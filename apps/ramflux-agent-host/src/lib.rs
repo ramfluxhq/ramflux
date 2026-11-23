@@ -21,6 +21,7 @@ mod runner_deferred;
 mod runner_output;
 mod runner_policy;
 mod runner_refusal;
+mod runner_retry;
 mod runner_run_approval;
 mod runner_surface;
 mod surface_plan;
@@ -74,6 +75,9 @@ pub enum Error {
     EngineTimeout,
     #[error("engine rejected or returned an invalid response")]
     EngineRejected,
+    /// PRX asked the host to wait. The job or owner decision is still outstanding.
+    #[error("engine rate limit; retry after {retry_after_ms} ms")]
+    RateLimited { retry_after_ms: u64 },
 }
 
 impl Error {

@@ -247,6 +247,11 @@ pub trait EngineProvider {
     fn poll(&mut self, _now_ms: u64) -> impl Future<Output = Result<Vec<EngineEvent>>> {
         async { Ok(Vec::new()) }
     }
+    /// `false` while this engine must not spend another job-status request.
+    /// Engines that do not share a remote quota stay ready on every call.
+    fn job_poll_ready(&self) -> bool {
+        true
+    }
     /// Apply a human-authenticated approval decision.
     ///
     /// # Errors

@@ -63,7 +63,10 @@ fn code_ok(text: &str) -> bool {
 
 fn map_transport(error: &PrxError) -> Error {
     match error {
-        PrxError::Unavailable | PrxError::Timeout | PrxError::RateLimited { .. } => Error::Bus,
+        PrxError::Unavailable | PrxError::Timeout => Error::Bus,
+        PrxError::RateLimited { retry_after_ms } => {
+            Error::RateLimited { retry_after_ms: retry_after_ms.unwrap_or(3_000).min(120_000) }
+        }
         _ => Error::EngineRejected,
     }
 }

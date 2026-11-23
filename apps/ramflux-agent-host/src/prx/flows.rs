@@ -91,6 +91,9 @@ fn prx_failure(error: &ramflux_prx_client::PrxError) -> Error {
         ramflux_prx_client::PrxError::Unavailable | ramflux_prx_client::PrxError::Timeout => {
             Error::EngineUnavailable
         }
+        ramflux_prx_client::PrxError::RateLimited { retry_after_ms } => {
+            Error::RateLimited { retry_after_ms: retry_after_ms.unwrap_or(3_000).min(120_000) }
+        }
         ramflux_prx_client::PrxError::Config { .. } => Error::Config,
         _ => Error::EngineRejected,
     }
