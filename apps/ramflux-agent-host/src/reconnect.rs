@@ -2,7 +2,124 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bound retry traffic across socket reconnects, including validated authentication races.
+//! An owner decision is posted during the backoff, before the agent socket is up again.
+use ramflux_agent_host::{
+    AgentBus, AgentHost, Config, EngineProvider, Error, Result, RfdBus, subscribe_owner,
+};
+use ramflux_sdk::LocalBusFrameKind;
 use std::time::Duration;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Wait {
+    Slept,
+    Stop,
+}
+
+type OwnerFrame = std::result::Result<ramflux_sdk::LocalBusFrame, Error>;
+
+enum Wake {
+    Slept,
+    Event(Box<OwnerFrame>),
+}
+
+pub(super) async fn one_attempt<E: EngineProvider>(
+    config: &Config,
+    host: &mut AgentHost<E>,
+    owner: &mut Option<RfdBus>,
+) -> Result<()> {
+    let mut bus = RfdBus::connect(&config.socket, &config.account_id).await?;
+    host.start(&mut bus).await?;
+    if owner.is_none() {
+        *owner = connect_owner(config, host.owner_account()).await?;
+    }
+    host.run_paired(&mut bus, owner).await
+}
+
+pub(super) async fn wait_and_forward<E: EngineProvider>(
+    config: &Config,
+    host: &mut AgentHost<E>,
+    owner: &mut Option<RfdBus>,
+    delay: Duration,
+) -> Result<Wait> {
+    if owner.is_none() {
+        *owner = connect_owner(config, host.owner_account()).await.ok().flatten();
+    }
+    let sleep = tokio::time::sleep(delay);
+    tokio::pin!(sleep);
+    let mut replaced = false;
+    loop {
+        // `owner_frame` borrows `owner`. Drop that future before `forward_one` borrows it again.
+        let wake = tokio::select! {
+            () = &mut sleep => Wake::Slept,
+            result = tokio::signal::ctrl_c() => {
+                result.map_err(|_| Error::State)?;
+                return Ok(Wait::Stop);
+            }
+            event = owner_frame(owner) => Wake::Event(Box::new(event)),
+        };
+        match wake {
+            Wake::Slept => return Ok(Wait::Slept),
+            Wake::Event(event) => {
+                if let Err(error) = forward_one(config, host, owner, &mut replaced, *event).await {
+                    eprintln!("prx approval forward deferred: {error}");
+                }
+            }
+        }
+    }
+}
+
+async fn connect_owner(config: &Config, account: Option<&str>) -> Result<Option<RfdBus>> {
+    let Some(account) = account else { return Ok(None) };
+    let mut bus = RfdBus::connect_owner(&config.socket, account).await?;
+    subscribe_owner(&mut bus).await?;
+    Ok(Some(bus))
+}
+
+async fn forward_one<E: EngineProvider>(
+    config: &Config,
+    host: &mut AgentHost<E>,
+    owner: &mut Option<RfdBus>,
+    replaced: &mut bool,
+    event: OwnerFrame,
+) -> Result<()> {
+    let frame = match event {
+        Ok(frame) if frame.kind == LocalBusFrameKind::Event && frame.method == "stream.lagged" => {
+            return replace_owner(config, host, owner, replaced).await;
+        }
+        Ok(frame) => frame,
+        Err(error) => {
+            replace_owner(config, host, owner, replaced).await?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = host.post_owner_decision(&frame).await {
+        replace_owner(config, host, owner, replaced).await?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn replace_owner<E: EngineProvider>(
+    config: &Config,
+    host: &AgentHost<E>,
+    owner: &mut Option<RfdBus>,
+    replaced: &mut bool,
+) -> Result<()> {
+    *owner = None;
+    if *replaced {
+        return Ok(());
+    }
+    *replaced = true;
+    *owner = connect_owner(config, host.owner_account()).await.ok().flatten();
+    Ok(())
+}
+
+async fn owner_frame(owner: &mut Option<RfdBus>) -> OwnerFrame {
+    if let Some(bus) = owner.as_mut() {
+        return bus.next_event().await;
+    }
+    std::future::pending().await
+}
 #[derive(Default)]
 pub(super) struct ReconnectBackoff {
     failures: u32,
