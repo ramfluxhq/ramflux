@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 - Remove deployment-specific host references from agent setup and pairing documentation; retain forward-secrecy fixture integrity metadata without internal design-history dumps.
+## [0.2.6] - 2026-11-23
+- Align release metadata with product version 0.2.6.
 
 ## [0.2.5] - 2026-11-22
 

@@ -30,20 +30,14 @@ impl RamfluxClient {
             return Err(SdkError::PairingCode("WrongContext"));
         }
         self.require_native_publication_settled(root)?;
-        let target = self
-            .assert_manifest_active_device_cached(
-                engine.config(),
-                root,
-                &job.target_ref.device_id,
-                "pairing_history",
-            )
-            .await?;
+        // The directory projection omits a sibling that has not published a prekey yet.
+        // Absence is not a finished job: the enrollment authority is the admission gate.
+        self.reject_projected_history_drift(engine, job, root).await?;
         let now = crate::custody::network_now()?;
         let current = self
             .current_custody_authority(root, now)?
             .ok_or(SdkError::PairingCode("UpdateRequired"))?;
         current.authorize(&job.source_ref, "sync", now)?;
-        current.authorize(&job.target_ref, "sync", now)?;
         // The enrollment head is a floor, not a snapshot: later heads (layer renewals, other
         // enrollments) keep the job valid, while both devices must still be authorized above.
         let epoch = current.envelope().body.device_set_epoch;
@@ -53,20 +47,73 @@ impl RamfluxClient {
         {
             return Err(SdkError::PairingCode("HeadChanged"));
         }
-        if target.principal_commitment != *root
-            || target.device_epoch != job.target_ref.device_epoch
+        if !authority_has_device(&current, &job.target_ref) {
+            return history_target_wait(&current, &job.target_ref);
+        }
+        current.authorize(&job.target_ref, "sync", now)?;
+        let _ = pool;
+        self.queue_pairing_history(root, &job.target_ref.device_id)
+    }
+
+    async fn reject_projected_history_drift(
+        &self,
+        engine: &impl GatewaySessionAccess,
+        job: &PairingOwnSyncJob,
+        root: &str,
+    ) -> Result<(), SdkError> {
+        let manifest =
+            self.cache_verified_device_manifest(engine.config(), root, "pairing_history").await?;
+        let Some(target) =
+            manifest.devices.iter().find(|device| device.device_id == job.target_ref.device_id)
+        else {
+            return Ok(());
+        };
+        if target.principal_commitment != root || target.device_epoch != job.target_ref.device_epoch
         {
             return Err(SdkError::PairingCode("HeadChanged"));
         }
-        let _ = pool;
-        let target = self.device_identity_for_root(root, &job.target_ref.device_id)?;
+        Ok(())
+    }
+
+    fn queue_pairing_history(
+        &mut self,
+        root: &str,
+        device_id: &str,
+    ) -> Result<PairingHistoryProgress, SdkError> {
+        let target = self.device_identity_for_root(root, device_id)?;
         match self.generated_history_transfer_done(&target)? {
             Some(true) => Ok(PairingHistoryProgress::Complete),
             Some(false) => Ok(PairingHistoryProgress::Pending),
-            None => {
-                self.stage_generated_history_transfer(&target)?;
-                Ok(PairingHistoryProgress::Pending)
-            }
+            None => match self.stage_generated_history_transfer(&target) {
+                Ok(_) => Ok(PairingHistoryProgress::Pending),
+                // The sibling is not sync-admitted or its prekey is not published yet.
+                Err(SdkError::GeneratedRefused { .. } | SdkError::InboundPending(_)) => {
+                    Ok(PairingHistoryProgress::Pending)
+                }
+                Err(error) => Err(error),
+            },
         }
+    }
+}
+
+fn authority_has_device(
+    current: &ramflux_crypto::custody::VerifiedRecord,
+    target: &ramflux_protocol::custody::DeviceRef,
+) -> bool {
+    current.envelope().body.devices.iter().any(|device| {
+        device.device_id == target.device_id && device.device_epoch == target.device_epoch
+    })
+}
+
+fn history_target_wait(
+    current: &ramflux_crypto::custody::VerifiedRecord,
+    target: &ramflux_protocol::custody::DeviceRef,
+) -> Result<PairingHistoryProgress, SdkError> {
+    let same_device =
+        current.envelope().body.devices.iter().any(|device| device.device_id == target.device_id);
+    if same_device {
+        Err(SdkError::PairingCode("HeadChanged"))
+    } else {
+        Ok(PairingHistoryProgress::Pending)
     }
 }

@@ -222,8 +222,13 @@ impl RamfluxClient {
         }
         let db = self.account_db()?;
         if db.client_record("conversation", &identity.conversation_id)?.is_none() {
-            let own = self.own_account_anchor()?;
             let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+            // An outgoing copy names this account on both ends. The contact projection creates
+            // the peer row; a self-pair would conflict with that conversation.
+            if verified.outer.source_principal_id == local.principal_id {
+                return Ok(());
+            }
+            let own = self.own_account_anchor()?;
             db.persist_client_record("conversation", &identity.conversation_id, &serde_json::json!({
                 "kind": "direct", "group_id": null, "title": null, "direct_route": null,
                 "participants": [local.principal_id, verified.outer.source_principal_id],

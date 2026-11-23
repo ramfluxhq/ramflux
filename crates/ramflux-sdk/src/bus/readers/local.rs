@@ -271,7 +271,73 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
         status["active_transport_kind"] = json!(snapshot.active_transport_kind);
         status["session_id"] = json!(snapshot.session_id);
     }
+    if view.native.is_some() {
+        hold_fresh_sibling_catch_up(client, &mut status)?;
+    }
     Ok(status)
+}
+
+const SIBLING_CATCH_UP_SECS: u64 = 45;
+
+/// The driver's first send waits on reported `live`. A just-enrolled sibling has not received
+/// its contact copy yet, so this reports pending until an accepted friend link exists or the
+/// bound elapses. The session snapshot stays live and receive continues.
+fn hold_fresh_sibling_catch_up(client: &RamfluxClient, status: &mut Value) -> Result<(), SdkError> {
+    if status.get("networking").and_then(Value::as_str) != Some("live") {
+        return Ok(());
+    }
+    if status.get("local_device_authorized") == Some(&Value::Bool(false)) {
+        return Ok(());
+    }
+    let Some(device) = status.get("device_id").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let root = match client.own_account_anchor() {
+        Ok(root) => root,
+        Err(SdkError::IdentityRootMissing) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let now = crate::custody::network_now()?;
+    let Some(authority) = client.current_custody_authority(&root, now)? else {
+        return Ok(());
+    };
+    let body = &authority.envelope().body;
+    let Some(local) = body.devices.iter().find(|entry| entry.device_id == device) else {
+        return Ok(());
+    };
+    let Some(started) =
+        local.branch_certificate.as_ref().map(|certificate| certificate.body.not_before)
+    else {
+        return Ok(());
+    };
+    if now.saturating_sub(started) > SIBLING_CATCH_UP_SECS {
+        return Ok(());
+    }
+    let sibling = body.devices.iter().any(|entry| {
+        entry.device_id != device
+            && authority
+                .authorize(
+                    &ramflux_protocol::custody::DeviceRef {
+                        account_anchor: root.clone(),
+                        device_id: entry.device_id.clone(),
+                        device_epoch: entry.device_epoch,
+                    },
+                    "sync",
+                    now,
+                )
+                .is_ok()
+    });
+    if !sibling || accepted_friend_link(client)? {
+        return Ok(());
+    }
+    status["networking"] = json!("networking_pending");
+    Ok(())
+}
+
+fn accepted_friend_link(client: &RamfluxClient) -> Result<bool, SdkError> {
+    Ok(client.friend_links()?.iter().any(|link| {
+        link.state == "accepted" && !link.blocked && link.capability_revoked_at.is_none()
+    }))
 }
 
 fn contacts(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError> {

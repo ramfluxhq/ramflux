@@ -165,13 +165,20 @@ clears old callbacks/sheets, retains consumed submits and drafts, and rebuilds
 with a fresh token identity using the same cumulative execution budget.
 
 The offline `card-pack` tool signs the linted `library/form.js` from a 32-byte
-Ed25519 operator seed and release metadata. The SDK bundles the ABI 5 development
+Ed25519 seed (`SigningKey::from_bytes`) plus release metadata. The seed is an
+operator file and is never committed. The SDK bundles the ABI 5 development
 package at release 1:3; its seed was generated outside the repository and removed
-after packaging. Only the public verification key is committed. This development
-key must not ship as a production release key; production signing-key custody and
-rotation remain an owner release-process decision. The ABI 4 development package
-at release 1:2 is retired. ABI 5 requires fresh artifacts; old artifacts fail
-admission. `card-render PACKAGE_PREFIX ENVELOPE [UPDATED]`
+after packaging. Only the public verification key is committed. Do not ship that
+development key in a release. Production custody is an owner decision: an offline
+seed, used only by `card-pack`.
+
+The ABI 4 development key is retired. Its descriptor pin
+`56436c14b29b5b4f2b2c4672ffd346a3406ed8f2f4a832487b6a9f68d38cafa9`
+(host ABI 4, catalog `rf-card/v1`, release 1:2) is not admitted. SDK
+`include/card/policy.json` `exact_descriptor_sha256` admits only the ABI 5
+descriptor `0b50eae6d66a57455d21b3854e2de6d58da90740bd4303db60d7f427b984792d`.
+ABI 5 requires fresh artifacts; old artifacts fail admission.
+`card-render PACKAGE_PREFIX ENVELOPE [UPDATED]`
 loads `.qjb`, `.descriptor.json`, `.sig`, `.pub` and the independently pinned
 `.policy.json` and prints the actual tree/mount/update batches. It accepts only
 local operator files and performs no authentication on their behalf. Production
@@ -192,6 +199,20 @@ boundary retained. Web uses the same Rust core in a dedicated worker. The web
 preview maps semantic nodes with text/native controls, stages mutations and
 forwards host slots; it does not implement SDK approval/link/image authority or
 native Modal sheets. Mobile and desktop hosts are separate modules.
+
+## Host fixtures
+
+`host-fixtures/` publishes one card input and one expected document for every
+catalog kind and every `variant` enum. `index.json` lists kind, variant,
+fixture and expected path. Trees are `ramflux.card.tree.v1` from
+`CardSession::open` against the signed library in
+`crates/ramflux-sdk/include/card/`. A catalog variant the runtime refuses has
+a `*.refusal.json` instead of a tree. The directory does not specify sizes,
+spacing, colors or accessibility chrome.
+
+Locale rows stay `en`. `LOCALE_FIXTURE_HOOK` in `src/bin/card_fixtures/cases.rs`
+is where further locales are added after the resolver accepts them. Regenerate
+with `cargo run -p ramflux-card --bin card-fixtures -- --write`.
 
 ## Validation
 

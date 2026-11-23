@@ -206,6 +206,8 @@ impl RamfluxClient {
             self.account_db()?.persist_actor_state(&fallback_key, &retained)?;
         }
         let text = retained.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
+        let version = retained.get("version").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        self.record_foreign_card(carrier, text, version)?;
         let outcome = Outcome {
             accepted: true,
             fallback_text: super::fallback::render(&carrier.author_principal_id, text),
