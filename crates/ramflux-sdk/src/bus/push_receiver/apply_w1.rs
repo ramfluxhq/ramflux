@@ -92,14 +92,14 @@ pub(crate) async fn apply_page(
     account: &mut LocalBusAccountState,
     turn: &ReceiveTurn,
     handle_generation: &dyn Fn() -> u64,
-    mut prepared: ReceiveEntry,
+    prepared: ReceiveEntry,
     source: PreparedSource,
     mut backpressure: Box<Backpressure>,
 ) -> Result<ReceiveApplied, SdkError> {
     let mut turn = turn.clone();
     turn.compat = account.bound_session_mode().is_some_and(|mode| !mode.is_push());
     refresh_cursor(account.client.account_db()?, &mut turn)?;
-    let mut source = match source.map(|prepared| *prepared).transpose() {
+    let source = match source.map(|prepared| *prepared).transpose() {
         Ok(source) => source,
         Err(error) if crate::bus::contact_backpressure::deferred(&prepared.entry, &error) => {
             hold_contact_capacity(account, &turn, handle_generation, &prepared, &mut backpressure)?;
@@ -117,25 +117,60 @@ pub(crate) async fn apply_page(
         }
         Err(error) => return Err(error),
     };
-    let mut attempts = 0;
+    apply_loaded(
+        account,
+        handle_generation,
+        crate::bus::account_runtime::writer_slice::ApplyResume {
+            turn,
+            prepared,
+            source,
+            backpressure,
+            attempts: 0,
+        },
+    )
+    .await
+}
+
+/// Continues one page after a writer pause. The stashed source skips the prepare transpose.
+pub(crate) async fn resume_apply_page(
+    account: &mut LocalBusAccountState,
+    resume: crate::bus::account_runtime::writer_slice::ApplyResume,
+    handle_generation: &dyn Fn() -> u64,
+) -> Result<ReceiveApplied, SdkError> {
+    apply_loaded(account, handle_generation, resume).await
+}
+
+async fn apply_loaded(
+    account: &mut LocalBusAccountState,
+    handle_generation: &dyn Fn() -> u64,
+    mut page: crate::bus::account_runtime::writer_slice::ApplyResume,
+) -> Result<ReceiveApplied, SdkError> {
+    // Reload the durable cursor. A yield before the cover commit repeats prepare;
+    // a committed cover short-circuits on the next pass.
+    page.turn.compat = account.bound_session_mode().is_some_and(|mode| !mode.is_push());
+    refresh_cursor(account.client.account_db()?, &mut page.turn)?;
     #[cfg(test)]
-    BINDING_TRIES.with(|cell| cell.set(0));
+    BINDING_TRIES.with(|cell| cell.set(page.attempts));
     loop {
         match Box::pin(apply_once(
             account,
-            &mut turn,
+            &mut page.turn,
             handle_generation,
-            &mut prepared,
-            &mut source,
-            &mut backpressure,
+            &mut page.prepared,
+            &mut page.source,
+            &mut page.backpressure,
         ))
         .await
         {
-            Err(SdkError::LegacyBindingChanged) => note_binding_changed(&mut attempts)?,
+            Err(SdkError::LegacyBindingChanged) => note_binding_changed(&mut page.attempts)?,
             Err(SdkError::PairRecoveryRequired) => {
-                recover_own_copy(account, &turn, handle_generation(), &prepared.entry)?;
+                recover_own_copy(account, &page.turn, handle_generation(), &page.prepared.entry)?;
                 stash_pair_reply(None);
                 break;
+            }
+            Err(error @ SdkError::WriterPause) => {
+                crate::bus::account_runtime::writer_slice::stash_apply(page);
+                return Err(error);
             }
             Err(error) => return Err(error),
             Ok(reply) => {
@@ -144,7 +179,7 @@ pub(crate) async fn apply_page(
             }
         }
     }
-    Ok((None, backpressure))
+    Ok((None, page.backpressure))
 }
 
 /// Publish durable application-outbox rows into RAM after a production `ApplyPage`.

@@ -113,6 +113,7 @@ async fn case() -> TestResult {
         crate::bus::runtime_limits::RuntimeTimeouts::held_for_test(),
         std::sync::Arc::new(Pending),
         None,
+        None,
     );
     let generation = handle.generation();
     account.connection = Some(handle);
@@ -124,6 +125,7 @@ async fn case() -> TestResult {
         }
     });
     let (connection_sender, connection_work) = mpsc::channel(2);
+    let (head_completion_sender, head_rx) = mpsc::channel(1);
     let (_lifecycle_sender, lifecycle) = mpsc::channel(4);
     let (_preempt_sender, preempt) = watch::channel(0);
     let (_stop, shutdown) = watch::channel(false);
@@ -132,8 +134,12 @@ async fn case() -> TestResult {
         timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
         lifecycle,
         preempt,
+        command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         connection_sender,
         connection_work,
+        head_completion_sender,
+        head_rx,
+        deferred: std::collections::VecDeque::new(),
         ledger: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
         pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
@@ -207,6 +213,7 @@ fn runtime_with_pending(
         crate::bus::runtime_limits::RuntimeTimeouts::held_for_test(),
         std::sync::Arc::new(Pending),
         None,
+        None,
     );
     let generation = handle.generation();
     account.connection = Some(handle);
@@ -217,6 +224,7 @@ fn runtime_with_pending(
         }
     });
     let (connection_sender, connection_work) = mpsc::channel(2);
+    let (head_completion_sender, head_rx) = mpsc::channel(1);
     let (_lifecycle_sender, lifecycle) = mpsc::channel(4);
     let (_preempt_sender, preempt) = watch::channel(0);
     let (_stop, shutdown) = watch::channel(false);
@@ -226,8 +234,12 @@ fn runtime_with_pending(
             timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
             lifecycle,
             preempt,
+            command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             connection_sender,
             connection_work,
+            head_completion_sender,
+            head_rx,
+            deferred: std::collections::VecDeque::new(),
             ledger: None,
             transient: crate::bus::account_runtime::TransientHost::default(),
             pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
