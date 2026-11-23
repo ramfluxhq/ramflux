@@ -40,6 +40,9 @@ type ReaderSlot = Arc<RoutingMutex<Option<AccountReaders>>>;
 /// Depth of the account writer's connection-work queue.
 const CONNECTION_WORK_QUEUE: usize = 2;
 
+/// One demanded head Apply. The fetch pass awaits that Apply before the next root.
+const HEAD_COMPLETION_QUEUE: usize = 1;
+
 // Two five-second directory attempts plus local backfill staging.
 
 pub(super) struct Bootstrap {
@@ -76,7 +79,10 @@ struct AccountRuntime {
     networking_observation_warned: bool,
     transfers: uploads::Transfers,
     connection_sender: mpsc::Sender<super::connection_manager::AccountWork>,
+    head_completion_sender: mpsc::Sender<super::connection_manager::AccountWork>,
     connection_work: mpsc::Receiver<super::connection_manager::AccountWork>,
+    /// Demanded head-refresh Apply. The runtime retains the sender.
+    head_rx: mpsc::Receiver<super::connection_manager::AccountWork>,
     /// Generic connection work skipped so a demanded head can be applied first.
     deferred: std::collections::VecDeque<super::connection_manager::AccountWork>,
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
@@ -144,6 +150,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         subscribers: BTreeMap::new(),
     };
     let (connection_sender, connection_work) = mpsc::channel(CONNECTION_WORK_QUEUE);
+    let (head_completion_sender, head_rx) = mpsc::channel(HEAD_COMPLETION_QUEUE);
     let mut account = AccountRuntime {
         timeouts,
         id: account_id,
@@ -161,7 +168,9 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         networking_observation_warned: false,
         transfers: uploads::Transfers::start(),
         connection_sender,
+        head_completion_sender,
         connection_work,
+        head_rx,
         deferred: std::collections::VecDeque::new(),
         ledger: None,
         transient: TransientHost::default(),
@@ -443,7 +452,7 @@ impl AccountRuntime {
                 _ = self.shutdown.changed() => break,
                 command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
                 checkpoint=self.transfers.receive.recv()=>{checkpoints += 1;if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}continue;},
-                work=head_demand::recv(&mut self.deferred,&mut self.connection_work)=>{
+                work = recv(&mut self.deferred, &mut self.head_rx, &mut self.connection_work) => {
                     checkpoints += 1;
                     if let Some(work)=work {
                         let mut shutdown=self.shutdown.clone();let mut preempt=self.preempt.clone();
@@ -586,6 +595,14 @@ impl AccountRuntime {
 
 fn stopped() -> SdkError {
     SdkError::LocalBus("account runtime stopped".to_owned())
+}
+
+async fn recv(
+    deferred: &mut std::collections::VecDeque<super::connection_manager::AccountWork>,
+    completion: &mut mpsc::Receiver<super::connection_manager::AccountWork>,
+    incoming: &mut mpsc::Receiver<super::connection_manager::AccountWork>,
+) -> Option<super::connection_manager::AccountWork> {
+    head_demand::recv(deferred, completion, incoming).await
 }
 
 #[cfg(test)]

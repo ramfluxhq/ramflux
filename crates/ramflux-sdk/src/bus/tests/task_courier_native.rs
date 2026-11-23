@@ -32,42 +32,7 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
             });
             let mut config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
             config.custody_vault = Some(vault);
-            let (_lifecycle_sender, lifecycle) = mpsc::channel(4);
-            let (_preempt_sender, preempt) = watch::channel(0);
-            let (connection_sender, connection_work) = mpsc::channel(2);
-            let mut runtime = AccountRuntime {
-                timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
-                id: "sender".into(),
-                state: LocalBusDaemonState {
-                    account_index: None,
-                    config,
-                    nodes: crate::node::NodeStore::default(),
-                    accounts: BTreeMap::new(),
-                    active_account_id: None,
-                    attended_accounts: BTreeSet::new(),
-                    subscribers: BTreeMap::new(),
-                },
-                receiver,
-                lifecycle,
-                preempt,
-                command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                connection_sender,
-                connection_work,
-                deferred: std::collections::VecDeque::new(),
-                ledger: None,
-                transient: crate::bus::account_runtime::TransientHost::default(),
-                pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
-                transfers: crate::bus::account_runtime::uploads::Transfers::start(),
-                readers: Arc::new(Mutex::new(None)),
-                events,
-                shutdown,
-                courier: None,
-                courier_events: None,
-                receive_gate_hook: None,
-                networking_expiry_pending: None,
-                networking_expiry_warned: false,
-                networking_observation_warned: false,
-            };
+            let mut runtime = sender_runtime(config, receiver, events, shutdown);
             private_unlock(&mut runtime).await?;
             assert!(runtime.courier.is_none(), "pending native data must not start preparation");
             let account =
@@ -106,6 +71,53 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
             Ok(())
         }))
         .await
+}
+
+fn sender_runtime(
+    config: LocalBusConfig,
+    receiver: mpsc::Receiver<AccountCommand>,
+    events: mpsc::Sender<EventBatch>,
+    shutdown: watch::Receiver<bool>,
+) -> AccountRuntime {
+    let (_lifecycle_sender, lifecycle) = mpsc::channel(4);
+    let (_preempt_sender, preempt) = watch::channel(0);
+    let (connection_sender, connection_work) = mpsc::channel(2);
+    let (head_completion_sender, head_rx) = mpsc::channel(1);
+    AccountRuntime {
+        timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
+        id: "sender".into(),
+        state: LocalBusDaemonState {
+            account_index: None,
+            config,
+            nodes: crate::node::NodeStore::default(),
+            accounts: BTreeMap::new(),
+            active_account_id: None,
+            attended_accounts: BTreeSet::new(),
+            subscribers: BTreeMap::new(),
+        },
+        receiver,
+        lifecycle,
+        preempt,
+        command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        connection_sender,
+        connection_work,
+        head_completion_sender,
+        head_rx,
+        deferred: std::collections::VecDeque::new(),
+        ledger: None,
+        transient: crate::bus::account_runtime::TransientHost::default(),
+        pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
+        transfers: crate::bus::account_runtime::uploads::Transfers::start(),
+        readers: Arc::new(Mutex::new(None)),
+        events,
+        shutdown,
+        courier: None,
+        courier_events: None,
+        receive_gate_hook: None,
+        networking_expiry_pending: None,
+        networking_expiry_warned: false,
+        networking_observation_warned: false,
+    }
 }
 
 async fn private_unlock(runtime: &mut AccountRuntime) -> Case {

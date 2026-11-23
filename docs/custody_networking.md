@@ -32,13 +32,13 @@ Native group mutations enqueue refreshes for stale own and group-member authorit
 roots. New sends do the same for the recipient or member roots. The five-second
 budget measured from command admission bounds the fetch, including when the
 session is Live. While that wait is outstanding it counts as a queued command,
-so directory and backfill pause between commits and yield the writer. Head-refresh
-Prepare and Apply already queued, or blocked only because the connection queue
-is full, are applied before other connection work. That pull is the queue depth
-plus the one waiting sender. A held or failed fetch returns `NetworkingPending`
+so directory and backfill pause between commits and yield the writer. A demanded
+head Apply uses a one-slot channel serviced before generic overflow while that
+demand is active. Prepare may still use the shared connection queue. A commit
+already running is not interrupted. A held or failed fetch returns `NetworkingPending`
 with `retry_after_ms` and `details.networking`. A fetch that still has no Apply
-returns the same pending outcome. No send uses an unapplied head, and a fetch
-started before the command began does not authorize it. A successful verified
+returns the same pending outcome at five seconds. No send uses an unapplied head,
+and a fetch started before the command began does not authorize it. A successful verified
 apply permits the command to continue. Legacy
 freshness refusals are serialized as this typed pending outcome. `group.history`
 reads stored history, name and roster through the local reader pool without a

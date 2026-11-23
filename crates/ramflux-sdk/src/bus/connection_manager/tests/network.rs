@@ -142,7 +142,7 @@ async fn network_change_while_connected_redials_and_delivery_continues() -> Case
         cfg.ca_cert = ca;
         let limits = limits();
         let connector = Arc::new(crate::bus::connection_manager::GatewayConnector { timeouts: limits.clone() });
-        let handle = ConnectionHandle::start_with(cfg, None, limits, connector, None);
+        let handle = ConnectionHandle::start_with(cfg, None, limits, connector, None, None);
         handle.require_live(Duration::from_secs(5)).await?;
         handle.call(|e| Box::pin(e.cursor()), Instant::now() + Duration::from_secs(5)).await?;
         let generation = handle.generation();
@@ -179,6 +179,7 @@ async fn lost_network_waits_for_available_before_dialing() -> Case {
             None,
             limits(),
             Arc::new(Connector { sessions, frame: Duration::from_secs(600) }),
+            None,
             None,
         );
         // A queued call is bounded by its own deadline even while offline.

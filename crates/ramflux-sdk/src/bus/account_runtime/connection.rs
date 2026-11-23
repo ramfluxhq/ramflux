@@ -23,6 +23,7 @@ impl AccountRuntime {
             account.timeouts = self.timeouts.clone();
             account.transfer_slots = Some(self.transfers.slots.clone());
             account.connection_work = Some(self.connection_sender.clone());
+            account.head_completion = Some(self.head_completion_sender.clone());
             #[cfg(test)]
             if self.state.config.test_session_connector.is_some() {
                 account.test_connector.clone_from(&self.state.config.test_session_connector);
@@ -91,6 +92,7 @@ impl AccountRuntime {
             tokio::select! {
                 biased;
                 ready=&mut ready=>{ready?;break;},
+                work=self.head_rx.recv()=>{if let Some(work)=work {self.apply_connection_work(work).await?;}},
                 work=self.connection_work.recv()=>{if let Some(work)=work {
                     #[cfg(test)]
                     let outcome = matches!(&work, AccountWork::Connected { .. } | AccountWork::Failed { .. });

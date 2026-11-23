@@ -293,7 +293,7 @@ async fn refresh_session_loss_cancels_registered_child() -> TestResult {
     // The real registration supplies Children.cancel, rather than test_context's
     // handle-wide stop channel. Use the same child body as production activation.
     handle.spawn_session_child("head-refresh", move |context| {
-        Box::pin(super::run(context, writer.clone()))
+        Box::pin(super::run(context, writer.clone(), writer.clone()))
     })?;
     for _ in 0..2 {
         let AccountWork::Directory(message) =

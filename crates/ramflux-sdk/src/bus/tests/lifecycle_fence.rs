@@ -78,6 +78,7 @@ pub(super) fn runtime_for(
         }
     });
     let (connection_sender, connection_work) = mpsc::channel(8);
+    let (head_completion_sender, head_rx) = mpsc::channel(1);
     let (lifecycle_sender, lifecycle) = mpsc::channel(4);
     let (preempt_sender, preempt) = watch::channel(0_u64);
     std::mem::forget((commands, stop, lifecycle_sender, preempt_sender));
@@ -107,6 +108,8 @@ pub(super) fn runtime_for(
         transfers: super::super::uploads::Transfers::start(),
         connection_sender,
         connection_work,
+        head_completion_sender,
+        head_rx,
         deferred: std::collections::VecDeque::new(),
         ledger: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
@@ -205,7 +208,7 @@ pub(super) async fn pump(
             if done(runtime) {
                 return Ok(None);
             }
-            let Some(work) = runtime.connection_work.recv().await else {
+            let Some(work) = runtime.recv_connection_work().await else {
                 return Err("connection work channel closed".into());
             };
             if hold && matches!(work, AccountWork::ApplyPage { .. }) {
@@ -226,7 +229,7 @@ pub(super) async fn pump_quiet(
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut last = Instant::now();
     while Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(20), runtime.connection_work.recv()).await
+        match tokio::time::timeout(Duration::from_millis(20), runtime.recv_connection_work()).await
         {
             Ok(Some(work)) => {
                 runtime.apply_connection_work(work).await?;
@@ -324,7 +327,7 @@ async fn held() -> Case {
     runtime.apply(unlock).await?;
     unlock_response.await??;
     runtime.stop_connection().await;
-    while runtime.connection_work.try_recv().is_ok() {}
+    while runtime.try_recv_connection_work().is_ok() {}
     {
         let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
         bind_config(account, &config)?;

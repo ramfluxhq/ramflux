@@ -4,9 +4,9 @@
 //! Priority for the authority head an active command has already demanded.
 //!
 //! The demand counts as a queued command, so directory and backfill pause
-//! between commits. Head-refresh work already in the connection queue, or
-//! blocked only because that queue is full, is applied before other work.
-//! The pull is the queue depth plus the one sender waiting on a full queue.
+//! between commits. A demanded head Apply waits in its own one-slot channel
+//! and is taken before generic overflow. Prepare may still use the shared
+//! queue. A commit already running is not interrupted.
 
 use super::AccountRuntime;
 use crate::SdkError;
@@ -57,18 +57,34 @@ fn is_head_refresh(work: &AccountWork) -> bool {
     )
 }
 
-/// Deferred generic connection work, then the live queue.
+/// A demanded head Apply, then deferred generic work, then the shared queue.
 ///
-/// Popping the deferred item returns immediately, so a cancelled `select`
-/// cannot lose it: the pop and the `Ready` happen in the same poll.
+/// Popping a queued item returns immediately, so a cancelled `select` cannot
+/// lose it: the pop and the `Ready` happen in the same poll. The runtime keeps
+/// the completion sender; a closed slot must not starve the shared queue.
 pub(super) async fn recv(
     deferred: &mut std::collections::VecDeque<AccountWork>,
+    completion: &mut tokio::sync::mpsc::Receiver<AccountWork>,
     incoming: &mut tokio::sync::mpsc::Receiver<AccountWork>,
 ) -> Option<AccountWork> {
+    match completion.try_recv() {
+        Ok(work) => return Some(work),
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+            if let Some(work) = deferred.pop_front() {
+                return Some(work);
+            }
+            return incoming.recv().await;
+        }
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+    }
     if let Some(work) = deferred.pop_front() {
         return Some(work);
     }
-    incoming.recv().await
+    tokio::select! {
+        biased;
+        work = completion.recv() => work,
+        work = incoming.recv() => work,
+    }
 }
 
 struct PreferGuard;
@@ -90,8 +106,10 @@ impl Drop for PreferGuard {
 }
 
 impl AccountRuntime {
-    /// Applies queued head-refresh work before other connection work.
+    /// Applies a queued head Apply, then demanded head-refresh work on the shared queue.
     pub(super) async fn prefer_demanded_head(&mut self) -> Result<(), SdkError> {
+        // A pause frees the Apply slot even when no command is waiting.
+        self.service_head_completion().await?;
         if !demand_active() {
             return Ok(());
         }
@@ -131,12 +149,37 @@ impl AccountRuntime {
 
     async fn defer_or_apply(&mut self, work: AccountWork) -> Result<(), SdkError> {
         // The in-progress job may also be pushed in front, so the cap is the
-        // queue depth plus that one resumed item.
+        // queue depth plus that one resumed item. A running transaction is not
+        // interrupted; the head is applied before generic overflow starts.
         if self.deferred.len() < super::CONNECTION_WORK_QUEUE + 1 {
             self.deferred.push_back(work);
             return Ok(());
         }
+        self.service_head_completion().await?;
         Box::pin(self.apply_connection_work(work)).await
+    }
+
+    /// One queued head Apply. Empty and disconnected are both idle.
+    pub(super) async fn service_head_completion(&mut self) -> Result<(), SdkError> {
+        if let Ok(work) = self.head_rx.try_recv() {
+            Box::pin(self.apply_connection_work(work)).await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn recv_connection_work(&mut self) -> Option<AccountWork> {
+        recv(&mut self.deferred, &mut self.head_rx, &mut self.connection_work).await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn try_recv_connection_work(
+        &mut self,
+    ) -> Result<AccountWork, tokio::sync::mpsc::error::TryRecvError> {
+        match self.head_rx.try_recv() {
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => self.connection_work.try_recv(),
+            other => other,
+        }
     }
 
     async fn pull_head_priority(
@@ -158,7 +201,7 @@ impl AccountRuntime {
             }
         }
         if held.len() == super::CONNECTION_WORK_QUEUE {
-            // The head Apply may be blocked in `send` until this pull frees a slot.
+            // A shared-queue head (no dedicated sender) may be blocked in `send`.
             tokio::task::yield_now().await;
             if let Ok(work) = self.connection_work.try_recv() {
                 held.push(work);

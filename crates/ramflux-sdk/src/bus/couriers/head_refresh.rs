@@ -358,7 +358,7 @@ pub(crate) async fn pass(
     let mut cancel = context.cancel.clone();
     let mut attempted = BTreeSet::new();
     let mut retry_budget = RETRY_DEMAND_SHARE;
-    let fetch = fetch_pass(&context, &writer, false, &mut attempted, &mut retry_budget);
+    let fetch = fetch_pass(&context, &writer, &writer, false, &mut attempted, &mut retry_budget);
     tokio::select! {
         biased;
         _ = cancel.changed() => Ok(()),
@@ -368,6 +368,7 @@ pub(crate) async fn pass(
 async fn fetch_pass(
     context: &SessionContext,
     writer: &mpsc::Sender<AccountWork>,
+    completion: &mpsc::Sender<AccountWork>,
     periodic: bool,
     attempted: &mut BTreeSet<String>,
     retry_budget: &mut usize,
@@ -399,7 +400,7 @@ async fn fetch_pass(
             attempted.insert(root.clone());
             let (reply, response) = oneshot::channel();
             send(
-                writer,
+                completion,
                 Work::Apply {
                     plan: plan.clone(),
                     root: root.clone(),
@@ -431,13 +432,18 @@ fn stopped() -> SdkError {
 }
 
 /// The registered session child refreshes on connect, demand and the half-bound timer.
-pub(crate) async fn run(context: SessionContext, writer: mpsc::Sender<AccountWork>) {
-    run_with_triggers(context, writer, true, true).await;
+pub(crate) async fn run(
+    context: SessionContext,
+    writer: mpsc::Sender<AccountWork>,
+    completion: mpsc::Sender<AccountWork>,
+) {
+    run_with_triggers(context, writer, completion, true, true).await;
 }
 
 async fn cycle(
     context: &SessionContext,
     writer: &mpsc::Sender<AccountWork>,
+    completion: &mpsc::Sender<AccountWork>,
     periodic: bool,
 ) -> Result<(), SdkError> {
     let mut attempted = BTreeSet::new();
@@ -446,7 +452,10 @@ async fn cycle(
         if pass > 0 {
             tokio::time::sleep(PASS_PAUSE).await;
         }
-        if fetch_pass(context, writer, periodic, &mut attempted, &mut retry_budget).await? == 0 {
+        if fetch_pass(context, writer, completion, periodic, &mut attempted, &mut retry_budget)
+            .await?
+            == 0
+        {
             break;
         }
     }
@@ -468,6 +477,7 @@ fn advance_sweep(next: &mut tokio::time::Instant, now: tokio::time::Instant) -> 
 async fn run_with_triggers(
     context: SessionContext,
     writer: mpsc::Sender<AccountWork>,
+    completion: mpsc::Sender<AccountWork>,
     connect: bool,
     periodic: bool,
 ) {
@@ -482,7 +492,7 @@ async fn run_with_triggers(
         let mut next_sweep = tokio::time::Instant::now() + REFRESH_INTERVAL;
         let mut timer = tokio::time::interval_at(next_sweep, REFRESH_INTERVAL);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        if connect && let Err(error) = cycle(&context, &writer, true).await {
+        if connect && let Err(error) = cycle(&context, &writer, &completion, true).await {
             tracing::debug!(%error, "connect head refresh deferred");
         }
         loop {
@@ -492,7 +502,7 @@ async fn run_with_triggers(
                 () = wake.notified() => {},
             }
             let periodic = periodic && advance_sweep(&mut next_sweep, tokio::time::Instant::now());
-            if let Err(error) = cycle(&context, &writer, periodic).await {
+            if let Err(error) = cycle(&context, &writer, &completion, periodic).await {
                 tracing::debug!(%error, "head refresh cycle deferred");
             }
         }
@@ -511,8 +521,12 @@ async fn run_with_triggers(
 }
 
 #[cfg(test)]
-pub(crate) async fn run_without_timer(context: SessionContext, writer: mpsc::Sender<AccountWork>) {
-    run_with_triggers(context, writer, true, false).await;
+pub(crate) async fn run_without_timer(
+    context: SessionContext,
+    writer: mpsc::Sender<AccountWork>,
+    completion: mpsc::Sender<AccountWork>,
+) {
+    run_with_triggers(context, writer, completion, true, false).await;
 }
 
 #[cfg(test)]

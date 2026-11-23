@@ -50,7 +50,7 @@ async fn production_cycle_decrements_retry_budget_across_fetch_passes() -> TestR
     let handle = account.connection.as_ref().ok_or("connection")?.clone();
     let context = handle.test_context();
     let (writer, mut receiver) = mpsc::channel(2);
-    let mut child = tokio::spawn(async move { cycle(&context, &writer, true).await });
+    let mut child = tokio::spawn(async move { cycle(&context, &writer, &writer, true).await });
     let mut retried = 0;
     let mut swept = 0;
     let mut saw_exhausted = false;

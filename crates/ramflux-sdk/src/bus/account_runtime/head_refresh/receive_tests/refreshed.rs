@@ -90,6 +90,7 @@ async fn setup_refreshed() -> TestResult<Case> {
     let refresh = tokio::spawn(crate::bus::couriers::head_refresh::run_without_timer(
         handle.test_context(),
         runtime.connection_sender.clone(),
+        runtime.connection_sender.clone(),
     ));
     Ok(Case { runtime, _alice: alice.root, bob, resumes, refresh, server, _stop: stop })
 }

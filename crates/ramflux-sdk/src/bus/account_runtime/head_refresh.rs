@@ -218,6 +218,10 @@ impl AccountRuntime {
             }
             tokio::select! {
                 biased;
+                work = self.head_rx.recv() => {
+                    let Some(work) = work else { return Err(SdkError::NetworkingPending); };
+                    self.admit_during_head_demand(work).await?;
+                }
                 () = tokio::time::sleep_until(network_deadline) => {}
                 work = self.connection_work.recv() => {
                     let Some(work) = work else { return Err(SdkError::NetworkingPending); };
@@ -227,8 +231,8 @@ impl AccountRuntime {
         }
     }
 
-    /// Apply a demanded head that is already queued, or blocked only because the
-    /// queue was full, then refuse if the authority is still stale.
+    /// Apply a demanded head already in the completion slot or the shared queue,
+    /// then refuse if the authority is still stale.
     async fn refuse_or_apply_queued(
         &mut self,
         command: &AccountCommand,
