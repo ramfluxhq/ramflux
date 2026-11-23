@@ -9,6 +9,7 @@ use crate::custody::pairing::{CredentialOutcome, LocalCredentialProvider};
 use ramflux_protocol::custody::pairing::PairingWire;
 use ramflux_protocol::custody::pairing::local_dto::CredentialRequest;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -21,6 +22,9 @@ pub(super) struct Bridge {
     provider: Mutex<Option<Arc<super::super::pairing::CallbackProvider>>>,
     parents: Mutex<BTreeMap<u64, Parent>>,
     usernames: Mutex<BTreeMap<u64, UsernameParent>>,
+    /// Shared with the in-process supervisor. Unlock reads it after connect, because the
+    /// host registers the callback only once the client handle exists.
+    callback_ready: Arc<AtomicBool>,
 }
 
 pub(super) struct UsernameParent {
@@ -131,14 +135,27 @@ impl Bridge {
         Ok(())
     }
 
+    /// The in-process supervisor reads this at unlock. It is false until `replace` installs a callback.
+    pub(super) fn callback_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.callback_ready)
+    }
+
     pub(super) fn replace(
         &self,
         next: Option<Arc<super::super::pairing::CallbackProvider>>,
     ) -> Result<(), SdkError> {
+        let installed = next.is_some();
+        // Clear before the provider disappears so unlock does not send a prompt nobody answers.
+        if !installed {
+            self.callback_ready.store(false, Ordering::Release);
+        }
         let previous = {
             let mut guard = self.provider.lock().map_err(|_| lock_err())?;
             std::mem::replace(&mut *guard, next)
         };
+        if installed {
+            self.callback_ready.store(true, Ordering::Release);
+        }
         if let Some(previous) = previous {
             previous.stop_and_drain();
         }
@@ -146,6 +163,7 @@ impl Bridge {
     }
 
     pub(super) fn shutdown(&self) {
+        self.callback_ready.store(false, Ordering::Release);
         let previous =
             self.provider.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some(previous) = previous {

@@ -246,7 +246,7 @@ impl Drop for Client {
 
 async fn run(worker: Worker) -> Result<(), SdkError> {
     let Worker {
-        config,
+        mut config,
         commands,
         lifecycle,
         shutdown,
@@ -260,6 +260,7 @@ async fn run(worker: Worker) -> Result<(), SdkError> {
     let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
     let (server_ready, initialized) = oneshot::channel();
     let server_shutdown = shutdown.clone();
+    config.credential_callback = shared.credentials.callback_flag();
     let server = tokio::task::spawn_local(crate::bus::inprocess::serve(
         config,
         server_stream,
