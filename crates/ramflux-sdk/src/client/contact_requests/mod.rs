@@ -26,7 +26,6 @@ pub(crate) use delivery::background::refusal_cells;
 pub(crate) use delivery::background::{
     ContactWork, apply as apply_background, run as run_background,
 };
-#[cfg(test)]
 pub(crate) use delivery::flush;
 pub(crate) use delivery::status as delivery_status;
 pub(crate) use wire::{Control, Decision, conversation};

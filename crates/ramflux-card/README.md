@@ -43,6 +43,14 @@ share a separate 4096-step allowance per expanded instance across admission,
 read-closure collection, display and checks; nested programs never renew it.
 The aggregate step ceiling is `8 * 17 * 17 * 65536 + 256 * 4096 = 152567808`.
 Independent cells therefore do not spend one another's indirect-program allowance.
+Within one resolver operation, `formatString` reuses parsed syntax keyed by the
+exact program bytes (at most 256 entries / 64 KiB of source). It never caches
+model values, scopes, locales, check results or evaluated output; every use still
+charges the existing expression steps. Cache misses together may scan at most
+`17 * (65536 + 12288) = 1323008` source bytes per operation; exceeding that bound
+returns `Limit` before parsing. Cache reclamation does not renew this allowance.
+This bounds distinct computed programs as well as repeated model programs.
+
 Expanded JSON bytes are charged before
 bound values are cloned or inserted. The SDK passes presentation separately;
 peer `theme`, `host`, script and unknown fields are refused.
@@ -158,10 +166,11 @@ with a fresh token identity using the same cumulative execution budget.
 
 The offline `card-pack` tool signs the linted `library/form.js` from a 32-byte
 Ed25519 seed (`SigningKey::from_bytes`) plus release metadata. The seed is an
-operator file and is never committed. The ABI 5 development public key bundled
-in the SDK was produced that way; the seed file was not retained with the
-bundle. Do not ship that development key in a release. Production custody is
-an owner decision: an offline seed, used only by `card-pack`.
+operator file and is never committed. The SDK bundles the ABI 5 development
+package at release 1:3; its seed was generated outside the repository and removed
+after packaging. Only the public verification key is committed. Do not ship that
+development key in a release. Production custody is an owner decision: an offline
+seed, used only by `card-pack`.
 
 The ABI 4 development key is retired. Its descriptor pin
 `56436c14b29b5b4f2b2c4672ffd346a3406ed8f2f4a832487b6a9f68d38cafa9`

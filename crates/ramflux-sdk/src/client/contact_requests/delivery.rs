@@ -374,7 +374,6 @@ impl RamfluxClient {
         }
     }
 }
-#[cfg(test)]
 pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     account.client.maintain_contact_requests()?;
     let db = account.client.account_db()?;

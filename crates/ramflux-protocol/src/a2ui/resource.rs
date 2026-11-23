@@ -17,6 +17,7 @@ const MAX_EXPRESSION_STEPS: usize = 8 * 17 * 17 * super::graph::MAX_EXPANDED_BYT
     + super::graph::MAX_INSTANCES * MAX_INDIRECT_STEPS;
 
 pub(super) struct Steps {
+    pub(super) programs: super::format_string::Programs,
     remaining: Cell<usize>,
     indirect: [Cell<usize>; super::graph::MAX_INSTANCES],
     instance: Cell<usize>,
@@ -25,6 +26,7 @@ pub(super) struct Steps {
 impl Steps {
     pub(super) fn new() -> Self {
         Self {
+            programs: super::format_string::Programs::default(),
             remaining: Cell::new(MAX_EXPRESSION_STEPS),
             indirect: std::array::from_fn(|_| Cell::new(MAX_INDIRECT_STEPS)),
             instance: Cell::new(0),
