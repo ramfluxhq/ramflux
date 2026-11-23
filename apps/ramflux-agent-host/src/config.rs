@@ -33,6 +33,24 @@ pub struct PrxConfig {
     pub turn_timeout_s: u64,
     #[serde(default = "approval_timeout")]
     pub approval_timeout_s: u64,
+    /// PRX agent name that receives `limits`. Required when a bound is set.
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    /// Provider stored when this host creates the PRX agent. Required when a bound is set.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Model stored when this host creates the PRX agent. Required when a bound is set.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// `agent_limits_v1` concurrency bound. `1..=1024` when set.
+    #[serde(default)]
+    pub max_concurrent_turns: Option<u32>,
+    /// `agent_limits_v1` daily cost bound, in cents. `1..=1_000_000_000` when set.
+    #[serde(default)]
+    pub max_cost_per_day_cents: Option<u64>,
+    /// When set, a deleted conversation erases every agent's turns in the mapped PRX session.
+    #[serde(default)]
+    pub erase_session_on_delete: bool,
 }
 const fn turn_timeout() -> u64 {
     120
@@ -118,6 +136,19 @@ const fn interval() -> u64 {
 const fn conversations() -> usize {
     128
 }
+
+fn limit_config_invalid(config: &PrxConfig) -> bool {
+    let turns = config.max_concurrent_turns;
+    let cost = config.max_cost_per_day_cents;
+    let bounded = turns.is_some() || cost.is_some();
+    let turns_bad = turns.is_some_and(|value| !(1..=1024).contains(&value));
+    let cost_bad = cost.is_some_and(|value| !(1..=1_000_000_000).contains(&value));
+    let name_bad = config.agent_name.as_ref().is_none_or(|name| name.is_empty() || name.len() > 64);
+    let provider_bad =
+        config.provider.as_ref().is_none_or(|value| value.is_empty() || value.len() > 128);
+    let model_bad = config.model.as_ref().is_none_or(|value| value.is_empty() || value.len() > 128);
+    turns_bad || cost_bad || (bounded && (name_bad || provider_bad || model_bad))
+}
 impl Config {
     /// # Errors
     /// Rejects unreadable, oversized or invalid configuration files.
@@ -163,6 +194,7 @@ impl Config {
                     || config.max_in_flight_per_conversation != 1
                     || !(1..=3600).contains(&config.turn_timeout_s)
                     || !(1..=3600).contains(&config.approval_timeout_s)
+                    || limit_config_invalid(config)
             })
         {
             return Err(Error::Config);
