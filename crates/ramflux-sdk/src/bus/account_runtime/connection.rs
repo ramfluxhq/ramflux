@@ -503,6 +503,9 @@ impl AccountRuntime {
         >,
         started: std::time::Instant,
     ) -> Result<bool, SdkError> {
+        // The cursor note is test-and-vault only. Production still receives the handles.
+        #[cfg(not(any(test, feature = "itest-memory-vault")))]
+        let _ = (handle, turn);
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             let _ = reply.send(result);
             return Ok(false);
