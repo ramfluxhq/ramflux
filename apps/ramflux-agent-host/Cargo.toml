@@ -21,11 +21,11 @@ thiserror.workspace = true
 clap.workspace = true
 keyring.workspace = true
 libc = "0.2"
-rustix = { version = "1.1", features = ["process"] }
+rustix = { version = "1.1", features = ["fs", "process"] }
 zeroize.workspace = true
 reqwest.workspace = true
 time = { version = "0.3", features = ["parsing"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal", "net", "io-util", "sync"] }
 
 [lints]
 workspace = true

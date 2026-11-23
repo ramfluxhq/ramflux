@@ -123,6 +123,8 @@ pub enum ApiCode {
     PurgePending,
     /// The idempotency key is missing or outside 16..=128 printable ASCII bytes.
     IdempotencyKeyRequired,
+    /// `410 snapshot_expired`: the snapshot page token is no longer valid.
+    SnapshotExpired,
     Unknown(String),
 }
 
@@ -159,6 +161,7 @@ impl ApiCode {
             "history_pending" => Self::HistoryPending,
             "purge_pending" => Self::PurgePending,
             "idempotency_key_required" => Self::IdempotencyKeyRequired,
+            "snapshot_expired" => Self::SnapshotExpired,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -426,6 +429,7 @@ mod tests {
             ("history_pending", ApiCode::HistoryPending),
             ("purge_pending", ApiCode::PurgePending),
             ("idempotency_key_required", ApiCode::IdempotencyKeyRequired),
+            ("snapshot_expired", ApiCode::SnapshotExpired),
         ];
         for (wire, expected) in cases {
             let body = format!(r#"{{"error":{{"code":"{wire}","message":"m"}}}}"#);

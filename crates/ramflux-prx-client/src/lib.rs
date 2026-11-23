@@ -29,6 +29,7 @@ mod purge;
 mod revision;
 mod run;
 mod session;
+mod sync;
 mod targeted;
 #[cfg(test)]
 mod test_support;
@@ -67,5 +68,10 @@ pub use purge::{PURGE_STORES, PurgeReceipt};
 pub use revision::{CatalogRevision, ConfigRevision};
 pub use run::{JobCancel, RunCancel, RunCode, RunState};
 pub use session::SessionCreated;
+pub use sync::{
+    EraseCopy, JournalEvent, MirrorOp, PONG_FRAME, SNAPSHOT_MAX_BODY, SNAPSHOT_PAGE_LIMIT,
+    ServerFrame, SnapshotPage, SnapshotRow, SyncCursor, SyncDial, TurnBody, TurnCopy, ack_frame,
+    decode_server, format_cursor, hello_frame, parse_cursor,
+};
 pub use targeted::{ReloadReport, ReloadStatus, TargetedAgents};
 pub use transport::{ClientConfig, DEFAULT_MAX_BODY_BYTES, DEFAULT_REQUEST_TIMEOUT};

@@ -3,7 +3,7 @@
 use clap::Parser;
 use ramflux_agent_host::{
     AgentHost, Config, CredentialVault, EngineProvider, Error, PrxEngine, RfdBus, RuleEngine,
-    import_provisioning_bundle, unlock_provisioned_account,
+    SyncTask, import_provisioning_bundle, unlock_provisioned_account,
 };
 use std::path::PathBuf;
 mod reconnect;
@@ -45,7 +45,10 @@ async fn run() -> ramflux_agent_host::Result<()> {
     unlock_provisioned_account(&vault, &config.socket, &config.account_id).await?;
     if let Some(engine) = &config.engine {
         let provider = PrxEngine::new(&engine.prx, config.max_conversations)?;
-        run_provider(config, provider).await
+        let sync = SyncTask::spawn(&engine.prx, &config.state_file);
+        let result = run_provider(config, provider).await;
+        sync.shutdown().await;
+        result
     } else {
         let provider = RuleEngine::new(&config)?;
         run_provider(config, provider).await
