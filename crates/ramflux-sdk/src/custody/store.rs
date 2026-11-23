@@ -1017,7 +1017,8 @@ fn read_account(
 /// through the atomic write that creation uses. Replaying the same record changes nothing.
 /// # Errors
 /// `CustodySetupInvalid` for a missing or foreign account; `PairingCode("HeadChanged")` when the
-/// pins do not advance; verification and I/O failures pass through.
+/// pins do not advance or the local human is not the approved custodian; verification and I/O
+/// failures pass through.
 pub(crate) fn replace_rebound_authority(
     root: &Path,
     account_id: &str,
@@ -1033,8 +1034,10 @@ pub(crate) fn replace_rebound_authority(
         return Err(invalid());
     }
     let verified = verify_record(record, now, None, custodian)?;
+    let custodian_publication = current_custodian_publication(root, &stored, custodian, now)?;
     if ramflux_protocol::custody::object_hash(&stored.record)?
         == ramflux_protocol::custody::object_hash(record)?
+        && stored.custodian_publication == custodian_publication
     {
         return Ok(());
     }
@@ -1044,7 +1047,27 @@ pub(crate) fn replace_rebound_authority(
     }
     stored.record = record.clone();
     stored.compacted_ids = None;
+    stored.custodian_publication = custodian_publication;
     genesis::replace_public(&path, &ramflux_protocol::canonical_json_bytes(&stored)?)
+}
+
+fn current_custodian_publication(
+    root: &Path,
+    stored: &StoredAuthority,
+    custodian: Option<&VerifiedRecord>,
+    now: u64,
+) -> Result<Option<Box<ramflux_protocol::custody::Publication>>, SdkError> {
+    let Some(human_id) = stored.custodian_account_id.as_deref() else {
+        return Ok(None);
+    };
+    let human = load_account(root, human_id, now)?;
+    let approved = custodian.ok_or_else(invalid)?;
+    if ramflux_protocol::custody::object_hash(human.record())?
+        != ramflux_protocol::custody::object_hash(approved.envelope())?
+    {
+        return Err(SdkError::PairingCode("HeadChanged"));
+    }
+    Ok(Some(Box::new(human.publication())))
 }
 
 /// The stored record of one account, decoded and NOT verified. A rebind uses it: the stored agent

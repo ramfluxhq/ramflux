@@ -138,6 +138,7 @@ fn wire_hosted(custodian: &str, row: &HostedAgent) -> g::AgentRecord {
         cleanup: String::new(),
         access: None,
         role: String::new(),
+        base: None,
     }
 }
 

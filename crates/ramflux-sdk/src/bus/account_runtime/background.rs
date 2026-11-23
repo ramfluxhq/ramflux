@@ -287,5 +287,11 @@ fn reject_agent(command: AgentPrivate, error: SdkError) {
         AgentPrivate::Call { reply, .. } => {
             let _ = reply.send(Err(error));
         }
+        AgentPrivate::Gateway { reply } => {
+            let _ = reply.send(Err(error));
+        }
+        AgentPrivate::SettleAdmission { reply } => {
+            let _ = reply.send(Err(error));
+        }
     }
 }

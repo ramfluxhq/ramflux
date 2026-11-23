@@ -312,11 +312,14 @@ fn persist_intent(
     vault: &dyn PrimaryVault,
 ) -> Result<BornAccount, SdkError> {
     let Replacement { ceremony, mut current, record, primary, device, seeds, now } = value;
-    let new_primary = format!("primary:{}", ceremony.ceremony_id);
+    let new_primary = ramflux_protocol::hash_base64url(
+        "ramflux.local.recovery_vault_reference.v1",
+        ceremony.ceremony_id.as_bytes(),
+    );
     let new_branch = if current.branch_pending() {
         current.stored.branch_vault_ref.clone()
     } else {
-        format!("branch:{}", ceremony.ceremony_id)
+        format!("branch:{new_primary}")
     };
     let verified = ramflux_crypto::custody::verify_record(
         &record,
@@ -432,10 +435,8 @@ pub(crate) fn pending_restore(
         return Err(invalid());
     }
     vault.preflight()?;
-    let branch_ref = format!(
-        "branch:restore:{}",
-        ramflux_protocol::encode_base64url(*crate::custody::random()?)
-    );
+    let branch_ref =
+        format!("branch:{}", ramflux_protocol::encode_base64url(*crate::custody::random()?));
     let device =
         format!("device-{}", ramflux_protocol::encode_base64url(*crate::custody::random()?));
     let mut seeds = Zeroizing::new([0; 64]);

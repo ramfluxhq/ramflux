@@ -378,6 +378,7 @@ fn node_only_retired(
         cleanup: NODE_RETIRED.to_owned(),
         access: None,
         role: String::new(),
+        base: None,
     };
     Ok(g::AgentConfigResult { value: Some(g::agent_config_result::Value::Record(record)) })
 }

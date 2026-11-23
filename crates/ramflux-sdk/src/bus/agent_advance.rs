@@ -380,6 +380,36 @@ impl Supervisor {
         Ok(Settle::Continue)
     }
 
+    /// Resume durable approved repairs without another read or unlock from the user.
+    pub(super) async fn maintain_agent_repairs(&self) {
+        let humans: Vec<String> = self
+            .accounts
+            .borrow()
+            .iter()
+            .filter(|(_, actor)| actor.is_open())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for human in humans {
+            match ready_repair(&self.config.data_root, &human) {
+                Ok(true) => {
+                    let Ok(now) = super::custody_setup::now() else { continue };
+                    match self.advance_agent_creations(&human, now).await {
+                        Ok(outcomes) => {
+                            for (_, result) in outcomes {
+                                if let Err(error) = result {
+                                    tracing::warn!(%error, "agent repair advance deferred");
+                                }
+                            }
+                        }
+                        Err(error) => tracing::warn!(%error, "agent repair scan deferred"),
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "agent repair readiness deferred"),
+            }
+        }
+    }
+
     /// Trigger (b) of decision r10: after a human account unlocks, finish what its pending agent
     /// creations still need. A failure leaves the requests pending for the next trigger.
     pub(super) async fn advance_after_unlock(&self, human: &str) {
@@ -387,6 +417,29 @@ impl Supervisor {
             let _ = self.advance_agent_creations(human, now).await;
         }
     }
+}
+
+fn ready_repair(root: &Path, human: &str) -> Result<bool, SdkError> {
+    if !root.join("custody_accounts").join(human).join("agent_creation").is_dir() {
+        return Ok(false);
+    }
+    let store = AgentCreationStore::open(root.to_path_buf(), human)?;
+    for entry in store.rebind_entries()? {
+        if !matches!(entry.binding, RebindBinding::RebindPending | RebindBinding::Committed) {
+            continue;
+        }
+        let Some(request) = entry.request_id else { continue };
+        let Some(record) = store.load(&request)? else { continue };
+        if matches!(
+            record.state,
+            AgentCreationState::Authorized
+                | AgentCreationState::PublicationPending
+                | AgentCreationState::PublicationUnknown
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

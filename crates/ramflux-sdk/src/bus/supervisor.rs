@@ -31,6 +31,7 @@ pub(super) struct Supervisor {
     pub(super) daemon_attended: RefCell<BTreeSet<u64>>,
     pub(super) installing: RefCell<BTreeSet<String>>,
     backup_expiry: RefCell<Option<tokio::task::JoinHandle<()>>>,
+    agent_repairs: RefCell<Option<tokio::task::JoinHandle<()>>>,
     pub(super) accounts: RefCell<BTreeMap<String, AccountActor>>,
     restore_states: RefCell<BTreeMap<String, RestoreState>>,
     subscribers: Rc<RefCell<BTreeMap<u64, LocalBusSubscriber>>>,
@@ -77,6 +78,7 @@ impl Supervisor {
             daemon_attended: RefCell::new(BTreeSet::default()),
             installing: RefCell::new(BTreeSet::default()),
             backup_expiry: RefCell::new(None),
+            agent_repairs: RefCell::new(None),
             config,
             index,
             stop_requested,
@@ -1226,6 +1228,10 @@ impl Supervisor {
     }
 
     pub(super) fn start_event_router(&self) {
+        if self.agent_repairs.borrow().is_none() {
+            let owner = self.owner.borrow().clone();
+            *self.agent_repairs.borrow_mut() = Some(spawn_agent_repairs(owner));
+        }
         if self.backup_expiry.borrow().is_none() {
             let jobs = self.backup_jobs.clone();
             *self.backup_expiry.borrow_mut() = Some(tokio::task::spawn_local(async move {
@@ -1249,6 +1255,9 @@ impl Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
+        if let Some(task) = self.agent_repairs.get_mut().take() {
+            task.abort();
+        }
         if let Some(task) = self.backup_expiry.get_mut().take() {
             task.abort();
         }
@@ -1259,6 +1268,22 @@ impl Drop for Supervisor {
             task.abort();
         }
     }
+}
+
+/// The worker future stays in this frame. Inlining it into `activate_native` makes that
+/// caller's future larger than the clippy limit.
+#[inline(never)]
+fn spawn_agent_repairs(owner: std::rc::Weak<Supervisor>) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_local(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let Some(supervisor) = owner.upgrade() else { break };
+            if *supervisor.stop_requested.borrow() {
+                break;
+            }
+            Box::pin(supervisor.maintain_agent_repairs()).await;
+        }
+    })
 }
 
 fn command(request: LocalBusFrame, connection: &LocalBusConnectionState) -> AccountCommand {
