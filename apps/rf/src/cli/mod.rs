@@ -68,11 +68,11 @@ pub(crate) use transfer::*;
     about = "Ramflux reference CLI over the local SDK bus"
 )]
 pub(crate) struct Cli {
-    #[cfg_attr(not(target_os = "linux"), arg(long, global = true, default_value = DEFAULT_SOCKET))]
-    #[cfg_attr(
-        target_os = "linux",
-        arg(long, global = true, default_value_os_t = crate::linux_paths::default_socket())
-    )]
+    #[cfg(target_os = "linux")]
+    #[arg(long, global = true)]
+    pub(crate) socket: Option<PathBuf>,
+    #[cfg(not(target_os = "linux"))]
+    #[arg(long, global = true, default_value = DEFAULT_SOCKET)]
     pub(crate) socket: PathBuf,
     #[command(subcommand)]
     pub(crate) command: Command,
