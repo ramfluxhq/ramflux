@@ -14,6 +14,7 @@ mod native;
 mod native_delivery;
 mod native_history;
 mod native_prepare;
+mod own_agent;
 pub(crate) use native_prepare::NativeContactHistory;
 #[cfg(test)]
 pub(crate) mod native_tests;
@@ -39,6 +40,20 @@ impl RamfluxClient {
             .client_record("settings", "contact_requests")?
             .and_then(|value| value["contact_requests"].as_str().map(str::to_owned))
             .unwrap_or_else(|| "manual".into()))
+    }
+    /// An agent accepts a request from the human its own record names as custodian. The human's
+    /// acceptance of its own agent is [`Self::accept_pending_own_agent`]: the local record is not
+    /// enough.
+    fn requester_is_named_custodian(&self, requester_root: &str) -> bool {
+        self.born_v3_account.as_ref().is_some_and(|account| {
+            account
+                .record()
+                .body
+                .profile
+                .custodian
+                .as_ref()
+                .is_some_and(|custodian| custodian.account_anchor == requester_root)
+        })
     }
     pub(crate) fn set_contact_request_policy(&self, policy: &str) -> Result<(), SdkError> {
         if !matches!(policy, "manual" | "auto_accept") {
@@ -221,8 +236,13 @@ impl RamfluxClient {
             return Ok(());
         }
         self.record_pending_friend_link(&request.link_id, root, &body.target_root)?;
-        if reciprocal || self.contact_request_policy()? == "auto_accept" {
+        if reciprocal
+            || self.requester_is_named_custodian(root)
+            || self.contact_request_policy()? == "auto_accept"
+        {
             self.decide_inbound_contact(&request, "accepted")?;
+        } else {
+            self.accept_pending_own_agent(&request)?;
         }
         Ok(())
     }

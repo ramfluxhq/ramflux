@@ -101,6 +101,11 @@ pub(crate) fn request_of(action: AgentAction) -> Result<(&'static str, Value), R
             confirmed(&mut body, confirm);
             ("agent.delete", body)
         }
+        AgentAction::Retire { agent, confirm } => {
+            let mut body = json!({"agent_anchor": agent});
+            confirmed(&mut body, confirm);
+            ("agent.retire", body)
+        }
         AgentAction::Status { operation_id } => {
             ("agent.operation.get", json!({"operation_id": operation_id}))
         }

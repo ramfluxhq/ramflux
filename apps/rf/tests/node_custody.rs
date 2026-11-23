@@ -360,19 +360,35 @@ fn deployed_record_requires_the_pinned_signature_before_any_preparation() -> Res
     let mut tampered = fixture.record()?;
     tampered.body.epoch += 1;
     let path = fixture.root.join("tampered.json");
-    fs::write(&path, serde_json::to_vec(&tampered)?)?;
+    write_private(&path, &serde_json::to_vec(&tampered)?)?;
     let result =
         fixture.run("custody-renew", &["--deployed-record", path.to_str().ok_or("path")?])?;
     assert!(!result.status.success());
+    let first =
+        format!("{}{}", String::from_utf8(result.stdout)?, String::from_utf8(result.stderr)?);
+    assert!(!first.contains("unsafe file permissions"), "{first}");
     assert!(!fixture.output.join("custody-epoch-2.env").exists());
-    fs::write(&path, br#"{"body":"PRIVATE_CREDENTIAL_MARKER","signature":"unused"}"#)?;
+    write_private(&path, br#"{"body":"PRIVATE_CREDENTIAL_MARKER","signature":"unused"}"#)?;
     let result =
         fixture.run("custody-renew", &["--deployed-record", path.to_str().ok_or("path")?])?;
     assert!(!result.status.success());
     let diagnostics =
         format!("{}{}", String::from_utf8(result.stdout)?, String::from_utf8(result.stderr)?);
-    assert!(diagnostics.contains("DEMO_CUSTODY_DEPLOYED_RECORD_INVALID"));
+    assert!(diagnostics.contains("DEMO_CUSTODY_DEPLOYED_RECORD_INVALID"), "{diagnostics}");
     assert!(!diagnostics.contains("PRIVATE_CREDENTIAL_MARKER"));
+    assert!(!diagnostics.contains("unsafe file permissions"), "{diagnostics}");
+    Ok(())
+}
+
+// `0o600` at creation. `open` still applies the process umask, so the mode is set again.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut file =
+        fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    file.write_all(bytes)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
     Ok(())
 }
 

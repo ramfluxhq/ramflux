@@ -40,6 +40,7 @@ fn identity(
         principal_id: name.into(),
         principal_commitment: commitment.clone(),
         root_public_key: public.clone(),
+        agent_lifecycle: None,
         devices: vec![DeviceManifestEntry {
             principal_id: name.into(),
             principal_commitment: commitment,
@@ -180,6 +181,7 @@ fn native_identity_with(
         principal_commitment: anchor,
         root_public_key: root_public_key.clone(),
         devices: Vec::new(),
+        agent_lifecycle: None,
     };
     Ok((
         CallEndpoint {

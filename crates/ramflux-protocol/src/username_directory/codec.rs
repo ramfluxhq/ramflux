@@ -98,7 +98,7 @@ fn duration(start: u64, end: u64, max: u64) -> Result<(), CodecError> {
 fn within<T: Serialize>(v: &T, cap: usize) -> Result<(), CodecError> {
     need(crate::canonical_json_bytes(v)?.len() <= cap, "frame_size")
 }
-fn fixed(value: &str, n: usize, field: &'static str) -> Result<(), CodecError> {
+pub(super) fn fixed(value: &str, n: usize, field: &'static str) -> Result<(), CodecError> {
     let decoded = crate::decode_base64url(value).map_err(|_| CodecError::Field(field))?;
     need(decoded.len() == n && crate::encode_base64url(decoded) == value, field)
 }
@@ -119,7 +119,7 @@ pub fn normalize_username(value: &str) -> Result<String, CodecError> {
     validate_username(&result)?;
     Ok(result)
 }
-fn node(value: &str) -> Result<(), CodecError> {
+pub(super) fn node(value: &str) -> Result<(), CodecError> {
     need(
         !value.is_empty()
             && value.len() <= 253

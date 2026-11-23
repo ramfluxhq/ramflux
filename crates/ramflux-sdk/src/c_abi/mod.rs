@@ -929,7 +929,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::NetworkingPending
         | SdkError::NetworkingPendingContext { .. }
         | SdkError::CustodyModeDowngrade
-        | SdkError::AgentCustodyUnsupported => RamfluxErrorCode::UnsupportedVersion,
+        | SdkError::AgentCustodyUnsupported
+        | SdkError::UsernameDirectoryRefused(_) => RamfluxErrorCode::UnsupportedVersion,
         SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable) => {
             RamfluxErrorCode::PermissionDenied
         }
@@ -1093,7 +1094,9 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
         E::SchemaResetRequired { .. } | E::RawWireResetRequired => {
             RamfluxErrorCode::SchemaResetRequired
         }
-        E::OperationReconciliationRequired { .. } => RamfluxErrorCode::InvalidArgument,
+        E::OperationReconciliationRequired { .. } | E::MuteUntilOutOfRange => {
+            RamfluxErrorCode::InvalidArgument
+        }
         E::AccountSchemaTooNew { .. } => RamfluxErrorCode::UnsupportedVersion,
         E::Integrity(_)
         | E::Protocol(_)

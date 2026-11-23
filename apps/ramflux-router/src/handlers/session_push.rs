@@ -230,6 +230,25 @@ fn bound_ack(
     }
     reply(&super::handle_mvp0_ack_bound(body, router)?)
 }
+fn fenced_agent_read(
+    router: &crate::router_runtime::RouterHandle,
+    target: &str,
+) -> anyhow::Result<Option<MeshResponse>> {
+    let Some((anchor, _)) = ramflux_protocol::parse_qualified_device_id(target).ok().flatten()
+    else {
+        return Ok(None);
+    };
+    let id = router.state().session_push_status(target).incarnation_id;
+    match router.state().agent_anchor_fenced(
+        router.store(),
+        &anchor,
+        ramflux_node_core::now_unix_seconds(),
+    ) {
+        Ok(false) => Ok(None),
+        Ok(true) => refused(SessionPushReason::RecipientUnreachable, id).map(Some),
+        Err(_) => refused(SessionPushReason::InternalError, id).map(Some),
+    }
+}
 fn query<'a>(path: &'a str, name: &str) -> Option<&'a str> {
     path.split_once('?')?
         .1
@@ -242,6 +261,9 @@ fn page(path: &str, router: &crate::router_runtime::RouterHandle) -> anyhow::Res
     let id = query(path, "incarnation_id").unwrap_or("");
     if let Err(error) = router.state().check_inbox_incarnation(target, id) {
         return refused(error.reason, error.incarnation_id);
+    }
+    if let Some(response) = fenced_agent_read(router, target)? {
+        return Ok(response);
     }
     let after = query(path, "after").unwrap_or("0").parse::<u64>();
     let limit = query(path, "limit").unwrap_or("100").parse::<usize>();
@@ -281,15 +303,18 @@ fn page(path: &str, router: &crate::router_runtime::RouterHandle) -> anyhow::Res
     }
 }
 fn point(path: &str, router: &crate::router_runtime::RouterHandle) -> anyhow::Result<MeshResponse> {
-    if query(path, "incarnation_id").is_none() {
-        return super::entry_fetch::reply(path, router.state());
-    }
     let bare = path.split('?').next().unwrap_or("");
     let target = bare
         .strip_prefix("/mvp1/inbox-entry/")
         .unwrap_or("")
         .rsplit_once('/')
         .map_or("", |(target, _)| target);
+    if let Some(response) = fenced_agent_read(router, target)? {
+        return Ok(response);
+    }
+    if query(path, "incarnation_id").is_none() {
+        return super::entry_fetch::reply(path, router.state());
+    }
     if let Some(id) = query(path, "incarnation_id")
         && let Err(error) = router.state().check_inbox_incarnation(target, id)
     {

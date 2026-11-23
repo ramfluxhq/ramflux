@@ -277,6 +277,11 @@ async fn serve_connection(
                     .await?;
             }
             MeshQuicAcceptedWireRequest::Json(accepted) => {
+                if accepted.request.path.starts_with("/s1/session/") {
+                    // The session fence asks whether the target's router session was closed.
+                    accepted.write_json_response(200, &serde_json::Value::Null).await?;
+                    continue;
+                }
                 anyhow::ensure!(
                     accepted.request.path.starts_with("/mvp1/inbox/alice-target?"),
                     "unexpected inbox request"

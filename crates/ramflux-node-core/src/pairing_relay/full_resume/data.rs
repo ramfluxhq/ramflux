@@ -94,7 +94,7 @@ impl FullResumeServer {
         queue.history[0] = queue.history[1];
         queue.history[1] = Some(Stamp { counter, hash });
         queue.next += 1;
-        ready.last_activity[signer] = self.clock.monotonic_ms();
+        ready.last_activity[signer] = self.clock.activity_ms();
         if signer == 1 && counter == 0 {
             ready.control.take();
         }
@@ -135,7 +135,7 @@ impl FullResumeServer {
             ready.data_poll_credit[signer] = credit - 500;
             ready.data_poll_updated[signer] = ready.data_poll_updated[signer].max(mono);
         }
-        ready.last_activity[signer] = mono;
+        ready.last_activity[signer] = self.clock.activity_ms();
         Ok(next.cloned())
     }
 }

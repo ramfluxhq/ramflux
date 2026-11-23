@@ -62,6 +62,10 @@ pub(crate) struct Fixture {
     pub requests: tokio::sync::mpsc::Receiver<Request>,
     /// Fires once per held request whose client stopped reading the response.
     pub cancelled: tokio::sync::mpsc::Receiver<()>,
+    /// While `true` (the default) the fixture router answers the session-fence lookup
+    /// `GET /s1/session/{target}` itself ("no router session"); a test that asserts on that
+    /// lookup sets it to `false` so the request reaches `requests`.
+    pub answer_session_fence: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
     root: ramflux_test_support::TestPath,
     _context_directory: ramflux_test_support::TestPath,
@@ -108,11 +112,13 @@ impl Fixture {
         };
         let (send, requests) = tokio::sync::mpsc::channel(32);
         let (cancel_send, cancelled) = tokio::sync::mpsc::channel(32);
+        let answer_session_fence = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let fence = answer_session_fence.clone();
         let task = tokio::spawn(async move {
             let mut tasks = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
-                 result=server.accept_connection()=> {let Ok(connection)=result else {return;};let send=send.clone();let cancel_send=cancel_send.clone();tasks.spawn(async move {if raw {let _=serve_raw(connection,send).await;} else {let _=serve(connection,send,cancel_send).await;}});}
+                 result=server.accept_connection()=> {let Ok(connection)=result else {return;};let send=send.clone();let cancel_send=cancel_send.clone();let fence=fence.clone();tasks.spawn(async move {if raw {let _=serve_raw(connection,send).await;} else {let _=serve(connection,send,cancel_send,fence).await;}});}
                  _=tasks.join_next(),if !tasks.is_empty()=>{}
                 }
             }
@@ -121,6 +127,7 @@ impl Fixture {
             context,
             requests,
             cancelled,
+            answer_session_fence,
             task,
             root,
             _context_directory: fixture_directory_0,
@@ -136,10 +143,21 @@ async fn serve(
     connection: ramflux_transport::MeshQuicConnection,
     send: tokio::sync::mpsc::Sender<Request>,
     cancelled: tokio::sync::mpsc::Sender<()>,
+    answer_session_fence: Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
     loop {
         let mut accepted =
             MeshQuicServer::accept_json_or_postcard_request_on_connection(&connection).await?;
+        let is_fence_lookup = matches!(&accepted, Wire::Json(a)
+            if answer_session_fence.load(std::sync::atomic::Ordering::Acquire)
+                && a.request.path.strip_prefix("/s1/session/").is_some_and(|rest| rest != "upsert"));
+        if is_fence_lookup {
+            // The session fence asks whether this target's router session was closed.
+            if let Wire::Json(a) = accepted {
+                a.write_json_response(200, &Value::Null).await?;
+            }
+            continue;
+        }
         let (path, body) = match &accepted {
             Wire::Json(a) => (a.request.path.clone(), a.request.body.clone()),
             Wire::Postcard(a) => (a.path.clone(), serde_json::from_slice(&a.body)?),

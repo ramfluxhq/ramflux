@@ -147,6 +147,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
 
 fn bus_reason_code(error: &SdkError) -> Option<String> {
     Some(match error {
+        SdkError::UsernameDirectoryRefused(code) => code.as_str().into(),
         SdkError::Storage(StorageError::AccountWriterBusy(_)) => "account_busy".into(),
         SdkError::ContactInput(reason) => reason.to_string(),
         SdkError::CustodyVault(reason) => reason.as_str().into(),
@@ -273,6 +274,12 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         | SdkError::Crypto(CryptoError::Protocol(
             ramflux_protocol::ProtocolError::GroupStateLimit(_),
         )) => "GroupStateCapacity",
+        other => delivery_error_code(other),
+    }
+}
+
+fn delivery_error_code(error: &SdkError) -> &'static str {
+    match error {
         SdkError::Storage(error) => storage_error_code(error),
         SdkError::TaskDeliveryTooLarge { .. } => "TaskDeliveryTooLarge",
         SdkError::SurfaceDeliveryTooLarge { .. } => "too_large",
@@ -298,6 +305,11 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::InboundRejected(code) if code == super::push_receiver::MANAGED_ACK_CODE => {
             super::push_receiver::MANAGED_ACK_CODE
         }
+        SdkError::GatewaySessionRejected(reason)
+            if reason.to_ascii_lowercase().contains("unreachable") =>
+        {
+            "recipient_unreachable"
+        }
         SdkError::CustodyNetwork(code) | SdkError::CustodyAdmission { code, .. } => {
             code.reason_code()
         }
@@ -318,6 +330,7 @@ fn undelivered_contact_request_code(error: &SdkError) -> &'static str {
 
 fn custody_unit_code(error: &SdkError) -> Option<&'static str> {
     Some(match error {
+        SdkError::UsernameDirectoryRefused(_) => "UsernameDirectoryRefused",
         SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
         SdkError::AgentCustodyUnsupported => "AgentCustodyUnsupported",
         SdkError::AgentCreationRefused(token) => token,
@@ -379,7 +392,8 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         | E::EventIdConflict(_)
         | E::IdentityLifecycleBlocked(_)
         | E::InvalidRecoveryState { .. }
-        | E::PairingField(_) => "ValidationFailed",
+        | E::PairingField(_)
+        | E::MuteUntilOutOfRange => "ValidationFailed",
     }
 }
 
