@@ -5,11 +5,11 @@
 //! that wrote `started_at` and a loopback capabilities read still advertises `host_bootstrap_v1`.
 
 use super::refused;
-use crate::RfError;
+use crate::SdkError;
 use ramflux_prx_client::{ClientConfig, HOST_BOOTSTRAP_V1, PrxClient};
 use serde::Deserialize;
-use std::io::Read;
-use std::os::unix::fs::MetadataExt;
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -21,6 +21,7 @@ pub(crate) struct RuntimeView {
     pub owner_id: String,
     pub started_at: String,
     pub fresh: bool,
+    pub alive: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,29 +35,53 @@ struct Wire {
     capabilities_url: String,
 }
 
-pub(crate) fn check_dir(path: &Path, memory: bool) -> Result<(), RfError> {
+pub(crate) fn check_dir(path: &Path, memory: bool) -> Result<(), SdkError> {
     let chain = chain(path)?;
     let uid = rustix::process::getuid().as_raw();
     for (index, dir) in chain.iter().enumerate() {
         let meta = std::fs::metadata(dir)?;
-        if !meta.is_dir() {
-            return Err(rejected(dir, meta.mode()));
-        }
-        if !allows(&meta, uid, index == 0 && memory) {
+        if !meta.is_dir() || !allows(&meta, uid, index == 0 && memory) {
             return Err(rejected(dir, meta.mode()));
         }
     }
     Ok(())
 }
 
-pub(crate) async fn inspect(dir: &Path) -> Result<Option<RuntimeView>, RfError> {
+/// Bytes of a valid `runtime.json`, or `None` when the file is missing or refused.
+pub(crate) fn snapshot(dir: &Path) -> Option<Vec<u8>> {
+    let path = dir.join("runtime.json");
+    let bytes = read_capped(&path, 8192)?;
+    read_runtime(&path).ok()?;
+    Some(bytes)
+}
+
+/// Write `bytes` back only when stop removed `runtime.json`. A newer file is left in place.
+///
+/// # Errors
+/// Returns an I/O error when the retained file cannot be created mode 0600.
+pub(crate) fn restore_if_missing(dir: &Path, bytes: Option<&[u8]>) -> Result<(), SdkError> {
+    let Some(bytes) = bytes.filter(|saved| !saved.is_empty() && saved.len() <= 8192) else {
+        return Ok(());
+    };
+    let path = dir.join("runtime.json");
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    write_new_private(&path, bytes)
+}
+
+pub(crate) async fn inspect(dir: &Path) -> Result<Option<RuntimeView>, SdkError> {
     let path = dir.join("runtime.json");
     if !path.is_file() {
         return Ok(None);
     }
     let wire = read_runtime(&path)?;
     let started = parse_rfc3339(&wire.started_at);
-    let same = match (process_start(wire.pid), started) {
+    let start = process_start(wire.pid);
+    let alive = start.is_some();
+    let same = match (start, started) {
         (Some(start), Some(at)) => start <= at.saturating_add(2),
         _ => false,
     };
@@ -69,6 +94,7 @@ pub(crate) async fn inspect(dir: &Path) -> Result<Option<RuntimeView>, RfError> 
         owner_id: wire.owner_id,
         started_at: wire.started_at,
         fresh,
+        alive,
     }))
 }
 
@@ -83,11 +109,11 @@ fn allows(meta: &std::fs::Metadata, uid: u32, memory: bool) -> bool {
     (owner == uid || owner == 0) && (!writable || sticky_root)
 }
 
-fn rejected(path: &Path, mode: u32) -> RfError {
+fn rejected(path: &Path, mode: u32) -> SdkError {
     refused("ancestor_rejected", format!("{} mode {:04o}", path.display(), mode & 0o7777))
 }
 
-fn chain(start: &Path) -> Result<Vec<PathBuf>, RfError> {
+fn chain(start: &Path) -> Result<Vec<PathBuf>, SdkError> {
     let mut out = Vec::new();
     let mut cur = std::fs::canonicalize(start)?;
     loop {
@@ -100,7 +126,51 @@ fn chain(start: &Path) -> Result<Vec<PathBuf>, RfError> {
     Ok(out)
 }
 
-fn read_runtime(path: &Path) -> Result<Wire, RfError> {
+fn write_new_private(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
+    let parent = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .ok_or_else(|| refused("field_invalid", "runtime.json"))?;
+    let name = path.file_name().ok_or_else(|| refused("field_invalid", "runtime.json"))?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".{}", std::process::id()));
+    let tmp = parent.join(tmp_name);
+    let mut file =
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+    drop(file);
+    if let Err(error) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+    place_exclusive(&tmp, path)
+}
+
+fn place_exclusive(tmp: &Path, path: &Path) -> Result<(), SdkError> {
+    match rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        tmp,
+        rustix::fs::CWD,
+        path,
+        rustix::fs::RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) if std::io::Error::from(error).kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(tmp);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(tmp);
+            Err(std::io::Error::from(error).into())
+        }
+    }
+}
+
+fn read_runtime(path: &Path) -> Result<Wire, SdkError> {
     let meta = std::fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() || meta.mode() & 0o777 != 0o600 {
         return Err(refused("runtime_mode", "runtime.json must be mode 0600"));

@@ -436,6 +436,20 @@ int32_t ramflux_v2_set_credential_provider(uint64_t handle,
                                            void *user_data);
 
 /*
+ Install or clear the provider-key callback for `agent.host.credential`.
+ The callback receives the provider id and writes the key into `out`. Return 0 when provided
+ and 1 when refused. A null callback clears the slot. The key is never placed in JSON.
+ */
+int32_t ramflux_v2_set_host_credential_provider(uint64_t handle,
+                                                int32_t (*callback)(const uint8_t*,
+                                                                    size_t,
+                                                                    uint8_t*,
+                                                                    size_t,
+                                                                    size_t*,
+                                                                    void*),
+                                                void *user);
+
+/*
  Stop networking, flush databases, and close file descriptors.
  Unlocked account state, including the database key, stays in memory.
  Pending operations complete as `RAMFLUX_V2_STATUS_SUSPENDED` (30).
