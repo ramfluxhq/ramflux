@@ -14,8 +14,7 @@ schemes requires a reset; no legacy root is converted into native authority.
 
 The ordinary SDK DM stack uses X3DH bootstrap and the existing persistent double
 ratchet. It advances its DH ratchet after the first reply and provides ratchet
-forward secrecy from that point. Bootstrap forward secrecy remains pending
-DM-FS-01: the current signed prekey is a stable derivation of retained branch
+forward secrecy from that point. Bootstrap forward secrecy remains unavailable: the current signed prekey is a stable derivation of retained branch
 material, with no published/consumed one-time prekey. Later compromise of retained
 bootstrap seeds can reconstruct a captured initial session.
 
@@ -201,7 +200,7 @@ wrapped capsule or backup. A new phrase derives a new master: there is no
 same-identity "rotate forgotten phrase" operation. Copies of the same user-held
 phrase are the same authority, not revocable recovery credentials.
 
-The stage-1 Rust implementation preallocates its normalization, phrase-display
+The Rust phrase-processing implementation preallocates its normalization, phrase-display
 and setup-frame buffers so secret-bearing writes cannot reallocate. Owned buffers
 use zeroizing wrappers. Residual library-boundary copies remain: BIP39
 `to_entropy_array` returns an entropy array by value before it enters a zeroizing
@@ -244,7 +243,7 @@ reusing v2's legacy workflow behavior.
 
 The [normative proposed wire specification](root_key_custody_wire.md) fixes the
 signature domains, JCS bodies, anchor rules, epoch encoding and verification
-order. It is a stage-1 review artifact, not an implemented protocol.
+order. Its proposed sections do not establish runtime availability.
 
 New accounts use `identity_root_commitment(master_public_key)` as their immutable
 anchor, start in v3 at genesis and never accept v1/v2 sets or legacy branch proofs.
@@ -640,7 +639,7 @@ passphrase in its configured credential vault until the owner exports a one-use
 passphrase only: never a recovery phrase, master key, self-signing key, branch key,
 or human credential. `ramflux-agent-host` imports it into the operator Mac Keychain
 and removes the file. The integration-only memory vault is compile- and runtime-gated;
-Linux production remains blocked on `ID-02-VAULT-LINUX-01`.
+Linux production provisioning requires a supported credential-vault provider.
 Custodian renewal can be batched with explicit scope; show expiry reminders and a clear waiting state when the human
 is unavailable. A daemon cannot promote itself to avoid lease expiry.
 
@@ -692,12 +691,12 @@ phrases in shell arguments, environment or unattended confirmation flags. Routin
 unlock and automatic reminders never ask for the phrase. State loss/recovery and
 incomplete publication plainly rather than silently creating another account.
 
-## Staged implementation and acceptance
+## Availability and verification boundaries
 
 Creation, ordinary SDK operations, data-only backup, phrase recovery/promotion and
 v3 contact cards are native implementation surfaces. Focused native tests are not
-cross-service acceptance. Controller-run realnet slices must verify the CLI/local
-bus contacts, DM, group, call and backup flow against the deployed product revision.
+cross-service acceptance. Deployment verification must cover the CLI/local-bus contacts, DM, group, call
+and backup flow against the deployed product revision.
 
 SAS pairing/primary approval, cooperative handover and external custody providers
 remain separate integration work. Their design sections do not imply availability.

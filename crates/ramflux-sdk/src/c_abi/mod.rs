@@ -913,9 +913,9 @@ fn confirm_abi_code(reason: crate::CustodyConfirmReason) -> RamfluxErrorCode {
     }
 }
 
-// Kept beside the matcher so `sdk_error_code` stays within the line limit.
-// The match stays exhaustive: a new `SdkError` variant still fails to compile.
-macro_rules! invalid_argument_errors {
+// The invalid-argument tail is a macro so `sdk_error_code` stays under the line limit
+// and the match stays exhaustive.
+macro_rules! sdk_invalid_argument {
     () => {
         SdkError::OperationReconciliationRequired(_)
             | SdkError::AgentCreationRefused(_)
@@ -975,9 +975,15 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::CustodyModeDowngrade
         | SdkError::AgentCustodyUnsupported
         | SdkError::UsernameDirectoryRefused(_) => RamfluxErrorCode::UnsupportedVersion,
-        SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable) => {
-            RamfluxErrorCode::PermissionDenied
-        }
+        SdkError::CustodyVaultUnavailable
+        | SdkError::CustodyVault(_)
+        | SdkError::AttachmentDeleted
+        | SdkError::Sync(_)
+        | SdkError::CapabilityDenied(_)
+        | SdkError::GrantInvalidated
+        | SdkError::RemoteAppApprovalRequired
+        | SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)
+        | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
         SdkError::CustodyRandomUnavailable
         | SdkError::HistoryEvidence(_)
         | SdkError::Crypto(_)
@@ -1006,24 +1012,15 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::TaskDeliveryTimeout => RamfluxErrorCode::TransportUnavailable,
         #[rustfmt::skip]
         SdkError::Protocol(_) | SdkError::Json(_) | SdkError::InvalidGatewayCursor(_) => RamfluxErrorCode::InvalidCanonicalJson,
-        SdkError::PriorityWriterAccess | SdkError::WriterPause | SdkError::Io(_) => {
-            RamfluxErrorCode::Internal
-        }
-        SdkError::CustodyVaultUnavailable
-        | SdkError::CustodyVault(_)
-        | SdkError::AttachmentDeleted
-        | SdkError::Sync(_)
-        | SdkError::CapabilityDenied(_)
-        | SdkError::GrantInvalidated
-        | SdkError::RemoteAppApprovalRequired
-        | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
+        #[rustfmt::skip]
+        SdkError::PriorityWriterAccess | SdkError::WriterPause | SdkError::Io(_) => RamfluxErrorCode::Internal,
         SdkError::AccountCommandBackpressure
         | SdkError::ContactInput(crate::ContactReason::LookupRateLimited)
         | SdkError::ContactRequestCapacity(_)
         | SdkError::CallControlReceiptCapacity { .. }
         | SdkError::TaskManifestWorkerCapacity
         | SdkError::TaskForwardWorkerCapacity => RamfluxErrorCode::RateLimited,
-        invalid_argument_errors!() => RamfluxErrorCode::InvalidArgument,
+        sdk_invalid_argument!() => RamfluxErrorCode::InvalidArgument,
     }
 }
 

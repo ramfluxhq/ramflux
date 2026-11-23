@@ -1,11 +1,20 @@
 # Account event stream
 
 The daemon owns one sync driver and durable sequence journal per unlocked account.
-Clients subscribe with `bus.subscribe` (alias `subscription.open`), an account id,
-a set of `topics`, and an optional `since_seq`. `*` selects all topics. A missing
-cursor starts at the current head; a supplied cursor replays events strictly after
-that sequence, followed by live changes. The response acknowledgement precedes
-replay on the same connection. Events carry `seq` and `at`.
+Phones follow that journal with `bus.subscribe`: an account id, a set of `topics`,
+and an optional `since_seq`. `*` selects all topics. A missing cursor starts at the
+current head; a supplied cursor replays events strictly after that sequence, followed
+by live changes. The response acknowledgement precedes replay on the same connection.
+Events carry `seq` and `at`.
+
+`subscription.open` opens ephemeral topics, backup jobs, pairing, and the
+attended-frontend marker (an empty topic list). The ephemeral topics are
+`state.changed`, `account.restore.finished`, `mcp.approval.request`, and
+`message.transient`. That opener acknowledges `{"subscribed": true}` and
+delivers those live events. A journal topic, including `*`, is refused with
+`unsupported reader request` when the account reader is open, and `*` is refused
+the same way before the reader exists. `bus.subscribe` is the supported
+live-update method for phones.
 
 ## Resume and recovery
 
