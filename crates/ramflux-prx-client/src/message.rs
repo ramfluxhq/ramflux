@@ -19,7 +19,7 @@ use crate::capabilities::{
 };
 use crate::client::PrxClient;
 use crate::error::{
-    ApiCode, PrxError, decode_api_error, decode_ok, local_refusal, present, protocol, rate_limited,
+    ApiCode, PrxError, decode_api_error, decode_ok, limit_or_rate, local_refusal, present, protocol,
 };
 use crate::name::AgentName;
 use crate::run::{RunCode, RunState, run_state};
@@ -28,8 +28,8 @@ use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-/// Who answers the message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Who answers the message. `Main` sorts before every named agent.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Target {
     /// Main. Sent as an omitted `agent`; `"main"` is the same key on PRX's side.
     Main,
@@ -219,8 +219,9 @@ fn post_answer(raw: Raw) -> Result<Raw, PrxError> {
         return Ok(raw);
     }
     if status == 429 {
-        // No built-in retry: the caller decides (card D4).
-        return Err(rate_limited(raw.retry_after, &raw.body));
+        // No built-in retry: the caller decides (card D4). `agent_busy` and
+        // `agent_budget_exhausted` stay admission refusals; other 429s stay the shared limit.
+        return Err(limit_or_rate(raw.retry_after, &raw.body));
     }
     match decode_api_error(status, &raw.body) {
         PrxError::Api { code: ApiCode::StorageUnavailable, .. } => {
@@ -248,8 +249,9 @@ impl PrxClient {
     /// # Errors
     /// Returns `Unsupported`; `PrxError::OutcomeUnknown` when the admission may have happened
     /// but its answer was lost, not decodable, or a storage failure; `ProviderNotReady`,
-    /// `RateLimited`, `Protocol` (uncoded 4xx) or the API error (for example `field_invalid`,
-    /// `agent_targeting_disabled`, `session_busy`), each of which means the turn was not admitted.
+    /// `RateLimited`, `AgentBusy`, `AgentBudgetExhausted`, `Protocol` (uncoded 4xx) or the API
+    /// error (for example `field_invalid`, `agent_targeting_disabled`, `session_busy`), each of
+    /// which means the turn was not admitted.
     pub async fn post_turn(
         &self,
         caps: &Capabilities,

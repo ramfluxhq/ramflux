@@ -982,6 +982,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::TaskForwardWorkerCapacity => RamfluxErrorCode::RateLimited,
         SdkError::OperationReconciliationRequired(_)
         | SdkError::AgentCreationRefused(_)
+        | SdkError::AgentNotRetired
+        | SdkError::PrxCall(_)
         | SdkError::EditConflict { .. }
         | SdkError::PinLimitReached
         | SdkError::RestoreSetupRequired

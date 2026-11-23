@@ -2,3 +2,4 @@
 # path | enclosing fn | ordinal | class | admission provenance or exclusion reason
 crates/ramflux-prx-client/src/error.rs | decode_ok | 1 | B | strict=parse_i_json; admission=B ingress boundary: PRX daemon 2xx response bytes over loopback
 crates/ramflux-prx-client/src/error.rs | rate_limited | 1 | B | strict=parse_i_json; admission=B ingress boundary: PRX daemon 429 response body over loopback
+crates/ramflux-prx-client/src/error.rs | limit_or_rate | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

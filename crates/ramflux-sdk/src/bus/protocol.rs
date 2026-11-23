@@ -44,6 +44,8 @@ pub struct LocalBusConfig {
     #[cfg(any(test, feature = "itest-restore-state"))]
     #[doc(hidden)]
     pub startup_restore_gate: Option<LocalBusStartupRestoreGate>,
+    /// Loopback PRX client. Absent means agent limits, history erase and purge are skipped.
+    pub(crate) prx: Option<std::sync::Arc<ramflux_prx_client::PrxClient>>,
 }
 
 #[cfg(any(test, feature = "itest-restore-state"))]
@@ -1110,7 +1112,25 @@ impl LocalBusConfig {
             test_network_command_gate: None,
             #[cfg(any(test, feature = "itest-restore-state"))]
             startup_restore_gate: None,
+            prx: None,
         }
+    }
+
+    /// Attach a loopback PRX client. Both the URL and the token file are required.
+    /// The URL must be `http://127.0.0.1` or `http://[::1]`, and the token file mode must be `0600`.
+    ///
+    /// # Errors
+    /// Returns `PrxCall("prx_rejected")` when the URL or the token file is refused. Nothing is sent.
+    pub fn with_prx(
+        mut self,
+        base_url: &str,
+        token_file: &std::path::Path,
+    ) -> Result<Self, crate::SdkError> {
+        let settings = ramflux_prx_client::ClientConfig::new(base_url, token_file);
+        let client = ramflux_prx_client::PrxClient::new(&settings)
+            .map_err(|_| crate::SdkError::PrxCall("prx_rejected"))?;
+        self.prx = Some(std::sync::Arc::new(client));
+        Ok(self)
     }
 
     #[cfg(any(test, feature = "itest-restore-state"))]

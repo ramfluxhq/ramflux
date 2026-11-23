@@ -29,6 +29,29 @@ fn refuse(token: &'static str) -> SdkError {
     SdkError::AgentCreationRefused(token)
 }
 
+fn refuse_bad_limits(config: &g::AgentConfigData) -> Result<(), SdkError> {
+    let Some(limits) = &config.limits else {
+        return Ok(());
+    };
+    let turns_bad = limits.max_concurrent_turns.is_some_and(|value| !(1..=1024).contains(&value));
+    let cost_bad =
+        limits.max_cost_per_day_cents.is_some_and(|value| !(1..=1_000_000_000).contains(&value));
+    if turns_bad || cost_bad { Err(refuse("field_invalid")) } else { Ok(()) }
+}
+
+fn copy_limits(intent: &mut crate::agent_record::AgentIntent, config: &g::AgentConfigData) {
+    let Some(limits) = &config.limits else {
+        return;
+    };
+    if limits.max_concurrent_turns.is_none() && limits.max_cost_per_day_cents.is_none() {
+        return;
+    }
+    intent.provider = Some(config.provider.clone());
+    intent.model = Some(config.model.clone());
+    intent.max_concurrent_turns = limits.max_concurrent_turns;
+    intent.max_cost_per_day_cents = limits.max_cost_per_day_cents;
+}
+
 /// The human authority read at one instant, with this device named in it.
 struct Human<'a> {
     record: &'a Envelope<DeviceSet>,
@@ -50,15 +73,11 @@ fn primary_branch_expiry(record: &Envelope<DeviceSet>, primary: &DeviceRef) -> O
 }
 
 /// Build the `AgentCustodyStatus` of one stored request. The request and receipt bytes travel as
-/// their canonical form; failures are closed tokens.
+/// their canonical form; failures are closed tokens. `request_hash` is `register_plan_hash` of the
+/// stored plan, the value `agent.creation.decide` must repeat.
 pub(crate) fn status_of(record: &AgentCreationRecord) -> Result<g::AgentCustodyStatus, SdkError> {
     let plan = record.plan_bytes().ok().filter(|bytes| !bytes.is_empty());
-    let agent_anchor = match plan.as_deref() {
-        Some(bytes) => Some(
-            decode_register_plan(bytes).map_err(|_| SdkError::CustodySetupInvalid)?.agent_anchor,
-        ),
-        None => None,
-    };
+    let (agent_anchor, request_hash) = plan_fields(plan.as_deref())?;
     let receipt_json = match record.receipt_b64.as_deref() {
         Some(text) => Some(decode_base64url(text).map_err(|_| SdkError::CustodySetupInvalid)?),
         None => None,
@@ -71,7 +90,18 @@ pub(crate) fn status_of(record: &AgentCreationRecord) -> Result<g::AgentCustodyS
         request_json: plan,
         receipt_json,
         error: record.failure.map(|failure| failure_body(failure, record.state)),
+        request_hash,
     })
+}
+
+/// The plan's anchor and `register_plan_hash`. A status with no plan has neither.
+fn plan_fields(bytes: Option<&[u8]>) -> Result<(Option<String>, String), SdkError> {
+    let Some(bytes) = bytes else {
+        return Ok((None, String::new()));
+    };
+    let plan = decode_register_plan(bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
+    let hash = register_plan_hash(&plan).map_err(|_| SdkError::CustodySetupInvalid)?;
+    Ok((Some(plan.agent_anchor), hash))
 }
 
 /// `AgentFailure.effects` of a stored request (AGENT-IDENTITY-01 r13 item 3). `possible`: the node
@@ -162,6 +192,7 @@ impl RamfluxClient {
         {
             return Err(refuse("metadata_pending"));
         }
+        refuse_bad_limits(config)?;
         crate::agent_record::check_access(access)?;
         let persona_bytes = serde_json::to_vec(&serde_json::json!({
             "avatar": persona.avatar,
@@ -197,8 +228,8 @@ impl RamfluxClient {
         let outcome = begin(&store, vault, &input, now)?;
         // Stage E2: the persona and access are kept on the creation record for the agent record.
         let mut intent_record = store.load(&request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
-        let intent =
-            crate::agent_record::AgentIntent { persona: persona.clone(), access: access.clone() };
+        let mut intent = crate::agent_record::AgentIntent::new(persona.clone(), access.clone());
+        copy_limits(&mut intent, config);
         intent_record.intent_b64 = Some(encode_base64url(serde_json::to_vec(&intent)?));
         store.save(&intent_record)?;
         let plan =

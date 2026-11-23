@@ -4,7 +4,7 @@
 //! Test-only helpers: an offline client (no request is ever sent through it) and a
 //! capability set built from literal tokens.
 
-use crate::capabilities::{BuildCommit, Capabilities};
+use crate::capabilities::{BuildCommit, Capabilities, LimitsFacts};
 use crate::client::PrxClient;
 use crate::transport::ClientConfig;
 use std::collections::BTreeSet;
@@ -34,6 +34,7 @@ pub(crate) fn caps_with(tokens: &[&str]) -> Capabilities {
         api: 1,
         capabilities: tokens.iter().map(|t| (*t).to_owned()).collect::<BTreeSet<_>>(),
         available: BTreeSet::new(),
+        limits_facts: LimitsFacts::default(),
     }
 }
 

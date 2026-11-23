@@ -26,6 +26,12 @@ fn engine(server: &FakePrx, timeout_s: u64) -> TestResult<(tempfile::TempDir, Pr
         authorization: PrxAuthorization::Supervised,
         turn_timeout_s: 120,
         approval_timeout_s: 600,
+        agent_name: None,
+        provider: None,
+        model: None,
+        max_concurrent_turns: None,
+        max_cost_per_day_cents: None,
+        erase_session_on_delete: false,
     };
     Ok((root, PrxEngine::new(&config, 8)?))
 }
@@ -583,6 +589,12 @@ async fn unavailable_prx_is_silent_and_logs_once_without_bearer_on_stderr() -> T
             authorization: PrxAuthorization::Full,
             turn_timeout_s: 120,
             approval_timeout_s: 600,
+            agent_name: None,
+            provider: None,
+            model: None,
+            max_concurrent_turns: None,
+            max_cost_per_day_cents: None,
+            erase_session_on_delete: false,
         };
         let mut full = PrxEngine::new(&config, 8)?;
         for now in [2, 3] {
