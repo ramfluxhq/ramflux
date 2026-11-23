@@ -356,6 +356,20 @@ int32_t ramflux_v2_operation_cancel(uint64_t handle, uint64_t id);
 int32_t ramflux_v2_operation_release(uint64_t handle, uint64_t id);
 
 /*
+ Authorize a username draft with the account master recovery phrase.
+ `phrase_bytes` is borrowed for this call and is not placed in JSON or logs.
+ Cancellation writes no signed output and does not submit. A lost submit reply
+ is reconciled with `username.status`; this function does not sign a replacement.
+ */
+int32_t ramflux_v2_username_authorize(uint64_t handle,
+                                      const uint8_t *public_request_json,
+                                      size_t public_request_len,
+                                      const uint8_t *phrase_bytes,
+                                      size_t phrase_len,
+                                      struct RamfluxBuffer **out_signed_json,
+                                      struct RamfluxBuffer **out_error_json);
+
+/*
  Poll one subscription event without blocking. Subscribe using execute(subscription.open/bus.subscribe).
  ResyncRequired=27 explicitly signals event overflow; terminal completions use separate credit.
  */

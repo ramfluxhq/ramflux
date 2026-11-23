@@ -1942,7 +1942,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "username",
       "key_export": false,
       "name": "username.mutate",
@@ -1951,7 +1951,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "username",
       "key_export": false,
       "name": "username.status",
@@ -1960,7 +1960,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "username",
       "key_export": false,
       "name": "username.resolve",
@@ -1969,7 +1969,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "username",
       "key_export": false,
       "name": "username.contact.add",
@@ -1978,7 +1978,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "profile",
       "key_export": false,
       "name": "profile.update",

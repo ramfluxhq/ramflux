@@ -252,13 +252,9 @@ policies! {
     "profile.update" => ("profile", true, true, false, false),
 }
 
-// Search stays unavailable to native hosts until its separate ABI integration is admitted.
+// Search and daemon shutdown stay unavailable. Username methods and the
+// profile alias are executable. The master phrase is not a bus field.
 pub(super) const DENIED_METHODS: &[&str] = &[
-    "username.mutate",
-    "username.status",
-    "username.resolve",
-    "username.contact.add",
-    "profile.update",
     "daemon.stop",
     "search.cancel",
     "search.cursor.close",
