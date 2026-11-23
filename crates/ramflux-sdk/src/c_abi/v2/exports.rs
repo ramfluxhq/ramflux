@@ -588,8 +588,45 @@ pub extern "C" fn ramflux_v2_operation_release(handle: u64, id: u64) -> i32 {
         if finished {
             operations.remove(&id);
         }
+        client.shared.credentials.forget_username(id);
         Ok(())
     })
+}
+
+/// Authorize a username draft with the account master recovery phrase.
+/// `phrase_bytes` is borrowed for this call and is not placed in JSON or logs.
+/// Cancellation writes no signed output and does not submit. A lost submit reply
+/// is reconciled with `username.status`; this function does not sign a replacement.
+#[unsafe(no_mangle)]
+#[must_use]
+pub extern "C" fn ramflux_v2_username_authorize(
+    handle: u64,
+    public_request_json: *const u8,
+    public_request_len: usize,
+    phrase_bytes: *const u8,
+    phrase_len: usize,
+    out_signed_json: *mut *mut RamfluxBuffer,
+    out_error_json: *mut *mut RamfluxBuffer,
+) -> i32 {
+    let mut cancelled = false;
+    let code = call(|| {
+        super::super::clear_out_ptr(out_signed_json)?;
+        super::super::clear_out_ptr(out_error_json)?;
+        let client = client(handle)?;
+        cancelled = super::username::authorize(
+            &client,
+            &super::username::AuthorizeInput {
+                public_json: public_request_json,
+                public_len: public_request_len,
+                phrase: phrase_bytes,
+                phrase_len,
+                out_signed: out_signed_json,
+                out_error: out_error_json,
+            },
+        )?;
+        Ok(())
+    });
+    if code == 0 && cancelled { RamfluxV2Status::Cancelled as i32 } else { code }
 }
 
 /// Poll one subscription event without blocking. Subscribe using execute(subscription.open/bus.subscribe).
@@ -700,7 +737,7 @@ pub(super) fn error_code(name: &str) -> i32 {
         "PermissionDenied" | "authorization_rejected" | "not_authorized" => {
             E::PermissionDenied as i32
         }
-        "RateLimited" | "rate_limited" | "quota_exceeded" => E::RateLimited as i32,
+        "RateLimited" | "rate_limited" | "Busy" | "quota_exceeded" => E::RateLimited as i32,
         "AccountBusy" | "DataRootInUse" | "account_busy" => E::AccountBusy as i32,
         "ObjectErased" | "attachment_deleted" => E::ObjectErased as i32,
         "ObjectIdentityConflict" => E::ObjectIdentityConflict as i32,

@@ -20,6 +20,7 @@ pub(crate) async fn exchange_username(
     transport: &super::UsernameConnection,
     center: w::NativeDirectoryPin,
     action: w::NativeUsernameAction,
+    deadline: tokio::time::Instant,
 ) -> Result<UsernameNetworkReply, SdkError> {
     if !w::enabled() {
         return Err(w::DirectoryCode::DirectoryUnavailable.into());
@@ -33,7 +34,7 @@ pub(crate) async fn exchange_username(
     let network = crate::gateway::proof_network_config(config)?;
     let home = network.node_id.clone();
     let mut connection = transport
-        .open(network.clone(), Arc::clone(&vault))
+        .open(network.clone(), Arc::clone(&vault), deadline)
         .await
         .inspect_err(|error| trace_failure("connect", error))?;
     let account = connection.account();

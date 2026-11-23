@@ -1468,8 +1468,8 @@ fn run_mesh_quic_client_runtime(
     Ok(())
 }
 
-/// `retry_cached` permits one re-send after a failed cached-connection attempt. Callers
-/// with a hard wire-attempt budget pass `false`: the request is then sent at most once.
+/// `retry_cached` permits one re-send when a cached connection fails before the request is
+/// fully written. A written request is never resent: the peer may already have accepted it.
 async fn mesh_quic_cached_request(
     pools: Arc<MeshQuicPoolRegistry>,
     breakers: Arc<MeshQuicCircuitBreakers>,
@@ -1501,20 +1501,15 @@ async fn mesh_quic_cached_request(
         require_gateway_instance(connection.connection(), expected)?;
     }
     require_exact_mesh_peer(connection.connection(), job.expected_peer_spiffe.as_deref())?;
-    let request_timeout = if reused_cached_connection && retry_cached {
-        MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT
-    } else {
-        MESH_QUIC_REQUEST_TIMEOUT
-    };
-    match timed_mesh_quic_request_on_connection(
+    match first_mesh_attempt(
         connection.connection(),
         &job.request,
-        request_timeout,
+        reused_cached_connection && retry_cached,
     )
     .await
     {
-        Ok(response) => Ok(response),
-        Err(error) if reused_cached_connection && retry_cached => {
+        MeshFirst::Done(response) => Ok(response),
+        MeshFirst::Resend(error) => {
             record_mesh_client_cached_request_failure();
             record_mesh_client_retry();
             tracing::warn!(
@@ -1560,13 +1555,8 @@ async fn mesh_quic_cached_request(
                 }
             }
         }
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                peer_addr = %connection.remote_address(),
-                connection_id = connection.stable_id(),
-                "mesh QUIC request failed on fresh connection; dropping cached connection"
-            );
+        MeshFirst::Failed(error) => {
+            log_unsent_mesh_failure(&connection, &error, reused_cached_connection && retry_cached);
             pool.remove_connection(&connection).await;
             Err(error)
         }
@@ -1734,64 +1724,15 @@ async fn mesh_quic_connect(
     Ok(MeshQuicCachedConnection { _endpoint: endpoint, connection })
 }
 
-async fn mesh_quic_request_on_connection(
+fn mesh_deadline(error: &tokio::time::error::Elapsed) -> TransportError {
+    record_mesh_client_request_timeout();
+    TransportError::Quic(error.to_string())
+}
+
+fn prefer_tls_close(
     connection: &quinn::Connection,
-    request: &MeshQuicClientRequestPayload,
-    timeout: Duration,
+    result: Result<MeshQuicClientResponsePayload, TransportError>,
 ) -> Result<MeshQuicClientResponsePayload, TransportError> {
-    let result = tokio::time::timeout(timeout, async {
-        let open_bi_started = std::time::Instant::now();
-        let open_bi_result =
-            connection.open_bi().await.map_err(|error| crate::quic_errors::connection(&error));
-        record_mesh_client_open_bi(open_bi_started.elapsed());
-        let (mut send, mut recv) = open_bi_result?;
-        let request_write_started = std::time::Instant::now();
-        let request_write_result = async {
-            match request {
-                MeshQuicClientRequestPayload::Json(request)
-                | MeshQuicClientRequestPayload::RawJson(request, _) => {
-                    write_quic_json_message(&mut send, request).await?;
-                }
-                MeshQuicClientRequestPayload::Postcard(request) => {
-                    write_postcard_frame(&mut send, request).await?;
-                }
-            }
-            send.finish().map_err(|error| TransportError::Quic(error.to_string()))
-        }
-        .await;
-        record_mesh_client_request_write(request_write_started.elapsed());
-        request_write_result?;
-        let response_read_started = std::time::Instant::now();
-        let response_read_result = async {
-            let response = match request {
-                MeshQuicClientRequestPayload::RawJson(_, limit) => {
-                    MeshQuicClientResponsePayload::RawJson(
-                        crate::quic_gateway::read_quic_raw_frame_limited(&mut recv, *limit).await?,
-                    )
-                }
-                MeshQuicClientRequestPayload::Json(_request) => {
-                    MeshQuicClientResponsePayload::Json(read_quic_json_frame(&mut recv).await?)
-                }
-                MeshQuicClientRequestPayload::Postcard(_request) => {
-                    let frame = read_quic_raw_frame(&mut recv).await?;
-                    let body = frame.strip_prefix(MESH_QUIC_POSTCARD_MAGIC).ok_or_else(|| {
-                        crate::quic_errors::wire("mesh QUIC postcard response missing binary magic")
-                    })?;
-                    MeshQuicClientResponsePayload::Postcard(postcard_from_bytes(body)?)
-                }
-            };
-            drain_quic_recv_to_fin(&mut recv).await?;
-            Ok(response)
-        }
-        .await;
-        record_mesh_client_response_read(response_read_started.elapsed());
-        response_read_result
-    })
-    .await
-    .map_err(|error| {
-        record_mesh_client_request_timeout();
-        TransportError::Quic(error.to_string())
-    })?;
     if result.is_err()
         && let Some(reason) = connection.close_reason()
     {
@@ -1801,6 +1742,155 @@ async fn mesh_quic_request_on_connection(
         }
     }
     result
+}
+
+async fn open_mesh_request(
+    connection: &quinn::Connection,
+    request: &MeshQuicClientRequestPayload,
+) -> Result<(quinn::SendStream, quinn::RecvStream), TransportError> {
+    let open_bi_started = std::time::Instant::now();
+    let open_bi_result =
+        connection.open_bi().await.map_err(|error| crate::quic_errors::connection(&error));
+    record_mesh_client_open_bi(open_bi_started.elapsed());
+    let (mut send, recv) = open_bi_result?;
+    let request_write_started = std::time::Instant::now();
+    let request_write_result = async {
+        match request {
+            MeshQuicClientRequestPayload::Json(request)
+            | MeshQuicClientRequestPayload::RawJson(request, _) => {
+                write_quic_json_message(&mut send, request).await?;
+            }
+            MeshQuicClientRequestPayload::Postcard(request) => {
+                write_postcard_frame(&mut send, request).await?;
+            }
+        }
+        send.finish().map_err(|error| TransportError::Quic(error.to_string()))
+    }
+    .await;
+    record_mesh_client_request_write(request_write_started.elapsed());
+    request_write_result?;
+    Ok((send, recv))
+}
+
+async fn read_mesh_response(
+    request: &MeshQuicClientRequestPayload,
+    send: quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+) -> Result<MeshQuicClientResponsePayload, TransportError> {
+    let response_read_started = std::time::Instant::now();
+    let response_read_result = async {
+        let response = match request {
+            MeshQuicClientRequestPayload::RawJson(_, limit) => {
+                MeshQuicClientResponsePayload::RawJson(
+                    crate::quic_gateway::read_quic_raw_frame_limited(recv, *limit).await?,
+                )
+            }
+            MeshQuicClientRequestPayload::Json(_request) => {
+                MeshQuicClientResponsePayload::Json(read_quic_json_frame(recv).await?)
+            }
+            MeshQuicClientRequestPayload::Postcard(_request) => {
+                let frame = read_quic_raw_frame(recv).await?;
+                let body = frame.strip_prefix(MESH_QUIC_POSTCARD_MAGIC).ok_or_else(|| {
+                    crate::quic_errors::wire("mesh QUIC postcard response missing binary magic")
+                })?;
+                MeshQuicClientResponsePayload::Postcard(postcard_from_bytes(body)?)
+            }
+        };
+        drain_quic_recv_to_fin(recv).await?;
+        Ok(response)
+    }
+    .await;
+    record_mesh_client_response_read(response_read_started.elapsed());
+    drop(send);
+    response_read_result
+}
+
+async fn mesh_quic_request_on_connection(
+    connection: &quinn::Connection,
+    request: &MeshQuicClientRequestPayload,
+    timeout: Duration,
+) -> Result<MeshQuicClientResponsePayload, TransportError> {
+    let result = tokio::time::timeout(timeout, async {
+        let (send, mut recv) = open_mesh_request(connection, request).await?;
+        read_mesh_response(request, send, &mut recv).await
+    })
+    .await
+    .map_err(|elapsed| mesh_deadline(&elapsed))?;
+    prefer_tls_close(connection, result)
+}
+
+fn log_unsent_mesh_failure(
+    connection: &MeshQuicSelectedConnection,
+    error: &TransportError,
+    written: bool,
+) {
+    if written {
+        tracing::warn!(
+            %error,
+            peer_addr = %connection.remote_address(),
+            connection_id = connection.stable_id(),
+            "mesh QUIC request already written; dropping connection without resending"
+        );
+    } else {
+        tracing::warn!(
+            %error,
+            peer_addr = %connection.remote_address(),
+            connection_id = connection.stable_id(),
+            "mesh QUIC request failed on fresh connection; dropping cached connection"
+        );
+    }
+}
+
+enum MeshFirst {
+    Done(MeshQuicClientResponsePayload),
+    /// The cached connection failed before `finish`: the peer has no complete request.
+    Resend(TransportError),
+    /// The request was written, or this was not a cached probe. Resending would reuse its nonce.
+    Failed(TransportError),
+}
+
+async fn first_mesh_attempt(
+    connection: &quinn::Connection,
+    request: &MeshQuicClientRequestPayload,
+    probe: bool,
+) -> MeshFirst {
+    if !probe {
+        return match timed_mesh_quic_request_on_connection(
+            connection,
+            request,
+            MESH_QUIC_REQUEST_TIMEOUT,
+        )
+        .await
+        {
+            Ok(response) => MeshFirst::Done(response),
+            Err(error) => MeshFirst::Failed(error),
+        };
+    }
+    // A live cached connection can still be slow. The short budget only covers opening and
+    // writing. Once `finish` succeeds the peer may already have recorded the session nonce,
+    // so the response is waited out and those bytes are not sent again.
+    match tokio::time::timeout(
+        MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT,
+        open_mesh_request(connection, request),
+    )
+    .await
+    {
+        Err(elapsed) => MeshFirst::Resend(mesh_deadline(&elapsed)),
+        Ok(Err(error)) => MeshFirst::Resend(error),
+        Ok(Ok((send, mut recv))) => {
+            let read = tokio::time::timeout(
+                MESH_QUIC_REQUEST_TIMEOUT,
+                read_mesh_response(request, send, &mut recv),
+            )
+            .await
+            .map_err(|elapsed| mesh_deadline(&elapsed))
+            .and_then(std::convert::identity);
+            match prefer_tls_close(connection, read) {
+                Ok(response) => MeshFirst::Done(response),
+                Err(error) => MeshFirst::Failed(error),
+            }
+        }
+    }
 }
 
 async fn timed_mesh_quic_request_on_connection(
