@@ -18,7 +18,9 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - ".github/workflows/windows.yml"
+  # Owner workflow 2026-11-23: only the next -> main promotion and main are gated.
   pull_request:
+    branches: ["main"]
     paths:
       - "crates/ramflux-sdk/**"
       - "crates/ramflux-storage/**"
