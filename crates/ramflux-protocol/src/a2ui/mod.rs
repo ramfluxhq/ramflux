@@ -10,6 +10,7 @@ mod icon_path;
 mod link;
 pub use link::validate_url;
 mod locale;
+mod locale_format;
 pub use locale::DisplayLocale;
 mod pointer;
 mod resolve;

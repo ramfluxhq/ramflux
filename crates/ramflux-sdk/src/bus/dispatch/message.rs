@@ -534,7 +534,8 @@ async fn dispatch_message_receipt_read(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let body: LocalBusMessageReceiptReadRequest = serde_json::from_value(request.body.clone())?;
+    let mut body: LocalBusMessageReceiptReadRequest = serde_json::from_value(request.body.clone())?;
+    fill_read_receipt_route(account, &mut body)?;
     let read_at = body.read_at.unwrap_or_else(now_unix_timestamp);
     let actor = account.client.owned_account_device_identity(&body.reader_id)?;
     if body.recipient_device_id.is_some()
@@ -587,6 +588,41 @@ async fn dispatch_message_receipt_read(
         response["entry"] = serde_json::to_value(entry?)?;
     }
     Ok(local_bus_ok(response))
+}
+
+fn fill_read_receipt_route(
+    account: &LocalBusAccountState,
+    body: &mut LocalBusMessageReceiptReadRequest,
+) -> Result<(), SdkError> {
+    if body.recipient_device_id.is_some() || body.target_delivery_id.is_some() {
+        return Ok(());
+    }
+    let Some(origin) = account.client.message_origin(&body.conversation_id, &body.message_id)?
+    else {
+        return Ok(());
+    };
+    if origin.get("direction").and_then(serde_json::Value::as_str) == Some("outgoing") {
+        return Ok(());
+    }
+    let Some(sender) = origin.get("sender_device_id").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    let Some(root) = origin.get("sender_root_commitment").and_then(serde_json::Value::as_str)
+    else {
+        return Err(SdkError::InboundPending("read receipt sender root is missing".into()));
+    };
+    let source = account.client.device_identity_for_root(root, sender)?;
+    let device = account
+        .client
+        .trusted_device(crate::client::identity_authority::HeadUse::NewAuthorization, &source)?;
+    let target = device
+        .get("target_delivery_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| SdkError::InboundPending("read receipt sender route is missing".into()))?;
+    body.recipient_device_id = Some(source.device_id().to_owned());
+    body.target_delivery_id = Some(target.to_owned());
+    Ok(())
 }
 
 fn receipt_gateway_message(

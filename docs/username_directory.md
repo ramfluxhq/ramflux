@@ -141,9 +141,11 @@ avatar candidate refuses before publication. Native Profile/DeviceSet bytes do n
 change. Bio uses the existing trim/NFC/140-scalar/560-byte limits.
 
 The local bus surface is `username.mutate`, `username.status`, `username.resolve`,
-`username.contact.add` and `profile.update`. New methods receive explicit denied native policy rows and generated
-manifest entries. They never enter executable C ABI discovery or native execution.
-The descriptor, executable native method set and CAS product pin remain unchanged.
+`username.contact.add` and `profile.update`. Those five methods are executable for
+native hosts. `profile.update` accepts only a profile change. The master phrase
+enters only through `ramflux_v2_username_authorize` and never through a bus field,
+event, or log. The contact-verify descriptor and CAS product pin stay unchanged.
+The executable native method set includes these five methods.
 
 Deployment verification must cover set/resolve/contact add through real daemons and
 services, original-request contact acceptance, default conversations, rename holds,
@@ -200,7 +202,8 @@ the primary and `--username-initialize` or `--username-recovery` at the witness.
 Missing witness state is never silently recreated. These operator recovery actions
 do not bypass peer credentials, semantic admission or the exact primary fsync gate.
 
-The release gate remains false; explicit provisioning does not enable general
+The directory release flag is on. Installations without an explicit centre pin
+still have no directory authority. Explicit provisioning does not enable general
 public directory service.
 
 ## Home reconciliation and profile publication

@@ -905,6 +905,15 @@
       "bridge_allowed": true,
       "capability": "contact",
       "key_export": false,
+      "name": "contact.requests.decline",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "contact",
+      "key_export": false,
       "name": "contact.requests.list",
       "secret_input": false,
       "secret_output": true,
@@ -960,9 +969,9 @@
       "capability": "contact.verify.cas",
       "contract": "CONTACT-VERIFY-CAS-01",
       "key_export": false,
-      "message_descriptor_blake3": "88d7da63263e2132e048ee86d833bd12c95088c80e112cce03456bf00fd6dab9",
+      "message_descriptor_blake3": "50108989877d6e1601743d5d242862d4e130155bf3bd1b3fd28b213426b42686",
       "name": "contact.verify",
-      "product_pin": "679c753bdaa6bd31c8b5b493cfc4cbe8088a3537",
+      "product_pin": "36cf7b76679c625c0bc9a31fe20d8ce95b35523f",
       "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
       "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,
@@ -1326,6 +1335,15 @@
       "key_export": false,
       "name": "group.invitations.list",
       "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "group",
+      "key_export": false,
+      "name": "group.leave",
+      "secret_input": true,
       "secret_output": true,
       "show_once": false
     },
@@ -2131,7 +2149,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "username",
       "key_export": false,
       "name": "username.mutate",
@@ -2140,7 +2158,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "username",
       "key_export": false,
       "name": "username.status",
@@ -2149,7 +2167,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "username",
       "key_export": false,
       "name": "username.resolve",
@@ -2158,7 +2176,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "username",
       "key_export": false,
       "name": "username.contact.add",
@@ -2167,7 +2185,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "profile",
       "key_export": false,
       "name": "profile.update",

@@ -105,6 +105,7 @@ fn sender_runtime(
         head_rx,
         deferred: std::collections::VecDeque::new(),
         ledger: None,
+        resume_receive_until: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
         pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
         username: crate::bus::account_runtime::username_calls::Calls::default(),

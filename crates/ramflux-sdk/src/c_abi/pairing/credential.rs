@@ -11,7 +11,7 @@ use std::{
     ffi::c_void,
     path::PathBuf,
     sync::{
-        Condvar, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -80,6 +80,18 @@ impl CallbackProvider {
         *active = active.checked_add(1).ok_or_else(invalid)?;
         Ok(Invocation(self))
     }
+    /// Reserve the same lifetime as a credential callback without invoking it.
+    ///
+    /// # Errors
+    /// Returns when the provider is stopped or its use counter cannot grow.
+    pub(crate) fn hold_username_master(self: &Arc<Self>) -> Result<UsernameMasterHold, SdkError> {
+        let mut active = self.active.lock().map_err(|_| invalid())?;
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(SdkError::PairingCode("Retired"));
+        }
+        *active = active.checked_add(1).ok_or_else(invalid)?;
+        Ok(UsernameMasterHold { provider: Arc::clone(self) })
+    }
     fn invoke(&self, request: &CredentialRequest) -> Result<CredentialOutcome, SdkError> {
         let metadata = request.to_wire_bytes().map_err(|_| invalid())?;
         let mut passphrase = Zeroizing::new([0_u8; 1024]);
@@ -134,6 +146,23 @@ impl LocalCredentialProvider for CallbackProvider {
     }
     fn cancel(&self) {
         self.stopped.store(true, Ordering::Release);
+    }
+}
+/// Keeps provider shutdown waiting until the username ceremony drops this value.
+pub(crate) struct UsernameMasterHold {
+    provider: Arc<CallbackProvider>,
+}
+impl UsernameMasterHold {
+    pub(crate) fn retired(&self) -> bool {
+        self.provider.stopped.load(Ordering::Acquire)
+    }
+}
+impl Drop for UsernameMasterHold {
+    fn drop(&mut self) {
+        let mut active =
+            self.provider.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.saturating_sub(1);
+        self.provider.idle.notify_all();
     }
 }
 pub(super) struct Refuse;

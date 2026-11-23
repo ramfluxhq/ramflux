@@ -152,11 +152,10 @@ fn failure_outputs_preserve_structured_codes_and_erase_diagnostics() {
 }
 
 #[test]
-fn concurrent_opens_reserve_a_previously_missing_root() {
+fn concurrent_opens_reserve_an_existing_root() {
     let root = tempfile::tempdir().expect("test: root parent");
-    let missing = root.path().join("new-root");
     let config = std::sync::Arc::new(
-        serde_json::to_vec(&json!({"data_root":missing,"allow_secret_exports":true}))
+        serde_json::to_vec(&json!({"data_root":root.path(),"allow_secret_exports":true}))
             .expect("test: config"),
     );
     let (finished, outcomes) = std::sync::mpsc::sync_channel(2);

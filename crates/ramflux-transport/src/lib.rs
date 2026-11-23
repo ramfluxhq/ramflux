@@ -122,8 +122,9 @@ pub use quic_gateway::{
     GatewaySessionFrameFuture, GatewaySessionFrameSink, GatewaySessionFrameSource,
     GatewaySessionTransport, GatewayTcpTlsStream, QuicConnectPhase, QuicGatewayBidiStream,
     QuicGatewayClient, QuicRequestPhase, RelayClientQuicConfig, TcpTlsGatewayBidiStream,
-    TcpTlsGatewayClient, read_gateway_session_json, read_quic_json_frame, relay_client_quic_health,
-    write_gateway_session_json, write_quic_json_frame, write_quic_json_message,
+    TcpTlsGatewayClient, drain_abandoned_quic, read_gateway_session_json, read_quic_json_frame,
+    relay_client_quic_health, write_gateway_session_json, write_quic_json_frame,
+    write_quic_json_message,
 };
 pub use relay_quic_pool::{
     RelayQuicBindFamily, RelayQuicCapacity, RelayQuicPool, RelayQuicPoolConfig, RelayQuicPoolKey,

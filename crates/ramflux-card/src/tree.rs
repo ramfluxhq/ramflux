@@ -31,6 +31,15 @@ pub struct Tree {
     pub root_key: String,
     pub nodes: Vec<Node>,
     pub host_slots: Vec<HostSlot>,
+    /// String-catalog tag after fallback.
+    #[serde(default = "english_tag")]
+    pub locale: String,
+    /// CLDR locale used for numbers, dates and plurals.
+    #[serde(default = "english_tag")]
+    pub format_locale: String,
+    /// `rtl` for Arabic, otherwise `ltr`.
+    #[serde(default = "ltr_direction")]
+    pub direction: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -50,6 +59,21 @@ pub struct MutationBatch {
     pub edit_seq: u64,
     pub mutations: Vec<Mutation>,
     pub host_slots: Vec<HostSlot>,
+    /// String-catalog tag after fallback. Present even when no node changed.
+    #[serde(default = "english_tag")]
+    pub locale: String,
+    /// CLDR locale used for numbers, dates and plurals.
+    #[serde(default = "english_tag")]
+    pub format_locale: String,
+    /// `rtl` for Arabic, otherwise `ltr`.
+    #[serde(default = "ltr_direction")]
+    pub direction: String,
+}
+fn english_tag() -> String {
+    "en".to_owned()
+}
+fn ltr_direction() -> String {
+    "ltr".to_owned()
 }
 impl Tree {
     pub(crate) fn parse(bytes: &[u8], spec: &CardSpec) -> Result<Self, CardError> {
@@ -133,6 +157,9 @@ impl Tree {
             edit_seq: self.edit_seq,
             mutations,
             host_slots: self.host_slots.clone(),
+            locale: self.locale.clone(),
+            format_locale: self.format_locale.clone(),
+            direction: self.direction.clone(),
         };
         if batch.mutations.len() > 512 || serde_json::to_vec(&batch)?.len() > MAX_TREE {
             return Err(CardError::Limit("mutation batch"));

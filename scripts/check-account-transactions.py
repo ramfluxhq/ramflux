@@ -42,6 +42,7 @@ ALLOW = {
     ('database.rs', 'transaction'): 'sole managed transaction acquisition boundary',
     ('database.rs', 'commit'): 'managed transaction completion boundary',
     ('database.rs', 'drop'): 'managed transaction rollback boundary',
+    ('database/park.rs', 'close_parked'): 'suspend: roll back an abandoned open transaction on the parked managed connection immediately before sqlite3_close; no new work starts on it',
     ('account_db/mac_subkeys.rs', 'initialize_archive'): 'atomic authority provenance for private restore staging; live accounts use initialize_managed',
     ('account_db/mac_subkeys.rs', 'initialize_with_fault'): 'private restore staging migration; live accounts use initialize_managed',
     ('account_db/backup_database.rs', 'enqueue_restore_events'): 'private restore staging database',

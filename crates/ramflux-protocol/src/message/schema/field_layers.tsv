@@ -911,3 +911,17 @@ AgentPage	records	1	1
 AgentPage	next	2	1
 AgentPage	journal_cursor	3	1
 AgentWatchAck	journal_cursor	1	1
+Call	summary	17	1
+CallSummaryParticipant	principal_id	1	1
+CallSummaryParticipant	device_id	2	1
+CallSummary	call_id	1	1
+CallSummary	caller	2	1
+CallSummary	callee_principal_id	3	1
+CallSummary	answered_device_id	4	1
+CallSummary	ringing_device_ids	5	1
+CallSummary	outcome	6	1
+CallSummary	failure	7	1
+CallSummary	duration_seconds	8	1
+CallSummary	created_at	9	1
+CallSummary	answered_at	10	1
+CallSummary	ended_at	11	1
