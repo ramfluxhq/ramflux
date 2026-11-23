@@ -169,6 +169,7 @@ impl PrxClient {
                 code: ApiCode::JobUnknown,
                 current_revision: None,
                 revision: None,
+                current_incarnation: None,
             });
         }
         let raw = Transport::check_status(raw)?;

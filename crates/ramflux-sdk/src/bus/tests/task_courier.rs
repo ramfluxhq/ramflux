@@ -277,6 +277,7 @@ pub(super) fn runtime(
     let (lifecycle_sender, lifecycle) = mpsc::channel(4);
     let (preempt_sender, preempt) = watch::channel(0);
     let (connection_sender, connection_work) = mpsc::channel(2);
+    let (head_completion_sender, head_rx) = mpsc::channel(1);
     let mut control_shutdown = shutdown.clone();
     tokio::task::spawn_local(async move {
         let _signals = (lifecycle_sender, preempt_sender);
@@ -297,8 +298,12 @@ pub(super) fn runtime(
         receiver,
         lifecycle,
         preempt,
+        command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         connection_sender,
         connection_work,
+        head_completion_sender,
+        head_rx,
+        deferred: std::collections::VecDeque::new(),
         ledger: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
         pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),

@@ -142,7 +142,11 @@ async fn refresh_on_connect(
     restored.connection = Some(handle.clone());
     let (writer, mut receiver) = mpsc::channel(2);
     // Real directory fetches with a scripted Live session; no demand or timer can satisfy this.
-    let child = tokio::spawn(head_refresh::run_without_timer(handle.test_context(), writer));
+    let child = tokio::spawn(head_refresh::run_without_timer(
+        handle.test_context(),
+        writer.clone(),
+        writer,
+    ));
     let mut fetched = BTreeSet::new();
     while fetched.len() < expected.len() {
         let work = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
@@ -159,7 +163,7 @@ async fn refresh_on_connect(
             assert!(outcome.is_ok(), "connect must fetch verified directory over TLS");
             assert!(fetched.insert(root.clone()), "connect fetches each root once");
         }
-        head_refresh::apply_work(restored, work);
+        let _ = head_refresh::apply_work(restored, work);
     }
     assert_eq!(fetched, expected, "restored contact must participate in connect sweep");
     for manifest in manifests {

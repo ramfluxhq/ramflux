@@ -116,7 +116,7 @@ async fn refresh_stops_on_lock() -> TestResult {
     let super::super::directory::DirectoryWork::HeadRefresh(message) = *message else {
         return Err("wrong directory work".into());
     };
-    apply_work(&mut account, message);
+    let _ = apply_work(&mut account, message);
     let (_socket, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await??;
     assert!(account.head_refresh.active.upgrade().is_some(), "fetch is in flight");
     handle.request_stop(crate::bus::connection_manager::DisconnectReason::Lock);
@@ -293,7 +293,7 @@ async fn refresh_session_loss_cancels_registered_child() -> TestResult {
     // The real registration supplies Children.cancel, rather than test_context's
     // handle-wide stop channel. Use the same child body as production activation.
     handle.spawn_session_child("head-refresh", move |context| {
-        Box::pin(super::run(context, writer.clone()))
+        Box::pin(super::run(context, writer.clone(), writer.clone()))
     })?;
     for _ in 0..2 {
         let AccountWork::Directory(message) =
@@ -306,7 +306,7 @@ async fn refresh_session_loss_cancels_registered_child() -> TestResult {
         let super::super::directory::DirectoryWork::HeadRefresh(message) = *message else {
             return Err("wrong directory work".into());
         };
-        apply_work(&mut account, message);
+        let _ = apply_work(&mut account, message);
     }
     let (_socket, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await??;
     assert!(account.head_refresh.active.upgrade().is_some(), "fetch holds the lease");
