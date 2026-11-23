@@ -56,6 +56,7 @@ fn runtime(
             deferred: std::collections::VecDeque::new(),
             ledger: None,
             pairing: super::super::pairing_calls::Calls::default(),
+            username: super::super::username_calls::Calls::default(),
             transient: TransientHost::default(),
             receive_gate_hook: None,
             courier_events: None,

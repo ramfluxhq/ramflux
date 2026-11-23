@@ -213,6 +213,7 @@ mod device_namespace;
 mod device_source;
 
 mod custody_sessions;
+pub use custody_sessions::NATIVE_SESSION_GRANT_SECONDS;
 
 mod custody_delivery;
 mod custody_service;

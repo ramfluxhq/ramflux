@@ -55,6 +55,7 @@ pub struct CustodyService {
     leases: Mutex<CustodyLeases>,
     admission: Mutex<()>,
     migration: Option<crate::HomeMigrationService>,
+    username: Option<crate::username_directory::NativeUsernameService>,
     pairing: Option<Arc<Mutex<crate::pairing_relay::PairingRelayStore>>>,
 }
 pub(crate) struct ProofFailure {
@@ -110,6 +111,37 @@ fn target(reference: &DeviceRef) -> Result<String, CustodyRefusal> {
         .map_err(invalid)
 }
 impl CustodyService {
+    /// # Errors
+    /// Refuses a directory backend for a different node identity.
+    pub fn with_username_directory(
+        mut self,
+        service: crate::username_directory::NativeUsernameService,
+    ) -> Result<Self, CustodyRefusal> {
+        if !service.matches_node(&self.audience, &self.node.envelope().body.node_signing_public_key)
+        {
+            return Err(CustodyRefusal::BindingRefused);
+        }
+        self.username = Some(service);
+        Ok(self)
+    }
+
+    /// The caller must enforce the authenticated local federation role before this read.
+    /// # Errors
+    /// Refuses unavailable directory configuration, unknown history or inactive native roots.
+    pub fn username_home_history(
+        &self,
+        router: &crate::RouterCore,
+        store: &crate::RouterRedbStore,
+        root: &str,
+        now: u64,
+    ) -> Result<ramflux_protocol::home_migration::ResolveResult, crate::NodeCoreError> {
+        self.username
+            .as_ref()
+            .ok_or_else(|| {
+                crate::NodeCoreError::Unauthorized("username directory unavailable".into())
+            })?
+            .history(router, store, root, now)
+    }
     /// Enable only after authenticating the receiving node against an independent pin.
     /// # Errors
     /// Rejects unadvertised no-binding mode and persistence/continuity failures.
@@ -151,6 +183,7 @@ impl CustodyService {
             leases: Mutex::new(CustodyLeases::with_issuance_settings(settings)),
             admission: Mutex::new(()),
             migration: None,
+            username: None,
             pairing: None,
         })
     }
@@ -398,6 +431,9 @@ impl CustodyService {
                     SessionRequest { session_id, request, action, connection_id },
                     admission,
                 ),
+            CustodyMeshRequest::RenewNativeSession { session_id, connection_id } => {
+                self.renew_native_session(scope, &session_id, &connection_id)
+            }
         }
     }
 }

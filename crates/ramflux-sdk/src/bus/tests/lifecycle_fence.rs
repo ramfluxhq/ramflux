@@ -114,6 +114,7 @@ pub(super) fn runtime_for(
         ledger: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
         pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
+        username: crate::bus::account_runtime::username_calls::Calls::default(),
         receive_gate_hook: None,
         courier_events: None,
     }

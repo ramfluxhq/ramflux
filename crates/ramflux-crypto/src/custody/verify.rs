@@ -95,6 +95,30 @@ impl VerifiedRecord {
         }
         Ok(cert)
     }
+    /// Latest instant [`Self::authorize`] still accepts, including clock skew.
+    /// A bound human custodian contributes the same window on its register lease.
+    /// # Errors
+    /// Returns the same errors as [`Self::authorize`].
+    pub fn authorization_deadline(
+        &self,
+        reference: &DeviceRef,
+        capability: &str,
+        now: u64,
+    ) -> Result<u64, CryptoError> {
+        let device_end = self
+            .authorize(reference, capability, now)?
+            .expires_at
+            .saturating_add(CLOCK_SKEW_SECONDS);
+        let Some(human) = &self.human_custodian else {
+            return Ok(device_end);
+        };
+        let primary = &self.envelope.body.master_certificate.body.primary_device_ref;
+        let custodian_end = human
+            .authorize(primary, "register", now)?
+            .expires_at
+            .saturating_add(CLOCK_SKEW_SECONDS);
+        Ok(device_end.min(custodian_end))
+    }
     #[must_use]
     pub fn capacity_pressure(&self) -> CapacityPressure {
         fn warn(used: usize, limit: usize) -> bool {

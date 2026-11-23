@@ -292,6 +292,7 @@ fn runtime(
             ledger: None,
             transient: super::super::TransientHost::default(),
             pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
+            username: crate::bus::account_runtime::username_calls::Calls::default(),
             receive_gate_hook: None,
             courier_events: None,
         },
