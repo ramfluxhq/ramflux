@@ -20,6 +20,7 @@ pub(crate) use own_checkpoint::OwnedSurfaceCheckpoint;
 pub(crate) use own_history::SurfaceHistoryExport;
 mod delivery;
 mod fallback;
+mod foreign_refusal;
 mod origin;
 mod own_delivery;
 pub(crate) use own_delivery::OwnContextDelivery;
@@ -32,6 +33,7 @@ pub(crate) use resync_request::ResyncReply;
 #[cfg(test)]
 pub(crate) use resync_request::with_fixed_surface_envelope_id;
 mod author_gate;
+pub(crate) mod card_session;
 mod rpc;
 mod scope;
 mod signer;

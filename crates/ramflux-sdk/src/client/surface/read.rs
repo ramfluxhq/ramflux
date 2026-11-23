@@ -13,7 +13,7 @@ impl RamfluxClient {
         action_id: Option<&str>,
     ) -> Result<Value, SdkError> {
         let Some(reference) = self.resolve_surface_reference(id, None, None)? else {
-            return Ok(Value::Null);
+            return self.foreign_refusal_view_by_id(id);
         };
         self.surface_get_ref(&reference, history_after, action_id)
     }
@@ -26,7 +26,7 @@ impl RamfluxClient {
         let id = reference;
         let db = self.account_db()?;
         let Some(mut view) = db.client_record("surface", id)? else {
-            return Ok(Value::Null);
+            return self.foreign_refusal_view(id);
         };
         let author = view
             .get("author_principal_id")
@@ -126,7 +126,7 @@ impl RamfluxClient {
         }
         Ok(view)
     }
-    fn surface_authored_locally(&self, author: &str) -> bool {
+    pub(crate) fn surface_authored_locally(&self, author: &str) -> bool {
         self.device_branch.as_ref().is_some_and(|local| local.principal_id == author)
             || self
                 .born_v3_account

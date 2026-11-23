@@ -10,6 +10,12 @@ pub(crate) async fn handle_daemon(socket: PathBuf, command: DaemonCommand) -> Re
         DaemonAction::Start(start) => {
             crate::logging::init()?;
             eprintln!("{}", ramflux_core::version::BANNER);
+            #[cfg(target_os = "linux")]
+            {
+                let state = crate::linux_paths::state_dir()?;
+                crate::linux_paths::ensure_state_dir(&state)?;
+                eprintln!("ramflux state directory: {}", state.display());
+            }
             #[cfg(feature = "itest-memory-vault")]
             let itest_vault_path =
                 start.itest_memory_vault.then(|| start.data_root.join("itest-memory-vault.json"));

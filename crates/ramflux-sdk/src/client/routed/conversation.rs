@@ -204,6 +204,7 @@ impl RamfluxClient {
                                 &body.encode_to_vec(),
                             )?;
                         }
+                        self.account_db()?.mark_generated_message_owned(&id, &local)?;
                     }
                     Ok::<_, SdkError>(())
                 })?;

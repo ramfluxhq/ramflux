@@ -913,9 +913,9 @@ fn confirm_abi_code(reason: crate::CustodyConfirmReason) -> RamfluxErrorCode {
     }
 }
 
-// Kept beside the matcher so `sdk_error_code` stays within the line limit.
-// The match stays exhaustive: a new `SdkError` variant still fails to compile.
-macro_rules! invalid_argument_errors {
+// The invalid-argument tail is a macro so `sdk_error_code` stays under the line limit
+// and the match stays exhaustive.
+macro_rules! sdk_invalid_argument {
     () => {
         SdkError::OperationReconciliationRequired(_)
             | SdkError::AgentCreationRefused(_)
@@ -982,10 +982,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::CapabilityDenied(_)
         | SdkError::GrantInvalidated
         | SdkError::RemoteAppApprovalRequired
-        | SdkError::LocalBusPermissionDenied
-        | SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable) => {
-            RamfluxErrorCode::PermissionDenied
-        }
+        | SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)
+        | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
         SdkError::CustodyRandomUnavailable
         | SdkError::HistoryEvidence(_)
         | SdkError::Crypto(_)
@@ -1022,7 +1020,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::CallControlReceiptCapacity { .. }
         | SdkError::TaskManifestWorkerCapacity
         | SdkError::TaskForwardWorkerCapacity => RamfluxErrorCode::RateLimited,
-        invalid_argument_errors!() => RamfluxErrorCode::InvalidArgument,
+        sdk_invalid_argument!() => RamfluxErrorCode::InvalidArgument,
     }
 }
 

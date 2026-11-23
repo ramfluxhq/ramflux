@@ -149,14 +149,18 @@ fn shared_directory(
                     | SdkError::FreshHeadRequired { .. }
             ) || (matches!(purpose, DirectoryPurpose::Read)
                 && client.born_v3_account.is_some()
-                && matches!(error, SdkError::InboundRejected(_))) =>
+                && matches!(
+                    error,
+                    SdkError::InboundRejected(_) | SdkError::PairingCode("PublicationPending")
+                )) =>
         {
             // Recovery may revoke a roster device; historical metadata is still readable.
             // Sending retains the original authorization failure rather than this fallback.
             // Reader clients have no process-local current-head freshness. Keep the signed
             // roster visible, without advertising a usable route or refreshing authority.
             // Read fallbacks never supply send authority; current sends fetch manifests
-            // before strict route resolution.
+            // before strict route resolution. PublicationPending withholds routes while
+            // the install marker is unsettled. Membership stays the verified snapshot.
             return Ok(state
                 .view()
                 .members

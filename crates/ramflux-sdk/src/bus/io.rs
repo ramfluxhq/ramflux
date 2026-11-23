@@ -98,7 +98,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
             details: body.get("details").cloned().map(Box::new),
-            retry_after_ms: None,
+            retry_after_ms: refused_retry_after_ms(body),
             cause: None,
         };
     }
@@ -144,6 +144,14 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
         },
         cause,
     }
+}
+
+fn refused_retry_after_ms(body: &serde_json::Value) -> Option<u64> {
+    body.get("retry_after_ms").and_then(serde_json::Value::as_u64).or_else(|| {
+        body.get("retry_after_secs")
+            .and_then(serde_json::Value::as_i64)
+            .map(|secs| u64::try_from(secs).map_or(0, |wait| wait.saturating_mul(1_000)))
+    })
 }
 
 fn bus_reason_code(error: &SdkError) -> Option<String> {

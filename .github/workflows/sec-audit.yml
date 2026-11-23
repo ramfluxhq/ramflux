@@ -1,7 +1,9 @@
 name: Security Audit
 
 on:
+  # Owner workflow 2026-11-23: CI gates only the next -> main promotion and main itself; next is verified by real runs.
   pull_request:
+    branches: ["main"]
   push:
     branches: [main]
   schedule:

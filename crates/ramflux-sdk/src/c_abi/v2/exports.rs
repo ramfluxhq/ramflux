@@ -677,7 +677,28 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "payload_too_large"
         | "target_not_found"
         | "target_deleted"
-        | "edit_conflict" => E::InvalidArgument as i32,
+        | "edit_conflict"
+        | "authority_unavailable"
+        | "layout_invalid"
+        | "recipient_empty"
+        | "not_grantee"
+        | "not_owner"
+        | "not_ready"
+        | "stream_closed"
+        | "stream_offset"
+        | "digest_mismatch"
+        | "seal_failed"
+        | "upload_rejected"
+        | "stale_generation"
+        | "duplicate_operation"
+        | "path_refused"
+        | "file_too_large"
+        | "manifest_too_large"
+        | "recipient_limit"
+        | "expired"
+        | "cancelled"
+        | "retirement_pending"
+        | "large_attachments" => E::InvalidArgument as i32,
         "InvalidCanonicalJson" => E::InvalidCanonicalJson as i32,
         "UnsupportedVersion" | "AccountSchemaTooNew" | "peer_upgrade_required" => {
             E::UnsupportedVersion as i32
@@ -693,7 +714,9 @@ pub(super) fn error_code(name: &str) -> i32 {
         "ObjectTransferFailed" => E::ObjectTransferFailed as i32,
         "DeviceRevoked" => E::DeviceRevoked as i32,
         "CryptoFailed" | "crypto_failure" => E::CryptoFailed as i32,
-        "StorageFailed" | "storage_unavailable" | "storage_capacity" => E::StorageFailed as i32,
+        "StorageFailed" | "storage_unavailable" | "storage_capacity" | "disk_full" => {
+            E::StorageFailed as i32
+        }
         "TransportUnavailable"
         | "NetworkingPending"
         | "Unavailable"
@@ -704,9 +727,9 @@ pub(super) fn error_code(name: &str) -> i32 {
         "PermissionDenied" | "authorization_rejected" | "not_authorized" => {
             E::PermissionDenied as i32
         }
-        "RateLimited" | "rate_limited" | "Busy" => E::RateLimited as i32,
+        "RateLimited" | "rate_limited" | "Busy" | "quota_exceeded" => E::RateLimited as i32,
         "AccountBusy" | "DataRootInUse" | "account_busy" => E::AccountBusy as i32,
-        "ObjectErased" => E::ObjectErased as i32,
+        "ObjectErased" | "attachment_deleted" => E::ObjectErased as i32,
         "ObjectIdentityConflict" => E::ObjectIdentityConflict as i32,
         "ObjectOwnershipUnverified" => E::ObjectOwnershipUnverified as i32,
         "CustodyForkFenced" => E::CustodyForkFenced as i32,

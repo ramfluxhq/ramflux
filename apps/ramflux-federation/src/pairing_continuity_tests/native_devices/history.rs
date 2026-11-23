@@ -107,7 +107,7 @@ async fn pairing_tls_enrollment_delivers_existing_dm_through_ordinary_object_rel
 
 const CUSTODY_AUTH_TIMEOUT_MS: &str = "3000";
 
-/// The sd001 shape: pairing on behind a trusted loopback proxy, with the primary approving
+/// Pairing behind a trusted loopback proxy, with the primary approving
 /// after the gateway's whole-exchange deadline for the connection opened at begin has passed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires prebuilt ordinary product service binaries; explicit module QA row"]
