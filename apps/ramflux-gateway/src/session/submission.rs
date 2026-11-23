@@ -477,11 +477,12 @@ async fn admit_signed_call(
     .await
 }
 
-fn call_authority_slow(error: &anyhow::Error) -> bool {
+fn call_admit_retryable(error: &anyhow::Error) -> bool {
     let text = error.to_string();
     text.contains("mesh request deadline exceeded")
         || text.contains("send_authority_closed")
         || text.contains("call_authority_busy")
+        || text.contains("gateway_writer_busy")
 }
 
 fn schedule_call_wake_after_delay(
@@ -492,7 +493,7 @@ fn schedule_call_wake_after_delay(
     error: &anyhow::Error,
     outcome: &str,
 ) -> bool {
-    if !call_authority_slow(error) {
+    if !call_admit_retryable(error) {
         return false;
     }
     let (Some(intent), Some(verified)) = (submit.call_intent.as_deref(), verified) else {
@@ -570,7 +571,7 @@ async fn finish_delayed_call_wake(delayed: DelayedCallWake) {
                 }
                 return;
             }
-            Err(error) if call_authority_slow(&error) && std::time::Instant::now() < deadline => {
+            Err(error) if call_admit_retryable(&error) && std::time::Instant::now() < deadline => {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
             Err(error) => {
