@@ -4,10 +4,12 @@
 //! Agent routes (`agent_crud_v1`) and Main readback (`agent_main_readback_v1`).
 //! Every call checks its token first. `PUT` and `DELETE` send `If-Match` with the config
 //! revision. `limits` is sent only when a bound is set and `agent_limits_v1` is advertised.
+//! `approval_wait_secs` is sent only when `run_approvals_v1` is advertised. A non-default
+//! value without that token is refused before any request. Readback always accepts the field.
 
 use crate::autonomy::Autonomy;
 use crate::capabilities::{
-    AGENT_CRUD_V1, AGENT_LIMITS_V1, AGENT_MAIN_READBACK_V1, Capabilities, require,
+    AGENT_CRUD_V1, AGENT_LIMITS_V1, AGENT_MAIN_READBACK_V1, Capabilities, RUN_APPROVALS_V1, require,
 };
 use crate::client::PrxClient;
 use crate::error::{ApiCode, PrxError, decode_ok, local_refusal, present, protocol};
@@ -141,16 +143,18 @@ impl AgentConfig {
     }
 
     /// The `PUT` body: a full replacement, `prompt` only when present, `limits` only when a bound
-    /// is set. `approval_wait_secs` is always sent. An unset inner limit is JSON null, which is
-    /// what PRX stores.
-    fn to_body(&self) -> Value {
+    /// is set. `approval_wait_secs` is sent only when `send_approval_wait` is set (the daemon
+    /// advertises `run_approvals_v1`). An unset inner limit is JSON null, which is what PRX stores.
+    fn to_body(&self, send_approval_wait: bool) -> Value {
         let mut body = Map::new();
         body.insert("provider".to_owned(), json!(self.provider));
         body.insert("model".to_owned(), json!(self.model));
         body.insert("autonomy".to_owned(), json!(autonomy_wire(self.autonomy)));
         body.insert("tools".to_owned(), json!(self.tools.to_wire()));
         body.insert("enabled".to_owned(), json!(self.enabled));
-        body.insert("approval_wait_secs".to_owned(), json!(self.approval_wait_secs));
+        if send_approval_wait {
+            body.insert("approval_wait_secs".to_owned(), json!(self.approval_wait_secs));
+        }
         if let Some(prompt) = &self.prompt {
             body.insert("prompt".to_owned(), json!(prompt));
         }
@@ -449,7 +453,8 @@ impl PrxClient {
 
     /// Creates or replaces an agent with a full body. `revision` is the config revision read
     /// from `list` or from the last readback. `confirm_high_risk` is sent only when true.
-    /// Needs `agent_crud_v1`. Local refusals (prompt size, tool list) send nothing.
+    /// Needs `agent_crud_v1`. A non-default `approval_wait_secs` also needs `run_approvals_v1`.
+    /// Local refusals (prompt size, tool list, a wait the daemon cannot store) send nothing.
     ///
     /// # Errors
     /// Returns `Unsupported`, the refusal of PRX (for example `revision_conflict`,
@@ -467,11 +472,17 @@ impl PrxClient {
         if config.limits_to_send().is_some() {
             require(caps, AGENT_LIMITS_V1)?;
         }
+        // The default is omitted when the token is absent. A chosen wait needs the token, and
+        // then the field is sent so the 201 readback matches what was stored.
+        let send_approval_wait = caps.has(RUN_APPROVALS_V1);
+        if !send_approval_wait && config.approval_wait_secs != DEFAULT_APPROVAL_WAIT_SECS {
+            require(caps, RUN_APPROVALS_V1)?;
+        }
         let mut path = format!("/api/agents/{}", name.as_str());
         if confirm_high_risk {
             path.push_str("?confirm_high_risk=true");
         }
-        let body = config.to_body();
+        let body = config.to_body(send_approval_wait);
         let raw =
             self.transport.call(Method::PUT, &path, Some(revision.as_str()), Some(&body)).await?;
         let kind = match raw.status {
@@ -674,17 +685,21 @@ mod tests {
             limits: None,
             approval_wait_secs: DEFAULT_APPROVAL_WAIT_SECS,
         };
-        let body = config.to_body();
+        let body = config.to_body(true);
         assert!(body.get("prompt").is_none(), "absent prompt is not sent");
         assert_eq!(body.get("tools"), Some(&json!(["*"])));
         assert_eq!(
             body.get("approval_wait_secs"),
             Some(&json!(DEFAULT_APPROVAL_WAIT_SECS)),
-            "the wait is always sent"
+            "the wait is sent when run_approvals_v1 is advertised"
+        );
+        assert!(
+            config.to_body(false).get("approval_wait_secs").is_none(),
+            "the default wait is omitted when the token is absent"
         );
         assert!(body.get("limits").is_none(), "unset limits are not sent");
         let waited = AgentConfig { approval_wait_secs: 30, ..config.clone() };
-        assert_eq!(waited.to_body().get("approval_wait_secs"), Some(&json!(30)));
+        assert_eq!(waited.to_body(true).get("approval_wait_secs"), Some(&json!(30)));
         let bounded = AgentConfig {
             limits: Some(AgentLimits {
                 max_concurrent_turns: Some(1),
@@ -692,22 +707,22 @@ mod tests {
             }),
             ..config.clone()
         };
-        let sent = bounded.to_body();
+        let sent = bounded.to_body(true);
         assert_eq!(
             sent.get("limits"),
             Some(&json!({"max_concurrent_turns": 1, "max_cost_per_day_cents": null})),
             "a set bound sends both fields"
         );
         let both_unset = AgentConfig { limits: Some(AgentLimits::default()), ..config.clone() };
-        assert!(both_unset.to_body().get("limits").is_none(), "both-unset limits are omitted");
+        assert!(both_unset.to_body(true).get("limits").is_none(), "both-unset limits are omitted");
         let empty =
             AgentConfig { prompt: Some(String::new()), tools: Tools::List(Vec::new()), ..config };
         assert_eq!(
-            empty.to_body().get("prompt"),
+            empty.to_body(true).get("prompt"),
             Some(&json!("")),
             "empty prompt is sent as empty"
         );
-        assert_eq!(empty.to_body().get("tools"), Some(&json!([])));
+        assert_eq!(empty.to_body(true).get("tools"), Some(&json!([])));
     }
 
     #[test]
@@ -840,6 +855,15 @@ mod tests {
                 "local refusal must return {expected:?} without a request, got {result:?}"
             );
         }
+        let waited = AgentConfig { approval_wait_secs: 30, ..base.clone() };
+        let refused_wait = client.put(&caps, &name(), &waited, &revision, false).await;
+        assert!(
+            matches!(
+                &refused_wait,
+                Err(PrxError::Unsupported { token, .. }) if token == RUN_APPROVALS_V1
+            ),
+            "a non-default wait without run_approvals_v1 sends nothing, got {refused_wait:?}"
+        );
         let limited = AgentConfig {
             limits: Some(AgentLimits { max_concurrent_turns: Some(1), ..AgentLimits::default() }),
             ..base
