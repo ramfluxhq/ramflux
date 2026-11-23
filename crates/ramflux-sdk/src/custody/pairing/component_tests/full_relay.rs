@@ -289,12 +289,12 @@ impl PairingClock for ClockBridge {
         self.manual.wall_unix_secs()
     }
     fn monotonic_ms(&self) -> u64 {
+        // These tests expire a ready epoch with `tokio::time::advance`. Idle
+        // retention follows this same clock. Real wall time is not added here,
+        // so a stalled runner is not peer silence.
         self.manual
             .monotonic_ms()
             .saturating_add(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX))
-    }
-    fn activity_ms(&self) -> u64 {
-        self.manual.monotonic_ms()
     }
 }
 pub(super) fn clock(
