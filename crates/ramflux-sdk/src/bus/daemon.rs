@@ -242,6 +242,29 @@ pub(crate) struct LocalBusDispatchResult {
     pub(crate) event: Option<LocalBusFrame>,
 }
 
+fn open_subscription(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+    connection: &mut LocalBusConnectionState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusSubscriptionOpenRequest = serde_json::from_value(request.body.clone())?;
+    if request
+        .body
+        .get("attended_frontend")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        let account_id = request_account_id(request)?.to_owned();
+        state.attended_accounts.insert(account_id.clone());
+        connection.attended_account_id = Some(account_id);
+    }
+    connection.topics.extend(body.topics);
+    if let Some(account_id) = request.account_id.clone() {
+        state.register_subscription(connection, account_id);
+    }
+    Ok(local_bus_ok(serde_json::json!({ "subscribed": true })))
+}
+
 pub(crate) async fn dispatch_local_bus_request(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
@@ -251,25 +274,7 @@ pub(crate) async fn dispatch_local_bus_request(
         return Err(SdkError::LocalBus("expected request frame".to_owned()));
     }
     match request.method.as_str() {
-        "subscription.open" => {
-            let body: LocalBusSubscriptionOpenRequest =
-                serde_json::from_value(request.body.clone())?;
-            if request
-                .body
-                .get("attended_frontend")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
-                let account_id = request_account_id(request)?.to_owned();
-                state.attended_accounts.insert(account_id.clone());
-                connection.attended_account_id = Some(account_id);
-            }
-            connection.topics.extend(body.topics);
-            if let Some(account_id) = request.account_id.clone() {
-                state.register_subscription(connection, account_id);
-            }
-            Ok(local_bus_ok(serde_json::json!({ "subscribed": true })))
-        }
+        "subscription.open" => open_subscription(request, state, connection),
         #[cfg(all(
             feature = "itest-memory-vault",
             ramflux_itest,
