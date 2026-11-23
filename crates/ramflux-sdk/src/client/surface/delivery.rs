@@ -6,36 +6,39 @@ use super::{Carrier, Outcome, Payload, PayloadKind, Receipt, SurfaceSender, key}
 use crate::{RamfluxClient, SdkError};
 use serde_json::json;
 
-fn covered_current_event(
+fn same_stored_document(
+    proved: &ramflux_protocol::SurfaceState,
+    state: &ramflux_protocol::SurfaceState,
+) -> bool {
+    proved.version() == state.version()
+        && proved.hash() == state.hash()
+        && proved.content() == state.content()
+        && proved.conversation_id() == state.conversation_id()
+}
+
+/// A covered wire is acknowledged only when it is the stored document.
+/// Any other proof, including a hash or component edited after signing, is `integrity`.
+fn covered_outcome(
     carrier: &Carrier,
     event: &ramflux_protocol::SurfaceEvent,
     state: &ramflux_protocol::SurfaceState,
 ) -> Result<Outcome, SdkError> {
     match ramflux_protocol::SurfaceState::validate_proof(event) {
-        Ok(proved)
-            if proved.version() == state.version()
-                && proved.hash() == state.hash()
-                && proved.content() == state.content()
-                && proved.conversation_id() == state.conversation_id() =>
-        {
+        Ok(proved) if same_stored_document(&proved, state) => {
             Outcome::accepted(&carrier.author_principal_id, state)
         }
-        Err(error) if covered_wire_is_broken(&error) => Ok(Outcome::protocol_rejected(&error)),
+        Err(ramflux_protocol::SurfaceReject::Version { expected: 1, actual })
+            if actual == event.version() && actual < state.version() && !event.is_resync() =>
+        {
+            if event.validate_carried_components().is_err() {
+                return Ok(Outcome::protocol_rejected(&ramflux_protocol::SurfaceReject::Integrity));
+            }
+            Outcome::accepted(&carrier.author_principal_id, state)
+        }
         Ok(_) | Err(_) => {
             Ok(Outcome::protocol_rejected(&ramflux_protocol::SurfaceReject::Integrity))
         }
     }
-}
-
-fn covered_wire_is_broken(error: &ramflux_protocol::SurfaceReject) -> bool {
-    matches!(
-        error,
-        ramflux_protocol::SurfaceReject::Integrity
-            | ramflux_protocol::SurfaceReject::Encoding
-            | ramflux_protocol::SurfaceReject::Conflict
-            | ramflux_protocol::SurfaceReject::Validation(_)
-            | ramflux_protocol::SurfaceReject::Limit
-    )
 }
 
 impl RamfluxClient {
@@ -179,15 +182,7 @@ impl RamfluxClient {
         let (_, state) = self
             .surface_state_ref(&reference)?
             .ok_or_else(|| super::invalid("snapshot floor has no surface state"))?;
-        if event.version() == state.version() {
-            return Ok(Some(covered_current_event(carrier, event, &state)?));
-        }
-        if let Err(error) = ramflux_protocol::SurfaceState::validate_proof(event)
-            && covered_wire_is_broken(&error)
-        {
-            return Ok(Some(Outcome::protocol_rejected(&error)));
-        }
-        Ok(Some(Outcome::accepted(&carrier.author_principal_id, &state)?))
+        Ok(Some(covered_outcome(carrier, event, &state)?))
     }
 
     fn replay_surface_delivery(
