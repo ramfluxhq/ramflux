@@ -1094,7 +1094,9 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
         E::SchemaResetRequired { .. } | E::RawWireResetRequired => {
             RamfluxErrorCode::SchemaResetRequired
         }
-        E::OperationReconciliationRequired { .. } => RamfluxErrorCode::InvalidArgument,
+        E::OperationReconciliationRequired { .. } | E::MuteUntilOutOfRange => {
+            RamfluxErrorCode::InvalidArgument
+        }
         E::AccountSchemaTooNew { .. } => RamfluxErrorCode::UnsupportedVersion,
         E::Integrity(_)
         | E::Protocol(_)

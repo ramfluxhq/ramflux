@@ -497,12 +497,12 @@ impl CustodyService {
         let source =
             RootQualifiedDeviceRef::from_custody_record(&authority, &session.device_ref.device_id)
                 .map_err(invalid)?;
-        validate_session_request(
+        accept_session_request(
             request,
-            action,
             &session,
-            &source,
+            action,
             &cert.branch_signing_public_key,
+            &source,
             now,
         )?;
         if let Some(grant) = grant {
@@ -813,6 +813,36 @@ fn home_refusal(
     }
 }
 
+fn accept_session_request(
+    request: &ramflux_protocol::SignedRequest,
+    session: &CustodySession,
+    action: &CustodySessionAction,
+    signing_key: &str,
+    source: &RootQualifiedDeviceRef,
+    now: u64,
+) -> Result<(), CustodyRefusal> {
+    if request.schema != "ramflux.signed_request.v1"
+        || request.domain != ramflux_protocol::domain::SIGNED_REQUEST
+        || request.version != 1
+        || request.path != CUSTODY_REQUEST_PATH
+        || request.method != ramflux_protocol::HttpMethod::POST
+        || request.device_proof_hash != session.proof_hash
+        || request.body_hash != custody_session_action_hash(action).map_err(invalid)?
+        || request.source_device_id != session.device_ref.device_id
+    {
+        return Err(CustodyRefusal::InvalidInput);
+    }
+    ramflux_crypto::verify_canonical_signature(
+        &ramflux_protocol::signed_bytes(request).map_err(invalid)?,
+        &request.signed.signature,
+        signing_key,
+    )
+    .map_err(invalid)?;
+    ramflux_protocol::ReplayGuard::new()
+        .check_signed_request(source, request, i64::try_from(now).map_err(invalid)?)
+        .map_err(invalid)
+}
+
 fn session_publication(
     router: &crate::RouterCore,
     session: &CustodySession,
@@ -846,34 +876,3 @@ fn home_operation(
 
 #[cfg(test)]
 mod dm_fs_v3_tests;
-
-fn validate_session_request(
-    request: &ramflux_protocol::SignedRequest,
-    action: &CustodySessionAction,
-    session: &CustodySession,
-    source: &RootQualifiedDeviceRef,
-    key: &str,
-    now: u64,
-) -> Result<(), CustodyRefusal> {
-    if request.schema != "ramflux.signed_request.v1"
-        || request.domain != ramflux_protocol::domain::SIGNED_REQUEST
-        || request.version != 1
-        || request.path != CUSTODY_REQUEST_PATH
-        || request.method != ramflux_protocol::HttpMethod::POST
-        || request.device_proof_hash != session.proof_hash
-        || request.body_hash != custody_session_action_hash(action).map_err(invalid)?
-        || request.source_device_id != session.device_ref.device_id
-    {
-        return Err(CustodyRefusal::InvalidInput);
-    }
-    ramflux_crypto::verify_canonical_signature(
-        &ramflux_protocol::signed_bytes(request).map_err(invalid)?,
-        &request.signed.signature,
-        key,
-    )
-    .map_err(invalid)?;
-    ramflux_protocol::ReplayGuard::new()
-        .check_signed_request(source, request, i64::try_from(now).map_err(invalid)?)
-        .map_err(invalid)?;
-    Ok(())
-}

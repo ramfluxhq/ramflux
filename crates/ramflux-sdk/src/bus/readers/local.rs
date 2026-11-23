@@ -192,6 +192,55 @@ pub(super) fn read(
 
 fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError> {
     let mut status = view.status.clone();
+    native_status(client, view, &mut status)?;
+    if let Some(connection) = &view.connection {
+        let mut snapshot = connection.snapshot();
+        // The actor refreshes its cached receive status on networking observations.
+        // W1 commits and ACK drains can advance the ledger between those observations,
+        // so status reads need current DB watermarks even when the session stays Live.
+        if let Some(receive) = &mut snapshot.receive
+            && let Some(target) = status["target_delivery_id"].as_str()
+        {
+            let db = client.account_db()?;
+            receive.committed_cursor =
+                crate::bus::push_receiver::apply_w1::read_cursor(db, target)?;
+            let counters = db.receive_status_counters(target)?;
+            receive.ack_intents_pending = counters.ack_intents_pending;
+            receive.held_entries = counters.held_entries;
+        }
+        if status["networking"] != json!(snapshot.state) {
+            status["networking"] = json!(snapshot.state);
+            status["networking_reason"] = json!(snapshot.cause);
+            status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
+        }
+        // A retired agent stays listed in the local custody record. The node's
+        // refusal is the fact the local surfaces follow; it wins over that record.
+        if snapshot.cause.as_ref().is_some_and(crate::AccountNetworkingReason::agent_retired) {
+            status["local_device_authorized"] = json!(false);
+            status["networking_reason"] = json!(snapshot.cause);
+            status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
+        }
+        status["session_delivery_mode"] = json!(connection.session_mode().receive_label());
+        status["networking_snapshot"] = json!(snapshot);
+        status["active_transport_kind"] = json!(snapshot.active_transport_kind);
+        status["session_id"] = json!(snapshot.session_id);
+    }
+    // After the snapshot copy. That copy is what put pending and a null reason
+    // back over the revoked-branch overlay.
+    if view.native.is_some()
+        && let Some(root) = view.account_root.as_deref()
+    {
+        let id = client.account_db()?.local_account_id.clone();
+        super::super::host_branch::overlay_status(&mut status, root, &id);
+    }
+    Ok(status)
+}
+
+fn native_status(
+    client: &RamfluxClient,
+    view: &AccountView,
+    status: &mut Value,
+) -> Result<(), SdkError> {
     if view.native.is_some() {
         let now = crate::custody::network_now()?;
         let native = crate::custody::load_data_account(
@@ -243,40 +292,7 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
         status["node_id"] =
             json!(client.account_db()?.load_actor_state::<String>("account/node-id")?);
     }
-    if let Some(connection) = &view.connection {
-        let mut snapshot = connection.snapshot();
-        // The actor refreshes its cached receive status on networking observations.
-        // W1 commits and ACK drains can advance the ledger between those observations,
-        // so status reads need current DB watermarks even when the session stays Live.
-        if let Some(receive) = &mut snapshot.receive
-            && let Some(target) = status["target_delivery_id"].as_str()
-        {
-            let db = client.account_db()?;
-            receive.committed_cursor =
-                crate::bus::push_receiver::apply_w1::read_cursor(db, target)?;
-            let counters = db.receive_status_counters(target)?;
-            receive.ack_intents_pending = counters.ack_intents_pending;
-            receive.held_entries = counters.held_entries;
-        }
-        if status["networking"] != json!(snapshot.state) {
-            status["networking"] = json!(snapshot.state);
-            status["networking_reason"] = json!(snapshot.cause);
-            status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
-        }
-        status["session_delivery_mode"] = json!(connection.session_mode().receive_label());
-        status["networking_snapshot"] = json!(snapshot);
-        status["active_transport_kind"] = json!(snapshot.active_transport_kind);
-        status["session_id"] = json!(snapshot.session_id);
-    }
-    // After the snapshot copy. That copy is what put pending and a null reason
-    // back over the revoked-branch overlay.
-    if view.native.is_some()
-        && let Some(root) = view.account_root.as_deref()
-    {
-        let id = client.account_db()?.local_account_id.clone();
-        super::super::host_branch::overlay_status(&mut status, root, &id);
-    }
-    Ok(status)
+    Ok(())
 }
 
 fn contacts(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError> {

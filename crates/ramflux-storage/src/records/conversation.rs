@@ -1,6 +1,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+/// Stored unix-second for "muted until turned off".
+/// It equals the I-JSON safe maximum, so a leaked copy is still a safe integer.
+/// JSON responses emit `mute_until: null` and `muted: true` for this value and
+/// for a leftover `i64::MAX` written by an older indefinite mute.
+pub const MUTE_UNTIL_TURNED_OFF: i64 = 9_007_199_254_740_991;
+
+const _: () = assert!(ramflux_protocol::MAX_SAFE_JSON_INTEGER == 9_007_199_254_740_991);
+
+/// Projects a stored mute instant onto a JSON-safe expiry.
+///
+/// `None` (not muted) and an until-turned-off mute both become `None`, which
+/// serializes as null. Callers distinguish them with `muted`.
+#[must_use]
+pub fn mute_until_for_json(stored: Option<i64>) -> Option<i64> {
+    stored.filter(|until| until.unsigned_abs() < ramflux_protocol::MAX_SAFE_JSON_INTEGER)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConversationProjection {
     pub conversation_id: String,
