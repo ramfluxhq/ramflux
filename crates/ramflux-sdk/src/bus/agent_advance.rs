@@ -305,9 +305,36 @@ impl Supervisor {
                     .await;
             }
         }
+        self.lock_retired_agent_sessions(&store).await?;
         let mut steps =
             SupervisorSteps { supervisor: self, human: human.to_owned(), store: store.clone() };
         advance_all(&mut steps, &store, now).await
+    }
+
+    /// Close an open session of an agent whose stored lifecycle is retired (`X`). The next
+    /// `agent.operation.get` or unlock runs this. A record page past the cap refuses.
+    async fn lock_retired_agent_sessions(
+        &self,
+        store: &AgentCreationStore,
+    ) -> Result<(), SdkError> {
+        let records = crate::agent_record::AgentRecordStore::at(store.agent_record_dir());
+        let mut after = None;
+        for _ in 0..256 {
+            let (page, next) = records.page(after.as_deref(), 50)?;
+            for record in &page {
+                if record.lifecycle != crate::agent_record::LIFECYCLE_RETIRED {
+                    continue;
+                }
+                if let Some(account_id) = agent_account_id(store, &record.agent_anchor)? {
+                    self.lock_account_session(&account_id).await?;
+                }
+            }
+            match next {
+                Some(cursor) => after = Some(cursor),
+                None => return Ok(()),
+            }
+        }
+        Err(SdkError::CustodySetupInvalid)
     }
 
     /// Trigger (b) of decision r10: after a human account unlocks, finish what its pending agent

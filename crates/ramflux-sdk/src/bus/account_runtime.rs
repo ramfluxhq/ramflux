@@ -16,6 +16,7 @@ use maintenance::Maintenance;
 mod transient;
 pub(super) use transient::TransientHost;
 mod agent_calls;
+mod agent_contacts;
 mod connection;
 mod pairing_calls;
 mod pairing_data;
@@ -575,6 +576,7 @@ impl AccountRuntime {
         self.maintain_pairing_own_sync().await;
         self.service_waiting_commands().await?;
         self.maintain_agent_record_broadcast();
+        self.maintain_agent_owner_contact().await;
         self.service_waiting_commands().await?;
         let activity = self.record_local_maintenance().await?;
         // Native admission may have completed on this sync pass after a local-only unlock.

@@ -458,6 +458,23 @@ impl FullPacketEpoch {
         }
         result
     }
+    /// Idle probe. An empty acknowledgement leaves any queued frame in place.
+    /// # Errors
+    /// Refuses an expired lease or a retired token. This does not retire the epoch.
+    pub(crate) fn activity_probe(&self) -> Result<PollFull, SdkError> {
+        if crate::custody::network_now()? >= self.expires_at {
+            return Err(SdkError::PairingCode("LeaseExpired"));
+        }
+        Ok(PollFull {
+            acknowledged: None,
+            epoch: self.epoch.clone(),
+            kind: "poll_full".into(),
+            lease_id: self.lease_id.clone(),
+            profile: PROFILE.into(),
+            role: self.role.as_str().into(),
+            token: self.token.as_ref().ok_or_else(wrong)?.clone(),
+        })
+    }
     /// Poll one encrypted peer packet. Queue acknowledgement derives only from the
     /// last authenticated packet; it is never a durable or semantic data receipt.
     /// # Errors

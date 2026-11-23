@@ -1,3 +1,13 @@
+experimental = ["wrapper-scripts"]
+
+[scripts.wrapper.test-tmp]
+command = ["bash", "-c", 'exec python3 -B "$NEXTEST_WORKSPACE_ROOT/scripts/ci/test-tmp.py" attempt -- "$@"', "test-tmp"]
+target-runner = "within-wrapper"
+
+[[profile.ci.scripts]]
+filter = 'all()'
+run-wrapper = "test-tmp"
+
 [profile.default]
 # A test running longer than 60 s fails: the first 30 s period flags it slow,
 # the second terminates it.

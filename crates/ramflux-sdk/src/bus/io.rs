@@ -278,6 +278,12 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         | SdkError::Crypto(CryptoError::Protocol(
             ramflux_protocol::ProtocolError::GroupStateLimit(_),
         )) => "GroupStateCapacity",
+        other => delivery_error_code(other),
+    }
+}
+
+fn delivery_error_code(error: &SdkError) -> &'static str {
+    match error {
         SdkError::Storage(error) => storage_error_code(error),
         SdkError::TaskDeliveryTooLarge { .. } => "TaskDeliveryTooLarge",
         SdkError::SurfaceDeliveryTooLarge { .. } => "too_large",
@@ -302,6 +308,11 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::OwnDeviceAuthorizationRefreshFailed(_) => "OwnDeviceAuthorizationRefreshFailed",
         SdkError::InboundRejected(code) if code == super::push_receiver::MANAGED_ACK_CODE => {
             super::push_receiver::MANAGED_ACK_CODE
+        }
+        SdkError::GatewaySessionRejected(reason)
+            if reason.to_ascii_lowercase().contains("unreachable") =>
+        {
+            "recipient_unreachable"
         }
         SdkError::CustodyNetwork(code) | SdkError::CustodyAdmission { code, .. } => {
             code.reason_code()

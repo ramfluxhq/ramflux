@@ -199,6 +199,7 @@ impl RamfluxClient {
         }
         db.persist_actor_state(KEY, &now.saturating_add(60))?;
         db.expire_contact_requests(now)?;
+        self.accept_newly_eligible_own_agents()?;
         db.prune_contact_request_fences_and_previews(now)?;
         for row in db.closed_contact_requests(now)? {
             let result = db.write_transaction(|| -> Result<(), SdkError> {
