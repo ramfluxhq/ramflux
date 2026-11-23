@@ -938,10 +938,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::CapabilityDenied(_)
         | SdkError::GrantInvalidated
         | SdkError::RemoteAppApprovalRequired
-        | SdkError::LocalBusPermissionDenied
-        | SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable) => {
-            RamfluxErrorCode::PermissionDenied
-        }
+        | SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)
+        | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
         SdkError::CustodyRandomUnavailable
         | SdkError::HistoryEvidence(_)
         | SdkError::Crypto(_)
