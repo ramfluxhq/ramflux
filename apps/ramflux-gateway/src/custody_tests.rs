@@ -139,6 +139,7 @@ fn exercise(
         router: None,
         auth_deadline: tokio::time::Instant::now() + Duration::from_secs(10),
         authenticated: false,
+        handed_off: false,
     };
     let action = CustodyProofAction::Publish { publication: Box::new(publication.clone()) };
     let request = proxy.prepare(
@@ -495,6 +496,7 @@ fn native_handoff_is_one_use_and_requires_the_exact_live_registered_authority() 
     };
     let grant = || GatewayGrant {
         session: session.clone(),
+        connection_id: String::new(),
         deadline: std::time::Instant::now() + Duration::from_secs(100),
     };
     let mut proxy = Proxy {
@@ -507,6 +509,7 @@ fn native_handoff_is_one_use_and_requires_the_exact_live_registered_authority() 
         authenticated: true,
         router: None,
         auth_deadline: tokio::time::Instant::now() + Duration::from_secs(100),
+        handed_off: false,
     };
     let taken = proxy.handoff(&session.session_id)?;
     assert!(proxy.handoff(&session.session_id).is_err());

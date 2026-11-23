@@ -304,6 +304,11 @@ impl GatewaySessionEngine {
                 Ok(true)
             }
             FrameClass::Terminal => {
+                self.terminal_why = Some(match frame {
+                    GatewayServerFrame::Close { reason }
+                    | GatewayServerFrame::Drain { reason, .. } => reason.clone(),
+                    _ => String::new(),
+                });
                 self.terminal_reason = Some(if matches!(kind, FrameKind::Drain) {
                     DisconnectReason::Drain
                 } else {

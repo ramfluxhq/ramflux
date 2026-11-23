@@ -212,29 +212,16 @@ impl RouterCore {
         // Transfer eviction protection from the global authentication lock to
         // bounded live references before persistence or waiting on an original.
         let _pins = PinReferences::new(&envelope)?;
-        let admission = store.admit_sender_retry(&source, &envelope, now)?;
-        drop(pin_admission);
-        let retry_owner = match admission {
-            RetryAdmission::Owner(owner) => owner,
-            retry => {
-                drop(lease);
-                let assignment = match retry {
-                    RetryAdmission::Accepted(assignment) => assignment,
-                    RetryAdmission::Waiting(waiter) => waiter.resolved_blocking()?,
-                    RetryAdmission::Owner(_) => {
-                        return Err(NodeCoreError::Redb(
-                            "retry owner reached accepted forwarding branch".into(),
-                        ));
-                    }
-                };
-                let assignment =
-                    crate::publication::await_sender_retry(&store.publication_core()?, assignment)?;
-                return Ok(ForwardedSubmission {
-                    outcome: crate::sender_retry::accepted_outcome(&assignment, envelope),
-                    incarnation_id: Some(assignment.inbox_incarnation_id),
-                    retain_until: Some(assignment.retain_until),
-                });
-            }
+        let (retry_owner, lease) = match take_forward_owner(
+            self,
+            store,
+            &source,
+            &envelope,
+            now,
+            ForwardHold { lease, pin_admission },
+        )? {
+            Ok(held) => held,
+            Err(done) => return Ok(done),
         };
         retry_owner.bind(&envelope.target_delivery_id)?;
         if store.has_local_delivery_envelope(
@@ -275,6 +262,56 @@ impl RouterCore {
             retry_owner.accepted_entry(store, source.root_commitment(), &entry, now);
         }
         Ok(ForwardedSubmission { outcome, incarnation_id: metadata.0, retain_until: metadata.1 })
+    }
+}
+
+struct ForwardHold {
+    lease: crate::SubmissionLease,
+    pin_admission: std::sync::MutexGuard<'static, ()>,
+}
+
+fn take_forward_owner(
+    router: &RouterCore,
+    store: &RouterRedbStore,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope: &ramflux_protocol::Envelope,
+    now: i64,
+    hold: ForwardHold,
+) -> Result<
+    Result<(crate::sender_retry::RetryOwner, crate::SubmissionLease), ForwardedSubmission>,
+    NodeCoreError,
+> {
+    let ForwardHold { lease, pin_admission } = hold;
+    let now_u =
+        u64::try_from(now).map_err(|_| NodeCoreError::Unauthorized("submission clock".into()))?;
+    if let Some(outcome) = router.fenced_submit_outcome(store, envelope, now_u)? {
+        drop(lease);
+        drop(pin_admission);
+        return Ok(Err(ForwardedSubmission { outcome, incarnation_id: None, retain_until: None }));
+    }
+    let admission = store.admit_sender_retry(source, envelope, now)?;
+    drop(pin_admission);
+    match admission {
+        RetryAdmission::Owner(owner) => Ok(Ok((owner, lease))),
+        retry => {
+            drop(lease);
+            let assignment = match retry {
+                RetryAdmission::Accepted(assignment) => assignment,
+                RetryAdmission::Waiting(waiter) => waiter.resolved_blocking()?,
+                RetryAdmission::Owner(_) => {
+                    return Err(NodeCoreError::Redb(
+                        "retry owner reached accepted forwarding branch".into(),
+                    ));
+                }
+            };
+            let assignment =
+                crate::publication::await_sender_retry(&store.publication_core()?, assignment)?;
+            Ok(Err(ForwardedSubmission {
+                outcome: crate::sender_retry::accepted_outcome(&assignment, envelope.clone()),
+                incarnation_id: Some(assignment.inbox_incarnation_id),
+                retain_until: Some(assignment.retain_until),
+            }))
+        }
     }
 }
 

@@ -16,6 +16,72 @@ struct Add {
     replace_provisional_root: Option<String>,
 }
 
+/// Only the verified directory adapter can construct this input; no caller-supplied root or URL.
+pub(in crate::bus) async fn add_username(
+    state: &mut LocalBusDaemonState,
+    account_id: &str,
+    resolved: &crate::username_directory::ResolvedUsername,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let home = account_home(state, account_id)?;
+    if home.node_id != resolved.node {
+        return Err(SdkError::LocalBusRefused {
+            code: "contact_home_node_unsupported".into(),
+            message: "Contact requests to a different home node are not available yet".into(),
+            body: Box::new(
+                json!({"node": &resolved.node, "root_commitment": &resolved.root_commitment}),
+            ),
+        });
+    }
+    let account = local_bus_account_mut(state, account_id)?;
+    let own = account.gateway_config.clone();
+    if resolved.principal_id == own.principal_id
+        || resolved.root_commitment == account.principal_commitment
+    {
+        return Err(ContactReason::SelfContact.into());
+    }
+    resolved.validate_for_add(crate::custody::network_now()?)?;
+    // Explicit Add pins the observed name before any request can enter the outbox. A failed
+    // transport may leave this historical pin, but cannot silently repoint a later retry.
+    resolved.pin_for_add(account.client.account_db()?)?;
+    if let Some(contact) = account.client.accepted_contact_retry(&resolved.principal_id, None)? {
+        if contact["root_commitment"].as_str() != Some(&resolved.root_commitment) {
+            return Err(ContactReason::RootConflict.into());
+        }
+        account.client.pin_contact_home(&resolved.principal_id, &resolved.node)?;
+        return Ok(local_bus_ok(contact_response(account, &contact, None)?));
+    }
+    let mut engine = account.live_session_client().map_err(lookup_failure)?;
+    let link =
+        crate::client::contact_roots::contact_link_id(&own.principal_id, &resolved.principal_id)?;
+    let result = account
+        .client
+        .resolve_contact(
+            &own,
+            &own,
+            ContactResolution {
+                send_request: true,
+                request_note: None,
+                selector: &resolved.principal_id,
+                expected_root: Some(&resolved.root_commitment),
+                card: None,
+                link_id: link,
+                allow_commitment: false,
+                requester_is_peer: false,
+                replace_provisional_root: None,
+                verification: None,
+            },
+            &mut engine,
+        )
+        .await;
+    account.apply_session_metadata(engine);
+    let contact = result?;
+    account.client.pin_contact_home(&resolved.principal_id, &resolved.node)?;
+    if let Some(handle) = &account.connection {
+        handle.wake_couriers();
+    }
+    Ok(local_bus_ok(contact_response(account, &contact, None)?))
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) async fn add(
     request: &LocalBusFrame,
@@ -215,7 +281,17 @@ pub(super) async fn export(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account = local_bus_account(state, id)?;
     let profile = account_home(state, id)?;
+    let agent_retired = account.connection.as_ref().is_some_and(|connection| {
+        connection
+            .snapshot()
+            .cause
+            .as_ref()
+            .is_some_and(crate::AccountNetworkingReason::agent_retired)
+    });
     if let Some(native) = &account.client.born_v3_account {
+        if agent_retired {
+            return Err(SdkError::AgentCreationRefused("agent_retired"));
+        }
         let now = crate::custody::network_now()?;
         let current =
             crate::custody::load_account_after_install(&state.config.data_root, id, now).await?;

@@ -96,9 +96,9 @@ fn agent_lifecycle_is_driven_through_rf_with_two_daemons() -> Result<()> {
     assert_eq!(seen["error"]["reasonCode"], "authorization_refused", "typed refusal: {seen}");
     assert_eq!(agent::list(desktop, owner)?.len(), 1, "the denied agent was never created");
 
-    // Delete on the desktop: the local state goes, the node keeps the custody record.
+    // Delete on the desktop: the local state goes and the node retires the custody record.
     let deleted = agent::delete(desktop, owner, &anchor)?;
-    assert_eq!(deleted["cleanup"], "node_record_retained", "{deleted}");
+    assert_eq!(deleted["cleanup"], "node_retired", "{deleted}");
     assert_eq!(deleted["lifecycle"], "X");
     wait_for(|| agent::show(primary, owner, &anchor).is_ok_and(|shown| shown["lifecycle"] == "X"))?;
     Ok(())

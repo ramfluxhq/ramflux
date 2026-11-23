@@ -650,6 +650,16 @@ async fn serve(
                     continue;
                 }
                 GatewayClientFrame::Heartbeat { now } => GatewayServerFrame::Heartbeat { now },
+                GatewayClientFrame::GrantRenew => {
+                    let renewed = match native_session.as_deref() {
+                        Some(id) => native.renew(&connection, id)?,
+                        None => None,
+                    };
+                    match renewed {
+                        Some(expires_at) => GatewayServerFrame::GrantRenewed { expires_at },
+                        None => GatewayServerFrame::Close { reason: "renewal_refused".into() },
+                    }
+                }
                 GatewayClientFrame::Resume { resume } => {
                     let hold = shared.lock().map_err(|_| "gateway")?.resume_hold.take();
                     if let Some(hold) = hold {

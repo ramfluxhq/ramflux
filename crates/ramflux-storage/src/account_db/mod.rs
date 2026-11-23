@@ -61,6 +61,9 @@ pub mod history;
 #[cfg(any(test, feature = "test-instrumentation"))]
 mod test_busy;
 pub use attachment_retirement::{NativeGrantAssociation, PendingAttachmentRetirement};
+mod backup_username_candidates;
+mod backup_username_directory;
+mod directory_facts;
 pub(crate) mod home_migration;
 pub mod identity_verification;
 pub mod journal;
@@ -77,10 +80,13 @@ pub mod object_retention;
 pub(crate) mod pairing;
 pub mod raw_inner;
 pub mod read_model;
+pub use directory_facts::{ConversationReadPosition, DirectoryTotals};
 pub(crate) mod receive;
 pub mod recovery;
 mod replay_markers;
 mod residue;
+pub(crate) mod username_candidates;
+pub(crate) mod username_directory;
 pub use residue::{
     ResidueHit, ResidueScan, ResidueScanStatus, ResidueTable, ResidueTableStatus, residue_needles,
 };

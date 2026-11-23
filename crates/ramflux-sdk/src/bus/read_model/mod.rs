@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 mod approvals;
 mod budget;
 mod capture;
+mod list_facts;
 mod rows;
 pub(super) use capture::{capture, capture_mcp_event, initialize};
 pub(crate) use rows::row;
@@ -85,9 +86,18 @@ fn read_inner(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Value, 
     if next.is_none() && ids.len() > limit as usize {
         next = Some(encode_cursor(account, directory, &ids[limit as usize - 1])?);
     }
-    let response = body(field, &result, next.as_deref());
+    let mut response = body(field, &result, next.as_deref());
+    if directory == "conversation" {
+        response["totals"] = directory_totals(client)?;
+    }
     super::io::encode_local_bus_frame(&local_bus_response(request, response.clone()))?;
     Ok(response)
+}
+
+fn directory_totals(client: &RamfluxClient) -> Result<Value, SdkError> {
+    let viewer = client.read_device_identity()?;
+    let totals = client.account_db()?.client_conversation_totals(viewer.as_ref())?;
+    Ok(json!({"unread": totals.unread, "attention": totals.attention}))
 }
 
 fn body(field: &str, rows: &[Value], next: Option<&str>) -> Value {

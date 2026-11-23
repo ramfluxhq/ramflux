@@ -111,6 +111,7 @@ async fn authenticated_principal_lookup_uses_router_json_ingress_and_returns_a_m
         principal_commitment: "bob-root".into(),
         root_public_key: "fixture-public-key".into(),
         devices: Vec::new(),
+        agent_lifecycle: None,
     };
     let (done, finished) = tokio::sync::oneshot::channel::<()>();
     let serving = tokio::spawn(serve_lookup_router(server, expected.clone(), finished));

@@ -35,7 +35,7 @@ pub(crate) type DurableIngressSnapshot = (u64, [u8; 32], u64, (u64, u64), usize)
 mod agent_publish;
 mod custody;
 mod custody_accounts;
-pub(crate) use agent_publish::{AgentPublicationWrite, StoredAgentPublish};
+pub(crate) use agent_publish::{AgentPublicationWrite, StoredAgentPublish, agent_host};
 pub(crate) mod direct_write;
 pub(crate) use custody_accounts::CustodyAccountWrite;
 mod custody_budget_policy;

@@ -6,8 +6,8 @@
 //! `AgentHostPacket.metadata` on the `AgentSync` control. A receiver applies it through
 //! `agent_record::apply_metadata`, after `client/agent_custody.rs` authorized the sender.
 use crate::agent_record::{
-    AgentRecordStore, Changes, LIFECYCLE_ACTIVE, StoredAgentRecord, apply_metadata, edit_record,
-    metadata_of, parse_cursor, retire,
+    AgentRecordStore, Changes, LIFECYCLE_ACTIVE, LIFECYCLE_RETIRED, StoredAgentRecord,
+    apply_metadata, edit_record, metadata_of, parse_cursor, retire,
 };
 use crate::bus::own_device_copy;
 use crate::client::generated_control::control_from_payload;
@@ -268,6 +268,35 @@ impl RamfluxClient {
         metadata: &g::AgentMetadata,
     ) -> Result<bool, SdkError> {
         let owner = self.own_account_anchor()?;
-        apply_metadata(&self.agent_record_store()?, &owner, metadata)
+        let changed = apply_metadata(&self.agent_record_store()?, &owner, metadata)?;
+        if changed {
+            // The file is already stored. Failing this call would skip a later retry that sees
+            // the same record as not newer, so a refused acceptance waits for maintenance.
+            if let Err(error) = self.accept_own_agent_anchor(&metadata.agent_anchor) {
+                tracing::warn!(%error, "own-agent contact acceptance deferred");
+            }
+        }
+        // Every receive retries a destroy that an earlier receive could not finish.
+        self.destroy_retired_material(&metadata.agent_anchor)?;
+        Ok(changed)
+    }
+
+    /// A retired record destroys this device's vault items for that agent. The phone has the
+    /// record and no local agent account, which is not an error. No vault leaves the items for
+    /// a later receive that has one.
+    fn destroy_retired_material(&self, agent: &str) -> Result<(), SdkError> {
+        let Some(record) = self.agent_record_store()?.load(agent)? else {
+            return Ok(());
+        };
+        if record.lifecycle != LIFECYCLE_RETIRED {
+            return Ok(());
+        }
+        let Some(vault) = &self.born_v3_vault else {
+            return Ok(());
+        };
+        match retire_agent_material(&self.agent_creation_store()?, vault.as_ref(), agent) {
+            Err(SdkError::AgentCreationRefused("agent_not_found")) => Ok(()),
+            other => other,
+        }
     }
 }
