@@ -9,6 +9,7 @@ use ramflux_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::future::Future;
 
@@ -25,25 +26,60 @@ pub enum EngineFailure {
     ApprovalTimeout,
     ApprovalDeclined,
     AuthorizationMismatch,
+    /// PRX HTTP 429 `agent_busy`. `retry_after_secs` is the `Retry-After` delta-seconds header.
+    AgentBusy {
+        retry_after_secs: Option<u64>,
+    },
+    /// PRX HTTP 429 `agent_budget_exhausted`. `retry_after_secs` is the `Retry-After` header.
+    AgentBudgetExhausted {
+        retry_after_secs: Option<u64>,
+    },
 }
 impl EngineFailure {
     /// Short visible status with a stable failure code and no remote response text.
     #[must_use]
-    pub const fn reply(&self) -> &'static str {
+    pub fn reply(&self) -> Cow<'static, str> {
         match self {
-            Self::Rejected => "The agent engine could not complete this request. [engine_rejected]",
-            Self::Busy => "The agent is waiting for the current turn or approval. [engine_busy]",
-            Self::RequestTimeout => "The engine request timed out. [engine_request_timeout]",
-            Self::TurnTimeout => "The agent turn timed out. [engine_turn_timeout]",
+            Self::Rejected => {
+                Cow::Borrowed("The agent engine could not complete this request. [engine_rejected]")
+            }
+            Self::Busy => Cow::Borrowed(
+                "The agent is waiting for the current turn or approval. [engine_busy]",
+            ),
+            Self::RequestTimeout => {
+                Cow::Borrowed("The engine request timed out. [engine_request_timeout]")
+            }
+            Self::TurnTimeout => Cow::Borrowed("The agent turn timed out. [engine_turn_timeout]"),
             Self::ApprovalUnavailable => {
-                "The approval is expired or unavailable. [approval_unavailable]"
+                Cow::Borrowed("The approval is expired or unavailable. [approval_unavailable]")
             }
-            Self::ApprovalTimeout => "The approval request timed out. [approval_timeout]",
-            Self::ApprovalDeclined => "The requested operation was declined. [approval_declined]",
-            Self::AuthorizationMismatch => {
-                "PRX requested approval in full authorization mode. [authorization_mismatch]"
+            Self::ApprovalTimeout => {
+                Cow::Borrowed("The approval request timed out. [approval_timeout]")
             }
+            Self::ApprovalDeclined => {
+                Cow::Borrowed("The requested operation was declined. [approval_declined]")
+            }
+            Self::AuthorizationMismatch => Cow::Borrowed(
+                "PRX requested approval in full authorization mode. [authorization_mismatch]",
+            ),
+            Self::AgentBusy { retry_after_secs } => admission_reply(
+                "The agent is at its concurrency limit.",
+                "agent_busy",
+                *retry_after_secs,
+            ),
+            Self::AgentBudgetExhausted { retry_after_secs } => admission_reply(
+                "The agent is over its daily cost limit.",
+                "agent_budget_exhausted",
+                *retry_after_secs,
+            ),
         }
+    }
+}
+
+fn admission_reply(lead: &str, code: &str, retry_after_secs: Option<u64>) -> Cow<'static, str> {
+    match retry_after_secs {
+        Some(seconds) => Cow::Owned(format!("{lead} Retry after {seconds}s. [{code}]")),
+        None => Cow::Owned(format!("{lead} [{code}]")),
     }
 }
 
@@ -253,6 +289,24 @@ pub trait EngineProvider {
     /// Rejects an acknowledgement that conflicts with provider state.
     fn acknowledge(&mut self, _event: &EngineEvent) -> Result<()> {
         Ok(())
+    }
+    /// Install configured admission limits. The default provider has none.
+    ///
+    /// # Errors
+    /// Rejects a limits configuration whose PRX write fails.
+    fn publish_limits(&mut self) -> impl Future<Output = Result<()>> + '_ {
+        async { Ok(()) }
+    }
+    /// Erase every agent's turns in the provider session mapped to this conversation.
+    /// The default provider has no session.
+    ///
+    /// # Errors
+    /// Rejects only corrupt local provider state. A remote refusal is not fatal.
+    fn erase_history<'a>(
+        &'a mut self,
+        _conversation_id: &'a str,
+    ) -> impl Future<Output = Result<()>> + 'a {
+        async { Ok(()) }
     }
     /// # Errors
     /// Rejects invalid plans. The default provider has no action behavior.

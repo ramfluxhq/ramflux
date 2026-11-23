@@ -29,6 +29,29 @@ fn refuse(token: &'static str) -> SdkError {
     SdkError::AgentCreationRefused(token)
 }
 
+fn refuse_bad_limits(config: &g::AgentConfigData) -> Result<(), SdkError> {
+    let Some(limits) = &config.limits else {
+        return Ok(());
+    };
+    let turns_bad = limits.max_concurrent_turns.is_some_and(|value| !(1..=1024).contains(&value));
+    let cost_bad =
+        limits.max_cost_per_day_cents.is_some_and(|value| !(1..=1_000_000_000).contains(&value));
+    if turns_bad || cost_bad { Err(refuse("field_invalid")) } else { Ok(()) }
+}
+
+fn copy_limits(intent: &mut crate::agent_record::AgentIntent, config: &g::AgentConfigData) {
+    let Some(limits) = &config.limits else {
+        return;
+    };
+    if limits.max_concurrent_turns.is_none() && limits.max_cost_per_day_cents.is_none() {
+        return;
+    }
+    intent.provider = Some(config.provider.clone());
+    intent.model = Some(config.model.clone());
+    intent.max_concurrent_turns = limits.max_concurrent_turns;
+    intent.max_cost_per_day_cents = limits.max_cost_per_day_cents;
+}
+
 /// The human authority read at one instant, with this device named in it.
 struct Human<'a> {
     record: &'a Envelope<DeviceSet>,
@@ -162,6 +185,7 @@ impl RamfluxClient {
         {
             return Err(refuse("metadata_pending"));
         }
+        refuse_bad_limits(config)?;
         crate::agent_record::check_access(access)?;
         let persona_bytes = serde_json::to_vec(&serde_json::json!({
             "avatar": persona.avatar,
@@ -197,8 +221,8 @@ impl RamfluxClient {
         let outcome = begin(&store, vault, &input, now)?;
         // Stage E2: the persona and access are kept on the creation record for the agent record.
         let mut intent_record = store.load(&request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
-        let intent =
-            crate::agent_record::AgentIntent { persona: persona.clone(), access: access.clone() };
+        let mut intent = crate::agent_record::AgentIntent::new(persona.clone(), access.clone());
+        copy_limits(&mut intent, config);
         intent_record.intent_b64 = Some(encode_base64url(serde_json::to_vec(&intent)?));
         store.save(&intent_record)?;
         let plan =
