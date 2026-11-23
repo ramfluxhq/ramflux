@@ -17,6 +17,8 @@ mod genesis;
 mod networking;
 pub(crate) mod pairing;
 mod publication;
+mod revoked_reserve;
+pub(crate) use revoked_reserve::with_anchor_ceremony;
 mod verification_cache;
 pub(crate) use verification_cache::PublicAuthorityCache;
 #[cfg(test)]
@@ -708,7 +710,7 @@ pub(crate) fn reserve_pairing_account(
     id: &str,
     anchor: &str,
 ) -> Result<PathBuf, SdkError> {
-    genesis::reserve_account(root, id, anchor)
+    revoked_reserve::reserve_for_ceremony(root, id, anchor)
 }
 
 /// Production vault-ref allocator (`custody_vault_reference.v1`). Same bytes as genesis.
@@ -1015,7 +1017,8 @@ fn read_account(
 /// through the atomic write that creation uses. Replaying the same record changes nothing.
 /// # Errors
 /// `CustodySetupInvalid` for a missing or foreign account; `PairingCode("HeadChanged")` when the
-/// pins do not advance; verification and I/O failures pass through.
+/// pins do not advance or the local human is not the approved custodian; verification and I/O
+/// failures pass through.
 pub(crate) fn replace_rebound_authority(
     root: &Path,
     account_id: &str,
@@ -1031,8 +1034,10 @@ pub(crate) fn replace_rebound_authority(
         return Err(invalid());
     }
     let verified = verify_record(record, now, None, custodian)?;
+    let custodian_publication = current_custodian_publication(root, &stored, custodian, now)?;
     if ramflux_protocol::custody::object_hash(&stored.record)?
         == ramflux_protocol::custody::object_hash(record)?
+        && stored.custodian_publication == custodian_publication
     {
         return Ok(());
     }
@@ -1042,7 +1047,27 @@ pub(crate) fn replace_rebound_authority(
     }
     stored.record = record.clone();
     stored.compacted_ids = None;
+    stored.custodian_publication = custodian_publication;
     genesis::replace_public(&path, &ramflux_protocol::canonical_json_bytes(&stored)?)
+}
+
+fn current_custodian_publication(
+    root: &Path,
+    stored: &StoredAuthority,
+    custodian: Option<&VerifiedRecord>,
+    now: u64,
+) -> Result<Option<Box<ramflux_protocol::custody::Publication>>, SdkError> {
+    let Some(human_id) = stored.custodian_account_id.as_deref() else {
+        return Ok(None);
+    };
+    let human = load_account(root, human_id, now)?;
+    let approved = custodian.ok_or_else(invalid)?;
+    if ramflux_protocol::custody::object_hash(human.record())?
+        != ramflux_protocol::custody::object_hash(approved.envelope())?
+    {
+        return Err(SdkError::PairingCode("HeadChanged"));
+    }
+    Ok(Some(Box::new(human.publication())))
 }
 
 /// The stored record of one account, decoded and NOT verified. A rebind uses it: the stored agent
@@ -1053,6 +1078,60 @@ pub(crate) fn stored_record_unverified(
     account_id: &str,
 ) -> Result<Envelope<DeviceSet>, SdkError> {
     Ok(read_stored(root, account_id)?.record)
+}
+
+/// Point an agent account at a different local human id.
+///
+/// The signed record, pins and vault references stay. A second call with the same
+/// destination changes nothing. A pointer that names neither account is refused.
+///
+/// # Errors
+/// `CustodySetupInvalid` when the account is not a headless agent, or the stored pointer is a
+/// third account. Storage failures pass through.
+pub(crate) fn retarget_agent_custodian(
+    root: &Path,
+    agent_account_id: &str,
+    from_human: &str,
+    to_human: &str,
+) -> Result<(), SdkError> {
+    valid_id(agent_account_id)?;
+    valid_id(from_human)?;
+    valid_id(to_human)?;
+    if from_human == to_human {
+        return Err(invalid());
+    }
+    let mut stored = read_stored(root, agent_account_id)?;
+    if stored.record.body.principal_kind != ramflux_protocol::PrincipalKind::HeadlessAi {
+        return Err(invalid());
+    }
+    match stored.custodian_account_id.as_deref() {
+        Some(current) if current == to_human => return Ok(()),
+        Some(current) if current == from_human => {}
+        _ => return Err(invalid()),
+    }
+    stored.custodian_account_id = Some(to_human.to_owned());
+    let path = directory(root, agent_account_id)?.join("authority.json");
+    genesis::replace_public(&path, &ramflux_protocol::canonical_json_bytes(&stored)?)
+}
+
+/// Human id named by an agent account's stored authority.
+///
+/// A missing authority is `Ok(None)`. This read does not create a directory.
+///
+/// # Errors
+/// `CustodySetupInvalid` for an invalid id or a corrupt authority. I/O failures pass through.
+pub(crate) fn stored_custodian_id(
+    root: &Path,
+    account_id: &str,
+) -> Result<Option<String>, SdkError> {
+    valid_id(account_id)?;
+    let path = directory(root, account_id)?.join("authority.json");
+    match fs::File::open(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+        Ok(file) => drop(file),
+    }
+    Ok(read_stored(root, account_id)?.custodian_account_id)
 }
 
 fn read_stored(root: &Path, account_id: &str) -> Result<StoredAuthority, SdkError> {

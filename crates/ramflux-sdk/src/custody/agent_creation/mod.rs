@@ -7,8 +7,10 @@ mod advance;
 mod capability;
 mod commit;
 mod delete;
+mod host_revoked;
 mod machine;
 mod publish;
+mod reassociate;
 mod rebind;
 mod rebind_commit;
 mod rebind_observe;
@@ -39,12 +41,20 @@ pub use capability::require_agent_custody_authorization;
 pub use commit::commit_approved;
 pub(crate) use commit::desktop_is_enrolled;
 pub(crate) use delete::{agent_account_id, is_retired_agent_account, retire_agent_material};
+pub(crate) use host_revoked::{
+    host_branch_marked, marked_account_anchor, note_host_branch_revoked, note_if_verified_revokes,
+    suspend_hosted_agents,
+};
 pub use machine::{
     BeginInput, BeginOutcome, PrimarySigning, apply_decision, begin, cancel, primary_sign_decision,
     receive_plan, resume_request,
 };
 pub(crate) use publish::complete_with_receipt;
 pub(crate) use publish::{AgentPublishing, first_action, load_publishing};
+pub(crate) use reassociate::{
+    advance_primary, advance_reassociation, fresh_plan_ready, plan_reassociation,
+    rebind_awaits_owner, release_completed_sources,
+};
 pub use rebind::{RebindBinding, RebindEntry, paused_agent_binding};
 pub use rebind_commit::commit_rebind;
 pub use rebind_observe::observe_primary;

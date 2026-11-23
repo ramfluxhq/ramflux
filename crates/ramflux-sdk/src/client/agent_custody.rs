@@ -79,6 +79,25 @@ fn refused(reason: &str) -> SdkError {
     SdkError::GeneratedRefused { code: GeneratedRefusalCode::Content, reason: reason.into() }
 }
 
+enum RosterEpoch {
+    Active(u64),
+    Inactive,
+    Absent,
+}
+
+fn roster_epoch(devices: &[ramflux_protocol::custody::Device], device_id: &str) -> RosterEpoch {
+    match devices.iter().find(|entry| entry.device_id == device_id) {
+        Some(entry)
+            if entry.device_epoch != 0
+                && entry.status == ramflux_protocol::DeviceSetStatus::Active =>
+        {
+            RosterEpoch::Active(entry.device_epoch)
+        }
+        Some(_) => RosterEpoch::Inactive,
+        None => RosterEpoch::Absent,
+    }
+}
+
 /// Metadata, and an activity marker whose recipient is the sender, go to every sibling.
 fn packet_broadcast(packet: &g::AgentHostPacket) -> bool {
     match packet.body.as_ref() {
@@ -107,12 +126,67 @@ fn activity_names_sender(packet: &g::AgentHostPacket, custody: &g::AgentCustodyP
 }
 
 impl RamfluxClient {
-    pub(super) fn device_epoch_of(&self, device: &RootQualifiedDeviceRef) -> Result<u64, SdkError> {
-        self.account_db()?
+    /// Epoch used on an agent-custody packet.
+    ///
+    /// The directory row is preferred. A row that has not been written yet uses the active
+    /// roster entry on the current custody cache, then on this device's born record. A device
+    /// that is absent from both is `InboundPending` so the receive pass retries until the
+    /// head names it or the existing retry budget ends. An inactive roster entry is refused.
+    ///
+    /// # Errors
+    /// `InboundPending` when neither store names the device. `GeneratedRefused` when the
+    /// roster names it and it is not active. Storage errors pass through.
+    pub(crate) fn device_epoch_of(&self, device: &RootQualifiedDeviceRef) -> Result<u64, SdkError> {
+        if let Some(epoch) = self.directory_device_epoch(device)? {
+            return Ok(epoch);
+        }
+        if let Some(epoch) = self.cached_roster_epoch(device)? {
+            return Ok(epoch);
+        }
+        if let Some(epoch) = self.born_roster_epoch(device)? {
+            return Ok(epoch);
+        }
+        Err(SdkError::InboundPending("agent custody device epoch missing".into()))
+    }
+
+    fn directory_device_epoch(
+        &self,
+        device: &RootQualifiedDeviceRef,
+    ) -> Result<Option<u64>, SdkError> {
+        Ok(self
+            .account_db()?
             .client_device_record(device)?
             .and_then(|record| record["device_epoch"].as_u64())
-            .filter(|epoch| *epoch != 0)
-            .ok_or_else(|| refused("agent custody device epoch missing"))
+            .filter(|epoch| *epoch != 0))
+    }
+
+    fn cached_roster_epoch(
+        &self,
+        device: &RootQualifiedDeviceRef,
+    ) -> Result<Option<u64>, SdkError> {
+        let now = crate::custody::network_now()?;
+        let Some(current) = self.current_custody_authority(device.root_commitment(), now)? else {
+            return Ok(None);
+        };
+        match roster_epoch(current.envelope().body.devices.as_slice(), device.device_id()) {
+            RosterEpoch::Active(epoch) => Ok(Some(epoch)),
+            RosterEpoch::Inactive => Err(refused("agent custody device epoch is not current")),
+            RosterEpoch::Absent => Ok(None),
+        }
+    }
+
+    fn born_roster_epoch(&self, device: &RootQualifiedDeviceRef) -> Result<Option<u64>, SdkError> {
+        let Some(born) = self.born_v3_account.as_deref() else {
+            return Ok(None);
+        };
+        if born.record().body.account_anchor != device.root_commitment() {
+            return Ok(None);
+        }
+        match roster_epoch(born.record().body.devices.as_slice(), device.device_id()) {
+            RosterEpoch::Active(epoch) => Ok(Some(epoch)),
+            RosterEpoch::Inactive => Err(refused("agent custody device epoch is not current")),
+            RosterEpoch::Absent => Ok(None),
+        }
     }
 
     /// Receive authorization of one `AgentHostPacket`. Refuses before any effect. A plan must name
