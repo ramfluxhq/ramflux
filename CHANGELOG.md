@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Consolidate message identity, transient delivery, Unsupported diagnostics, revision entropy and native group snapshot rules in one protocol specification; repair the storage-profile link.
+
 ## [0.2.5] - 2026-11-22
 
 - Relay: legacy v2 relay tokens are removed; a relay store from earlier versions must be reset before upgrading. Account runtime: sessions run on their own thread, so database work no longer freezes session timers; a late best-effort exchange no longer retires the session, and retirement logs name the reason. A newly added device receives the owner's earlier history. Call invites fail at once with a typed error when calls are not wired. Agent creation can be driven end to end from the rf CLI. PRX client repinned to 296a83367. Retired bus methods removed.
