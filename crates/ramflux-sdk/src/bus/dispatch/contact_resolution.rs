@@ -16,6 +16,73 @@ struct Add {
     replace_provisional_root: Option<String>,
 }
 
+/// Only the verified directory adapter can construct this input; no caller-supplied root or URL.
+pub(in crate::bus) async fn add_username(
+    state: &mut LocalBusDaemonState,
+    account_id: &str,
+    resolved: &crate::username_directory::ResolvedUsername,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let home = account_home(state, account_id)?;
+    if home.node_id != resolved.node {
+        return Err(SdkError::LocalBusRefused {
+            code: "contact_home_node_unsupported".into(),
+            message: "Contact requests to a different home node are not available yet".into(),
+            body: Box::new(
+                json!({"node": &resolved.node, "root_commitment": &resolved.root_commitment}),
+            ),
+        });
+    }
+    let account = local_bus_account_mut(state, account_id)?;
+    let own = account.gateway_config.clone();
+    if resolved.principal_id == own.principal_id
+        || resolved.root_commitment == account.principal_commitment
+    {
+        return Err(ContactReason::SelfContact.into());
+    }
+    resolved.validate_for_add(crate::custody::network_now()?)?;
+    // Explicit Add pins the observed name before any request can enter the outbox. A failed
+    // transport may leave this historical pin, but cannot silently repoint a later retry.
+    resolved.pin_for_add(account.client.account_db()?)?;
+    if let Some(contact) = account.client.accepted_contact_retry(&resolved.principal_id, None)? {
+        if contact["root_commitment"].as_str() != Some(&resolved.root_commitment) {
+            return Err(ContactReason::RootConflict.into());
+        }
+        account.client.pin_contact_home(&resolved.principal_id, &resolved.node)?;
+        return Ok(local_bus_ok(contact_response(account, &contact, None)?));
+    }
+    let mut engine = account.live_session_client().map_err(lookup_failure)?;
+    let link =
+        crate::client::contact_roots::contact_link_id(&own.principal_id, &resolved.principal_id)?;
+    let result = account
+        .client
+        .resolve_contact(
+            &own,
+            &own,
+            ContactResolution {
+                send_request: true,
+                request_note: None,
+                selector: &resolved.principal_id,
+                expected_root: Some(&resolved.root_commitment),
+                card: None,
+                link_id: link,
+                allow_commitment: false,
+                requester_is_peer: false,
+                replace_provisional_root: None,
+                verification: None,
+                directory_base: None,
+            },
+            &mut engine,
+        )
+        .await;
+    account.apply_session_metadata(engine);
+    let contact = result?;
+    account.client.pin_contact_home(&resolved.principal_id, &resolved.node)?;
+    if let Some(handle) = &account.connection {
+        handle.wake_couriers();
+    }
+    Ok(local_bus_ok(contact_response(account, &contact, None)?))
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) async fn add(
     request: &LocalBusFrame,
@@ -66,24 +133,22 @@ pub(super) async fn add(
     {
         return Err(ContactReason::AlreadyContact.into());
     }
-    if let Some(card) = &card
-        && !account.client.contact_request_retryable(&selector)?
-        && let Some(old) = account.client.account_db()?.client_record("identity", &selector)?
-        && old["contact_identity_commitment"].as_str() == Some(&card.root_commitment)
-        && account.client.contact_root_source(&old)? != crate::ContactRootSource::Lookup
-        && account.client.friend_link_peer_is_accepted(&card.root_commitment)?
+    if let Some(card) = card.as_ref()
+        && let Some(done) = pin_accepted_card(state, account_id, card, &selector).await?
     {
-        return Err(ContactReason::AlreadyContact.into());
+        return Ok(done);
     }
     let mut verified_home = None;
+    let mut directory_base = None;
     let gateway = match card.as_ref() {
         Some(card) => {
-            let home = account_home(state, account_id)?;
-            let gateway = card_gateway(card, &own, &state.config.data_root, &home).await?;
-            // `card_gateway` proved the card's node is this node: same origin, same key
-            // fingerprint, same node id from its signed client record.
-            verified_home = Some(home.node_id.clone());
-            gateway
+            let profile = account_home(state, account_id)?;
+            let verified = card_gateway(card, &own, &state.config.data_root, &profile).await?;
+            // The signed client record names the home. A foreign node keeps this session
+            // and is reached through `target_node` after the pin below.
+            verified_home = Some(verified.node_id);
+            directory_base = verified.directory_base;
+            verified.gateway
         }
         None => own.clone(),
     };
@@ -109,6 +174,7 @@ pub(super) async fn add(
                 requester_is_peer,
                 replace_provisional_root: replace_provisional_root.as_deref(),
                 verification: None,
+                directory_base: directory_base.as_deref(),
             },
             &mut engine,
         )
@@ -130,6 +196,42 @@ pub(super) async fn add(
         tracing::warn!(%error, "accepted contact copy deferred to account sync");
     }
     Ok(local_bus_ok(contact_response(account, &contact, legacy.as_ref())?))
+}
+
+/// An accepted non-lookup contact keeps its card refusal, except when no home is pinned.
+/// The verified card's home is then recorded so attachment send can name the grantee.
+async fn pin_accepted_card(
+    state: &mut LocalBusDaemonState,
+    account_id: &str,
+    card: &ContactCardBody,
+    selector: &str,
+) -> Result<Option<LocalBusDispatchResult>, SdkError> {
+    let account = local_bus_account(state, account_id)?;
+    if account.client.contact_request_retryable(selector)? {
+        return Ok(None);
+    }
+    let Some(old) = account.client.account_db()?.client_record("identity", selector)? else {
+        return Ok(None);
+    };
+    if old["contact_identity_commitment"].as_str() != Some(card.root_commitment.as_str())
+        || account.client.contact_root_source(&old)? == crate::ContactRootSource::Lookup
+        || !account.client.friend_link_peer_is_accepted(&card.root_commitment)?
+    {
+        return Ok(None);
+    }
+    if old.get("home_node_id").and_then(Value::as_str).is_some_and(|home| !home.is_empty())
+        || account.client.born_v3_account.is_none()
+    {
+        return Err(ContactReason::AlreadyContact.into());
+    }
+    let home = account_home(state, account_id)?;
+    let own = local_bus_account(state, account_id)?.gateway_config.clone();
+    let root = state.config.data_root.clone();
+    card_gateway(card, &own, &root, &home).await?;
+    let account = local_bus_account_mut(state, account_id)?;
+    account.client.pin_contact_home(selector, &home.node_id)?;
+    let contact = account.client.contact_entry(selector)?;
+    Ok(Some(local_bus_ok(contact_response(account, &contact, None)?)))
 }
 
 fn contact_response(
@@ -164,31 +266,49 @@ fn contact_response(
     Ok(response)
 }
 
+struct CardHome {
+    gateway: GatewaySessionConfig,
+    node_id: String,
+    /// Public prekey base when the card's home is not this node. `None` uses the session directory.
+    directory_base: Option<String>,
+}
+
 async fn card_gateway(
     card: &ContactCardBody,
     own: &GatewaySessionConfig,
     root: &Path,
     home: &crate::NodeProfile,
-) -> Result<GatewaySessionConfig, SdkError> {
-    // A self-signed locator is not authority to contact an arbitrary host.
-    let home_origin = home.discovery_origin().map_err(|_| ContactReason::HomeProfileStale)?;
-    let card_origin =
-        crate::node::discovery_origin(&card.node.url).map_err(|_| ContactReason::InvalidCard)?;
-    if home_origin != card_origin {
-        return Err(SdkError::ContactHomeNodeUnsupported);
-    }
-    if crate::contact_node_fingerprint(&home.node_public_key)? != card.node.key_fingerprint {
-        return Err(ContactReason::NodeFingerprintMismatch.into());
-    }
-    let record = crate::node::fetch_client_record(&card.node.url).await.map_err(|e| match e {
-        SdkError::Transport(_) | SdkError::Io(_) => lookup_failure(e),
-        _ => ContactReason::ManifestInvalid.into(),
-    })?;
+) -> Result<CardHome, SdkError> {
+    // The card URL is the locator the user presented. The signed client record, not the
+    // URL text, names the home. A foreign record's gateway addresses are not dialed.
+    let record =
+        crate::node::fetch_client_record(&card.node.url).await.map_err(|error| match error {
+            SdkError::Transport(_) | SdkError::Io(_) => lookup_failure(error),
+            _ => ContactReason::ManifestInvalid.into(),
+        })?;
     if crate::contact_node_fingerprint(&record.node_public_key)? != card.node.key_fingerprint {
         return Err(ContactReason::NodeFingerprintMismatch.into());
     }
-    if home.node_id != record.node_id {
-        return Err(SdkError::ContactHomeNodeUnsupported);
+    let node_id = crate::client::recipient_home::node_id(Some(record.node_id.as_str()))
+        .ok_or(ContactReason::InvalidCard)?;
+    if node_id == home.node_id {
+        return same_home_gateway(card, own, root, home, record).await;
+    }
+    if record.prekey_http_url.is_empty() {
+        return Err(ContactReason::ManifestInvalid.into());
+    }
+    Ok(CardHome { gateway: own.clone(), node_id, directory_base: Some(record.prekey_http_url) })
+}
+
+async fn same_home_gateway(
+    card: &ContactCardBody,
+    own: &GatewaySessionConfig,
+    root: &Path,
+    home: &crate::NodeProfile,
+    record: ramflux_protocol::WellKnownClientRecord,
+) -> Result<CardHome, SdkError> {
+    if crate::contact_node_fingerprint(&home.node_public_key)? != card.node.key_fingerprint {
+        return Err(ContactReason::NodeFingerprintMismatch.into());
     }
     if home.node_public_key != record.node_public_key {
         return Err(ContactReason::NodeFingerprintMismatch.into());
@@ -198,15 +318,15 @@ async fn card_gateway(
     let mut gateway = own.clone();
     gateway.gateway_addr = crate::node::resolve_node_addr(&profile.gateway.quic_addr)
         .await
-        .map_err(|e| SdkError::ContactUnavailable(Box::new(e)))?;
+        .map_err(|error| SdkError::ContactUnavailable(Box::new(error)))?;
     gateway.tcp_gateway_addr = Some(
         crate::node::resolve_node_addr(&profile.gateway.tcp_addr)
             .await
-            .map_err(|e| SdkError::ContactUnavailable(Box::new(e)))?,
+            .map_err(|error| SdkError::ContactUnavailable(Box::new(error)))?,
     );
     gateway.server_name.clone_from(&profile.gateway.server_name);
     gateway.ca_cert = profile.write_ca(&root.join("contact_nodes"))?;
-    Ok(gateway)
+    Ok(CardHome { gateway, node_id: home.node_id.clone(), directory_base: None })
 }
 
 pub(super) async fn export(
@@ -215,7 +335,17 @@ pub(super) async fn export(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account = local_bus_account(state, id)?;
     let profile = account_home(state, id)?;
+    let agent_retired = account.connection.as_ref().is_some_and(|connection| {
+        connection
+            .snapshot()
+            .cause
+            .as_ref()
+            .is_some_and(crate::AccountNetworkingReason::agent_retired)
+    });
     if let Some(native) = &account.client.born_v3_account {
+        if agent_retired {
+            return Err(SdkError::AgentCreationRefused("agent_retired"));
+        }
         let now = crate::custody::network_now()?;
         let current =
             crate::custody::load_account_after_install(&state.config.data_root, id, now).await?;
@@ -362,7 +492,17 @@ fn parse_selector(
     let requester_is_peer = request.method == "contact.accept"
         && legacy.as_ref().is_none_or(|old| old.requester_id == selector);
     let replace_provisional_root = parsed.and_then(|a| a.replace_provisional_root);
+    // `@name` waits for the username directory (USERNAME-DIR-LIVE, #461). That
+    // directory is not on this branch, so a leading `@` is an invalid card.
+    username_directory_selector(&selector)?;
     Ok(Selection { legacy, card, selector, requester_is_peer, replace_provisional_root })
+}
+
+fn username_directory_selector(selector: &str) -> Result<(), SdkError> {
+    if selector.as_bytes().first() == Some(&b'@') {
+        return Err(ContactReason::InvalidCard.into());
+    }
+    Ok(())
 }
 
 fn account_home(state: &LocalBusDaemonState, id: &str) -> Result<crate::NodeProfile, SdkError> {

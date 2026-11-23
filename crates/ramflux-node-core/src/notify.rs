@@ -1783,17 +1783,27 @@ impl NotifyRedbStore {
     /// Returns an error when the ledger cannot be read or written.
     pub fn prune_wake_ledger(&self, now: u64) -> Result<usize, NodeCoreError> {
         let now = self.send_authority.retention_clock(now)?;
+        self.prune_wake_ledger_at(now)
+    }
+
+    // The caller has checkpointed the durable clock floor exactly once.
+    fn prune_wake_ledger_at(&self, now: u64) -> Result<usize, NodeCoreError> {
         self.prune_wake_copies(now)?;
         let txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        let removed = wake_admission::prune(&txn, now)? + {
+        let pending = wake_admission::prune(&txn, now)?;
+        let (ledger, changed) = {
             let mut table = txn
                 .open_table(NOTIFY_WAKE_LEDGER)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
             prune_open_ledger(&txn, &mut table, now)?
         };
-        txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        Ok(removed)
+        if pending != 0 || changed {
+            txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        } else {
+            txn.abort().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        }
+        Ok(pending + ledger)
     }
 
     fn load_wake_ledger_row(&self, wake_id: &str) -> Result<Option<WakeLedgerRow>, NodeCoreError> {
@@ -3031,7 +3041,7 @@ fn prune_open_ledger(
     txn: &redb::WriteTransaction,
     table: &mut redb::Table<'_, &'static str, &'static [u8]>,
     now: u64,
-) -> Result<usize, NodeCoreError> {
+) -> Result<(usize, bool), NodeCoreError> {
     let mut due =
         txn.open_table(NOTIFY_WAKE_DUE).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
     let candidates = due
@@ -3044,6 +3054,7 @@ fn prune_open_ledger(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut removed = 0;
+    let mut changed = false;
     for (until, key) in candidates {
         if until > now {
             break;
@@ -3056,8 +3067,9 @@ fn prune_open_ledger(
             removed += 1;
         }
         due.remove((until, key.as_str())).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        changed = true;
     }
-    Ok(removed)
+    Ok((removed, changed))
 }
 
 fn ledger_row(

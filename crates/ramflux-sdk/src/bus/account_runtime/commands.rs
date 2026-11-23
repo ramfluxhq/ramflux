@@ -59,6 +59,7 @@ impl AccountRuntime {
     }
 
     async fn preempt_network_tasks(&mut self) -> Result<(), SdkError> {
+        self.username.stop().await;
         self.pairing.stop().await;
         self.transfers.stop().await;
         if let Some(account) = self.state.accounts.get(&self.id) {
@@ -113,7 +114,7 @@ impl AccountRuntime {
                         Ok(()) => result,
                         Err(error) => Err(error),
                     };
-                    self.start_connection()?;
+                    self.start_connection_or_defer();
                     self.start_courier();
                     let result = result.and_then(|_| {
                         super::super::native_account::response(local_bus_account(
@@ -154,12 +155,25 @@ impl AccountRuntime {
                 let result = self.authorize_backup(generation);
                 let _ = reply.send(result);
             }
+            super::super::actor::PrivateCommand::ProjectActivity { activity, reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.store_owner_activity(*activity));
+                }
+            }
             super::super::actor::PrivateCommand::Agent(command) => self.apply_agent(*command),
             super::super::actor::PrivateCommand::Capture(reply) => {
                 if !reply.is_closed() {
                     let result = self.capture_backup();
                     let _ = reply.send(result);
                 }
+            }
+            #[cfg(feature = "c-abi")]
+            super::super::actor::PrivateCommand::ReleaseFiles { reply } => {
+                let _ = reply.send(self.release_for_suspend().await);
+            }
+            #[cfg(feature = "c-abi")]
+            super::super::actor::PrivateCommand::ReopenFiles { reply } => {
+                let _ = reply.send(self.reopen_from_suspend());
             }
         }
         Ok(())
@@ -170,7 +184,23 @@ impl AccountRuntime {
             .await
     }
 
+    async fn park_command(&mut self, command: &mut AccountCommand) -> Result<bool, SdkError> {
+        if command.private.as_ref().is_some_and(super::background::is_file_command) {
+            let Some(backup) = command.private.take() else { return Ok(false) };
+            self.apply_private(backup, &command.request).await?;
+            return Ok(true);
+        }
+        if self.state.config.background.load(std::sync::atomic::Ordering::Acquire) {
+            super::background::reject_suspended(command);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     async fn apply_command(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
+        if self.park_command(&mut command).await? {
+            return Ok(false);
+        }
         self.refresh_networking_expiry().await;
         if command.admission.as_ref().is_some_and(|admission| !admission.claim()) {
             return Ok(false);
@@ -218,16 +248,13 @@ impl AccountRuntime {
                 return Ok(false);
             }
         }
-        if matches!(
-            command.request.method.as_str(),
-            "device.transfer.begin"
-                | "device.transfer.status"
-                | "device.pair.join"
-                | "device.transfer.join"
-                | "object.fetch"
-                | "object.put.finish"
-        ) {
+        if owned_command(&command.request.method) {
             self.start_owned_command(command, reply).await?;
+            return Ok(false);
+        }
+        if super::super::username_directory::handles(&command.request.method) {
+            // Boxed: the username handler's future would otherwise enlarge every account command future on the stack.
+            Box::pin(self.start_username(command, reply)).await;
             return Ok(false);
         }
         #[cfg(test)]
@@ -296,7 +323,7 @@ impl AccountRuntime {
             Ok(()) => result,
             Err(error) => Err(error),
         };
-        self.start_connection()?;
+        self.start_connection_or_defer();
         self.start_courier();
         if let Some(courier) = &self.courier {
             courier.signal();
@@ -308,14 +335,50 @@ impl AccountRuntime {
         }
         let result = match self.publish(&command.request).await {
             Ok(()) => result,
+            // The progress row is already committed. A later outbox wake can fail
+            // with the writer pause, which the bus reports as ValidationFailed.
+            // The host does not retry that code, so the owner copy must still go out.
+            Err(error) if result.is_ok() && command.request.method == "agent.progress" => {
+                tracing::warn!(
+                    account_id = %self.id,
+                    %error,
+                    "agent progress publication deferred; owner copy remains"
+                );
+                result
+            }
             Err(error) => Err(error),
         };
         let _ = reply.send(result);
-        Ok(command.request.method == "account.lock" && self.state.accounts.is_empty())
+        Ok(matches!(command.request.method.as_str(), "account.lock" | "account.sign_out")
+            && self.state.accounts.is_empty())
     }
 }
 
 impl AccountRuntime {
+    fn store_owner_activity(
+        &self,
+        activity: super::super::actor::OwnerActivity,
+    ) -> Result<(), SdkError> {
+        if activity.owner_id != self.id {
+            tracing::warn!(
+                owner_id = %activity.owner_id,
+                account_id = %self.id,
+                reason_code = "owner_actor_mismatch",
+                "agent activity owner copy was not stored"
+            );
+            return Err(SdkError::AccountNotOpen(activity.owner_id));
+        }
+        // This thread's pause scope belongs to whichever account last armed it.
+        // The copy is one short command; a foreign scope must not refuse it.
+        let _guard = ramflux_storage::writer_budget::ServiceGuard::enter();
+        let client = &local_bus_account(&self.state, &self.id)?.client;
+        crate::client::agent_activity::store_owner_copy(
+            client,
+            &activity.state_kind,
+            activity.record,
+        )
+    }
+
     pub(super) async fn start_owned_command(
         &mut self,
         command: AccountCommand,
@@ -334,4 +397,16 @@ impl AccountRuntime {
         }
         Ok(())
     }
+}
+
+fn owned_command(method: &str) -> bool {
+    matches!(
+        method,
+        "device.transfer.begin"
+            | "device.transfer.status"
+            | "device.pair.join"
+            | "device.transfer.join"
+            | "object.fetch"
+            | "object.put.finish"
+    )
 }

@@ -98,12 +98,12 @@ if (process.argv.includes("--test")) {
 } else {
   const base = new URL("./", import.meta.url);
 
-  const result = await build({ entryPoints: [fileURLToPath(new URL("form.tsx", base))],
+  const result = await build({ absWorkingDir: fileURLToPath(base), entryPoints: [fileURLToPath(new URL("form.tsx", base))],
     bundle: true, format: "esm", platform: "neutral", target: "es2020", jsxFactory: "h",
     alias: {"@rf/card":fileURLToPath(new URL("primitives.ts",base))}, legalComments: "none", write: false, metafile: true });
   const allowedFiles=new Set(["form.tsx","primitives.ts","format.ts","presentation-types.ts","../../../src/generated/RFCardComponents.tsx","../../../src/generated/RFCardStyles.ts","../../../src/generated/rf-tokens.ts"].map(p=>resolve(fileURLToPath(base),p)));
   for(const input of Object.keys(result.metafile.inputs)) {
-    const path=resolve(input);
+    const path=resolve(fileURLToPath(base),input);
     if(!allowedFiles.has(path))throw Error("only manifest-pinned generated and project sources are allowed: "+relative(fileURLToPath(base),path));
     lintSource(await readFile(path,"utf8"),path===resolve(fileURLToPath(base),"../../../src/generated/RFCardComponents.tsx"),path===resolve(fileURLToPath(base),"primitives.ts"));
   }

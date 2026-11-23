@@ -9,8 +9,8 @@ use crate::custody::agent_creation::{
     AgentCreationRecord, AgentCreationStore, AgentStep, commit_approved,
 };
 
-/// `AgentRecord.cleanup` of a deleted agent: the published custody record stays on the node.
-const NODE_RECORD_RETAINED: &str = "node_record_retained";
+/// `AgentRecord.cleanup` after this call's node retirement succeeded.
+const NODE_RETIRED: &str = "node_retired";
 
 impl AccountRuntime {
     /// Carries the agent records this device wrote to the owner's other devices. The record
@@ -75,6 +75,7 @@ impl AccountRuntime {
             }
             AgentPrivate::Call { call, reply } => self.reply_agent_call(call, reply),
             AgentPrivate::HomeNode { reply } => self.reply_agent_home_node(reply),
+            AgentPrivate::Admission { reply } => self.reply_pairing_admission(reply),
         }
     }
 
@@ -137,17 +138,9 @@ impl AccountRuntime {
                 }
             }
             AgentCall::Delete(mutation) => {
-                let record = account.client.agent_delete(
-                    vault.as_ref(),
-                    &mutation.agent_anchor,
-                    mutation.confirmed,
-                    now,
-                )?;
-                let mut wire = crate::agent_record::to_wire(&record);
-                // The custody record published on the home node is not retired by this module.
-                wire.cleanup = NODE_RECORD_RETAINED.into();
-                g::AgentConfigResult { value: Some(g::agent_config_result::Value::Record(wire)) }
+                deleted_record(&account.client, vault.as_ref(), &mutation, now)?
             }
+            AgentCall::Retire(mutation) => retired_record(&account.client, &mutation, now)?,
             AgentCall::Watch(watch) => {
                 let changes = account.client.agent_record_changes(&watch.journal_cursor)?;
                 let cursor = changes.cursor.to_string();
@@ -209,4 +202,65 @@ impl AccountRuntime {
         let account = self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
         Ok(account.client.account_db()?.load_actor_state::<String>("account/node-id")?)
     }
+
+    /// Answer the admission-reader read by private command; a closed reply channel skips it.
+    pub(super) fn reply_pairing_admission(
+        &self,
+        reply: tokio::sync::oneshot::Sender<
+            Result<Option<std::sync::Arc<ramflux_storage::PairingAdmissionReader>>, SdkError>,
+        >,
+    ) {
+        if !reply.is_closed() {
+            let _ = reply.send(self.pairing_admission());
+        }
+    }
+
+    /// The still-open reader of this account's unlocked DB. A closed reader is `None`.
+    pub(super) fn pairing_admission(
+        &self,
+    ) -> Result<Option<std::sync::Arc<ramflux_storage::PairingAdmissionReader>>, SdkError> {
+        let account = self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
+        if let Some(reader) = account.gateway_config.pairing_admission.clone()
+            && reader.is_open()
+        {
+            return Ok(Some(reader));
+        }
+        let Some(db) = account.client.active_account_db.as_ref() else {
+            return Ok(None);
+        };
+        let reader = std::sync::Arc::new(db.pairing_admission_reader());
+        Ok(reader.is_open().then_some(reader))
+    }
+}
+
+fn deleted_record(
+    client: &crate::RamfluxClient,
+    vault: &dyn crate::custody::PrimaryVault,
+    mutation: &ramflux_protocol::message::AgentMutation,
+    now: u64,
+) -> Result<ramflux_protocol::message::AgentConfigResult, SdkError> {
+    let record = client.agent_delete(vault, &mutation.agent_anchor, mutation.confirmed, now)?;
+    Ok(record_result(&record))
+}
+
+/// Local half of `agent.retire`: lifecycle `X` and the broadcast. The phone keeps the agent's
+/// vault items; the desktop that receives the metadata destroys them.
+fn retired_record(
+    client: &crate::RamfluxClient,
+    mutation: &ramflux_protocol::message::AgentMutation,
+    now: u64,
+) -> Result<ramflux_protocol::message::AgentConfigResult, SdkError> {
+    let current = client.agent_record_get(&mutation.agent_anchor)?;
+    let record =
+        client.agent_retire(&mutation.agent_anchor, &current.identity, mutation.confirmed, now)?;
+    Ok(record_result(&record))
+}
+
+fn record_result(
+    record: &crate::agent_record::StoredAgentRecord,
+) -> ramflux_protocol::message::AgentConfigResult {
+    use ramflux_protocol::message as g;
+    let mut wire = crate::agent_record::to_wire(record);
+    wire.cleanup = NODE_RETIRED.into();
+    g::AgentConfigResult { value: Some(g::agent_config_result::Value::Record(wire)) }
 }

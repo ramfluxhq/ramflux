@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Refresh a ready data epoch while this task is inside a local section.
-//! The relay drops the epoch after 10s without a touch. A probe uses an empty
+//! The relay drops the epoch after 10s without a touch. The first probe waits
+//! one period, so a short section does not poll. A probe uses an empty
 //! acknowledgement so a queued frame stays for the real poll.
 
 use super::TailJob;
@@ -39,6 +40,9 @@ pub(super) async fn retain_relay_activity<T>(
     let task = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(REFRESH);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // `interval` completes its first tick immediately. Reset so the probe
+        // waits one period and a short section sends no extra poll.
+        ticker.reset();
         loop {
             tokio::select! {
                 biased;

@@ -14,17 +14,20 @@ itest-memory-vault = ["ramflux-sdk/itest-memory-vault"]
 ramflux-core.workspace = true
 ramflux-sdk.workspace = true
 ramflux-protocol.workspace = true
+ramflux-prx-client.workspace = true
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 clap.workspace = true
 keyring.workspace = true
 libc = "0.2"
-rustix = { version = "1.1", features = ["process"] }
+rustix = { version = "1.1", features = ["fs", "process"] }
+sha1 = "0.10.7"
 zeroize.workspace = true
 reqwest.workspace = true
 time = { version = "0.3", features = ["parsing"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal", "net", "io-util", "sync"] }
 
 [lints]
 workspace = true

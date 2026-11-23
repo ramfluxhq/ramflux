@@ -23,6 +23,8 @@ pub(super) enum AgentCall {
     Record(String),
     /// `agent.delete` (contract 2 `AgentMutation`).
     Delete(Box<g::AgentMutation>),
+    /// `agent.retire` (contract 2 `AgentMutation`): the current primary retires the node record.
+    Retire(Box<g::AgentMutation>),
     /// `agent.watch` (contract 2 `AgentWatch`): the changes after a cursor.
     Watch(Box<g::AgentWatch>),
     /// `agent.persona.edit` (contract 2 `AgentPersonaEdit`).
@@ -41,6 +43,7 @@ pub(super) fn handles(method: &str) -> bool {
             | "agent.get"
             | "agent.watch"
             | "agent.delete"
+            | "agent.retire"
             | "agent.persona.edit"
             | "agent.access.set"
     )
@@ -89,6 +92,7 @@ async fn apply(
         }
         "agent.watch" => AgentCall::Watch(Box::new(decode(body)?)),
         "agent.delete" => AgentCall::Delete(Box::new(decode(body)?)),
+        "agent.retire" => AgentCall::Retire(Box::new(decode(body)?)),
         "agent.persona.edit" => AgentCall::PersonaEdit(Box::new(decode(body)?)),
         "agent.access.set" => AgentCall::AccessSet(Box::new(decode(body)?)),
         _ => return Err(SdkError::CustodySetupInvalid),
@@ -97,11 +101,25 @@ async fn apply(
         AgentCall::Get(id) => Some(id.clone()),
         _ => None,
     };
+    let publish = limit_publish(&call);
+    let purge = purge_anchor(&call);
     if let AgentCall::Delete(mutation) = &call {
         // The running session of the agent goes first (decision r23 F1 a).
         supervisor.close_agent_before_delete(&account_id, mutation).await?;
     }
+    // An unconfirmed call skips the node proof and lets the actor return `confirmation_required`.
+    if mutation_confirmed(&call) {
+        prove_node_retirement(supervisor, &actor, &account_id, &call).await?;
+    }
     let result = actor.agent_call(call).await?;
+    crate::prx_owner::after_agent(
+        supervisor.config.prx.as_deref(),
+        &supervisor.config.data_root,
+        publish.as_ref(),
+        purge.as_deref(),
+        &result,
+    )
+    .await?;
     match read_id {
         Some(id) if advances_on_read(&result) => {
             // A failed advance leaves the request where it was; the reread reports that state.
@@ -110,6 +128,71 @@ async fn apply(
             actor.agent_call(AgentCall::Get(id)).await
         }
         _ => Ok(result),
+    }
+}
+
+fn limit_publish(call: &AgentCall) -> Option<crate::prx_owner::LimitPublish> {
+    let AgentCall::Create(body) = call else {
+        return None;
+    };
+    let config = body.config.as_ref()?;
+    let limits = config.limits.as_ref()?;
+    if limits.max_concurrent_turns.is_none() && limits.max_cost_per_day_cents.is_none() {
+        return None;
+    }
+    Some(crate::prx_owner::LimitPublish {
+        provider: config.provider.clone(),
+        model: config.model.clone(),
+        tools: config.tools.clone(),
+        turns: limits.max_concurrent_turns,
+        cost: limits.max_cost_per_day_cents,
+    })
+}
+
+fn purge_anchor(call: &AgentCall) -> Option<String> {
+    match call {
+        AgentCall::Delete(body) => Some(body.agent_anchor.clone()),
+        _ => None,
+    }
+}
+
+fn mutation_confirmed(call: &AgentCall) -> bool {
+    match call {
+        AgentCall::Delete(mutation) | AgentCall::Retire(mutation) => {
+            mutation.confirmed == Some(true)
+        }
+        _ => false,
+    }
+}
+
+/// Node retirement before any local delete or retire. A failed proof leaves local state so a
+/// retry can still sign.
+async fn prove_node_retirement(
+    supervisor: &Supervisor,
+    actor: &AccountActor,
+    human: &str,
+    call: &AgentCall,
+) -> Result<(), SdkError> {
+    match call {
+        AgentCall::Delete(mutation) => {
+            super::agent_retire::prove_agent_delete(
+                supervisor,
+                actor,
+                human,
+                &mutation.agent_anchor,
+            )
+            .await
+        }
+        AgentCall::Retire(mutation) => {
+            super::agent_retire::prove_primary_retire(
+                supervisor,
+                actor,
+                human,
+                &mutation.agent_anchor,
+            )
+            .await
+        }
+        _ => Ok(()),
     }
 }
 

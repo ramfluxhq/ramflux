@@ -43,23 +43,20 @@ try{
  const failures=[],intents=[],slots=[];
  function view(){const root=document.createElement('main');document.body.append(root);return {root,card:new CardView(root,workerURL,(...a)=>intents.push(a),s=>slots.push(s),s=>failures.push(s),presentation),worker:instances.at(-1)}}
  const a=view(),b=view();assert.throws(()=>view(),new RegExp(presentation.strings.capacity));b.card.dispose();
- const n=(key,kind,value='',attrs={})=>({key,kind,value,text:key,action:null,children:[],attrs});
- const batch=(previous_version,version,mutations)=>({session:1,version,value:{previous_version,version,mutations}});
+
+ const n=(key,kind,value='',attrs={})=>({key,component_id:key,source_instance:[],scope:'root',parent_key:key==='root'?null:'root',slot:{slot:key==='root'?'root':'children',position:0},kind,children:[],attrs:{value,disabled:false,errors:[],accessibility:{live:'off'},...attrs}});
+ const batch=(previous_version,version,mutations)=>({session:1,version,value:{schema:'ramflux.card.mutations.v1',session:1,previous_version,version,signed_version:1,signed_hash:'shown',edit_seq:version-1,mutations,host_slots:[]}});
  const up=(node,parent=null,index=0)=>({op:'upsert',node,parent,index});
  const answer=(worker,value)=>{const request=worker.port.sent.shift();assert(request);worker.port.reply({seq:request.seq,json:JSON.stringify(value)});return request};
  const tick=async()=>{await Promise.resolve();await Promise.resolve();await Promise.resolve()};
- const opening=a.card.open('{}');await tick();answer(a.worker,batch(0,1,[up(n('root','column')),up(n('first','text_field','old'),'root'),up(n('second','number','20',{minimum:18,maximum:80}),'root',1),up(n('submit','submit'),'root',2)]));await opening;
- const first=a.root.querySelector('input[type=text]'),number=a.root.querySelector('input[type=number]'),button=a.root.querySelector('button');
- first.focus();first.value='new';first.dispatchEvent(new window.Event('change'));number.value='21';number.dispatchEvent(new window.Event('change'));await tick();assert.equal(a.worker.port.sent.length,2);assert(button.disabled);button.click();assert.equal(a.worker.port.sent.length,2);
- const firstEdit=answer(a.worker,batch(1,2,[up(n('first','text_field','new'),'root')]));assert.equal(JSON.parse(firstEdit.json).token.version,1);assert.equal(document.activeElement,first,'native input focus survives');
- const host=a.card.update('{}');await tick();const secondRequest=a.worker.port.sent.shift();const hostRequest=a.worker.port.sent.shift();assert(secondRequest&&hostRequest);
- a.worker.port.reply({seq:hostRequest.seq,json:JSON.stringify(batch(2,3,[up(n('second','number','40'),'root',1)]))});await host;
- a.worker.port.reply({seq:secondRequest.seq,json:JSON.stringify({session:1,version:3,value:{result:'stale_dropped'}})});await tick();assert.equal(number.value,'40');assert(failures.includes(presentation.strings.stale_edit));assert.equal(intents.length,0);
- for(const value of ['', '1.5']){number.value=value;number.dispatchEvent(new window.Event('change'));await tick();assert.equal(a.worker.port.sent.length,0);assert(button.disabled);assert.equal(a.root.querySelector('[role=alert]').textContent,presentation.strings.form_number)}
- number.value='17';number.dispatchEvent(new window.Event('change'));await tick();answer(a.worker,{session:1,version:4,value:{result:'validation',batch:{previous_version:3,version:4,mutations:[up(n('second','number','40',{error:presentation.strings.form_range}),'root',1)]}}});await tick();assert.equal(number.value,'40');assert.equal(a.root.querySelector('[role=alert]').textContent,presentation.strings.form_range);
- const changed=a.card.present(registry.resolve('zh-CN','dark',false));await tick();answer(a.worker,batch(4,5,[up(n('first','text_field','new'),'root')]));await changed;assert.equal(a.root.lang,'zh-CN');
+ const opening=a.card.open('{}');await tick();answer(a.worker,batch(0,1,[up(n('root','Column')),up(n('first','TextField','old'),'root'),up(n('second','Slider',20,{min:18,max:80}),'root',1),up(n('submit','Button'),'root',2)]));await opening;
+ const first=a.root.querySelector('input[type=text]');first.focus();first.value='new';first.dispatchEvent(new window.Event('change'));await tick();assert.equal(a.worker.port.sent.length,1);assert(a.root.querySelector('button').disabled);
+ const firstEdit=answer(a.worker,batch(1,2,[up(n('first','TextField','new'),'root')]));await tick();const token=JSON.parse(firstEdit.json).token;
+ assert.deepEqual(token,{session:1,signedVersion:1,editSeq:0,treeVersion:1,key:'first'});assert.equal(document.activeElement.dataset.controlKey,'first','native focus restores by key');
+ const second=a.root.querySelector('input[type=range]');second.value='21';second.dispatchEvent(new window.Event('change'));await tick();answer(a.worker,{session:1,version:2,value:{result:'stale_dropped'}});await tick();assert(failures.includes(presentation.strings.stale_edit));assert.equal(intents.length,0);
+ const changed=a.card.present(registry.resolve('zh-CN','dark',false));await tick();answer(a.worker,batch(2,3,[up(n('first','TextField','new'),'root')]));await changed;assert.equal(a.root.lang,'zh-CN');
  const requests=Array.from({length:32},()=>a.card.update('{}').catch(e=>e));await assert.rejects(a.card.update('{}'),new RegExp(registry.resolve('zh-CN','dark',false).strings.busy));await tick();
- const request=a.worker.port.sent.shift();a.worker.port.reply({seq:request.seq,json:JSON.stringify(batch(999,6,[]))});await Promise.all(requests);assert(a.root.inert);assert(a.worker.terminated);assert.deepEqual(slots.at(-1),[]);
+ const request=a.worker.port.sent.shift();a.worker.port.reply({seq:request.seq,json:JSON.stringify(batch(999,4,[]))});await Promise.all(requests);assert(a.root.inert);assert(a.worker.terminated);assert.deepEqual(slots.at(-1),[]);
  const replacement=view();const pending=replacement.card.open('{}').catch(e=>e);replacement.card.dispose();assert(await pending instanceof Error);assert(replacement.worker.terminated);a.card.dispose();
  const terminal=view();const pendingTerminal=terminal.card.open('{}').catch(e=>e);await tick();const terminalRequest=terminal.worker.port.sent.shift();terminal.worker.port.reply({seq:terminalRequest.seq,error:'content_unavailable',terminal:true});assert(await pendingTerminal instanceof Error);assert(terminal.root.inert);assert(terminal.worker.terminated);terminal.card.dispose();
  const recovery=view();const malformed=recovery.card.open('{').catch(e=>e);await tick();const malformedRequest=recovery.worker.port.sent.shift();recovery.worker.port.reply({seq:malformedRequest.seq,error:'content_unavailable',terminal:false});assert(await malformed instanceof Error);assert(!recovery.worker.terminated);recovery.card.dispose();
@@ -67,16 +64,18 @@ try{
   const fixture=view();let version=0;
   for(const suffix of ['mount','edit']){
    const mutations=JSON.parse(await readFile(new URL('../fixtures/'+name+'.'+suffix+'.json',import.meta.url)));
-   const request=suffix==='mount'?fixture.card.open('{}'):fixture.card.update('{}');await tick();
-   answer(fixture.worker,{session:1,version:mutations.version,value:mutations});await request;version=mutations.version;
+   const request=suffix==='mount'?fixture.card.open('{}'):fixture.card.update('{}');await tick();answer(fixture.worker,{session:1,version:mutations.version,value:mutations});await request;version=mutations.version;
    for(const mutation of mutations.mutations){
-    const element=fixture.root.querySelector('[data-card-key="'+mutation.key+'"]');
-    if(mutation.op==='remove'){assert(!element);continue}
-    const node=mutation.node,shown=fixture.root.querySelector('[data-card-key="'+node.key+'"]');assert(shown,name+' '+node.key);
-    if(node.text)assert(shown.textContent.includes(node.text),name+' fixture text');
+    const key=mutation.op==='remove'?mutation.key:mutation.node.key;
+    const shown=Array.from(fixture.root.querySelectorAll('[data-card-key]')).find(element=>element.dataset.cardKey===key);
+    if(mutation.op==='remove'){assert(!shown);continue}
+    // Hidden tab/Modal content remains in the staged tree and has no DOM hit targets.
+    if(mutation.node.attrs.disabled||['Modal'].includes(mutation.node.kind))continue;
+    if(shown&&typeof mutation.node.attrs.text==='string')assert(shown.textContent.includes(mutation.node.attrs.text),name+' opaque text');
    }
   }
-  const removed=fixture.card.update('{}');await tick();answer(fixture.worker,batch(version,version+1,[{op:'remove',key:'root'}]));await removed;assert.equal(fixture.root.childElementCount,0);fixture.card.dispose();
+  const initial=JSON.parse(await readFile(new URL('../fixtures/'+name+'.tree.json',import.meta.url)));
+  const removed=fixture.card.suspend();await tick();answer(fixture.worker,{session:1,version:version+1,value:{schema:'ramflux.card.mutations.v1',session:1,previous_version:version,version:version+1,signed_version:2,signed_hash:'shown',edit_seq:0,mutations:initial.nodes.toReversed().map(node=>({op:'remove',key:node.key})),host_slots:[]}});await removed;assert.equal(fixture.root.childElementCount,0);fixture.card.dispose();
  }
  await window.happyDOM.close();console.log('WEB_ADAPTER_TESTS_OK');
 }finally{clearTimeout(deadline);await rm(directory,{recursive:true,force:true})}

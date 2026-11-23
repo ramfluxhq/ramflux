@@ -417,14 +417,44 @@ impl BornAccount {
         &self,
         vault: &dyn PrimaryVault,
     ) -> Result<super::PrimarySigningLease, SdkError> {
+        self.primary_lease(vault, false)
+    }
+    /// The signer of this account's contact card and contact consent. A human signs on its
+    /// primary device. An agent's record names its custodian's primary phone as primary, and that
+    /// phone never holds agent keys: the agent signs with its own self-signing key on the device
+    /// that hosts it. Verifiers check only the master certificate's self-signing key.
+    fn contact_signer(
+        &self,
+        vault: &dyn PrimaryVault,
+    ) -> Result<super::PrimarySigningLease, SdkError> {
+        self.primary_lease(vault, self.hosts_agent_locally()?)
+    }
+    /// Whether this is a headless agent custodied by a local human and this device is the agent's
+    /// own device.
+    fn hosts_agent_locally(&self) -> Result<bool, SdkError> {
+        let body = &self.record().body;
+        if body.principal_kind != ramflux_protocol::PrincipalKind::HeadlessAi
+            || self.stored.custodian_account_id.is_none()
+        {
+            return Ok(false);
+        }
+        let local = self.local_device_id()?;
+        Ok(body.devices.iter().any(|entry| entry.device_id == local))
+    }
+    fn primary_lease(
+        &self,
+        vault: &dyn PrimaryVault,
+        hosted_agent: bool,
+    ) -> Result<super::PrimarySigningLease, SdkError> {
         self.require_current_snapshot()?;
         if self.branch_pending() || self.authority_blocked {
             return Err(SdkError::NetworkingPending);
         }
         require_current_authority(&self.stored.pins, &self.verified)?;
         if self.stored.primary_vault_ref.is_empty()
-            || self.record().body.master_certificate.body.primary_device_ref.device_id
-                != self.local_device_id()?
+            || (!hosted_agent
+                && self.record().body.master_certificate.body.primary_device_ref.device_id
+                    != self.local_device_id()?)
         {
             return Err(SdkError::PairingCode("PrimaryRequired"));
         }
@@ -453,7 +483,7 @@ impl BornAccount {
             return Err(SdkError::NetworkingPending);
         }
         require_current_authority(&self.stored.pins, &self.verified)?;
-        Ok(self.group_primary(vault)?.sign_contact_card_v3(&self.verified, body, now)?)
+        Ok(self.contact_signer(vault)?.sign_contact_card_v3(&self.verified, body, now)?)
     }
     #[must_use]
     pub(crate) const fn branch_pending(&self) -> bool {
@@ -481,19 +511,30 @@ impl BornAccount {
     pub fn local_account_id(&self) -> &str {
         &self.stored.local_account_id
     }
-    /// Resolve renderer authority from the local creator registry and verified custody records.
+    /// Whether `anchor` is this owner's agent for rendering.
+    ///
+    /// `publication_bound` is the pinned current publication check. Both the hosted-account path
+    /// and the phone path (no local account for `anchor`) require it, plus a non-retired record.
+    /// A hosted account whose anchor matches must still agree; disagreement fails closed.
     pub(crate) fn owns_surface_agent(
         &self,
         author: &str,
         anchor: &str,
         now: u64,
+        publication_bound: bool,
     ) -> Result<bool, SdkError> {
-        if self.authority_blocked
+        if !publication_bound
+            || self.authority_blocked
             || self.record().body.principal_kind != ramflux_protocol::PrincipalKind::Human
+            || !self.records_own_agent(anchor)
         {
             return Ok(false);
         }
+        self.hosted_agent_agrees(author, anchor, now)
+    }
+    fn hosted_agent_agrees(&self, author: &str, anchor: &str, now: u64) -> Result<bool, SdkError> {
         let root = self.networking_path.parent().and_then(Path::parent).ok_or_else(invalid)?;
+        let mut saw_anchor = false;
         for summary in list_accounts(root, now)? {
             let Some(id) = summary.get("local_account_id").and_then(serde_json::Value::as_str)
             else {
@@ -502,25 +543,35 @@ impl BornAccount {
             let Ok(agent) = load_account(root, id, now) else {
                 continue;
             };
-            if !agent.authority_blocked
-                && agent.record().body.principal_id == author
-                && agent.record().body.account_anchor == anchor
-                && agent.record().body.principal_kind == ramflux_protocol::PrincipalKind::HeadlessAi
-                && agent.stored.custodian_account_id.as_ref().is_some_and(|id| {
-                    load_account(root, id, now).is_ok_and(|custodian| {
-                        !custodian.authority_blocked
-                            && custodian.record().body.account_anchor
-                                == self.record().body.account_anchor
-                    })
-                })
-                && agent.record().body.profile.custodian.as_ref().is_some_and(|custodian| {
-                    custodian.account_anchor == self.record().body.account_anchor
-                })
-            {
+            if agent.record().body.account_anchor != anchor {
+                continue;
+            }
+            saw_anchor = true;
+            if hosted_account_matches(self, &agent, author, root, now) {
                 return Ok(true);
             }
         }
-        Ok(false)
+        Ok(!saw_anchor)
+    }
+    /// Whether this owner's agent record names `anchor` as one of its live agents. The record is
+    /// a discovery hint written when a creation completes and synced to every own device. It is
+    /// not ownership by itself: rendering and acceptance also require the pinned publication.
+    /// A record that cannot be read is not an ownership claim.
+    pub(crate) fn records_own_agent(&self, anchor: &str) -> bool {
+        let record = self.agent_creation_store().and_then(|store| {
+            crate::agent_record::AgentRecordStore::at(store.agent_record_dir()).load(anchor)
+        });
+        match record {
+            Ok(Some(record)) => {
+                record.lifecycle == crate::agent_record::LIFECYCLE_ACTIVE
+                    && record.custodian_anchor == self.record().body.account_anchor
+            }
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(%error, "agent record unreadable; surface author not treated as own");
+                false
+            }
+        }
     }
     /// The human account that custodies this headless account on this root, if any.
     #[must_use]
@@ -560,6 +611,14 @@ impl BornAccount {
     #[must_use]
     pub(crate) fn primary_vault_ref(&self) -> &str {
         &self.stored.primary_vault_ref
+    }
+    /// Vault reference of a headless participant's one-use data passphrase, when one was stored.
+    #[must_use]
+    pub(crate) fn provisioning_vault_ref(&self) -> Option<&str> {
+        self.stored
+            .agent_provisioning_vault_ref
+            .as_deref()
+            .filter(|reference| !reference.is_empty())
     }
     #[must_use]
     pub(crate) fn publication(&self) -> ramflux_protocol::custody::Publication {
@@ -675,6 +734,37 @@ pub(crate) fn custody_vault_reference(
     ))
 }
 
+/// Removes `custody_accounts/{id}`. A symlink at the directory or any child is refused.
+///
+/// # Errors
+/// `Storage(Integrity("account erase symlink"))` when the path or a child is a symlink
+/// or the path is not a directory. A missing directory succeeds.
+pub(crate) fn remove_custody_tree(root: &Path, id: &str) -> Result<(), SdkError> {
+    let dir = directory(root, id)?;
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+            return Err(erase_symlink());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_symlink() {
+            return Err(erase_symlink());
+        }
+    }
+    match fs::remove_dir_all(&dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other.map_err(SdkError::from),
+    }
+}
+
+fn erase_symlink() -> SdkError {
+    SdkError::Storage(ramflux_storage::StorageError::Integrity("account erase symlink"))
+}
+
 pub(crate) fn account_exists(root: &Path, id: &str) -> Result<bool, SdkError> {
     // This query also guards legacy paths: do not impose new identifier rules on them.
     if valid_id(id).is_err() {
@@ -751,6 +841,31 @@ fn reconcile_marker(
         Err(error) => Err(error.into()),
     }
 }
+fn hosted_account_matches(
+    owner: &BornAccount,
+    agent: &BornAccount,
+    author: &str,
+    root: &Path,
+    now: u64,
+) -> bool {
+    !agent.authority_blocked
+        && agent.record().body.principal_id == author
+        && agent.record().body.principal_kind == ramflux_protocol::PrincipalKind::HeadlessAi
+        && agent.stored.custodian_account_id.as_ref().is_some_and(|id| {
+            load_account(root, id, now).is_ok_and(|custodian| {
+                !custodian.authority_blocked
+                    && custodian.record().body.account_anchor == owner.record().body.account_anchor
+            })
+        })
+        && agent
+            .record()
+            .body
+            .profile
+            .custodian
+            .as_ref()
+            .is_some_and(|custodian| custodian.account_anchor == owner.record().body.account_anchor)
+}
+
 pub(crate) fn list_accounts(root: &Path, now: u64) -> Result<Vec<serde_json::Value>, SdkError> {
     let dir = root.join("custody_accounts");
     if !dir.try_exists()? {
@@ -1280,7 +1395,7 @@ impl BornAccount {
         {
             return Err(invalid());
         }
-        let primary = self.group_primary(vault)?;
+        let primary = self.contact_signer(vault)?;
         if primary.public_key()
             != current.envelope().body.master_certificate.body.self_signing_public_key
         {

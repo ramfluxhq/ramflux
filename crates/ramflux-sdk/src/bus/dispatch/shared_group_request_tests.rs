@@ -208,12 +208,9 @@ async fn reject_demoted_federated_add(
         crate::client::shared_group::GroupControlBody::Request {
             request: request.clone(),
             federation: Some(LocalBusFederationRoute {
-                federation_url: "invalid://must-not-fetch".into(),
                 source_node_id: "source".into(),
                 target_node_id: "remote".into(),
                 required_capability: "opaque_event".into(),
-                admin_token: None,
-                recipient_prekey_url: Some("invalid://must-not-fetch".into()),
             }),
         },
     );

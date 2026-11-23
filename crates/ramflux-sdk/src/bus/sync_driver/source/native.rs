@@ -56,11 +56,16 @@ async fn resolve(
     preview: Preview,
     candidate: Option<SdkDeviceManifestResponse>,
 ) -> Result<(), SdkError> {
-    let Some(root) = preview.root.as_deref() else { return Ok(()) };
+    let Some(root) = preview.root.clone() else { return Ok(()) };
     let manifest = if let Some(manifest) = candidate {
         manifest
     } else {
-        super::fetch_inbound_manifest(config, root).await?
+        let envelope = entry.envelope.clone();
+        let origin_root = root.clone();
+        let origin = writer
+            .apply(move |account| account.client.sender_manifest_origin(&envelope, &origin_root))
+            .await?;
+        super::fetch_sender_manifest(config, super::Query { root, origin }).await?
     };
     let entry = entry.clone();
     let (history, entry, preview, manifest) = writer

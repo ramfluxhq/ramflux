@@ -12,6 +12,9 @@ use super::{
 };
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::custody::pairing::PairingWire;
+
+mod agent_renewal;
+mod native_renew;
 pub(super) struct ProofAttempt {
     pub action: CustodyProofAction,
     pub proof: Box<Envelope<BranchProofV3>>,
@@ -277,6 +280,7 @@ impl CustodyService {
         let now = now.saturating_add(tick.elapsed().as_secs());
         let tick = tick + tick.elapsed();
         let proof = attempt.proof;
+        let fence = super::agent_session::FenceCall { router, store, now };
         let _home = if matches!(
             attempt.action,
             CustodyProofAction::Register { .. } | CustodyProofAction::OpenSession
@@ -323,12 +327,10 @@ impl CustodyService {
                 Ok(CustodyServerFrame::SessionEstablished { session })
             }
             CustodyProofAction::Publish { .. } => {
-                router
-                    .publish_custody_record_from(publication, now, store, source)
-                    .map_err(super::publication_failure)?;
-                Ok(CustodyServerFrame::Published {
-                    record_hash: object_hash(&publication.record).map_err(invalid)?,
-                })
+                self.finish_human_publish(router, store, publication, source, now)
+            }
+            CustodyProofAction::AgentRetire { agent_anchor } => {
+                self.finish_agent_retire(&fence, publication, &proof.body.device_ref, &agent_anchor)
             }
             CustodyProofAction::AgentPublish { agent_profile, plan, authorization, .. } => {
                 let input = crate::custody_authority::AgentPublishInput {
@@ -340,6 +342,7 @@ impl CustodyService {
                 agent_publish_frame(router, store, now, source, &input)
             }
             CustodyProofAction::Register { prekey_bundle } => {
+                super::agent_session::guard_headless(&fence, publication)?;
                 validate_bundle(
                     authority,
                     &proof.body.device_ref,
@@ -355,10 +358,29 @@ impl CustodyService {
                 })
             }
             CustodyProofAction::OpenSession => {
+                super::agent_session::guard_headless(&fence, publication)?;
                 self.finish_open_session(store, authority, &proof, holder, (now, tick))
             }
         }
     }
+
+    fn finish_human_publish(
+        &self,
+        router: &crate::RouterCore,
+        store: &crate::RouterRedbStore,
+        publication: &CustodyPublication,
+        source: std::net::IpAddr,
+        now: u64,
+    ) -> Result<CustodyServerFrame, super::ProofFailure> {
+        router
+            .publish_custody_record_from(publication, now, store, source)
+            .map_err(super::publication_failure)?;
+        self.suspend_owner_agents(router, store, &publication.record.body.account_anchor, now)?;
+        Ok(CustodyServerFrame::Published {
+            record_hash: object_hash(&publication.record).map_err(invalid)?,
+        })
+    }
+
     fn finish_open_session(
         &self,
         store: &crate::RouterRedbStore,
@@ -380,7 +402,10 @@ impl CustodyService {
             record_hash: proof.body.record_hash.clone(),
             proof_hash: object_hash(proof).map_err(invalid)?,
             binding_mode: proof.body.binding_mode,
-            expires_at: proof.body.expires_at.min(now.saturating_add(300)),
+            expires_at: proof
+                .body
+                .expires_at
+                .min(now.saturating_add(crate::NATIVE_SESSION_GRANT_SECONDS)),
         };
         let session = self.leases().open(session, holder, now, tick)?;
         Ok(CustodyServerFrame::SessionEstablished { session })
@@ -472,26 +497,14 @@ impl CustodyService {
         let source =
             RootQualifiedDeviceRef::from_custody_record(&authority, &session.device_ref.device_id)
                 .map_err(invalid)?;
-        if request.schema != "ramflux.signed_request.v1"
-            || request.domain != ramflux_protocol::domain::SIGNED_REQUEST
-            || request.version != 1
-            || request.path != CUSTODY_REQUEST_PATH
-            || request.method != ramflux_protocol::HttpMethod::POST
-            || request.device_proof_hash != session.proof_hash
-            || request.body_hash != custody_session_action_hash(action).map_err(invalid)?
-            || request.source_device_id != session.device_ref.device_id
-        {
-            return Err(CustodyRefusal::InvalidInput);
-        }
-        ramflux_crypto::verify_canonical_signature(
-            &ramflux_protocol::signed_bytes(&request).map_err(invalid)?,
-            &request.signed.signature,
+        accept_session_request(
+            request,
+            &session,
+            action,
             &cert.branch_signing_public_key,
-        )
-        .map_err(invalid)?;
-        ramflux_protocol::ReplayGuard::new()
-            .check_signed_request(&source, request, i64::try_from(now).map_err(invalid)?)
-            .map_err(invalid)?;
+            &source,
+            now,
+        )?;
         if let Some(grant) = grant {
             let CustodySessionAction::HomeMigration { request: migration } = action else {
                 return Err(CustodyRefusal::BindingRefused);
@@ -533,16 +546,24 @@ impl CustodyService {
         if matches!(action, CustodySessionAction::HomeMigration { .. }) {
             return Err(CustodyRefusal::BindingRefused);
         }
-        let _home =
-            if matches!(action, CustodySessionAction::Ack { .. } | CustodySessionAction::Close) {
-                None
-            } else {
-                Some(home_operation(scope, &session.device_ref, &request.nonce, now)?)
-            };
+        self.refuse_suspended_session(router, scope.store, &session, &publication, now)?;
+        let _home = if matches!(
+            action,
+            CustodySessionAction::Ack { .. }
+                | CustodySessionAction::Close
+                | CustodySessionAction::UsernameDirectory { .. }
+        ) {
+            None
+        } else {
+            Some(home_operation(scope, &session.device_ref, &request.nonce, now)?)
+        };
         self.leases().request(session_id, &request.nonce)?;
         // Authenticated submit persistence and retry waits use mailbox ownership;
         // they must not retain the service-wide admission lock.
-        if matches!(action, CustodySessionAction::Submit { .. }) {
+        if matches!(
+            action,
+            CustodySessionAction::Submit { .. } | CustodySessionAction::UsernameDirectory { .. }
+        ) {
             drop(admission);
         }
         self.perform_action(scope, &session, &authority, &source, attempt.action)
@@ -558,6 +579,19 @@ impl CustodyService {
         let Scope { router, store, now, .. } = scope;
         let cert = authority.authorize(&session.device_ref, "message", now).map_err(invalid)?;
         match action {
+            CustodySessionAction::UsernameDirectory { request } => {
+                if session.binding_mode == BindingMode::NoChannelBinding {
+                    return Err(CustodyRefusal::BindingRefused);
+                }
+                self.username
+                    .as_ref()
+                    .ok_or(CustodyRefusal::Unsupported)?
+                    .execute(router, store, source, *request, now)
+                    .map(|response| CustodyServerFrame::UsernameDirectory {
+                        response: Box::new(response),
+                    })
+                    .map_err(persistence)
+            }
             CustodySessionAction::HomeMigration { .. } => Err(CustodyRefusal::Unsupported),
             CustodySessionAction::Lookup { device_ref } => {
                 let p = router
@@ -777,6 +811,36 @@ fn home_refusal(
             .unwrap_or(CustodyRefusal::PersistenceUnavailable),
         error => persistence(error),
     }
+}
+
+fn accept_session_request(
+    request: &ramflux_protocol::SignedRequest,
+    session: &CustodySession,
+    action: &CustodySessionAction,
+    signing_key: &str,
+    source: &RootQualifiedDeviceRef,
+    now: u64,
+) -> Result<(), CustodyRefusal> {
+    if request.schema != "ramflux.signed_request.v1"
+        || request.domain != ramflux_protocol::domain::SIGNED_REQUEST
+        || request.version != 1
+        || request.path != CUSTODY_REQUEST_PATH
+        || request.method != ramflux_protocol::HttpMethod::POST
+        || request.device_proof_hash != session.proof_hash
+        || request.body_hash != custody_session_action_hash(action).map_err(invalid)?
+        || request.source_device_id != session.device_ref.device_id
+    {
+        return Err(CustodyRefusal::InvalidInput);
+    }
+    ramflux_crypto::verify_canonical_signature(
+        &ramflux_protocol::signed_bytes(request).map_err(invalid)?,
+        &request.signed.signature,
+        signing_key,
+    )
+    .map_err(invalid)?;
+    ramflux_protocol::ReplayGuard::new()
+        .check_signed_request(source, request, i64::try_from(now).map_err(invalid)?)
+        .map_err(invalid)
 }
 
 fn session_publication(

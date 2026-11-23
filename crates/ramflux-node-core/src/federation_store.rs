@@ -723,6 +723,53 @@ impl FederationRedbStore {
         Ok(Some(delivery))
     }
 
+    /// True when this tuple already has a committed receipt that is still inside its TTL.
+    /// An expired row is not a receipt. An expired forward is an error, matching delivery.
+    ///
+    /// # Errors
+    /// Returns [`NodeCoreError::TtlExpired`] when the forward itself has expired, and a
+    /// storage error when the seen table cannot be read.
+    pub fn inbound_forward_committed(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        request: &crate::FederatedEnvelopeForwardRequest,
+        now: u64,
+    ) -> Result<bool, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
+        let expires_at = inbound_forward_expires_at(request)?;
+        if expires_at <= now {
+            return Err(NodeCoreError::TtlExpired {
+                envelope_id: request.envelope.envelope_id.clone(),
+            });
+        }
+        let seen_key = federated_forward_replay_key(source, request);
+        let read_txn =
+            self.db.begin_read().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let table = read_txn
+            .open_table(FEDERATION_INBOUND_FORWARD_SEEN_TABLE)
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let record = table
+            .get(seen_key.as_str())
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?
+            .map(|value| deserialize_inbound_forward_seen_record(value.value()))
+            .transpose()?;
+        Ok(matches!(
+            record,
+            Some(record)
+                if matches!(record.state, FederationInboundForwardSeenState::Committed)
+                    && record.expires_at > now
+        ))
+    }
+
+    /// Replay tuple shared by the delivery reservation and the durable seen row.
+    #[must_use]
+    pub fn inbound_replay_tuple(
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        request: &crate::FederatedEnvelopeForwardRequest,
+    ) -> String {
+        federated_forward_replay_key(source, request)
+    }
+
     fn expired_inbound_forward_keys(&self, now: u64) -> Result<Vec<String>, NodeCoreError> {
         let read_txn =
             self.db.begin_read().map_err(|source| NodeCoreError::Redb(source.to_string()))?;

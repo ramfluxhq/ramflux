@@ -36,6 +36,14 @@ fn staged_account() -> Result<LocalBusAccountState, SdkError> {
 fn shared_group_packet_selection_propagates_real_sqlite_write_refusal() -> Result<(), SdkError> {
     let mut account = staged_account()?;
     assert_eq!(pending_packets(&account.client, now_unix_timestamp())?.len(), 1);
+    // Selection rewrites a row only when its stored bytes differ from the canonical record, so
+    // store the row with an extra field to make the next selection a real write.
+    let db = account.client.account_db()?;
+    let id = maintenance::page(db, TRANSFER_SEND_PREFIX, now_unix_timestamp(), 512)?.remove(0);
+    let mut stored =
+        db.load_actor_state::<serde_json::Value>(&id)?.ok_or(SdkError::LocalBus("row".into()))?;
+    stored["stored_before_canonical_rewrite"] = serde_json::json!(true);
+    db.persist_actor_state(&id, &stored)?;
     let reader = account.client.account_db()?.open_reader()?;
     account.client.active_account_db = Some(reader);
     assert!(matches!(

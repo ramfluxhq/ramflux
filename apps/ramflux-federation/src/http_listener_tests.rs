@@ -165,44 +165,19 @@ fn federation_ijson_ingress_refuses_unsafe_integer() -> TestResult {
     let root = temp_cert_root("federation-ijson-admin")?;
     let context = context(&root)?;
 
-    for (path, wrap_forward) in
-        [("/s8/federation/forward", false), ("/internal/home-node-migration/forward", true)]
-    {
-        let make_body = |created_at: &str, ext: &str, token: &str| {
-            let forward = federation_forward_body(created_at, ext, token);
-            if wrap_forward {
-                format!(r#"{{"admin_token":"{token}","forward":{forward}}}"#)
-            } else {
-                forward
-            }
-        };
-        for (created_at, ext, rejected) in [
-            ("9007199254740991", r#""x_probe":"v","x_probe":"v""#, true),
-            ("9007199254740992", r#""x_probe":"v""#, true),
-            ("9007199254740991", r#""x_probe":"v""#, false),
-        ] {
-            let body = make_body(created_at, ext, "secret");
-            let request_context = context.clone();
-            let response = request("POST", path, &body, move |stream| {
-                crate::admin_http::handle_admin_connection_with_limits(
-                    stream,
-                    &request_context,
-                    crate::http_limits::defaults(false),
-                    std::time::Instant::now(),
-                );
-                Ok(())
-            })?;
-            if rejected {
-                assert_http_response(&response, "400 Bad Request", Some(EXPECTED_BODY))?;
-            } else {
-                assert_http_response(&response, "500 Internal Server Error", None)?;
-                assert!(!response.ends_with(std::str::from_utf8(EXPECTED_BODY)?));
-            }
-        }
-
-        let unauthenticated = make_body("9007199254740991", r#""x_probe":"v""#, "wrong");
+    let path = "/internal/home-node-migration/forward";
+    let make_body = |created_at: &str, ext: &str, token: &str| {
+        let forward = federation_forward_body(created_at, ext, token);
+        format!(r#"{{"admin_token":"{token}","forward":{forward}}}"#)
+    };
+    for (created_at, ext, rejected) in [
+        ("9007199254740991", r#""x_probe":"v","x_probe":"v""#, true),
+        ("9007199254740992", r#""x_probe":"v""#, true),
+        ("9007199254740991", r#""x_probe":"v""#, false),
+    ] {
+        let body = make_body(created_at, ext, "secret");
         let request_context = context.clone();
-        let response = request("POST", path, &unauthenticated, move |stream| {
+        let response = request("POST", path, &body, move |stream| {
             crate::admin_http::handle_admin_connection_with_limits(
                 stream,
                 &request_context,
@@ -211,9 +186,35 @@ fn federation_ijson_ingress_refuses_unsafe_integer() -> TestResult {
             );
             Ok(())
         })?;
-        assert_http_response(&response, "500 Internal Server Error", None)?;
-        assert!(!response.ends_with(std::str::from_utf8(EXPECTED_BODY)?));
+        if rejected {
+            assert_http_response(&response, "400 Bad Request", Some(EXPECTED_BODY))?;
+        } else {
+            assert_http_response(&response, "500 Internal Server Error", None)?;
+            assert!(!response.ends_with(std::str::from_utf8(EXPECTED_BODY)?));
+        }
     }
+
+    let unauthenticated = make_body("9007199254740991", r#""x_probe":"v""#, "wrong");
+    let request_context = context.clone();
+    let response = request("POST", path, &unauthenticated, move |stream| {
+        crate::admin_http::handle_admin_connection_with_limits(
+            stream,
+            &request_context,
+            crate::http_limits::defaults(false),
+            std::time::Instant::now(),
+        );
+        Ok(())
+    })?;
+    assert_http_response(&response, "500 Internal Server Error", None)?;
+    assert!(!response.ends_with(std::str::from_utf8(EXPECTED_BODY)?));
+    let removed_context = context.clone();
+    let response = request(
+        "POST",
+        "/internal/home-submit/forward",
+        r#"{"admin_token":"secret"}"#,
+        move |stream| handle_admin_request(stream, &removed_context),
+    )?;
+    assert_http_response(&response, "404 Not Found", None)?;
 
     drop(context);
     std::fs::remove_dir_all(root)?;
@@ -232,6 +233,7 @@ fn public_listener_has_no_admin_routes_even_with_valid_token() -> TestResult {
     };
     for path in [
         "/s8/federation/forward",
+        "/internal/home-submit/forward",
         "/internal/home-node-migration/forward",
         ramflux_node_core::MIGRATION_LOCAL_PATH,
         ramflux_node_core::MIGRATION_PEER_PATH,
@@ -342,24 +344,63 @@ fn public_discovery_and_router_client_reads_preserve_payloads() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn internal_home_node_forward_authenticates_and_reaches_peer_mesh() -> TestResult {
+#[tokio::test]
+async fn internal_home_node_forward_authenticates_and_reaches_peer_mesh() -> TestResult {
+    const CHILD: &str = "RAMFLUX_FORWARD_MESH_TEST_CHILD";
+    if let Some(sentinel) = std::env::var_os(CHILD) {
+        check_internal_home_node_forward()?;
+        std::fs::write(sentinel, b"accepted")?;
+        return Ok(());
+    }
+    let root = tempfile::tempdir()?;
+    let sentinel = root.path().join("completed");
+    let mut command = tokio::process::Command::new(std::env::current_exe()?);
+    command
+        .args([
+            "--exact",
+            "http_listener_tests::internal_home_node_forward_authenticates_and_reaches_peer_mesh",
+            "--nocapture",
+        ])
+        .env(CHILD, &sentinel)
+        .env("RAMFLUX_TEST_NODE_ENDPOINTS_FILE", root.path().join("endpoints.json"))
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let result = tokio::time::timeout(Duration::from_secs(60), child.wait())
+        .await
+        .map_err(|_| "test: isolated forward exceeded its deadline")??;
+    assert!(result.success(), "test: isolated exact-socket forward failed");
+    assert!(sentinel.is_file(), "test: isolated forward filter ran zero tests");
+    Ok(())
+}
+
+fn check_internal_home_node_forward() -> TestResult {
     let root = temp_cert_root("http-forward")?;
     let ca = issue_test_ca(&root)?;
     let router_cert = issue_test_service_cert(&ca, "node-a", "ramflux-router")?;
     let local = issue_test_service_cert(&ca, "node-a", "ramflux-federation")?;
-    let peer_cert = issue_test_service_cert(&ca, "node-b", "ramflux-federation")?;
+    let peer_cert = issue_test_service_cert(&ca, "node-b.test", "ramflux-federation")?;
     let router = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &router_cert.tls)?;
     let peer = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &peer_cert.tls)?;
     let mut admin = context(&root)?;
     Arc::make_mut(&mut admin.router).endpoint = router.local_addr()?.to_string();
     Arc::make_mut(&mut admin.router).tls = local.tls;
     let mut peer_discovery = admin.discovery.clone();
-    peer_discovery.node_id = "node-b".into();
+    peer_discovery.node_id = "node-b.test".into();
     peer_discovery.public_endpoint = peer.local_addr()?.to_string();
     peer_discovery.node_ca_cert_pem = peer_cert.ca_pem;
     admit_peer(&admin, &peer_discovery)?;
-    let envelope = forward_envelope()?;
+    let endpoints = std::env::var_os("RAMFLUX_TEST_NODE_ENDPOINTS_FILE")
+        .ok_or("test: endpoints path missing")?;
+    std::fs::write(
+        &endpoints,
+        serde_json::to_vec(&serde_json::json!({
+            "node-b.test": {"discovery": peer.local_addr()?, "mesh": peer.local_addr()?}
+        }))?,
+    )?;
+    let mut envelope = forward_envelope()?;
+    envelope["target_node_id"] = serde_json::json!("node-b.test");
     let router_worker =
         std::thread::spawn(move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let mut stream = router.accept()?;
@@ -384,7 +425,7 @@ fn internal_home_node_forward_authenticates_and_reaches_peer_mesh() -> TestResul
                 &mut stream,
                 "200 OK",
                 &serde_json::json!({
-                    "accepted":true,"source_node_id":"node-a","target_node_id":"node-b",
+                    "accepted":true,"source_node_id":"node-a","target_node_id":"node-b.test",
                     "delivery":{"outcome":"accepted","target_delivery_id":"peer","inbox_seq":1,"cursor":null,"nack":null}
                 }),
             )?;

@@ -258,6 +258,7 @@ fn runtime(
     let (shutdown_owner, shutdown) = watch::channel(false);
     let (events, _batches) = mpsc::channel(1);
     let (connection_sender, connection_work) = mpsc::channel(1);
+    let (head_completion_sender, head_rx) = mpsc::channel(1);
     Ok((
         AccountRuntime {
             timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
@@ -274,6 +275,7 @@ fn runtime(
             receiver,
             lifecycle,
             preempt,
+            command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             readers: Arc::new(Mutex::new(None)),
             events,
             shutdown,
@@ -284,9 +286,14 @@ fn runtime(
             transfers: crate::bus::account_runtime::uploads::Transfers::start(),
             connection_sender,
             connection_work,
+            head_completion_sender,
+            head_rx,
+            deferred: std::collections::VecDeque::new(),
             ledger: None,
+            resume_receive_until: None,
             transient: super::super::TransientHost::default(),
             pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
+            username: crate::bus::account_runtime::username_calls::Calls::default(),
             receive_gate_hook: None,
             courier_events: None,
         },

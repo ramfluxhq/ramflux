@@ -167,6 +167,11 @@ fn acquire_submission(
     envelope: &ramflux_protocol::Envelope,
     now: u64,
 ) -> Result<crate::SubmissionLease, CustodyRefusal> {
+    match router.fenced_submit_outcome(store, envelope, now) {
+        Ok(Some(_)) => return Err(CustodyRefusal::RecipientUnreachable),
+        Ok(None) => {}
+        Err(_) => return Err(CustodyRefusal::PersistenceUnavailable),
+    }
     match store.acquire_submission(&envelope.target_delivery_id) {
         Ok(lease) => Ok(lease),
         Err(crate::NodeCoreError::HomeMigration(reason)) => {

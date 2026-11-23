@@ -19,8 +19,11 @@ pub mod conversation;
 pub(crate) mod conversation_projection;
 mod deferred_attachment;
 pub(crate) mod device_unlock;
+pub(crate) mod foreign_manifest;
 pub(crate) mod manifest_demand;
+pub(crate) mod recipient_home;
 pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};
+pub(crate) mod agent_activity;
 pub(crate) mod agent_custody;
 pub(crate) mod agent_custody_calls;
 pub(crate) mod agent_rebind;
@@ -150,7 +153,6 @@ pub struct RamfluxClient {
     /// Set only while one attachment message is being authored; binds its grants to the id.
     pub(crate) attachment_binding: Option<crate::attachment_send::Binding>,
     pub(crate) mcp_registry: McpRegistry,
-    pub(crate) federation_mesh: FederationMesh,
     #[cfg(test)]
     pub(crate) native_bus_fixture: Option<Box<native_test_support::bus::Material>>,
 }
@@ -190,7 +192,6 @@ impl Default for RamfluxClient {
             attachment_plane: None,
             attachment_binding: None,
             mcp_registry: McpRegistry::new(),
-            federation_mesh: FederationMesh::new(),
         }
     }
 }

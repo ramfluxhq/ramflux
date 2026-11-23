@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+mod account_local;
 pub(crate) mod account_runtime;
+mod background;
 #[cfg(test)]
 pub(crate) use account_runtime::apply_ack_flush;
 mod ack_cache;
 mod actor;
 mod agent_advance;
 mod agent_methods;
+mod agent_retire;
 pub(crate) mod attachment_plane;
 mod attachment_scheduler;
 pub(crate) mod backup_jobs;
@@ -25,6 +28,8 @@ pub(crate) mod credentials;
 pub(crate) mod native_actor;
 mod recovery;
 pub(crate) mod runtime_limits;
+#[cfg(unix)]
+mod socket_dir;
 mod transfer_slots;
 pub use creation_client::{
     LocalBusCreationClient, LocalBusPendingCreation, LocalBusPendingRecovery,
@@ -42,6 +47,7 @@ mod gateway_resume;
 mod generated_typing;
 pub(crate) mod group_conversation;
 mod group_delivery;
+mod host_manage;
 pub mod io;
 mod journal;
 mod lifecycle;
@@ -59,6 +65,7 @@ mod readers;
 mod requests;
 pub(crate) mod secrets;
 mod shared_group_sync;
+mod username_directory;
 pub(crate) use shared_group_sync::enqueue as enqueue_shared_group;
 pub(crate) mod push_receiver;
 mod socket;

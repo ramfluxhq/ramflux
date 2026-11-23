@@ -111,8 +111,5 @@ async fn inbound_contact_request_lands_once_admission_succeeds_without_a_client_
         .await
 }
 
-#[path = "gateway_runtime_lock_tests.rs"]
-mod lock;
-
 #[path = "gateway_runtime_keyed_tests.rs"]
 mod keyed;

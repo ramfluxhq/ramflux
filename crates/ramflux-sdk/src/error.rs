@@ -34,7 +34,7 @@ impl GroupOperation {
             "group.member.add" => Some(Self::MemberAdd),
             "group.send" => Some(Self::Send),
             "group.name.set" => Some(Self::Rename),
-            "group.member.remove" => Some(Self::MemberRemove),
+            "group.leave" | "group.member.remove" => Some(Self::MemberRemove),
             _ => None,
         }
     }
@@ -179,6 +179,11 @@ pub enum SdkError {
     SurfaceProtocol(#[from] ramflux_protocol::a2ui::Reject),
     #[error("priority session calls cannot await account writer checkpoints")]
     PriorityWriterAccess,
+    #[error("account command queue wait expired")]
+    AccountCommandBackpressure,
+    /// Internal yield while a background writer attempt lets one queued command run.
+    #[error("account writer paused for a queued command")]
+    WriterPause,
     #[error("gateway_writer_busy: retryable")]
     GatewayWriterBusy,
     #[error(transparent)]
@@ -215,6 +220,8 @@ pub enum SdkError {
     AttachmentDeleted,
     #[error("home migration refused: {0:?}")]
     HomeMigrationRefused(ramflux_protocol::home_migration::Refusal),
+    #[error("username directory refused: {}", .0.as_str())]
+    UsernameDirectoryRefused(ramflux_protocol::username_directory::DirectoryCode),
     #[error("custody networking refused: {0}")]
     CustodyNetwork(#[from] ramflux_protocol::custody::CustodyRefusal),
     #[error("custody networking refused: Capacity; {}", crate::custody::capacity_hint::message(.capacity))]
@@ -252,6 +259,12 @@ pub enum SdkError {
     /// (for example `desktop_required` or `creation_pairing_required`), never prose.
     #[error("agent creation refused: {0}")]
     AgentCreationRefused(&'static str),
+    /// `agent.delete` ran before PRX had retired the agent. Nothing was purged.
+    #[error("agent purge order: agent_not_retired")]
+    AgentNotRetired,
+    /// A PRX management call failed. The token is a closed code, never a response body.
+    #[error("PRX call failed: {0}")]
+    PrxCall(&'static str),
     #[error("invalid custody setup")]
     CustodySetupInvalid,
     /// A confirm check failed. The reason token names the check and never a secret.
@@ -299,10 +312,6 @@ pub enum SdkError {
     SurfaceCheckpointMismatch,
     #[error("contact root replacement requires confirmation")]
     ContactConfirmationRequired(Box<crate::ContactRootChange>),
-    #[error(
-        "contact card names a different home node; automatic cross-node contact routing is unavailable"
-    )]
-    ContactHomeNodeUnsupported,
     #[error("contact lookup unavailable: {0}")]
     ContactUnavailable(#[source] Box<SdkError>),
     #[error(transparent)]
@@ -452,6 +461,7 @@ impl From<StorageError> for SdkError {
         match error {
             StorageError::ObjectErased => Self::ObjectErased,
             StorageError::PairingField(name) => Self::PairingField(name),
+            StorageError::WriterPause => Self::WriterPause,
             other => Self::Storage(other),
         }
     }

@@ -246,7 +246,7 @@ async fn submit_federated(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let recipient_principal_commitment = body.recipient_principal_commitment.clone();
     let message = body.into_gateway_message_with_body(Vec::new());
-    let engine = account.session_client().await?;
+    let mut engine = account.session_client().await?;
     let recipient = resolve_federated_message_recipient_principal_commitment(
         &account.client,
         federation,
@@ -259,7 +259,7 @@ async fn submit_federated(
     let response = account
         .client
         .send_plaintext_federated_message_async(
-            &engine,
+            &mut engine,
             crate::client::federation::PlaintextForward {
                 content,
                 message,
@@ -320,11 +320,9 @@ fn require_message_submit_friend_link_accepted(
 
 /// Cross-node manifest gate for federated direct messages (C2 §5).
 ///
-/// The recipient lives on a remote home node, so the sender's local gateway/device directory cannot
-/// serve the manifest. Resolve and verify it directly from the recipient home node's federation HTTP
-/// surface — the same base the federated send already uses for the recipient prekey fetch. The
-/// manifest is self-authenticating against the expected commitment, so a lying remote node can only
-/// fail closed. The gate runs before send, fail-closed.
+/// The recipient directory is the pinned home's signed public prekey endpoint.
+/// A caller URL is not an origin. The manifest is self-checked against the
+/// expected commitment. The gate runs before send and fails closed.
 async fn federated_manifest_gate(
     client: &RamfluxClient,
     federation: &LocalBusFederationRoute,
@@ -332,22 +330,23 @@ async fn federated_manifest_gate(
     device_id: &str,
     timeout: Duration,
 ) -> Result<ResolvedMessageRecipient, SdkError> {
-    let manifest_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
-        SdkError::LocalBus(
-            "federated direct messages require a recipient home-node url (--recipient-prekey-url) to verify the remote device manifest"
-                .to_owned(),
-        )
-    })?;
+    let base = crate::client::recipient_home::required_public_base(
+        client,
+        recipient_principal_commitment.unwrap_or(""),
+        Some(federation.target_node_id.as_str()),
+    )
+    .await?;
+    let remote = crate::client::contact::RemoteManifest { url: &base, timeout };
     let principal_commitment = client
         .resolve_federated_target_principal_commitment_async(
-            crate::client::contact::RemoteManifest { url: manifest_url, timeout },
+            remote,
             recipient_principal_commitment,
             device_id,
         )
         .await?;
     let device = client
         .assert_manifest_active_device_from_url_async(
-            crate::client::contact::RemoteManifest { url: manifest_url, timeout },
+            remote,
             &principal_commitment,
             device_id,
             "message_submit_friend_gate",
@@ -534,7 +533,8 @@ async fn dispatch_message_receipt_read(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let body: LocalBusMessageReceiptReadRequest = serde_json::from_value(request.body.clone())?;
+    let mut body: LocalBusMessageReceiptReadRequest = serde_json::from_value(request.body.clone())?;
+    fill_read_receipt_route(account, &mut body)?;
     let read_at = body.read_at.unwrap_or_else(now_unix_timestamp);
     let actor = account.client.owned_account_device_identity(&body.reader_id)?;
     if body.recipient_device_id.is_some()
@@ -587,6 +587,41 @@ async fn dispatch_message_receipt_read(
         response["entry"] = serde_json::to_value(entry?)?;
     }
     Ok(local_bus_ok(response))
+}
+
+fn fill_read_receipt_route(
+    account: &LocalBusAccountState,
+    body: &mut LocalBusMessageReceiptReadRequest,
+) -> Result<(), SdkError> {
+    if body.recipient_device_id.is_some() || body.target_delivery_id.is_some() {
+        return Ok(());
+    }
+    let Some(origin) = account.client.message_origin(&body.conversation_id, &body.message_id)?
+    else {
+        return Ok(());
+    };
+    if origin.get("direction").and_then(serde_json::Value::as_str) == Some("outgoing") {
+        return Ok(());
+    }
+    let Some(sender) = origin.get("sender_device_id").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    let Some(root) = origin.get("sender_root_commitment").and_then(serde_json::Value::as_str)
+    else {
+        return Err(SdkError::InboundPending("read receipt sender root is missing".into()));
+    };
+    let source = account.client.device_identity_for_root(root, sender)?;
+    let device = account
+        .client
+        .trusted_device(crate::client::identity_authority::HeadUse::NewAuthorization, &source)?;
+    let target = device
+        .get("target_delivery_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| SdkError::InboundPending("read receipt sender route is missing".into()))?;
+    body.recipient_device_id = Some(source.device_id().to_owned());
+    body.target_delivery_id = Some(target.to_owned());
+    Ok(())
 }
 
 fn receipt_gateway_message(
@@ -738,16 +773,18 @@ fn dispatch_conversation_mute(
     if body.unmute {
         account.client.unmute_conversation(&body.conversation_id)?;
     } else {
-        account
-            .client
-            .mute_conversation(&body.conversation_id, body.mute_until.unwrap_or(i64::MAX))?;
+        let mute_until = body.mute_until.unwrap_or(ramflux_storage::MUTE_UNTIL_TURNED_OFF);
+        account.client.mute_conversation(&body.conversation_id, mute_until)?;
     }
     let state = account.client.conversation_list_state(&body.conversation_id)?;
+    let (muted, mute_until) =
+        account.client.account_db()?.conversation_mute_fields(state.mute_until);
     Ok(local_bus_ok(serde_json::json!({
         "conversation_id": state.conversation_id,
         "archived": state.archived,
         "pin_order": state.pin_order,
-        "mute_until": state.mute_until,
+        "muted": muted,
+        "mute_until": mute_until,
         "hidden_at": state.hidden_at,
         "cleared_at": state.cleared_at,
     })))
@@ -796,7 +833,7 @@ pub(crate) async fn dispatch_message_receive_request(
         "durable_reader": "message.read",
         "snapshot_sequence": account.client.account_db()?.journal_bounds()?.head_seq,
     });
-    Ok(LocalBusDispatchResult { response_body, event })
+    Ok(LocalBusDispatchResult { response_body, event, owner_copy: None })
 }
 
 #[cfg(test)]

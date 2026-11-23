@@ -40,8 +40,9 @@ impl RamfluxClient {
         }
         let request = self.inbound_device_manifest_request(entry)?;
         let manifest = if let Some(root) = request {
+            let origin = self.sender_manifest_origin(&entry.envelope, &root)?;
             Some(
-                crate::client::contact::fetch_verified_device_manifest(gateway, &root)
+                crate::client::foreign_manifest::fetch_sender_manifest(gateway, origin, &root)
                     .await
                     .map_err(|source| SdkError::DirectoryAuthorityUnavailable {
                         root,

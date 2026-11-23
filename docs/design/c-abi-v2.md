@@ -52,6 +52,15 @@ body; it is not a second business schema. Message ProtoJSON retains its own
 schema's presence and decimal string rules. The bridge never generates an
 operation key, retries a mutation or turns a lost response into success.
 
+## Attended account code
+
+`ramflux_v2_set_credential_provider` installs the callback that answers
+`device.credential.request` on the in-process connection. Setup requires the
+code twice and the copies must match. Unlock and phrase take one copy and an
+empty confirmation. A null callback unregisters and drains. The host must not
+reenter the client from the callback. Close and replacement wait until the
+callback returns. `account.passphrase.rotate` stays in the wiped request body.
+
 ## Generated method policy
 
 `crates/ramflux-sdk/include/ramflux_sdk_methods.json` is the machine-readable
@@ -157,7 +166,10 @@ from that snapshot's journal cursor. Reset does not fetch data or restore a
 subscription by itself.
 
 
-Open a subscription via `execute` using `subscription.open` or `bus.subscribe`.
+Open the account journal via `execute` using `bus.subscribe`. `subscription.open`
+remains the ephemeral, backup, pairing, and attended-frontend opener. A journal
+topic, including `*`, is refused on an open account. Phones do not use it to
+tail the journal.
 `event_poll` consumes one frame without blocking. It returns Pending (24),
 Closed (26) with a null buffer. ResyncRequired (27) includes an owned, generation-tagged gap event. Event
 credit is bounded to 64 frames and 4 MiB; a single frame is at most 1 MiB.
@@ -172,7 +184,9 @@ Immediate statuses use existing numeric `RamfluxErrorCode` values 0–23,
 including AccountBusy=18 and SchemaResetRequired=23. V2 adds Pending=24,
 Cancelled=25, Closed=26 and ResyncRequired=27 without changing v1. Unknown
 business error names map to Internal=16 while preserving the full typed SDK
-error frame. Native code must inspect numeric codes, not diagnostic prose.
+error frame. Attachment refusals, including `authority_unavailable`, map to
+InvalidArgument (1); the error frame still carries the stable code string.
+Native code must inspect numeric codes, not diagnostic prose.
 
 Host pointers must be aligned and valid for their documented lengths. Null,
 invalid lengths, duplicate I-JSON members and invalid handles are rejected.
@@ -439,7 +453,8 @@ must never appear in JSON methods, completions or event frames. Android provider
 wrap seeds with a non-exportable Android Keystore AES-GCM key (StrongBox when
 available) before durable persistence; plaintext storage is forbidden. iOS uses
 non-synchronizable Keychain items with
-`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. All callback spans are borrowed
+`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` with a shared Keychain access
+group for the application and notification extension. All callback spans are borrowed
 only until return. SDK-owned callback input copies are wiped immediately after
 both successful and failed callbacks; load buffers and decoded temporary seeds
 are zeroized on every exit. Hosts must wipe their own temporary plaintext copies.
@@ -494,3 +509,97 @@ any leftover private intent. Such eviction ends that operation's retry window.
 Pending operations are never evicted for capacity: a window full of pending
 receipts returns `RateLimited` until one completes or expires. Successful sends
 mark their receipts terminal only after all deliveries are submitted.
+
+## Mobile shared-root and background custody contract
+
+The host provisions storage before calling either v2 open function. `data_root`
+is an absolute path to an existing dedicated directory. The bridge no longer
+creates a missing root. Unix admission never repairs refused permissions.
+On Unix the directory must
+belong to the effective process user and have mode `0700`; group/other access,
+including world-readable roots, is refused before supervisor startup. A final
+symlink or non-directory is refused. Ancestor aliases used by platform container
+APIs may resolve normally. Use a stable, host-controlled container: this check
+is not a recursive ACL audit or protection against a hostile same-user process
+replacing paths during startup. Windows retains its existing owner/DACL checks.
+
+Both open functions clear the output handle before admission. Their synchronous
+status is the typed refusal; there is no open error JSON or diagnostic-string
+parsing contract:
+
+| Outcome | Status | Host action |
+| --- | --- | --- |
+| Relative, missing, non-directory or final-symlink root | `InvalidArgument` (1) | Obtain/provision the correct container directory; no automatic fallback. |
+| OS path permission denial, foreign Unix owner or Unix mode other than `0700` | `PermissionDenied` (12) | Correct the host provisioning; the SDK does not chmod a refused root. |
+| Custody preflight returns locked (provider status 4) | `VaultLocked` (31) | Wait for OS custody availability, then retry; no client or supervisor was started. |
+| Other custody preflight failure | Existing mapped SDK status | Keep the refusal; never switch to plaintext or another provider. |
+| Another client/process owns this root | `AccountBusy` (18) | Retry only after the owner releases its lease. |
+
+A provider passed to `ramflux_v2_client_open_with_custody` is retained during
+admission and preflighted once before filesystem access or supervisor startup,
+even for an empty root. Locked custody takes precedence over path admission.
+Failure releases that retained context. Preflight must check storage availability
+without prompting, creating a key, storing a secret or unlocking a collection.
+Report unavailable first-unlock custody as callback status **4**, not missing (1),
+corrupt (2), a success with empty bytes, or a panic. Ordinary later custody
+operations retain their existing typed operation-error envelopes. An open with
+no host provider does not claim to establish mobile custody availability.
+
+### iOS host obligations
+
+Resolve the entitled App Group container with
+`FileManager.containerURL(forSecurityApplicationGroupIdentifier:)`, and create a
+private SDK subdirectory inside it. The main app and notification service
+extension use that same root and the same non-synchronizing Keychain access
+group. Never pass the app's ordinary private container or a separate extension
+root. The SDK cannot attest App Group membership or Keychain entitlements.
+
+Use `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` for background wrapping
+keys/items, with `kSecAttrSynchronizable=false`. This class becomes available
+after the first OS unlock following restart and stays available when the screen
+locks again; it does not migrate to another device. Do not use
+`kSecAttrAccessibleWhenUnlockedThisDeviceOnly` for the default background wrap.
+Use `NSFileProtectionCompleteUntilFirstUserAuthentication` on the root and all
+SDK files, including SQLite databases, WAL/SHM sidecars and newly created files.
+The host must verify inherited file protection on a physical device; Unix mode
+checks cannot establish the iOS data-protection class.
+
+### Android host obligations
+
+Use a dedicated `0700` directory in credential-encrypted app-private storage,
+readable by the application and its FCM service under the same app UID. A
+separate service process uses the same path/provider and coordinates ownership;
+never make it a public/external-storage directory or give another UID access.
+Do not put account data or wrapping records in device-protected Direct Boot
+storage. Check `UserManager.isUserUnlocked` before opening; pre-first-unlock
+custody must report locked without opening an alternate root.
+
+Wrap secrets with a non-exportable Android Keystore AES-GCM key, with
+`setUserAuthenticationRequired(false)` for the default background key. Keep the
+wrapped records in credential-encrypted storage: that storage supplies the
+first-unlock gate; an auth-free Keystore key alone does not. Do not set
+`setUnlockedDeviceRequired(true)` as an after-first-unlock substitute: it
+requires the device to be unlocked at the time of use and prevents screen-locked
+background decryption. No plaintext key persistence or file-vault fallback.
+
+### Ownership and acceptance boundary
+
+Shared storage does not grant concurrent writer/session access. The existing
+whole-root lease and same-process registry still apply. A second app/extension
+open must receive `AccountBusy` until ownership is released. This contract adds
+no extension-safe wake-fetch entry point, shared-reader mode or session handoff.
+Optional app lock is separate: a presence-gated wrap must not be silently
+replaced by the background wrap when app lock is enabled; this card does not
+implement that policy.
+
+A scratch host can verify root admission, the real supervisor's account read,
+provider preflight/locked refusal and retain/release balance. Platform acceptance
+still requires nn to measure App Group/access-group entitlement behavior, actual
+Keystore use, reboot before/after first unlock, screen-relocked background use,
+and file/SQLite sidecar protection. A simulated locked callback proves only the
+SDK refusal path.
+
+Platform references: [Apple background Keychain accessibility](https://developer.apple.com/documentation/security/ksecattraccessibleafterfirstunlockthisdeviceonly),
+[Apple shared containers](https://developer.apple.com/documentation/foundation/filemanager/containerurl(forsecurityapplicationgroupidentifier:)),
+[Android Direct Boot storage](https://developer.android.com/privacy-and-security/direct-boot),
+[Android Keystore parameters](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder).

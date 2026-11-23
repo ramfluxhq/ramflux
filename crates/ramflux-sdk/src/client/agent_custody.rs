@@ -33,6 +33,8 @@ pub(crate) enum CustodyBody {
     Cancel(Vec<u8>),
     /// The agent record of a sibling, to apply by `EventOrder` (AGENT-IDENTITY-01 E3).
     Metadata(Box<g::AgentMetadata>),
+    /// A progress or approval row for this owner. It is not a creation plan.
+    Activity(Box<crate::client::agent_activity::ActivityPacket>),
 }
 
 /// Authorizes an `AgentMetadata` broadcast (AGENT-IDENTITY-01 E3): the source must be another device
@@ -77,6 +79,33 @@ fn refused(reason: &str) -> SdkError {
     SdkError::GeneratedRefused { code: GeneratedRefusalCode::Content, reason: reason.into() }
 }
 
+/// Metadata, and an activity marker whose recipient is the sender, go to every sibling.
+fn packet_broadcast(packet: &g::AgentHostPacket) -> bool {
+    match packet.body.as_ref() {
+        Some(g::agent_host_packet::Body::Metadata(_)) => true,
+        Some(g::agent_host_packet::Body::Custody(custody)) => {
+            activity_names_sender(packet, custody)
+        }
+        _ => false,
+    }
+}
+
+fn activity_names_sender(packet: &g::AgentHostPacket, custody: &g::AgentCustodyPacket) -> bool {
+    let Some(g::agent_custody_packet::Value::RequestJson(bytes)) = custody.value.as_ref() else {
+        return false;
+    };
+    if !matches!(crate::client::agent_activity::parse_marker(bytes), Ok(Some(_))) {
+        return false;
+    }
+    match (packet.source.as_ref(), packet.recipient.as_ref()) {
+        (Some(source), Some(recipient)) => {
+            source.account_anchor == recipient.account_anchor
+                && source.device_id == recipient.device_id
+        }
+        _ => false,
+    }
+}
+
 impl RamfluxClient {
     pub(super) fn device_epoch_of(&self, device: &RootQualifiedDeviceRef) -> Result<u64, SdkError> {
         self.account_db()?
@@ -105,10 +134,9 @@ impl RamfluxClient {
             packet.source.as_ref().ok_or_else(|| refused("agent custody source missing"))?;
         let declared_recipient =
             packet.recipient.as_ref().ok_or_else(|| refused("agent custody recipient missing"))?;
-        // A metadata broadcast is sent to every sibling at once, so its recipient names the root
-        // only; a custody packet is point-to-point and names this device.
-        let broadcast =
-            matches!(packet.body.as_ref(), Some(g::agent_host_packet::Body::Metadata(_)));
+        // Metadata and an activity marker name the sending device as recipient: one body
+        // reaches every sibling. Any other custody packet names this device.
+        let broadcast = packet_broadcast(packet);
         if packet.owner_anchor != own_root
             || declared_source.account_anchor != source.root_commitment()
             || declared_source.device_id != source.device_id()
@@ -132,6 +160,16 @@ impl RamfluxClient {
         };
         match custody.value.as_ref() {
             Some(g::agent_custody_packet::Value::RequestJson(plan_bytes)) => {
+                if let Some(activity) = crate::client::agent_activity::parse_marker(plan_bytes)? {
+                    let record_conversation =
+                        activity.record.get("conversation_id").and_then(|value| value.as_str());
+                    if activity.conversation_id != conversation
+                        || record_conversation != Some(conversation)
+                    {
+                        return Err(refused("agent activity conversation mismatch"));
+                    }
+                    return Ok(CustodyBody::Activity(Box::new(activity)));
+                }
                 check_received_request(
                     plan_bytes,
                     conversation,
@@ -237,6 +275,10 @@ impl RamfluxClient {
             .map_err(|_| refused("agent custody clock range"))?;
         let store = self.agent_creation_store()?;
         match body {
+            CustodyBody::Activity(activity) => {
+                crate::client::agent_activity::commit(self, &activity.state_kind, activity.record)?;
+                Ok(())
+            }
             CustodyBody::Metadata(metadata) => self.receive_agent_metadata(&metadata).map(|_| ()),
             CustodyBody::Plan(plan_bytes) => receive_plan(&store, &plan_bytes, now).map(|_| ()),
             CustodyBody::Cancel(cancel_bytes) => {

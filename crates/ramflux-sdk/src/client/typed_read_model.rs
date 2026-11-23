@@ -104,6 +104,10 @@ pub struct MessageViewPage {
     /// Cursor for the next older page; absent at the beginning of history.
     pub next_before: Option<g::EventIdentity>,
     pub snapshot_sequence: u64,
+    /// Stored `read_through_message_id` for this reader. Absent when no cursor is stored.
+    pub read_through_message_id: Option<String>,
+    /// Active unread-marker id, otherwise the oldest visible message after that cursor.
+    pub first_unread_message_id: Option<String>,
 }
 
 /// Durable changes after a cursor, oldest change first.
@@ -207,6 +211,11 @@ fn strip_content_media_keys(content: &mut g::Content) {
                 strip_media_keys(replacement);
             }
         }
+        Some(g::content::Value::Call(call))
+            if !matches!(call.payload, Some(g::call::Payload::Summary(_))) =>
+        {
+            call.payload = None;
+        }
         _ => {}
     }
 }
@@ -246,12 +255,17 @@ impl RamfluxClient {
                 identities.push(identity);
             }
         }
+        let reader = self.read_device_identity()?;
+        let position =
+            self.account_db()?.conversation_read_position(conversation, reader.as_ref())?;
         let mut views = MessageViewPage {
             schema: READ_MODEL_SCHEMA,
             conversation_id: conversation.to_owned(),
             messages,
             next_before: page.next_before,
             snapshot_sequence: page.snapshot_sequence,
+            read_through_message_id: position.read_through_message_id,
+            first_unread_message_id: position.first_unread_message_id,
         };
         // Views add reactions and receipts to the bounded updates; keep the same frame cap.
         while encoded_len(&views)? > MAX_RESPONSE_BYTES {
@@ -488,6 +502,9 @@ impl RamfluxClient {
                 view.kind = content.value.as_ref().map_or("unspecified", kind_name);
                 if let Some(g::content::Value::Message(body)) = content.value.as_ref() {
                     view.text = Some(body.text.clone());
+                }
+                if let Some(direction) = crate::client::call::history::present(self, &mut content) {
+                    view.text = Some(direction);
                 }
                 view.content = Some(content);
                 view.revision = self

@@ -5,7 +5,7 @@
 //! response bound. The HTTP stack is the workspace's `reqwest` (same features as
 //! `apps/ramflux-agent-host`).
 
-use crate::error::{PrxError, config, decode_api_error, protocol, rate_limited};
+use crate::error::{PrxError, config, decode_api_error, limit_or_rate, protocol};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, IF_MATCH, RETRY_AFTER};
 use reqwest::{Method, Url, redirect};
 use serde_json::Value;
@@ -71,6 +71,36 @@ pub(crate) struct Raw {
     pub(crate) retry_after: Option<u64>,
 }
 
+struct Outbound<'a> {
+    method: &'a Method,
+    path: &'a str,
+    if_match: Option<&'a str>,
+    idempotency_key: Option<&'a str>,
+    body: Option<&'a Value>,
+    max_body: usize,
+}
+
+impl<'a> Outbound<'a> {
+    fn new(method: &'a Method, path: &'a str, max_body: usize) -> Self {
+        Self { method, path, if_match: None, idempotency_key: None, body: None, max_body }
+    }
+
+    const fn if_match(mut self, if_match: Option<&'a str>) -> Self {
+        self.if_match = if_match;
+        self
+    }
+
+    const fn idempotency(mut self, idempotency_key: Option<&'a str>) -> Self {
+        self.idempotency_key = idempotency_key;
+        self
+    }
+
+    const fn body(mut self, body: Option<&'a Value>) -> Self {
+        self.body = body;
+        self
+    }
+}
+
 /// The HTTP side of a client: one connection pool, one token, the limits.
 pub(crate) struct Transport {
     http: reqwest::Client,
@@ -109,12 +139,64 @@ impl Transport {
         if_match: Option<&str>,
         body: Option<&Value>,
     ) -> Result<Raw, PrxError> {
-        let mut raw = self.send_once(&method, path, if_match, body).await?;
+        self.call_keyed(method, path, if_match, None, body).await
+    }
+
+    /// Like `call`, and also sends `Idempotency-Key` when `idempotency_key` is set.
+    pub(crate) async fn call_keyed(
+        &self,
+        method: Method,
+        path: &str,
+        if_match: Option<&str>,
+        idempotency_key: Option<&str>,
+        body: Option<&Value>,
+    ) -> Result<Raw, PrxError> {
+        let call = Outbound::new(&method, path, self.max_body_bytes)
+            .if_match(if_match)
+            .idempotency(idempotency_key)
+            .body(body);
+        let mut raw = self.send_once(&call).await?;
         if raw.status == 401 {
             self.reload_token()?;
-            raw = self.send_once(&method, path, if_match, body).await?;
+            raw = self.send_once(&call).await?;
         }
         Self::check_status(raw)
+    }
+
+    /// Like `call` for a GET with no body, and a caller-chosen response bound.
+    pub(crate) async fn call_capped(
+        &self,
+        method: Method,
+        path: &str,
+        max_body: usize,
+    ) -> Result<Raw, PrxError> {
+        let call = Outbound::new(&method, path, max_body);
+        let mut raw = self.send_once(&call).await?;
+        if raw.status == 401 {
+            self.reload_token()?;
+            raw = self.send_once(&call).await?;
+        }
+        Self::check_status(raw)
+    }
+
+    /// Loopback host and port for the sync WebSocket. The bearer is read separately.
+    pub(crate) fn sync_dial(&self) -> Result<crate::sync::SyncDial, PrxError> {
+        let host = match self.base.host_str() {
+            Some("127.0.0.1") => "127.0.0.1",
+            Some("[::1]" | "::1") => "::1",
+            _ => return Err(config("base URL must be loopback")),
+        };
+        let port = self
+            .base
+            .port_or_known_default()
+            .filter(|port| *port != 0)
+            .ok_or(config("base URL has no port"))?;
+        Ok(crate::sync::SyncDial { host: host.to_owned(), port })
+    }
+
+    /// Re-reads the token file. Callers drop the value after placing it on the socket.
+    pub(crate) fn bearer(&self) -> Result<Zeroizing<String>, PrxError> {
+        load_token(&self.token_file)
     }
 
     /// Sends a request exactly once and returns whatever HTTP answer came back, with no token
@@ -127,7 +209,8 @@ impl Transport {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Raw, PrxError> {
-        self.send_once(&method, path, None, body).await
+        let call = Outbound::new(&method, path, self.max_body_bytes).body(body);
+        self.send_once(&call).await
     }
 
     /// Sends one request and returns the raw answer, with the same single token re-read on a 401
@@ -138,10 +221,11 @@ impl Transport {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Raw, PrxError> {
-        let mut raw = self.send_once(&method, path, None, body).await?;
+        let call = Outbound::new(&method, path, self.max_body_bytes).body(body);
+        let mut raw = self.send_once(&call).await?;
         if raw.status == 401 {
             self.reload_token()?;
-            raw = self.send_once(&method, path, None, body).await?;
+            raw = self.send_once(&call).await?;
         }
         Ok(raw)
     }
@@ -150,33 +234,33 @@ impl Transport {
         if (200..300).contains(&raw.status) {
             Ok(raw)
         } else if raw.status == 429 {
-            // No built-in retry (card D4): the caller decides.
-            Err(rate_limited(raw.retry_after, &raw.body))
+            // No built-in retry (card D4): the caller decides. Admission refusals stay distinct
+            // from the shared API limit.
+            Err(limit_or_rate(raw.retry_after, &raw.body))
         } else {
             Err(decode_api_error(raw.status, &raw.body))
         }
     }
 
-    async fn send_once(
-        &self,
-        method: &Method,
-        path: &str,
-        if_match: Option<&str>,
-        body: Option<&Value>,
-    ) -> Result<Raw, PrxError> {
-        let url = self.base.join(path).map_err(|_| config("request path is invalid"))?;
+    async fn send_once(&self, call: &Outbound<'_>) -> Result<Raw, PrxError> {
+        let url = self.base.join(call.path).map_err(|_| config("request path is invalid"))?;
         let mut request = self
             .http
-            .request(method.clone(), url)
+            .request(call.method.clone(), url)
             .timeout(self.request_timeout)
             .header(AUTHORIZATION, self.authorization()?)
             .header(ACCEPT, "application/json");
-        if let Some(revision) = if_match {
+        if let Some(revision) = call.if_match {
             let value = HeaderValue::from_str(revision)
                 .map_err(|_| config("revision is not a header value"))?;
             request = request.header(IF_MATCH, value);
         }
-        if let Some(payload) = body {
+        if let Some(key) = call.idempotency_key {
+            let value = HeaderValue::from_str(key)
+                .map_err(|_| config("idempotency key is not a header value"))?;
+            request = request.header("idempotency-key", value);
+        }
+        if let Some(payload) = call.body {
             let bytes = serde_json::to_vec(payload)
                 .map_err(|_| protocol("request body could not be encoded"))?;
             request = request.header(CONTENT_TYPE, "application/json").body(bytes);
@@ -192,7 +276,7 @@ impl Transport {
         while let Some(chunk) =
             response.chunk().await.map_err(|error| map_transport_error(&error))?
         {
-            if raw_body.len().saturating_add(chunk.len()) > self.max_body_bytes {
+            if raw_body.len().saturating_add(chunk.len()) > call.max_body {
                 return Err(protocol("response body exceeds the client bound"));
             }
             raw_body.extend_from_slice(&chunk);

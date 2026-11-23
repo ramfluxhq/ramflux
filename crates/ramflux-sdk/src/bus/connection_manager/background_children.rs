@@ -23,6 +23,9 @@ pub(super) fn start(
     let _ = handle.spawn_session_child("keepalive", |context| {
         Box::pin(crate::bus::push_receiver::keepalive::run(context))
     });
+    let _ = handle.spawn_session_child("grant-renewal", |context| {
+        Box::pin(super::grant_renewal::run(context))
+    });
     if let Some(work) = handle.shared.account_work.clone() {
         let task_writer = work.clone();
         let task_requests = Arc::new(tokio::sync::Mutex::new(task_requests));
@@ -73,10 +76,7 @@ pub(super) fn start(
         let _ = handle.spawn_session_child("delivery-receipts", move |context| {
             Box::pin(crate::bus::delivery_receipts::run_background(context, receipt_work.clone()))
         });
-        let refresh_work = work.clone();
-        let _ = handle.spawn_session_child("head-refresh", move |context| {
-            Box::pin(crate::bus::couriers::head_refresh::run(context, refresh_work.clone()))
-        });
+        spawn_head_refresh(handle, &work);
         let backfill_work = work.clone();
         let _ = handle.spawn_session_child("own-contact-backfill", move |context| {
             Box::pin(crate::bus::couriers::directory::backfill(context, backfill_work.clone()))
@@ -115,6 +115,20 @@ pub(super) fn start(
         auxiliary.extend(spawn_account_receive(handle, work, timeouts));
     }
     auxiliary
+}
+
+fn spawn_head_refresh(handle: &ConnectionHandle, work: &mpsc::Sender<AccountWork>) {
+    let refresh_work = work.clone();
+    // A missing dedicated sender keeps Apply on the shared pipe. Tests that
+    // pass only `account_work` still read that pipe; the account writer installs one.
+    let completion = handle.shared.head_completion.clone().unwrap_or_else(|| refresh_work.clone());
+    let _ = handle.spawn_session_child("head-refresh", move |context| {
+        Box::pin(crate::bus::couriers::head_refresh::run(
+            context,
+            refresh_work.clone(),
+            completion.clone(),
+        ))
+    });
 }
 
 fn spawn_account_receive(

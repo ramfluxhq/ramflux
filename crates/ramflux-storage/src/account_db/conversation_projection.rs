@@ -301,6 +301,7 @@ impl AccountDb {
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
+        // NULLIF turns a cleared '' cursor into SQL NULL. That is absence.
         let read_through_message_id = self
             .connection
             .query_row(
@@ -308,9 +309,10 @@ impl AccountDb {
                    FROM conversation_read_state
                   WHERE conversation_id = ?1 AND reader_id = ?2",
                 params![conversation_id, reader_id],
-                |row| row.get(0),
+                |row| row.get::<_, Option<String>>(0),
             )
-            .optional()?;
+            .optional()?
+            .flatten();
         let delivered_through_message_id = self
             .connection
             .query_row(
@@ -318,9 +320,10 @@ impl AccountDb {
                    FROM conversation_delivery_state
                   WHERE conversation_id = ?1 AND receiver_device_id = ?2",
                 params![conversation_id, reader_id],
-                |row| row.get(0),
+                |row| row.get::<_, Option<String>>(0),
             )
-            .optional()?;
+            .optional()?
+            .flatten();
         let manual_unread_message_id = self
             .connection
             .query_row(

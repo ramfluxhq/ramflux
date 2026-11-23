@@ -29,6 +29,19 @@ pub(crate) struct DaemonStart {
     /// JSON array of client-supplied built-in profiles with factory public-key pins.
     #[arg(long)]
     pub(crate) builtin_nodes: Option<PathBuf>,
-    #[arg(long, default_value = DEFAULT_DATA_ROOT)]
+    #[cfg_attr(not(target_os = "linux"), arg(long, default_value = DEFAULT_DATA_ROOT))]
+    #[cfg_attr(
+        target_os = "linux",
+        arg(long, default_value_os_t = crate::linux_paths::default_data_root())
+    )]
     pub(crate) data_root: PathBuf,
+    /// Loopback PRX base URL. Set together with `--prx-token-file`, or set neither.
+    #[arg(long)]
+    pub(crate) prx_base_url: Option<String>,
+    /// Bearer token file for `--prx-base-url`. Mode must be `0600`.
+    #[arg(long)]
+    pub(crate) prx_token_file: Option<PathBuf>,
+    /// Read a fresh `runtime.json` and `owner.token` from this directory. Does not start PRX.
+    #[arg(long)]
+    pub(crate) prx_state_dir: Option<PathBuf>,
 }

@@ -35,7 +35,6 @@ an old combined endpoint to work.
 | Admin | GET `/healthz` | Private operator / production peering fixture readiness |
 | Admin | POST `/admin/federation/peer` | `rf admin federation peer`, private operator tooling; token required |
 | Admin | POST `/admin/federation/discover` | Private discovery/pinning tooling; token required |
-| Admin | POST `/s8/federation/forward` | Explicit privileged cross-node CLI forwarding; token required |
 | Admin | POST `/internal/home-node-migration/forward` | Router local home-node migration forwarding; token required |
 | Admin | POST `/s8/federation/mesh-observability` | Private operator / production peering fixture transport diagnostics; token required |
 
@@ -48,15 +47,88 @@ consumer exists for that route.
 
 ## Authenticated mesh route inventory
 
-TCP mTLS and QUIC expose the same four routes, on the independently configured
+TCP TLS and QUIC expose the following shared routes, on the independently configured
 mesh listener (Compose port 7443). Neither HTTP listener forwards these paths.
 
 | Method and path | Reader / caller |
 | --- | --- |
 | GET `/healthz` | Authenticated mesh health probes |
 | GET `/mvp9/federation/trust-snapshot` | Relay trust consumers over authenticated mesh |
-| POST `/s8/federation/envelope` | Admitted federation peers delivering signed envelopes |
-| POST `/internal/retention/gc_sweep` | Retention service only; peer service identity enforced |
+| POST `/s8/federation/envelope` | Node-signed envelopes; the client certificate supplies no authority |
+| POST `/internal/retention/gc_sweep` | Local retention service only; node and service identity enforced |
+
+The federation listener permits absent client certificates. Every route except
+`POST /s8/federation/envelope` requires a verified mesh identity, checked before body
+reads on TCP, Quinn and compio; unknown routes deny access. Health and trust snapshot
+require a known non-retention service on this node. Retention can call only `gc_sweep`
+among protected routes and must belong to this node. Migration and attachment renewal
+require a remote federation identity: migration binds its node to the signed call's
+claimed peer, and renewal binds it to the requested home node. Envelope handling
+uses only the signed request, regardless of whether a verified certificate is present.
+
+Envelope senders use server-authenticated TLS with pinned server roots, without a client
+certificate, in pools separate from service mTLS. First contact stages canonical HTTPS
+signed discovery and verifies the node request before atomically publishing trust. Existing
+pins never trigger inbound discovery or capability refresh. Requests must target this node,
+fit the 2 MiB body cap, have TTL at most 604800 seconds, be unexpired and be no more than
+60 seconds in the future. Malformed signature encodings reject before discovery; a
+well-formed signature for an unknown source requires its discovered key to verify.
+
+Inbound discovery has 64 attempts/hour, four per remote IP/hour, four concurrent workers,
+a 128-node coalescing cache and a 60-second negative cache. Only invalid records from
+completed canonical discovery fetches enter the negative cache; DNS, transport, deadline
+and capacity refusals do not. Discovery owns a fresh ten-second deadline independent of
+the triggering request. A late caller cannot publish a pin, but successful discovery stays
+cached for a genuine caller. Failures never create node blocks. The 16 new pins/hour
+sub-quota is recorded by `InboundSigned` pin provenance and survives restart within the
+shared 32/hour and 1024 total pin limits. Outbound discovery retains its separate
+32-attempt/hour allowance. Sixteen source IPs can exhaust the 64/hour inbound budget;
+callers sharing an IP share its allowance.
+
+New-source connections and handshakes each have 16 process-wide slots, two per IP and
+two per IPv4 /24 or IPv6 /64. Repeat network groups cannot consume the final four slots.
+New-source requests have eight slots, two per IP/group, with two slots reserved for new
+groups. Previously verified source addresses use separate 16-slot connection/handshake
+and 32-slot request pools (four per group, two per IP, four-slot new-group headroom).
+The address cache is process-local, expires after one hour and holds at most 128 entries;
+only verified TLS identities or authenticated signed requests populate it. Address hints
+provide scheduling capacity, never certificate or envelope authority. Verified mTLS
+connections bypass anonymous connection/request pools. Enough distinct groups can still
+exhaust a finite pool, and co-located callers share fairness limits.
+
+Anonymous connections serve at most four requests. TCP anonymous headers and QUIC
+pre-stream idle waits expire after two seconds; request bodies/processing retain a
+10-second absolute deadline. Handshakes expire after five seconds. Quinn and compio
+accept new arrivals independently of outstanding handshakes; all transports share source
+accounting. QUIC synchronous workers retain their permits through cancellation.
+
+QUIC frames place `method` and `path` before `body`, as the mesh request serializer does.
+A bounded routing header is admitted before any body value is read; body-first or
+unroutable frames refuse. Strict I-JSON validation still covers the complete admitted frame.
+
+Both transports use the same durable federation inbound receipt table in redb. Committed
+receipts are checked only after node and device authentication, survive service restart,
+and are retained until envelope expiry. A captured valid request returns the duplicate
+outcome without another delivery; expired requests refuse. A crash before receipt commit
+retains the existing at-least-once behavior and router deduplication boundary.
+
+TCP mTLS also serves `POST /internal/cross-node/forward` only to the exact
+`spiffe://<local-node>/ramflux-router` identity. The router takes the federation
+endpoint from `mesh.endpoints.federation`, authenticates its service certificate
+with the configured mesh CA, and submits `{target_node, envelope}` within a
+10-second absolute deadline, bounded headers and a 1 MiB reply cap before allocation.
+The TCP reader checks the exact same-node router identity after bounded headers and
+before reading or allocating the body; a refusal closes the connection with 403.
+This route's compact request cap is 1,048,669 bytes: the 1 MiB complete envelope cap,
+a 63-byte ASCII target node id and 30 bytes of JSON framing. The router applies the
+same request cap before writing and refuses explicit endpoint schemes other than
+`https://`; bare mesh socket addresses still use TLS. Cross-node QUIC submit jobs
+hold a separate eight-job permit inside the existing 64-job blocking dispatcher,
+including across caller cancellation, leaving 56 slots for other routes.
+The handoff writes at most once; transport retries remain caller-owned.
+Federation supplies the local source node, attaches
+source authority and signs through the ordinary outbound flow. This same-node
+handoff has no admin-token input and is independent of migration forwarding.
 
 ## Integration fixture control plane
 
@@ -80,7 +152,6 @@ handler. Production builds do not enable this feature. Legacy fixture
 | POST `/mvp8/federation/handshake` | Admission fixtures |
 | GET `/mvp8/federation/capabilities/{node}` | Capability assertions |
 | POST `/mvp8/federation/friend-request` | Cross-node friend-request fixtures |
-| POST `/s8/federation/forward` | Test forwarding fixtures |
 | POST `/mvp7/federation/tombstone` | Federation deletion fixtures |
 | GET `/mvp7/federation/tombstone/{node}` | Tombstone assertions |
 

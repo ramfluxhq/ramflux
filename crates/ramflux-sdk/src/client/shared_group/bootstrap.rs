@@ -222,6 +222,31 @@ impl RamfluxClient {
             .transpose()?;
         Ok(PreparedSharedGroup::Snapshot(SnapshotPrepared { state, distribution }))
     }
+
+    /// A stranger bootstrap may carry a creator snapshot. Hold that snapshot as an
+    /// invitation. A snapshot that does not need consent is not joined here.
+    pub(crate) fn stranger_invitation_packet(
+        &self,
+        route: &crate::client::routed::Routing,
+        body: &[u8],
+    ) -> Result<Option<PreparedSharedGroup>, SdkError> {
+        if route.kind != crate::client::routed::Kind::GroupControl {
+            return Ok(None);
+        }
+        let Some(state) = decode_packet(body)? else {
+            return Ok(None);
+        };
+        if route.group_id.as_deref() != Some(state.view().group_id.as_str())
+            || route.conversation_id != state.view().conversation_id
+        {
+            return Err(invalid("group state routing mismatch"));
+        }
+        if !self.group_snapshot_requires_consent(&state)? {
+            return Err(invalid("stranger group snapshot is not an invitation"));
+        }
+        Ok(Some(PreparedSharedGroup::Invitation { state, body: Zeroizing::new(body.to_vec()) }))
+    }
+
     pub(crate) fn authorize_prepared_shared_group(
         &self,
         prepared: &PreparedSharedGroup,

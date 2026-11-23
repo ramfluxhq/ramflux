@@ -7,8 +7,18 @@ use super::super::*;
 
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Call {
-    #[prost(message, optional, tag = "16")]
-    pub control: ::core::option::Option<CallControl>,
+    #[prost(oneof = "call::Payload", tags = "16, 17")]
+    pub payload: ::core::option::Option<call::Payload>,
+}
+/// Nested message and enum types in `Call`.
+pub mod call {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag = "16")]
+        Control(super::CallControl),
+        #[prost(message, tag = "17")]
+        Summary(super::CallSummary),
+    }
 }
 impl serde::Serialize for Call {
     #[allow(deprecated)]
@@ -18,12 +28,19 @@ impl serde::Serialize for Call {
     {
         use serde::ser::SerializeStruct;
         let mut len = 0;
-        if self.control.is_some() {
+        if self.payload.is_some() {
             len += 1;
         }
         let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.Call", len)?;
-        if let Some(v) = self.control.as_ref() {
-            struct_ser.serialize_field("control", v)?;
+        if let Some(v) = self.payload.as_ref() {
+            match v {
+                call::Payload::Control(v) => {
+                    struct_ser.serialize_field("control", v)?;
+                }
+                call::Payload::Summary(v) => {
+                    struct_ser.serialize_field("summary", v)?;
+                }
+            }
         }
         struct_ser.end()
     }
@@ -34,10 +51,11 @@ impl<'de> serde::Deserialize<'de> for Call {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] = &["control"];
+        const FIELDS: &[&str] = &["control", "summary"];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             Control,
+            Summary,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -60,6 +78,7 @@ impl<'de> serde::Deserialize<'de> for Call {
                     {
                         match value {
                             "control" => Ok(GeneratedField::Control),
+                            "summary" => Ok(GeneratedField::Summary),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -77,7 +96,7 @@ impl<'de> serde::Deserialize<'de> for Call {
             where
                 V: serde::de::MapAccess<'de>,
             {
-                let mut control__ = None;
+                let mut payload__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -85,14 +104,24 @@ impl<'de> serde::Deserialize<'de> for Call {
                     }
                     match k {
                         GeneratedField::Control => {
-                            if control__.is_some() {
+                            if payload__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("control"));
                             }
-                            control__ = map_.next_value()?;
+                            payload__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call::Payload::Control);
+                        }
+                        GeneratedField::Summary => {
+                            if payload__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("summary"));
+                            }
+                            payload__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call::Payload::Summary);
                         }
                     }
                 }
-                Ok(Call { control: control__ })
+                Ok(Call { payload: payload__ })
             }
         }
         deserializer.deserialize_struct("ramflux.message.v1.Call", FIELDS, GeneratedVisitor)

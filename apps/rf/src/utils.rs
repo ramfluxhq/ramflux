@@ -40,6 +40,18 @@ pub(crate) fn rf_now_unix_timestamp_u64() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_secs())
 }
 
+pub(crate) fn require_json_safe_mute_until(mute_until: Option<i64>) -> Result<(), RfError> {
+    if mute_until
+        .is_some_and(|until| until.unsigned_abs() > ramflux_protocol::MAX_SAFE_JSON_INTEGER)
+    {
+        return Err(RfError::Message(
+            "mute_until exceeds the safe JSON integer range; omit --mute-until to mute until turned off"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn print_json(value: &serde_json::Value) -> Result<(), RfError> {
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(serde_json::to_string_pretty(&value)?.as_bytes())?;

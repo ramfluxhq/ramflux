@@ -702,6 +702,7 @@ pub fn prune(db: &redb::Database, now: u64) -> Result<usize, SendAuthorityError>
         .map(|entry| entry.map(|(k, _)| (k.value().0, k.value().1.to_owned())).map_err(storage))
         .collect::<Result<Vec<_>, _>>()?;
     let mut removed = 0;
+    let mut changed = false;
     for (at, id) in candidates {
         if at > now {
             break;
@@ -746,9 +747,14 @@ pub fn prune(db: &redb::Database, now: u64) -> Result<usize, SendAuthorityError>
             removed += 1;
         }
         due.remove((at, id.as_str())).map_err(storage)?;
+        changed = true;
     }
     drop(due);
-    tx.commit().map_err(storage)?;
+    if changed {
+        tx.commit().map_err(storage)?;
+    } else {
+        tx.abort().map_err(storage)?;
+    }
     Ok(removed)
 }
 

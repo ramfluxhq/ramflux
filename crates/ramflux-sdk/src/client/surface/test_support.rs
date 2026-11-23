@@ -81,7 +81,25 @@ pub(crate) async fn owned_pair_with_vault(
         client.persist_observed_identity_directory_now(&human_manifest)?;
         client.persist_observed_identity_directory_now(&agent_manifest)?;
     }
+    seed_own_agent_record(&human_client, &agent_client)?;
     Ok((human_client, agent_client, vault))
+}
+/// Rendering and acceptance read the owner's agent record next to the pinned publication. The
+/// creation writes it on completion and every own device receives it; this fixture completes
+/// without an intent, so the record is seeded on each owner terminal.
+pub(crate) fn seed_own_agent_record(owner: &RamfluxClient, agent: &RamfluxClient) -> TestResult {
+    let author = owner
+        .born_v3_account
+        .as_ref()
+        .map(|account| account.record().body.master_certificate.body.primary_device_ref.clone())
+        .ok_or("owner account")?;
+    let anchor = agent
+        .born_v3_account
+        .as_ref()
+        .map(|account| account.record().body.account_anchor.clone())
+        .ok_or("agent account")?;
+    crate::agent_record::seed_for_test(&owner.agent_record_store()?, &anchor, &author, 1)?;
+    Ok(())
 }
 pub(crate) fn create_frame(
     conversation: &str,
@@ -166,6 +184,7 @@ pub(crate) async fn owned_terminals_with_vault(
         enroll_surface_sibling(&secondary, &mut human, &vault, "human", "human-two").await?;
     let author_two =
         enroll_surface_sibling(&secondary, &mut agent, &vault, "author", "author-two").await?;
+    seed_own_agent_record(&human_two, &agent)?;
     let clients = vec![agent, author_two, human, human_two];
     let mut by_root =
         std::collections::BTreeMap::<String, ramflux_protocol::custody::CustodyManifest>::new();

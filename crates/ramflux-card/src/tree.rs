@@ -1,390 +1,251 @@
 // SPDX-License-Identifier: BSD-3-Clause
-use crate::{CardError, CardSpec, ChartKind, Choice, HostSecuritySlot, Series, spec::preflight};
+//! Flat keyed ABI-5 trees and atomic, shallow mutation batches.
+use crate::{CardError, CardSpec, HostSlot, NodeKind, spec::preflight};
+use ramflux_protocol::a2ui::ResolvedSlot;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
-
-pub(crate) const MAX_TREE: usize = 64 * 1024;
-const MAX_EXPANDED_NODES: usize = 256;
-const MAX_NODE_DEPTH: usize = 16;
-/// Only native form controls. Approval, HTML and navigation are absent.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeKind {
-    Column,
-    Form,
-    TextField,
-    Submit,
-    Number,
-    Select,
-    Toggle,
-    Text,
-    Task,
-    Progress,
-    Chart,
-    Table,
-    ApprovalInfo,
-}
+pub(crate) const MAX_TREE: usize = 256 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
     pub key: String,
+    pub component_id: String,
+    pub source_instance: Vec<String>,
+    pub scope: String,
+    pub parent_key: Option<String>,
+    pub slot: ResolvedSlot,
+    pub children: Vec<String>,
     pub kind: NodeKind,
-    pub text: String,
-    pub value: String,
-    pub action: Option<String>,
-    pub children: Vec<Node>,
-    #[serde(default, skip_serializing_if = "Attrs::is_empty")]
-    pub attrs: Box<Attrs>,
-}
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Style {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub background: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub border: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gap: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub padding: Option<u8>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Plot {
-    pub kind: ChartKind,
-    pub unit: String,
-    pub scale: u32,
-    pub series: Vec<Series>,
-}
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Attrs {
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub required: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub disabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub options: Vec<Choice>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub progress: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub columns: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub rows: Vec<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub plot: Option<Plot>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub style: Option<Style>,
-}
-impl Attrs {
-    fn is_empty(&self) -> bool {
-        self == &Self::default()
-    }
+    pub attrs: Map<String, Value>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tree {
-    pub root: Node,
+    pub schema: String,
+    pub session: u64,
+    pub signed_version: u64,
+    pub signed_hash: String,
+    pub edit_seq: u64,
+    pub tree_version: u64,
+    pub root_key: String,
+    pub nodes: Vec<Node>,
+    pub host_slots: Vec<HostSlot>,
+    /// String-catalog tag after fallback.
+    #[serde(default = "english_tag")]
+    pub locale: String,
+    /// CLDR locale used for numbers, dates and plurals.
+    #[serde(default = "english_tag")]
+    pub format_locale: String,
+    /// `rtl` for Arabic, otherwise `ltr`.
+    #[serde(default = "ltr_direction")]
+    pub direction: String,
 }
-/// Upsert uses a shallow node; children are attached by their own keyed operations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Mutation {
     Remove { key: String },
     Upsert { parent: Option<String>, index: usize, node: Node },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MutationBatch {
+    pub schema: String,
+    pub session: u64,
     pub previous_version: u64,
     pub version: u64,
+    pub signed_version: u64,
+    pub signed_hash: String,
+    pub edit_seq: u64,
     pub mutations: Vec<Mutation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub host_slots: Vec<HostSecuritySlot>,
+    pub host_slots: Vec<HostSlot>,
+    /// String-catalog tag after fallback. Present even when no node changed.
+    #[serde(default = "english_tag")]
+    pub locale: String,
+    /// CLDR locale used for numbers, dates and plurals.
+    #[serde(default = "english_tag")]
+    pub format_locale: String,
+    /// `rtl` for Arabic, otherwise `ltr`.
+    #[serde(default = "ltr_direction")]
+    pub direction: String,
 }
-
+fn english_tag() -> String {
+    "en".to_owned()
+}
+fn ltr_direction() -> String {
+    "ltr".to_owned()
+}
 impl Tree {
     pub(crate) fn parse(bytes: &[u8], spec: &CardSpec) -> Result<Self, CardError> {
         preflight(bytes, MAX_TREE)?;
-        let tree: Self = serde_json::from_slice(bytes)?;
-        tree.check_limits()?;
-        palette(&tree.root, &spec.presentation()?)?;
-        if tree.without_style() != crate::projection::expected(spec)? {
+        let value: Value = serde_json::from_slice(bytes)?;
+        let expected =
+            spec.render_tree.clone().map_or_else(|| crate::projection::expected(spec), Ok)?;
+        // Compare raw JSON as well as typed semantics: serde flattening must never
+        // discard an unknown field in a host slot or node before this check.
+        if value != serde_json::to_value(&expected)? {
             return Err(CardError::Invalid("component semantics"));
         }
-        Ok(tree)
+        expected.check_limits()?;
+        Ok(expected)
     }
     pub(crate) fn check_limits(&self) -> Result<(), CardError> {
-        let mut keys = BTreeSet::new();
-        let mut expanded = 0;
-        validate_node(&self.root, 1, &mut keys, &mut expanded)
-    }
-    pub(crate) fn without_style(&self) -> Self {
-        fn strip(node: &mut Node) {
-            node.attrs.style = None;
-            for child in &mut node.children {
-                strip(child);
-            }
+        if self.nodes.len() > 256 || serde_json::to_vec(self)?.len() > MAX_TREE {
+            return Err(CardError::Limit("tree"));
         }
-        let mut tree = self.clone();
-        strip(&mut tree.root);
-        tree
+        let mut keys = BTreeSet::new();
+        let mut bytes = 0usize;
+        for node in &self.nodes {
+            if !keys.insert(&node.key) {
+                return Err(CardError::Invalid("duplicate tree key"));
+            }
+            bytes = bytes.saturating_add(serde_json::to_vec(&node.attrs)?.len());
+        }
+        if bytes > 64 * 1024 {
+            return Err(CardError::Limit("resolved properties"));
+        }
+        Ok(())
     }
     pub(crate) fn diff(
         &self,
         old: Option<&Self>,
         previous_version: u64,
         version: u64,
-    ) -> MutationBatch {
-        let before = old.map_or_else(Vec::new, |tree| flatten(&tree.root));
-        let after = flatten(&self.root);
-        let before_map: BTreeMap<_, _> = before.iter().map(|m| (&m.node.key, m)).collect();
-        let after_keys: BTreeSet<_> = after.iter().map(|m| &m.node.key).collect();
+    ) -> Result<MutationBatch, CardError> {
+        let before: BTreeMap<_, _> =
+            old.into_iter().flat_map(|t| &t.nodes).map(|node| (&node.key, node)).collect();
+        let keys: BTreeSet<_> = self.nodes.iter().map(|node| &node.key).collect();
         let mut mutations = Vec::new();
-        for entry in before.iter().rev() {
-            if !after_keys.contains(&entry.node.key) {
-                mutations.push(Mutation::Remove { key: entry.node.key.clone() });
+        if let Some(old) = old {
+            for node in old.nodes.iter().rev() {
+                if !keys.contains(&node.key) {
+                    mutations.push(Mutation::Remove { key: node.key.clone() });
+                }
             }
         }
-        let mut reparented = BTreeSet::new();
-        for entry in after {
-            let old = before_map.get(&entry.node.key);
-            let must_rebuild = old
-                .is_some_and(|old| old.parent != entry.parent || old.node.kind != entry.node.kind)
-                || entry.parent.as_ref().is_some_and(|parent| reparented.contains(parent));
-            if must_rebuild {
-                reparented.insert(entry.node.key.clone());
-            }
-            if must_rebuild || old.is_none_or(|old| **old != entry) {
+        // Emit all surviving children when an edge list changes. This also rebuilds an
+        // unchanged descendant after its ancestor was removed/reinserted by the host.
+        let mut rebuilt = BTreeSet::new();
+        for node in &self.nodes {
+            let index = self.index(node)?;
+            let previous = before.get(&node.key);
+            let parent_rebuilt = node.parent_key.as_ref().is_some_and(|key| rebuilt.contains(key));
+            let moved = match (old, previous) {
+                (Some(old), Some(previous)) => {
+                    old.index(previous)? != index || previous.parent_key != node.parent_key
+                }
+                _ => true,
+            };
+            if parent_rebuilt || moved || previous.is_none_or(|previous| *previous != node) {
+                let mut shallow = node.clone();
+                shallow.children.clear();
                 mutations.push(Mutation::Upsert {
-                    parent: entry.parent,
-                    index: entry.index,
-                    node: entry.node,
+                    parent: node.parent_key.clone(),
+                    index,
+                    node: shallow,
                 });
+                rebuilt.insert(node.key.clone());
             }
         }
-        MutationBatch { previous_version, version, mutations, host_slots: Vec::new() }
-    }
-}
-fn validate_node(
-    node: &Node,
-    depth: usize,
-    keys: &mut BTreeSet<String>,
-    expanded: &mut usize,
-) -> Result<(), CardError> {
-    *expanded = expanded.saturating_add(
-        1 + node.attrs.options.len()
-            + node.attrs.rows.iter().map(|r| 1 + r.len()).sum::<usize>()
-            + node
-                .attrs
-                .plot
-                .as_ref()
-                .map_or(0, |p| p.series.iter().map(|s| s.points.len()).sum::<usize>()),
-    );
-    if depth > MAX_NODE_DEPTH || *expanded > MAX_EXPANDED_NODES {
-        return Err(CardError::Limit("expanded nodes or depth"));
-    }
-    if node.key.len() > 160
-        || node.text.len() > 1024
-        || node.value.len() > 4096
-        || !keys.insert(node.key.clone())
-    {
-        return Err(CardError::Invalid("tree key or text"));
-    }
-    if let Some(style) = &node.attrs.style {
-        for color in [&style.color, &style.background, &style.border].into_iter().flatten() {
-            if !(color.len() == 7 || color.len() == 9)
-                || !color.starts_with('#')
-                || !color.bytes().skip(1).all(|v| v.is_ascii_hexdigit())
-            {
-                return Err(CardError::Invalid("semantic color"));
-            }
+        let batch = MutationBatch {
+            schema: "ramflux.card.mutations.v1".into(),
+            session: self.session,
+            previous_version,
+            version,
+            signed_version: self.signed_version,
+            signed_hash: self.signed_hash.clone(),
+            edit_seq: self.edit_seq,
+            mutations,
+            host_slots: self.host_slots.clone(),
+            locale: self.locale.clone(),
+            format_locale: self.format_locale.clone(),
+            direction: self.direction.clone(),
+        };
+        if batch.mutations.len() > 512 || serde_json::to_vec(&batch)?.len() > MAX_TREE {
+            return Err(CardError::Limit("mutation batch"));
         }
-        if style.gap.is_some_and(|v| v > 64) || style.padding.is_some_and(|v| v > 64) {
-            return Err(CardError::Invalid("semantic geometry"));
+        Ok(batch)
+    }
+    fn index(&self, node: &Node) -> Result<usize, CardError> {
+        match &node.parent_key {
+            None => Ok(0),
+            Some(parent) => self
+                .nodes
+                .iter()
+                .find(|node| &node.key == parent)
+                .and_then(|parent| parent.children.iter().position(|key| key == &node.key))
+                .ok_or(CardError::Invalid("tree edge")),
         }
     }
-    for child in &node.children {
-        validate_node(child, depth + 1, keys, expanded)?;
-    }
-    Ok(())
-}
-#[derive(PartialEq, Eq)]
-struct FlatNode {
-    parent: Option<String>,
-    index: usize,
-    node: Node,
-}
-fn flatten(root: &Node) -> Vec<FlatNode> {
-    fn visit(node: &Node, parent: Option<String>, index: usize, out: &mut Vec<FlatNode>) {
-        let mut shallow = node.clone();
-        shallow.children.clear();
-        out.push(FlatNode { parent, index, node: shallow });
-        for (index, child) in node.children.iter().enumerate() {
-            visit(child, Some(node.key.clone()), index, out);
-        }
-    }
-    let mut out = Vec::new();
-    visit(root, None, 0, &mut out);
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::tests::fixture;
     #[test]
     fn rejects_invalid_trees_and_bounds_expansion() {
-        let spec =
-            CardSpec::parse(include_bytes!("../fixtures/form.json")).expect("test: valid card");
-        let fixture = include_str!("../fixtures/form.tree.json");
+        let spec = fixture();
+        let mut tree = crate::projection::expected(&spec).expect("test: projection");
+        tree.nodes[0].attrs.insert("html".into(), Value::String("script".into()));
         assert!(
-            Tree::parse(fixture.replace("text_field", "approval").as_bytes(), &spec).is_err(),
-            "unknown/security controls must be rejected"
+            Tree::parse(&serde_json::to_vec(&tree).expect("test: tree"), &spec).is_err(),
+            "VM semantics cannot add attributes"
         );
-        assert!(
-            Tree::parse(fixture.replace("profile:submit", "profile:field").as_bytes(), &spec)
-                .is_err(),
-            "duplicate keys must be rejected"
-        );
-        assert!(
-            Tree::parse(fixture.replace("Ada", "Eve").as_bytes(), &spec).is_err(),
-            "renderer cannot change bound field values"
-        );
-        let mut tree: Tree = serde_json::from_str(fixture).expect("test: typed fixture");
-        let child = tree.root.children.first().expect("test: first form").clone();
-        tree.root.children = (0..MAX_EXPANDED_NODES)
-            .map(|index| {
-                let mut n = child.clone();
-                n.key = format!("form-{index}");
-                n.children.clear();
-                n
-            })
-            .collect();
-        assert!(
-            matches!(tree.check_limits(), Err(CardError::Limit("expanded nodes or depth"))),
-            "257 nodes must fail the expansion bound"
-        );
-        tree.root.children.pop();
-        tree.check_limits().expect("test: exactly 256 nodes accepted");
-        let mut bytes = fixture.as_bytes().to_vec();
-        bytes.resize(MAX_TREE, b' ');
-        Tree::parse(&bytes, &spec).expect("test: exactly 64 KiB accepted");
-        bytes.push(b' ');
-        assert!(matches!(Tree::parse(&bytes, &spec), Err(CardError::Limit("JSON bytes"))));
+        tree.nodes = vec![tree.nodes[0].clone(); 257];
+        assert!(tree.check_limits().is_err(), "expanded nodes are bounded");
     }
     #[test]
     fn keyed_diff_orders_removals_and_skips_unchanged_nodes() {
-        let tree: Tree = serde_json::from_str(include_str!("../fixtures/form.tree.json"))
-            .expect("test: tree fixture");
-        let mut changed = tree.clone();
-        changed.root.children.clear();
-        let batch = changed.diff(Some(&tree), 1, 2);
-        let keys: Vec<_> = batch
-            .mutations
-            .iter()
-            .filter_map(|m| match m {
-                Mutation::Remove { key } => Some(key.as_str()),
-                Mutation::Upsert { .. } => None,
-            })
-            .collect();
-        assert_eq!(
-            keys,
-            ["profile:submit", "profile:field", "profile"],
-            "children must be removed before their parent"
-        );
+        let tree = crate::projection::expected(&fixture()).expect("test: tree");
         assert!(
-            tree.diff(Some(&tree), 1, 2).mutations.is_empty(),
-            "unchanged keyed tree needs only a version advance"
+            tree.diff(Some(&tree), 1, 2).expect("test: diff").mutations.is_empty(),
+            "unchanged nodes need no upsert"
+        );
+        let mut empty = tree.clone();
+        empty.nodes.clear();
+        let batch = empty.diff(Some(&tree), 1, 2).expect("test: removal batch");
+        assert_eq!(
+            batch.mutations.first(),
+            Some(&Mutation::Remove { key: tree.nodes.last().expect("test: leaf").key.clone() }),
+            "remove descendants before parents"
         );
     }
-}
-
-#[cfg(test)]
-mod depth_and_move_tests {
-    use super::*;
     #[test]
     fn eight_node_levels_hit_the_explicit_json_nesting_budget() {
-        const LEVELS: usize = 8;
-        let mut node = Node {
-            key: "leaf".into(),
-            kind: NodeKind::Column,
-            text: String::new(),
-            value: String::new(),
-            action: None,
-            children: Vec::new(),
-            attrs: Box::default(),
-        };
-        for level in 1..LEVELS {
-            node = Node {
-                key: format!("node-{level}"),
-                kind: NodeKind::Column,
-                text: String::new(),
-                value: String::new(),
-                action: None,
-                children: vec![node],
-                attrs: Box::default(),
-            };
-        }
-        let bytes = serde_json::to_vec(&Tree { root: node }).expect("test: bounded deep tree");
-        let spec =
-            CardSpec::parse(include_bytes!("../fixtures/form.json")).expect("test: card fixture");
+        let spec = fixture();
+        let tree = crate::projection::expected(&spec).expect("test: tree");
+        let bytes = serde_json::to_vec(&tree).expect("test: flat tree");
+        assert_eq!(
+            Tree::parse(&bytes, &spec).expect("test: ABI5 flat edges"),
+            tree,
+            "flat keyed edges do not recursively embed nodes"
+        );
         assert!(
-            matches!(Tree::parse(&bytes, &spec), Err(CardError::Limit("JSON depth"))),
-            "JSON object/children nesting is distinct from the semantic node-depth cap"
+            preflight(&[b'['; 33], MAX_TREE).is_err(),
+            "JSON transport recursion remains bounded"
         );
     }
     #[test]
     fn reparent_after_ancestor_removal_reemits_the_retained_subtree() {
-        let original: Tree = serde_json::from_str(include_str!("../fixtures/form.tree.json"))
-            .expect("test: tree fixture");
-        let mut old = original.clone();
-        let mut wrapper = original.root.clone();
-        wrapper.key = "wrapper".into();
-        old.root.children = vec![wrapper];
-        let batch = original.diff(Some(&old), 1, 2);
+        let tree = crate::projection::expected(&fixture()).expect("test: tree");
+        let mut after = tree.clone();
+        let old = after.nodes[1].clone();
+        let child = after.nodes[2].key.clone();
+        after.nodes[0].children = old.children.clone();
+        for node in &mut after.nodes {
+            if node.parent_key.as_ref() == Some(&old.key) {
+                node.parent_key = Some(after.root_key.clone());
+            }
+        }
+        after.nodes.remove(1);
+        let batch = after.diff(Some(&tree), 1, 2).expect("test: reparent");
         assert!(
-            matches!(batch.mutations.first(),Some(Mutation::Remove {key}) if key=="wrapper"),
-            "old ancestor must be removed first"
-        );
-        let upserts: Vec<_> = batch
-            .mutations
-            .iter()
-            .filter_map(|m| {
-                if let Mutation::Upsert { node, .. } = m { Some(node.key.as_str()) } else { None }
-            })
-            .collect();
-        assert_eq!(
-            upserts,
-            ["profile", "profile:field", "profile:submit"],
-            "reparenting must recreate unchanged descendants destroyed with their ancestor"
+            batch
+                .mutations
+                .iter()
+                .any(|m| matches!(m,Mutation::Upsert{node,..} if node.key==child)),
+            "reparented retained children must be reattached"
         );
     }
-}
-
-fn palette(node: &Node, presentation: &crate::Presentation) -> Result<(), CardError> {
-    if let Some(style) = &node.attrs.style {
-        for value in [&style.color, &style.background, &style.border].into_iter().flatten() {
-            if !presentation.owns_color(value) {
-                return Err(CardError::Invalid("color outside host tokens"));
-            }
-        }
-        for value in [style.gap, style.padding].into_iter().flatten() {
-            if !presentation.tokens.values().any(|token| token.as_u64() == Some(u64::from(value))) {
-                return Err(CardError::Invalid("geometry outside host tokens"));
-            }
-        }
-    }
-    for child in &node.children {
-        palette(child, presentation)?;
-    }
-    Ok(())
 }

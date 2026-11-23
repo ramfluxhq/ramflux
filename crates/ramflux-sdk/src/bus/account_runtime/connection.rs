@@ -23,6 +23,7 @@ impl AccountRuntime {
             account.timeouts = self.timeouts.clone();
             account.transfer_slots = Some(self.transfers.slots.clone());
             account.connection_work = Some(self.connection_sender.clone());
+            account.head_completion = Some(self.head_completion_sender.clone());
             #[cfg(test)]
             if self.state.config.test_session_connector.is_some() {
                 account.test_connector.clone_from(&self.state.config.test_session_connector);
@@ -42,6 +43,31 @@ impl AccountRuntime {
             pool.set_account_view(&self.state, &self.id)?;
         }
         Ok(())
+    }
+
+    /// Keeps the account open when the connection cannot start. The next command retries.
+    pub(super) fn start_connection_or_defer(&mut self) {
+        if let Err(error) = self.start_connection() {
+            tracing::warn!(
+                %error,
+                "account connection manager startup deferred; account remains open"
+            );
+        }
+    }
+
+    /// Background work must not drop the command mailbox. An unusable account still stops.
+    pub(super) async fn finish_connection_work(
+        &mut self,
+        work: AccountWork,
+    ) -> Result<(), SdkError> {
+        match self.apply_connection_work(work).await {
+            Ok(()) => Ok(()),
+            Err(error) if crate::bus::task_courier_queue::stop_class(&error) => Err(error),
+            Err(error) => {
+                tracing::warn!(%error, "account connection work deferred; account remains open");
+                Ok(())
+            }
+        }
     }
     pub(super) async fn stop_connection(&mut self) {
         self.clear_transient_host();
@@ -91,6 +117,7 @@ impl AccountRuntime {
             tokio::select! {
                 biased;
                 ready=&mut ready=>{ready?;break;},
+                work=self.head_rx.recv()=>{if let Some(work)=work {self.apply_connection_work(work).await?;}},
                 work=self.connection_work.recv()=>{if let Some(work)=work {
                     #[cfg(test)]
                     let outcome = matches!(&work, AccountWork::Connected { .. } | AccountWork::Failed { .. });
@@ -162,6 +189,15 @@ impl AccountRuntime {
     }
 
     async fn apply_connection_work_inner(&mut self, work: AccountWork) -> Result<bool, SdkError> {
+        // A directory attempt awaits one queued command between commits. That
+        // retry cannot hold the account borrow the other arms use.
+        let work = match work {
+            AccountWork::Directory(work) => {
+                self.apply_directory_pausing(*work).await?;
+                return Ok(false);
+            }
+            other => other,
+        };
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };
@@ -181,9 +217,7 @@ impl AccountRuntime {
                 }
             }
             AccountWork::Contacts(work) => {
-                if work.generation() == handle.generation() {
-                    crate::client::contact_requests::apply_background(account, *work);
-                }
+                Self::apply_contact_drive(account, handle.generation(), *work).await;
             }
             AccountWork::OwnCopy(work) => {
                 if work.generation() == handle.generation() {
@@ -195,7 +229,7 @@ impl AccountRuntime {
                     super::super::delivery_receipts::apply_background(account, *work);
                 }
             }
-            AccountWork::Directory(work) => self.apply_directory_work(*work)?,
+            AccountWork::Directory(_) => return Ok(false),
             AccountWork::PrepareReceiveEpoch { .. }
             | AccountWork::ResetReceiveEpoch { .. }
             | AccountWork::PrepareReceive { .. }
@@ -237,6 +271,33 @@ impl AccountRuntime {
             }
         }
         Ok(publish_networking)
+    }
+
+    /// The contact courier's production pass. Durable queue updates and the submit
+    /// stay on this writer; `flush` is the same function the inline test callers use.
+    async fn apply_contact_drive(
+        account: &mut LocalBusAccountState,
+        generation: u64,
+        work: crate::client::contact_requests::ContactWork,
+    ) {
+        match work {
+            crate::client::contact_requests::ContactWork::Drive { generation: stamped, reply } => {
+                if reply.is_closed() {
+                    return;
+                }
+                let active = if stamped == generation {
+                    crate::client::contact_requests::flush(account).await.map(|count| count > 0)
+                } else {
+                    Ok(false)
+                };
+                let _ = reply.send(active);
+            }
+            other => {
+                if other.generation() == generation {
+                    crate::client::contact_requests::apply_background(account, other);
+                }
+            }
+        }
     }
 
     fn apply_ack_work(
@@ -388,52 +449,70 @@ impl AccountRuntime {
         if generation != handle.generation() || reply.is_closed() {
             return Ok(false);
         }
-        let Some(account) = self.state.accounts.get_mut(&self.id) else {
-            return Ok(false);
-        };
         let target = entry.entry.target_delivery_id.clone();
-        let active = match ledger_is_active(account, handle.generation(), &target) {
-            Ok(active) => active,
-            Err(error) => {
-                let _ = reply.send(Err(error));
+        let turn = {
+            let Some(account) = self.state.accounts.get_mut(&self.id) else {
                 return Ok(false);
+            };
+            let active = match ledger_is_active(account, handle.generation(), &target) {
+                Ok(active) => active,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return Ok(false);
+                }
+            };
+            if active {
+                match page_turn(account, generation, &target, turn) {
+                    Ok(turn) => Some(turn),
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return Ok(false);
+                    }
+                }
+            } else {
+                None
             }
         };
-        if !active {
+        let Some(turn) = turn else {
             self.apply_receive_entry(generation, entry, source, backpressure, reply).await?;
             return Ok(false);
-        }
-        let turn = match page_turn(account, generation, &target, turn) {
-            Ok(turn) => turn,
-            Err(error) => {
-                let _ = reply.send(Err(error));
-                return Ok(false);
-            }
         };
         let current = handle.clone();
         #[cfg(test)]
-        let started = {
-            if let Some(handle) = &account.connection {
-                handle.test_record_receive("apply-start", std::time::Duration::ZERO);
-            }
-            std::time::Instant::now()
+        if let Some(connection) =
+            self.state.accounts.get(&self.id).and_then(|account| account.connection.as_ref())
+        {
+            connection.test_record_receive("apply-start", std::time::Duration::ZERO);
+        }
+        let started = std::time::Instant::now();
+        let Some((result, reply)) =
+            self.apply_page_pausing(&turn, &current, (entry, source, backpressure), reply).await?
+        else {
+            return Ok(false);
         };
-        let result = Box::pin(super::super::push_receiver::apply_w1::apply_page(
-            account,
-            &turn,
-            &|| current.generation(),
-            entry,
-            source,
-            backpressure,
-        ))
-        .await;
+        self.publish_applied_page(handle, &turn, result, reply, started).await
+    }
+
+    async fn publish_applied_page(
+        &mut self,
+        handle: &crate::bus::connection_manager::ConnectionHandle,
+        turn: &super::super::connection_manager::ReceiveTurn,
+        result: Result<super::super::connection_manager::ReceiveApplied, SdkError>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<super::super::connection_manager::ReceiveApplied, SdkError>,
+        >,
+        started: std::time::Instant,
+    ) -> Result<bool, SdkError> {
+        // The cursor note is test-and-vault only. Production still receives the handles.
+        #[cfg(not(any(test, feature = "itest-memory-vault")))]
+        let _ = (handle, turn);
+        let Some(account) = self.state.accounts.get_mut(&self.id) else {
+            let _ = reply.send(result);
+            return Ok(false);
+        };
         #[cfg(any(test, feature = "itest-memory-vault"))]
         if result.is_ok() {
-            let cursor = super::super::push_receiver::apply_w1::read_cursor(
-                account.client.account_db()?,
-                &target,
-            )?;
-            handle.receive_observations().committed(turn.cursor, cursor);
+            note_committed_cursor(account, handle, turn.cursor, &turn.target);
         }
         let result = match result {
             Ok(applied) => {
@@ -443,13 +522,15 @@ impl AccountRuntime {
         };
         #[cfg(test)]
         if result.is_ok()
-            && let Some(handle) = &account.connection
+            && let Some(connection) = &account.connection
         {
-            handle.test_record_receive("apply", started.elapsed());
-            handle.test_record_receive("projection", started.elapsed());
+            connection.test_record_receive("apply", started.elapsed());
+            connection.test_record_receive("projection", started.elapsed());
         }
-        if let Some(handle) = &account.connection {
-            handle.wake_couriers();
+        #[cfg(not(test))]
+        let _ = started;
+        if let Some(connection) = &account.connection {
+            connection.wake_couriers();
         }
         let request = crate::LocalBusFrame::request(
             "receive",
@@ -462,13 +543,89 @@ impl AccountRuntime {
         let published = std::time::Instant::now();
         self.publish(&request).await?;
         #[cfg(test)]
-        if let Some(handle) =
+        if let Some(connection) =
             self.state.accounts.get(&self.id).and_then(|account| account.connection.as_ref())
         {
-            handle.test_record_receive("publish", published.elapsed());
+            connection.test_record_receive("publish", published.elapsed());
         }
         let _ = reply.send(result);
         Ok(false)
+    }
+
+    async fn apply_page_pausing(
+        &mut self,
+        turn: &super::super::connection_manager::ReceiveTurn,
+        current: &crate::bus::connection_manager::ConnectionHandle,
+        first: (
+            super::super::connection_manager::ReceiveEntry,
+            super::super::sync_driver::source::PreparedSource,
+            Box<super::super::contact_backpressure::Backpressure>,
+        ),
+        reply: tokio::sync::oneshot::Sender<
+            Result<super::super::connection_manager::ReceiveApplied, SdkError>,
+        >,
+    ) -> Result<
+        Option<(
+            Result<super::super::connection_manager::ReceiveApplied, SdkError>,
+            tokio::sync::oneshot::Sender<
+                Result<super::super::connection_manager::ReceiveApplied, SdkError>,
+            >,
+        )>,
+        SdkError,
+    > {
+        let mut resume = None;
+        let mut first = Some(first);
+        loop {
+            ramflux_storage::writer_budget::begin_attempt();
+            let yielded = {
+                let _scope = ramflux_storage::writer_budget::PauseScope::enter();
+                let Some(account) = self.state.accounts.get_mut(&self.id) else {
+                    let _ = reply.send(Err(SdkError::AccountDbNotUnlocked));
+                    return Ok(None);
+                };
+                let applied = if let Some(saved) = resume.take() {
+                    Box::pin(super::super::push_receiver::apply_w1::resume_apply_page(
+                        account,
+                        saved,
+                        &|| current.generation(),
+                    ))
+                    .await
+                } else if let Some((entry, source, backpressure)) = first.take() {
+                    Box::pin(super::super::push_receiver::apply_w1::apply_page(
+                        account,
+                        turn,
+                        &|| current.generation(),
+                        entry,
+                        source,
+                        backpressure,
+                    ))
+                    .await
+                } else {
+                    let _ = reply.send(Err(SdkError::WriterPause));
+                    return Ok(None);
+                };
+                if let Err(SdkError::WriterPause) = &applied {
+                    if let Some(saved) = super::writer_slice::take_apply() {
+                        resume = Some(saved);
+                        None
+                    } else {
+                        let _ = reply.send(Err(SdkError::WriterPause));
+                        return Ok(None);
+                    }
+                } else {
+                    Some(applied)
+                }
+            };
+            match yielded {
+                None => {
+                    // The page stays on this attempt. A demanded head already
+                    // queued is applied before the page continues.
+                    self.prefer_demanded_head().await?;
+                    self.service_waiting_commands().await?;
+                }
+                Some(finished) => return Ok(Some((finished, reply))),
+            }
+        }
     }
 
     async fn apply_receive_entry(
@@ -621,6 +778,26 @@ fn page_turn(
     };
     super::super::push_receiver::apply_w1::refresh_cursor(db, &mut turn)?;
     Ok(turn)
+}
+
+/// The itest cursor probe is an observation. A storage miss must not stop the actor.
+#[cfg(any(test, feature = "itest-memory-vault"))]
+fn note_committed_cursor(
+    account: &LocalBusAccountState,
+    handle: &crate::bus::connection_manager::ConnectionHandle,
+    before: u64,
+    target: &str,
+) {
+    match account
+        .client
+        .account_db()
+        .and_then(|db| super::super::push_receiver::apply_w1::read_cursor(db, target))
+    {
+        Ok(cursor) => handle.receive_observations().committed(before, cursor),
+        Err(error) => {
+            tracing::warn!(%error, "receive cursor observation deferred");
+        }
+    }
 }
 
 async fn short_step<T>(

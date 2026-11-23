@@ -1,173 +1,244 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//! Data/ownership projection used to validate the complete interpreter commit.
-use crate::{Attrs, CardError, CardSpec, Component, FieldKind, Node, NodeKind, Plot, Tree};
-
-pub(crate) fn node(kind: NodeKind, key: String, text: String, value: String) -> Node {
-    Node { key, kind, text, value, action: None, children: Vec::new(), attrs: Box::default() }
+//! Resolver-to-native projection. The signed library cannot change these semantics.
+use crate::{CardError, CardSpec, EventToken, HostSlot, Node, NodeKind, Tree, slots::SlotRequest};
+use ramflux_protocol::a2ui::{ResolvedSlot, ResolvedSurface};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
+#[derive(Clone, Default)]
+pub(crate) struct LocalState {
+    pub tabs: BTreeMap<String, usize>,
+    pub modals: BTreeSet<String>,
+    pub consumed: BTreeSet<String>,
+    pub link: Option<(String, String)>,
+}
+impl LocalState {
+    pub(crate) fn cancel_link(&mut self) {
+        if let Some((key, _)) = self.link.take() {
+            self.consumed.remove(&key);
+        }
+    }
 }
 pub(crate) fn expected(spec: &CardSpec) -> Result<Tree, CardError> {
-    let presentation = spec.presentation()?;
-    let mut root = node(NodeKind::Column, "root".into(), String::new(), String::new());
-    for component in &spec.components {
-        let mut result = match component {
-            Component::Form(value) => form(value, spec)?,
-            Component::Task(value) => task(value, &presentation),
-            Component::Chart(value) => chart(value, &presentation)?,
-            Component::Approval(value) => approval(value, &presentation),
-        };
-        result.attrs.style = None;
-        root.children.push(result);
-    }
-    Ok(Tree { root })
+    project(spec, 1, 1, 0, &LocalState::default())
 }
-fn form(form: &crate::Form, spec: &CardSpec) -> Result<Node, CardError> {
-    let mut form_node = node(NodeKind::Form, form.id.clone(), form.title.clone(), String::new());
-    for field in form.fields.clone() {
-        let value = spec
-            .model
-            .get(field.binding.strip_prefix('/').ok_or(CardError::Invalid("binding"))?)
-            .ok_or(CardError::Invalid("model"))?;
-        let kind = match field.kind {
-            FieldKind::Input => NodeKind::TextField,
-            FieldKind::Number => NodeKind::Number,
-            FieldKind::Select => NodeKind::Select,
-            FieldKind::Toggle => NodeKind::Toggle,
+pub(crate) fn project(
+    spec: &CardSpec,
+    session: u64,
+    version: u64,
+    edit_seq: u64,
+    local: &LocalState,
+) -> Result<Tree, CardError> {
+    let resolved = spec.resolved()?;
+    let keys = keys(&resolved)?;
+    let mounted = mounted(&resolved, &keys, local)?;
+    let mut nodes = Vec::new();
+    let mut host_slots = Vec::new();
+    for (index, source) in resolved.nodes.iter().enumerate() {
+        let key = keys.get(index).ok_or(CardError::Invalid("instance key"))?.clone();
+        let mut attrs = source.properties.clone();
+        for field in [
+            "id",
+            "component",
+            "children",
+            "child",
+            "action",
+            "@checks",
+            "@catalogId",
+            "@metadata",
+            "trigger",
+            "content",
+        ] {
+            attrs.remove(field);
+        }
+        if let Some(tabs) = attrs.get_mut("tabs").and_then(Value::as_array_mut) {
+            for tab in tabs {
+                tab.as_object_mut().ok_or(CardError::Invalid("tab"))?.remove("child");
+            }
+        }
+        let accessibility = attrs.remove("@accessibility").unwrap_or_else(|| json!({"live":"off"}));
+        attrs.insert("accessibility".into(), accessibility);
+        let is_mounted = *mounted.get(index).ok_or(CardError::Invalid("mounted instance"))?;
+        let action = resolved.actions.iter().find(|action| action.node == index);
+        let disabled = !is_mounted
+            || local.consumed.contains(&key)
+            || action.is_some_and(|action| {
+                matches!(
+                    action.kind,
+                    ramflux_protocol::a2ui::ResolvedActionKind::Event { checks_pass: false, .. }
+                )
+            });
+        attrs.insert("disabled".into(), json!(disabled));
+        attrs.insert("errors".into(), json!(source.errors));
+        if let Some(input) = resolved.inputs.iter().find(|input| input.node == index) {
+            attrs.insert("input_pointer".into(), json!(input.pointer));
+        }
+        if action.is_some() {
+            attrs.insert("action_ref".into(), json!(key));
+        }
+        let kind: NodeKind = serde_json::from_value(json!(source.component))?;
+        let token = EventToken {
+            session,
+            signed_version: spec.signed_version,
+            edit_seq,
+            tree_version: version,
+            key: key.clone(),
         };
-        let mut control =
-            node(kind, format!("{}:{}", form.id, field.id), field.label, value.display());
-        control.attrs = Box::new(Attrs {
-            required: field.required,
-            disabled: form.disabled || field.disabled,
-            error: field.error,
-            options: field.options,
-            minimum: field.minimum,
-            maximum: field.maximum,
-            ..Attrs::default()
+        if is_mounted {
+            slot(source, &keys, &key, &token, local, &mut host_slots)?;
+        }
+        nodes.push(Node {
+            key,
+            component_id: source.id.clone(),
+            source_instance: source.source_instance.clone(),
+            scope: source.scope.clone(),
+            parent_key: source
+                .parent
+                .map(|parent| keys.get(parent).cloned().ok_or(CardError::Invalid("parent")))
+                .transpose()?,
+            slot: source.slot,
+            children: source
+                .children
+                .iter()
+                .map(|child| keys.get(*child).cloned().ok_or(CardError::Invalid("child")))
+                .collect::<Result<_, _>>()?,
+            kind,
+            attrs,
         });
-        form_node.children.push(control);
     }
-    let mut submit = node(
-        NodeKind::Submit,
-        format!("{}:submit", form.id),
-        spec.presentation()?.text("form_submit").into(),
-        String::new(),
-    );
-    submit.action = Some(form.submit.clone());
-    submit.attrs.disabled = form.disabled;
-    form_node.children.push(submit);
-    Ok(form_node)
+    let tree = Tree {
+        schema: "ramflux.card.tree.v1".into(),
+        session,
+        signed_version: spec.signed_version,
+        signed_hash: spec.signed_hash.clone(),
+        edit_seq,
+        tree_version: version,
+        root_key: keys.first().cloned().ok_or(CardError::Invalid("root"))?,
+        nodes,
+        host_slots,
+        locale: resolved.locale.clone(),
+        format_locale: resolved.format_locale.clone(),
+        direction: resolved.direction.clone(),
+    };
+    tree.check_limits()?;
+    Ok(tree)
 }
-
-fn task(task: &crate::Task, presentation: &crate::Presentation) -> Node {
-    let mut task_node =
-        node(NodeKind::Task, task.id.clone(), task.title.clone(), task.task_ref.clone());
-    task_node.children.push(node(
-        NodeKind::Text,
-        format!("{}:people", task.id),
-        presentation
-            .format("task_people", &[("requester", &task.requester), ("owner", &task.owner)]),
-        String::new(),
-    ));
-    let mut progress = node(
-        NodeKind::Progress,
-        format!("{}:progress", task.id),
-        presentation.text(&format!("task_{}", task.status.key())).into(),
-        String::new(),
-    );
-    progress.attrs.progress = task.progress;
-    progress.attrs.status = Some(presentation.text(&format!("task_{}", task.status.key())).into());
-    task_node.children.push(progress);
-    for step in &task.steps {
-        let mut n = node(
-            NodeKind::Text,
-            format!("{}:step-{}", task.id, step.id),
-            step.text.clone(),
-            String::new(),
+pub(crate) fn keys(resolved: &ResolvedSurface) -> Result<Vec<String>, CardError> {
+    let mut routes: Vec<Vec<ResolvedSlot>> = Vec::new();
+    let mut keys = Vec::new();
+    for node in &resolved.nodes {
+        let mut route = node
+            .parent
+            .map(|parent| routes.get(parent).cloned().ok_or(CardError::Invalid("route")))
+            .transpose()?
+            .unwrap_or_default();
+        route.push(node.slot);
+        // Use the protocol canonicalizer even if dependency feature unification
+        // enables insertion-ordered serde maps in a downstream SDK build.
+        keys.push(
+            ramflux_protocol::canonical_json_string(&json!([node.id, node.source_instance, route]))
+                .map_err(|_| CardError::Invalid("canonical instance key"))?,
         );
-        n.attrs.status = Some(presentation.text(&format!("task_{}", step.status.key())).into());
-        task_node.children.push(n);
+        routes.push(route);
     }
-    task_node
+    Ok(keys)
 }
-
-fn chart(chart: &crate::Chart, presentation: &crate::Presentation) -> Result<Node, CardError> {
-    let mut chart_node =
-        node(NodeKind::Chart, chart.id.clone(), chart.title.clone(), String::new());
-    chart_node.attrs.plot = Some(Plot {
-        kind: chart.kind,
-        unit: chart.unit.clone(),
-        scale: chart.scale,
-        series: chart.series.clone(),
-    });
-    chart_node.children.push(node(
-        NodeKind::Text,
-        format!("{}:design", chart.id),
-        presentation.text("chart_pending").into(),
-        String::new(),
-    ));
-    let mut table = node(
-        NodeKind::Table,
-        format!("{}:table", chart.id),
-        presentation.format("chart_table", &[("title", &chart.title)]),
-        String::new(),
-    );
-    table.attrs.columns.push(presentation.text("chart_label").into());
-    table.attrs.columns.extend(chart.series.iter().map(|s| s.label.clone()));
-    let first = chart.series.first().ok_or(CardError::Invalid("chart series"))?;
-    for (index, point) in first.points.iter().enumerate() {
-        let mut row = vec![point.label.clone()];
-        for s in &chart.series {
-            let p = s.points.get(index).ok_or(CardError::Invalid("chart point"))?;
-            row.push(scaled(p.value, chart.scale, &chart.unit, presentation));
+fn mounted(
+    resolved: &ResolvedSurface,
+    keys: &[String],
+    local: &LocalState,
+) -> Result<Vec<bool>, CardError> {
+    let mut mounted = Vec::new();
+    for node in &resolved.nodes {
+        let visible = match node.parent {
+            None => true,
+            Some(parent) => {
+                let ancestor = resolved.nodes.get(parent).ok_or(CardError::Invalid("parent"))?;
+                let key = keys.get(parent).ok_or(CardError::Invalid("parent key"))?;
+                *mounted.get(parent).ok_or(CardError::Invalid("preorder"))?
+                    && match node.slot {
+                        ResolvedSlot::Tab(index) => {
+                            local.tabs.get(key).copied().unwrap_or(0) == index
+                        }
+                        ResolvedSlot::Trigger => false,
+                        ResolvedSlot::Content if ancestor.component == "Modal" => {
+                            local.modals.contains(key)
+                        }
+                        _ => true,
+                    }
+            }
+        };
+        mounted.push(visible);
+    }
+    Ok(mounted)
+}
+fn slot(
+    source: &ramflux_protocol::a2ui::ResolvedNode,
+    keys: &[String],
+    key: &str,
+    token: &EventToken,
+    local: &LocalState,
+    slots: &mut Vec<HostSlot>,
+) -> Result<(), CardError> {
+    let p = &source.properties;
+    let text = |field: &str| {
+        p.get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or(CardError::Invalid("slot property"))
+    };
+    let request_id = serde_json::to_string(token)?;
+    let request = match source.component.as_str() {
+        "Approval" => Some((
+            "approval",
+            SlotRequest::Approval {
+                request_id,
+                request_ref: text("requestRef")?,
+                task_binding: p
+                    .get("taskBinding")
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()?,
+            },
+        )),
+        "Image" => Some((
+            "image",
+            SlotRequest::Image {
+                request_id,
+                attachment: p.get("attachment").cloned().ok_or(CardError::Invalid("attachment"))?,
+                description: text("description")?,
+                fit: p.get("fit").and_then(Value::as_str).unwrap_or("fill").into(),
+                variant: p.get("variant").and_then(Value::as_str).unwrap_or("mediumFeature").into(),
+            },
+        )),
+        "Modal" => {
+            let trigger = source
+                .children
+                .first()
+                .and_then(|index| keys.get(*index))
+                .cloned()
+                .ok_or(CardError::Invalid("modal trigger"))?;
+            let content = source
+                .children
+                .get(1)
+                .and_then(|index| keys.get(*index))
+                .cloned()
+                .ok_or(CardError::Invalid("modal content"))?;
+            Some(("modal", SlotRequest::Modal { trigger_key: trigger, content_key: content }))
         }
-        table.attrs.rows.push(row);
-    }
-    chart_node.children.push(table);
-    Ok(chart_node)
-}
-
-fn approval(approval: &crate::Approval, presentation: &crate::Presentation) -> Node {
-    let mut info = node(
-        NodeKind::ApprovalInfo,
-        approval.id.clone(),
-        presentation.text("approval_heading").into(),
-        String::new(),
-    );
-    if !approval.explanation.is_empty() {
-        info.children.push(node(
-            NodeKind::Text,
-            format!("{}:explanation", approval.id),
-            approval.explanation.clone(),
-            String::new(),
-        ));
-    }
-    info
-}
-
-pub(crate) fn scaled(
-    value: i64,
-    scale: u32,
-    unit: &str,
-    presentation: &crate::Presentation,
-) -> String {
-    let value = grouped(&value.to_string(), presentation.text("number_group"));
-    let scale = grouped(&scale.to_string(), presentation.text("number_group"));
-    presentation
-        .format(
-            if scale == "1" { "number_unit" } else { "number_scaled" },
-            &[("value", &value), ("scale", &scale), ("unit", unit)],
-        )
-        .trim()
-        .to_owned()
-}
-fn grouped(value: &str, separator: &str) -> String {
-    let (sign, digits) = value.strip_prefix('-').map_or(("", value), |v| ("-", v));
-    let mut out = String::from(sign);
-    for (index, c) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
-            out.push_str(separator);
+        "Button" => {
+            local.link.as_ref().filter(|(link_key, _)| link_key == key).map(|(_, url)| {
+                ("link_open", SlotRequest::LinkOpen { request_id, url: url.clone() })
+            })
         }
-        out.push(c);
+        _ => None,
+    };
+    if let Some((kind, request)) = request {
+        slots.push(HostSlot {
+            id: ramflux_protocol::canonical_json_string(&json!([kind, key]))
+                .map_err(|_| CardError::Invalid("canonical slot id"))?,
+            key: key.into(),
+            token: token.clone(),
+            request,
+        });
     }
-    out
+    Ok(())
 }

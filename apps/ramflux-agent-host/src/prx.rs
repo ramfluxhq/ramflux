@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Bounded HTTP adapter for detached PRX console jobs.
+//! Bounded HTTP adapter for detached PRX jobs.
+//! A configured agent name opens a caller-keyed session and posts a targeted turn.
+//! Without one, the host keeps the console session and posts only `message`.
 use crate::{
     EngineApproval, EngineEvent, EngineFailure, EngineInput, EngineProvider, Error, Intent,
     PrxAuthorization, PrxConfig, PrxSessionScope, Result,
@@ -9,21 +11,39 @@ use crate::{
 use reqwest::{Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, io::Read, path::Path, time::Instant};
+use std::{
+    collections::BTreeMap,
+    io::Read,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 const MAX_TOKEN_BYTES: u64 = 8192;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const UNAVAILABLE_LOG_WINDOW_SECONDS: u64 = 60;
+const MAX_ERASE_RECEIPTS: usize = 128;
+
+mod flows;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PrxJob {
     job_id: String,
+    /// Poll path from the ACK. Empty when the ACK omitted it; poll uses `/api/jobs/{job_id}`.
+    #[serde(default)]
     poll_url: String,
+    /// Hint path from an older ACK. Cancel posts the run route, not this URL.
+    #[serde(default)]
     cancel_url: String,
     message_id: String,
     #[serde(default)]
     deadline_ms: u64,
+    /// Durable id from the 202 body. Empty on a checkpoint written before it was stored.
+    #[serde(default)]
+    run_id: String,
+    /// Session the run was admitted on. Empty on an older checkpoint.
+    #[serde(default)]
+    session_id: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -57,6 +77,25 @@ struct PrxState {
     completed: BTreeMap<String, PrxCompleted>,
     #[serde(default)]
     pending: BTreeMap<String, String>,
+    /// Receipts of a session erase, keyed by the ramflux conversation id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    history_erased: BTreeMap<String, Vec<StoredHistory>>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredHistory {
+    erase_id: String,
+    generation: u64,
+    remaining: u64,
+    incarnation: String,
+    session: String,
+    agent: String,
+    scope_incarnation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forgotten_created: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forgotten_touched: Option<u64>,
 }
 
 enum HttpFailure {
@@ -64,6 +103,12 @@ enum HttpFailure {
     Timeout,
     Rejected,
     Invalid,
+    /// HTTP 429 `agent_busy` or `agent_budget_exhausted`. Not retried.
+    Admission(EngineFailure),
+    /// Shared HTTP 429. The job or decision stays and is retried after the delay.
+    RateLimited {
+        retry_after_secs: u64,
+    },
 }
 
 struct HttpResponse {
@@ -78,10 +123,20 @@ pub struct PrxEngine {
     max_conversations: usize,
     state: PrxState,
     last_unavailable_log: Option<Instant>,
+    /// Earliest time the bus tick may spend another `GET /api/jobs` request.
+    next_job_poll: Option<Instant>,
     authorization: PrxAuthorization,
     turn_timeout_ms: u64,
     approval_timeout_ms: u64,
     mismatch_logged: bool,
+    typed: Option<ramflux_prx_client::PrxClient>,
+    token_file: PathBuf,
+    request_timeout_s: u64,
+    limit_turns: Option<u32>,
+    limit_cost: Option<u64>,
+    prx_agent: Option<String>,
+    prx_provider: Option<String>,
+    prx_model: Option<String>,
 }
 
 impl PrxEngine {
@@ -115,6 +170,10 @@ impl PrxEngine {
             .timeout(std::time::Duration::from_secs(config.request_timeout_s))
             .build()
             .map_err(|_| Error::Config)?;
+        let wants_typed = config.erase_session_on_delete
+            || config.max_concurrent_turns.is_some()
+            || config.max_cost_per_day_cents.is_some();
+        let typed = if wants_typed { Some(typed_client(config)?) } else { None };
         Ok(Self {
             client,
             base_url,
@@ -122,11 +181,32 @@ impl PrxEngine {
             max_conversations,
             state: PrxState::default(),
             last_unavailable_log: None,
+            next_job_poll: None,
             authorization: config.authorization,
             turn_timeout_ms: config.turn_timeout_s.saturating_mul(1000),
             approval_timeout_ms: config.approval_timeout_s.saturating_mul(1000),
             mismatch_logged: false,
+            typed,
+            token_file: config.token_file.clone(),
+            request_timeout_s: config.request_timeout_s,
+            limit_turns: config.max_concurrent_turns,
+            limit_cost: config.max_cost_per_day_cents,
+            prx_agent: config.agent_name.clone(),
+            prx_provider: config.provider.clone(),
+            prx_model: config.model.clone(),
         })
+    }
+
+    fn approval_client(&mut self) -> Result<&ramflux_prx_client::PrxClient> {
+        if self.typed.is_none() {
+            let settings =
+                ramflux_prx_client::ClientConfig::new(self.base_url.as_str(), &self.token_file)
+                    .with_request_timeout(std::time::Duration::from_secs(self.request_timeout_s));
+            self.typed = Some(
+                ramflux_prx_client::PrxClient::new(&settings).map_err(|_| Error::EngineRejected)?,
+            );
+        }
+        self.typed.as_ref().ok_or(Error::EngineRejected)
     }
 
     fn url(&self, path: &str) -> std::result::Result<Url, HttpFailure> {
@@ -147,6 +227,7 @@ impl PrxEngine {
             if error.is_timeout() { HttpFailure::Timeout } else { HttpFailure::Unavailable }
         })?;
         let status = response.status();
+        let retry_after = retry_after_seconds(response.headers());
         if response
             .content_length()
             .is_some_and(|length| length > u64::try_from(MAX_RESPONSE_BYTES).unwrap_or(u64::MAX))
@@ -158,6 +239,9 @@ impl PrxEngine {
         })?;
         if bytes.len() > MAX_RESPONSE_BYTES {
             return Err(HttpFailure::Invalid);
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return classify_too_many(retry_after, &bytes);
         }
         let body = if bytes.is_empty() {
             Value::Null
@@ -187,6 +271,17 @@ impl PrxEngine {
         {
             return Err(HttpFailure::Rejected);
         }
+        if self.prx_agent.is_some() {
+            self.create_keyed_session(conversation_id).await
+        } else {
+            self.create_console_session(conversation_id).await
+        }
+    }
+
+    async fn create_console_session(
+        &mut self,
+        conversation_id: &str,
+    ) -> std::result::Result<String, HttpFailure> {
         let response = self.request(Method::POST, "api/sessions", Some(json!({}))).await?;
         if response.status != StatusCode::CREATED {
             return Err(HttpFailure::Rejected);
@@ -196,6 +291,31 @@ impl PrxEngine {
             .filter(|value| value.len() <= 256 && valid_segment(value))
             .ok_or(HttpFailure::Invalid)?
             .to_owned();
+        self.state.sessions.insert(conversation_id.to_owned(), session.clone());
+        Ok(session)
+    }
+
+    async fn create_keyed_session(
+        &mut self,
+        conversation_id: &str,
+    ) -> std::result::Result<String, HttpFailure> {
+        let Some(agent) = self.prx_agent.as_deref() else {
+            return Err(HttpFailure::Rejected);
+        };
+        if ramflux_prx_client::AgentName::parse(agent).is_err() {
+            return Err(HttpFailure::Rejected);
+        }
+        let key = caller_session_key(conversation_id);
+        let response =
+            self.request(Method::POST, "api/sessions", Some(json!({ "session_key": key }))).await?;
+        if response.status != StatusCode::CREATED && response.status != StatusCode::OK {
+            return Err(HttpFailure::Rejected);
+        }
+        let session = response.body["session_id"].as_str().ok_or(HttpFailure::Invalid)?;
+        if session != key || !valid_segment(session) {
+            return Err(HttpFailure::Invalid);
+        }
+        let session = session.to_owned();
         self.state.sessions.insert(conversation_id.to_owned(), session.clone());
         Ok(session)
     }
@@ -217,34 +337,25 @@ impl PrxEngine {
         {
             return Err(HttpFailure::Rejected);
         }
-        let visible = context_message(input);
+        let body = turn_body(input, self.prx_agent.as_deref())?;
         let mut session = self.session(input.conversation.conversation_id).await?;
-        let mut response = self
-            .request(
-                Method::POST,
-                &format!("api/sessions/{session}/message?mode=async"),
-                Some(json!({"message":visible})),
-            )
-            .await?;
+        let mut response = post_async(self, &session, &body).await?;
         if response.status == StatusCode::NOT_FOUND {
             self.state.sessions.remove(input.conversation.conversation_id);
             session = self.create_session(input.conversation.conversation_id).await?;
-            response = self
-                .request(
-                    Method::POST,
-                    &format!("api/sessions/{session}/message?mode=async"),
-                    Some(json!({"message":visible})),
-                )
-                .await?;
+            response = post_async(self, &session, &body).await?;
         }
         if response.status != StatusCode::ACCEPTED {
             return Err(HttpFailure::Rejected);
         }
-        let job = parse_job(
+        let mut job = parse_job(
             &response.body,
             input.conversation.message_id,
             now_ms.saturating_add(self.turn_timeout_ms),
         )?;
+        if valid_segment(&session) {
+            job.session_id = session;
+        }
         self.state.jobs.insert(input.conversation.conversation_id.to_owned(), job);
         Ok(())
     }
@@ -255,7 +366,13 @@ impl PrxEngine {
         job: &PrxJob,
         now_ms: u64,
     ) -> std::result::Result<Option<EngineEvent>, HttpFailure> {
-        let response = self.request(Method::GET, &job.poll_url, None).await?;
+        let derived = if valid_path(&job.poll_url) {
+            None
+        } else {
+            Some(job_poll_path(&job.job_id).ok_or(HttpFailure::Invalid)?)
+        };
+        let poll_url = derived.as_deref().unwrap_or(job.poll_url.as_str());
+        let response = self.request(Method::GET, poll_url, None).await?;
         if response.status == StatusCode::NOT_FOUND {
             return Ok(Some(EngineEvent::VisibleFailure {
                 conversation_id: conversation_id.to_owned(),
@@ -302,6 +419,10 @@ impl PrxEngine {
                         decision_id,
                         approval,
                     })),
+                    Err(HttpFailure::RateLimited { retry_after_secs }) => {
+                        self.defer_job_poll(retry_after_secs);
+                        Ok(None)
+                    }
                     Err(error) => {
                         self.revoke_pending(conversation_id).await;
                         if matches!(error, HttpFailure::Unavailable | HttpFailure::Timeout) {
@@ -338,10 +459,14 @@ impl PrxEngine {
         if self.state.jobs.contains_key(conversation_id) {
             return Err(HttpFailure::Rejected);
         }
-        let session = self.state.sessions.get(conversation_id).ok_or(HttpFailure::Rejected)?;
+        let session =
+            self.state.sessions.get(conversation_id).ok_or(HttpFailure::Rejected)?.to_owned();
         let approval_path = format!("api/sessions/{session}/approvals/{decision_id}");
         if !approved {
             let response = self.request(Method::DELETE, &approval_path, None).await;
+            if let Err(HttpFailure::RateLimited { retry_after_secs }) = response {
+                return Err(HttpFailure::RateLimited { retry_after_secs });
+            }
             // A terminal local decline must free the conversation even during an outage.
             self.state.pending.remove(conversation_id);
             let response = response?;
@@ -357,15 +482,20 @@ impl PrxEngine {
             return Err(HttpFailure::Rejected);
         }
         // Approval is single-use: retry only resume after the approval POST has succeeded.
-        let Ok(response) = self.resume_approved(&approval_path).await else {
-            self.revoke_pending(conversation_id).await;
-            return Err(HttpFailure::Rejected);
+        let response = match self.resume_approved(&approval_path).await {
+            Ok(response) => response,
+            Err(error) => {
+                self.revoke_pending(conversation_id).await;
+                return Err(error);
+            }
         };
         self.state.pending.remove(conversation_id);
-        self.state.jobs.insert(
-            conversation_id.to_owned(),
-            parse_job(&response.body, message_id, now_ms.saturating_add(self.turn_timeout_ms))?,
-        );
+        let mut job =
+            parse_job(&response.body, message_id, now_ms.saturating_add(self.turn_timeout_ms))?;
+        if valid_segment(&session) {
+            job.session_id = session;
+        }
+        self.state.jobs.insert(conversation_id.to_owned(), job);
         Ok(())
     }
 
@@ -390,6 +520,8 @@ impl PrxEngine {
                     if response.status.is_server_error()
                         || matches!(response.status.as_u16(), 408 | 429) => {}
                 Err(HttpFailure::Unavailable | HttpFailure::Timeout) => {}
+                Err(HttpFailure::Admission(reason)) => return Err(HttpFailure::Admission(reason)),
+                Err(error @ HttpFailure::RateLimited { .. }) => return Err(error),
                 Ok(_) | Err(HttpFailure::Invalid | HttpFailure::Rejected) => {
                     return Err(HttpFailure::Rejected);
                 }
@@ -463,6 +595,40 @@ impl PrxEngine {
                 .await;
         }
     }
+
+    fn cancel_session(&self, conversation_id: &str, job: &PrxJob) -> String {
+        self.state
+            .sessions
+            .get(conversation_id)
+            .cloned()
+            .filter(|id| valid_segment(id))
+            .unwrap_or_else(|| job.session_id.clone())
+    }
+
+    /// Posts `POST /api/sessions/{session}/runs/{run}/cancel`. A missing run id, a 404
+    /// `run_unknown`, or any other failure is outcome-unknown: the local job is already dropped
+    /// and this does not retry.
+    async fn post_run_cancel(&self, session_id: &str, run_id: &str) {
+        let Some(path) = run_cancel_path(session_id, run_id) else {
+            eprintln!("prx cancel outcome unknown");
+            return;
+        };
+        match self.request(Method::POST, &path, Some(json!({}))).await {
+            Ok(response) if response.status.is_success() => {}
+            _ => eprintln!("prx cancel outcome unknown"),
+        }
+    }
+
+    fn note_job_poll(&mut self) {
+        self.next_job_poll = Some(Instant::now() + std::time::Duration::from_secs(3));
+    }
+
+    fn defer_job_poll(&mut self, retry_after_secs: u64) {
+        let at = Instant::now() + std::time::Duration::from_secs(retry_after_secs.clamp(3, 120));
+        if self.next_job_poll.is_none_or(|current| at > current) {
+            self.next_job_poll = Some(at);
+        }
+    }
 }
 
 impl EngineProvider for PrxEngine {
@@ -497,6 +663,14 @@ impl EngineProvider for PrxEngine {
                 self.note_unavailable();
                 Ok(Vec::new())
             }
+            Err(HttpFailure::Admission(reason)) => Ok(vec![EngineEvent::VisibleFailure {
+                conversation_id: input.conversation.conversation_id.to_owned(),
+                message_id: input.conversation.message_id.to_owned(),
+                reason,
+            }]),
+            Err(HttpFailure::RateLimited { retry_after_secs }) => {
+                Err(Error::RateLimited { retry_after_ms: retry_after_secs.saturating_mul(1000) })
+            }
             Err(error @ (HttpFailure::Timeout | HttpFailure::Rejected | HttpFailure::Invalid)) => {
                 Ok(vec![EngineEvent::VisibleFailure {
                     conversation_id: input.conversation.conversation_id.to_owned(),
@@ -511,6 +685,10 @@ impl EngineProvider for PrxEngine {
         }
     }
 
+    fn job_poll_ready(&self) -> bool {
+        self.next_job_poll.is_none_or(|at| Instant::now() >= at)
+    }
+
     async fn poll(&mut self, now_ms: u64) -> Result<Vec<EngineEvent>> {
         let mut events = self
             .state
@@ -518,6 +696,7 @@ impl EngineProvider for PrxEngine {
             .iter()
             .map(|(conversation, completed)| completed.event(conversation))
             .collect::<Vec<_>>();
+        self.note_job_poll();
         let jobs = self
             .state
             .jobs
@@ -526,7 +705,8 @@ impl EngineProvider for PrxEngine {
             .collect::<Vec<_>>();
         for (conversation, job) in jobs {
             let result = if now_ms >= job.deadline_ms {
-                let _ = self.request(Method::POST, &job.cancel_url, Some(json!({}))).await;
+                let session = self.cancel_session(&conversation, &job);
+                self.post_run_cancel(&session, &job.run_id).await;
                 self.revoke_pending(&conversation).await;
                 Ok(Some(failure(&conversation, &job.message_id, EngineFailure::TurnTimeout)))
             } else {
@@ -541,6 +721,20 @@ impl EngineProvider for PrxEngine {
                 }
                 Ok(None) => {}
                 Err(HttpFailure::Unavailable | HttpFailure::Timeout) => self.note_unavailable(),
+                Err(HttpFailure::RateLimited { retry_after_secs }) => {
+                    self.defer_job_poll(retry_after_secs);
+                    break;
+                }
+                Err(HttpFailure::Admission(reason)) => {
+                    self.state.jobs.remove(&conversation);
+                    let event = EngineEvent::VisibleFailure {
+                        conversation_id: conversation.clone(),
+                        message_id: job.message_id.clone(),
+                        reason,
+                    };
+                    self.state.completed.insert(conversation, PrxCompleted::from_event(&event)?);
+                    events.push(event);
+                }
                 Err(HttpFailure::Rejected | HttpFailure::Invalid) => {
                     self.state.jobs.remove(&conversation);
                     let event = EngineEvent::VisibleFailure {
@@ -572,13 +766,27 @@ impl EngineProvider for PrxEngine {
                 Err(Error::EngineUnavailable)
             }
             Err(HttpFailure::Timeout) => Err(Error::EngineTimeout),
-            Err(HttpFailure::Rejected | HttpFailure::Invalid) => Err(Error::EngineRejected),
+            Err(HttpFailure::RateLimited { retry_after_secs }) => {
+                Err(Error::RateLimited { retry_after_ms: retry_after_secs.saturating_mul(1000) })
+            }
+            Err(HttpFailure::Admission(_) | HttpFailure::Rejected | HttpFailure::Invalid) => {
+                Err(Error::EngineRejected)
+            }
         }
+    }
+
+    async fn publish_limits(&mut self) -> Result<()> {
+        self.publish_configured().await
+    }
+
+    async fn erase_history<'a>(&'a mut self, conversation_id: &'a str) -> Result<()> {
+        self.erase_mapped(conversation_id).await
     }
 
     async fn cancel<'a>(&'a mut self, conversation_id: &'a str) -> Result<()> {
         if let Some(job) = self.state.jobs.remove(conversation_id) {
-            let _ = self.request(Method::POST, &job.cancel_url, Some(json!({}))).await;
+            let session = self.cancel_session(conversation_id, &job);
+            self.post_run_cancel(&session, &job.run_id).await;
         }
         self.revoke_pending(conversation_id).await;
         self.state.completed.remove(conversation_id);
@@ -607,6 +815,10 @@ impl EngineProvider for PrxEngine {
             || self.state.jobs.len() > self.max_conversations
             || self.state.completed.len() > self.max_conversations
             || self.state.pending.len() > self.max_conversations
+            || self.state.history_erased.len() > MAX_ERASE_RECEIPTS
+            || self.state.history_erased.iter().any(|(id, rows)| {
+                !valid_id(id) || rows.len() > 64 || rows.iter().any(|row| !stored_history_ok(row))
+            })
             || self.state.pending.iter().any(|(c, d)| !valid_id(c) || !valid_segment(d))
             || self
                 .state
@@ -617,8 +829,10 @@ impl EngineProvider for PrxEngine {
                 !valid_id(conversation)
                     || !valid_id(&job.job_id)
                     || !valid_id(&job.message_id)
-                    || !valid_path(&job.poll_url)
-                    || !valid_path(&job.cancel_url)
+                    || !(job.poll_url.is_empty() || valid_path(&job.poll_url))
+                    || !(job.cancel_url.is_empty() || valid_path(&job.cancel_url))
+                    || !optional_segment(&job.run_id)
+                    || !optional_segment(&job.session_id)
             })
             || self
                 .state
@@ -646,6 +860,16 @@ impl EngineProvider for PrxEngine {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect()
+    }
+
+    async fn post_run_approval<'a>(
+        &'a mut self,
+        session: &'a str,
+        approval_id: &'a str,
+        decision: &'a str,
+    ) -> Result<crate::engine::RunApprovalPost> {
+        let client = self.approval_client()?;
+        crate::prx_approval::post(client, session, approval_id, decision).await
     }
 
     fn acknowledge(&mut self, event: &EngineEvent) -> Result<()> {
@@ -770,20 +994,48 @@ fn parse_job(
             .ok_or(HttpFailure::Invalid)
     };
     let job_id = field("job_id")?;
-    let poll_url = body["poll_url"]
+    let mut poll_url = optional_url(body, "poll_url")?;
+    if poll_url.is_empty() {
+        poll_url = job_poll_path(&job_id).ok_or(HttpFailure::Invalid)?;
+    }
+    let cancel_url = optional_url(body, "cancel_url")?;
+    let run_id = body["run_id"]
         .as_str()
-        .filter(|value| valid_path(value))
-        .ok_or(HttpFailure::Invalid)?
-        .to_owned();
-    let cancel_url = body["cancel_url"]
-        .as_str()
-        .filter(|value| valid_path(value))
+        .filter(|value| valid_segment(value))
         .ok_or(HttpFailure::Invalid)?
         .to_owned();
     if !valid_id(message_id) {
         return Err(HttpFailure::Invalid);
     }
-    Ok(PrxJob { job_id, poll_url, cancel_url, message_id: message_id.to_owned(), deadline_ms })
+    Ok(PrxJob {
+        job_id,
+        poll_url,
+        cancel_url,
+        message_id: message_id.to_owned(),
+        deadline_ms,
+        run_id,
+        session_id: String::new(),
+    })
+}
+
+/// A missing or null URL is absent. A present value must already be an `/api/` path.
+fn optional_url(body: &Value, name: &str) -> std::result::Result<String, HttpFailure> {
+    match body.get(name) {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(value) => value
+            .as_str()
+            .filter(|path| valid_path(path))
+            .map(str::to_owned)
+            .ok_or(HttpFailure::Invalid),
+    }
+}
+
+fn job_poll_path(job_id: &str) -> Option<String> {
+    if !valid_segment(job_id) {
+        return None;
+    }
+    let path = format!("/api/jobs/{job_id}");
+    valid_path(&path).then_some(path)
 }
 
 fn parse_job_result(
@@ -825,6 +1077,75 @@ fn parse_job_result(
     }
 }
 
+async fn post_async(
+    engine: &PrxEngine,
+    session: &str,
+    body: &Value,
+) -> std::result::Result<HttpResponse, HttpFailure> {
+    engine
+        .request(
+            Method::POST,
+            &format!("api/sessions/{session}/message?mode=async"),
+            Some(body.clone()),
+        )
+        .await
+}
+
+fn turn_body(
+    input: &EngineInput<'_>,
+    agent: Option<&str>,
+) -> std::result::Result<Value, HttpFailure> {
+    let visible = context_message(input);
+    let Some(agent) = agent else {
+        return Ok(json!({ "message": visible }));
+    };
+    let Ok(name) = ramflux_prx_client::AgentName::parse(agent) else {
+        return Err(HttpFailure::Rejected);
+    };
+    if visible.trim().is_empty() || visible.len() > 65_536 {
+        return Err(HttpFailure::Rejected);
+    }
+    let kind = if input.chat_kind == "group" { "group" } else { "dm" };
+    Ok(json!({
+        "client_message_id": wire_message_id(input.conversation.message_id),
+        "agent": name.as_str(),
+        "deliver": "turn",
+        "message": visible,
+        "chat": {
+            "id": input.conversation.conversation_id,
+            "kind": kind,
+            "member_count": 1,
+        },
+        "sender": {
+            "principal_id": "rf",
+            "display": bounded_label(input.sender_display_name, 128),
+        },
+        "mentions": [],
+    }))
+}
+
+fn caller_session_key(conversation_id: &str) -> String {
+    if is_caller_session_key(conversation_id) {
+        conversation_id.to_owned()
+    } else {
+        flows::stable_key("rf-", conversation_id)
+    }
+}
+
+fn is_caller_session_key(key: &str) -> bool {
+    (8..=128).contains(&key.len())
+        && key.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && !key.starts_with("console-")
+}
+
+fn wire_message_id(message_id: &str) -> String {
+    let legal = (1..=128).contains(&message_id.len())
+        && message_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-'));
+    if legal { message_id.to_owned() } else { flows::stable_key("m", message_id) }
+}
+
 fn context_message(input: &EngineInput<'_>) -> String {
     let sender = bounded_label(input.sender_display_name, 128);
     let kind = if input.chat_kind == "group" { "group" } else { "direct" };
@@ -863,6 +1184,60 @@ fn strip_image_markers(reply: &str) -> String {
     output.trim().to_owned()
 }
 
+fn typed_client(config: &PrxConfig) -> Result<ramflux_prx_client::PrxClient> {
+    let settings = ramflux_prx_client::ClientConfig::new(&config.base_url, &config.token_file)
+        .with_request_timeout(std::time::Duration::from_secs(config.request_timeout_s));
+    ramflux_prx_client::PrxClient::new(&settings).map_err(|_| Error::Config)
+}
+
+fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    if !raw.is_empty() && raw.len() <= 20 && raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        raw.parse().ok()
+    } else {
+        None
+    }
+}
+
+fn classify_too_many(
+    header_seconds: Option<u64>,
+    bytes: &[u8],
+) -> std::result::Result<HttpResponse, HttpFailure> {
+    match ramflux_prx_client::limit_or_rate(header_seconds, bytes) {
+        ramflux_prx_client::PrxError::AgentBusy { retry_after_secs } => {
+            Err(HttpFailure::Admission(EngineFailure::AgentBusy { retry_after_secs }))
+        }
+        ramflux_prx_client::PrxError::AgentBudgetExhausted { retry_after_secs } => {
+            Err(HttpFailure::Admission(EngineFailure::AgentBudgetExhausted { retry_after_secs }))
+        }
+        ramflux_prx_client::PrxError::RateLimited { retry_after_ms } => {
+            Err(HttpFailure::RateLimited {
+                retry_after_secs: retry_seconds(retry_after_ms, header_seconds),
+            })
+        }
+        _ => {
+            Err(HttpFailure::RateLimited { retry_after_secs: retry_seconds(None, header_seconds) })
+        }
+    }
+}
+
+fn retry_seconds(retry_after_ms: Option<u64>, header_seconds: Option<u64>) -> u64 {
+    let from_body = retry_after_ms.map(|millis| millis.saturating_add(999) / 1000);
+    from_body.or(header_seconds).unwrap_or(3).clamp(1, 120)
+}
+
+fn stored_history_ok(row: &StoredHistory) -> bool {
+    row.remaining == 0
+        && !row.erase_id.is_empty()
+        && row.erase_id.len() <= 128
+        && valid_segment(&row.session)
+        && valid_segment(&row.agent)
+        && row.incarnation.len() <= 64
+        && row.scope_incarnation.len() <= 64
+        && !row.incarnation.chars().any(char::is_control)
+        && !row.scope_incarnation.chars().any(char::is_control)
+}
+
 fn valid_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
 }
@@ -878,6 +1253,18 @@ fn valid_path(value: &str) -> bool {
 
 fn valid_segment(value: &str) -> bool {
     valid_id(value) && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+}
+
+fn optional_segment(value: &str) -> bool {
+    value.is_empty() || valid_segment(value)
+}
+
+fn run_cancel_path(session_id: &str, run_id: &str) -> Option<String> {
+    if !valid_segment(session_id) || !valid_segment(run_id) {
+        return None;
+    }
+    let path = format!("/api/sessions/{session_id}/runs/{run_id}/cancel");
+    valid_path(&path).then_some(path)
 }
 
 fn valid_approval(approval: &EngineApproval) -> bool {
@@ -918,6 +1305,40 @@ mod tests {
             assert!(!valid_path(path));
         }
         assert!(valid_path("/api/jobs/job-1/cancel"));
+    }
+
+    #[test]
+    fn async_ack_with_ids_only_uses_the_job_poll_and_run_cancel() {
+        let body = json!({
+            "job_id": "b3dc4630-2422-47e3-b656-dc6dcecde137",
+            "run_id": "de70bf03-5015-44d0-afbf-26b17a45481a"
+        });
+        let Ok(job) = parse_job(&body, "message-1", 10) else {
+            panic!("ack with job_id and run_id must be stored");
+        };
+        assert_eq!(job.poll_url, "/api/jobs/b3dc4630-2422-47e3-b656-dc6dcecde137");
+        assert_eq!(job.cancel_url, "");
+        assert_eq!(
+            run_cancel_path("rf-session", &job.run_id).as_deref(),
+            Some("/api/sessions/rf-session/runs/de70bf03-5015-44d0-afbf-26b17a45481a/cancel")
+        );
+    }
+
+    #[test]
+    fn a_supplied_illegal_url_is_still_rejected() {
+        let poll = json!({
+            "job_id": "job-1",
+            "run_id": "run-1",
+            "poll_url": "/api/../secret"
+        });
+        assert!(parse_job(&poll, "message-1", 10).is_err());
+        let cancel = json!({
+            "job_id": "job-1",
+            "run_id": "run-1",
+            "cancel_url": "https://evil.example/cancel"
+        });
+        assert!(parse_job(&cancel, "message-1", 10).is_err());
+        assert!(parse_job(&json!({"job_id": "job-1"}), "message-1", 10).is_err());
     }
 
     #[test]

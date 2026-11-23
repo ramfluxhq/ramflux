@@ -22,14 +22,17 @@ pub enum Direction {
     Rtl,
 }
 impl Presentation {
-    /// Load the app-bundled launch catalogs; additional locales/themes use `parse`.
+    /// Load host chrome for `locale`. Unknown tags use the English catalog
+    /// (Traditional Chinese uses `zh-CN` until a Traditional catalog ships)
+    /// and never fail. Arabic is right-to-left. The stored tag is the request.
     /// # Errors
-    /// Rejects unsupported bundled locale/theme names.
+    /// Rejects a theme catalog that cannot be decoded.
     pub fn bundled(locale: &str, dark: bool) -> Result<Self, CardError> {
-        let strings = match locale {
-            "en" => include_str!("../locales/en.json"),
-            "zh-CN" => include_str!("../locales/zh-CN.json"),
-            _ => return Err(CardError::Invalid("host locale")),
+        let parsed = ramflux_protocol::a2ui::DisplayLocale::parse(locale);
+        let strings = if parsed.uses_zh_cn_copy() {
+            include_str!("../locales/zh-CN.json")
+        } else {
+            include_str!("../locales/en.json")
         };
         let tokens = if dark {
             include_str!("../themes/dark.json")
@@ -37,8 +40,8 @@ impl Presentation {
             include_str!("../themes/light.json")
         };
         Ok(Self {
-            locale: locale.into(),
-            direction: Direction::Ltr,
+            locale: parsed.requested_tag().to_owned(),
+            direction: if parsed.is_rtl() { Direction::Rtl } else { Direction::Ltr },
             strings: serde_json::from_str(strings)?,
             tokens: serde_json::from_str(tokens)?,
         })
@@ -90,7 +93,9 @@ impl Presentation {
     pub fn text(&self, key: &str) -> &str {
         self.strings.get(key).map_or("", String::as_str)
     }
-    pub(crate) fn format(&self, key: &str, values: &[(&str, &str)]) -> String {
+    /// Substitute only host catalog placeholders; replacement text remains opaque.
+    #[must_use]
+    pub fn format(&self, key: &str, values: &[(&str, &str)]) -> String {
         let mut result = String::new();
         let mut rest = self.text(key);
         while let Some((prefix, tail)) = rest.split_once('{') {
@@ -107,9 +112,6 @@ impl Presentation {
         }
         result.push_str(rest);
         result
-    }
-    pub(crate) fn owns_color(&self, value: &str) -> bool {
-        self.tokens.values().any(|token| token.as_str() == Some(value))
     }
 }
 fn color(value: &str) -> bool {
@@ -157,31 +159,15 @@ mod tests {
                 "peer JSON cannot select host presentation"
             );
         }
-        let mut json: serde_json::Value = serde_json::from_str(input).expect("test: fixture");
-        let form = json
-            .get_mut("components")
-            .and_then(serde_json::Value::as_array_mut)
-            .and_then(|v| v.first_mut())
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("test: form object");
-        form.insert("fields".into(), serde_json::json!([]));
-        assert!(
-            crate::CardSpec::parse(&serde_json::to_vec(&json).expect("test: empty form")).is_err(),
-            "explicit fields must be nonempty"
-        );
-        let form = json
-            .get_mut("components")
-            .and_then(serde_json::Value::as_array_mut)
-            .and_then(|v| v.first_mut())
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("test: form object");
-        form.remove("fields");
-        form.insert("label".into(), "Name".into());
-        form.insert("binding".into(), "/name".into());
-        assert!(
-            crate::CardSpec::parse(&serde_json::to_vec(&json).expect("test: legacy specimen"))
-                .is_err(),
-            "single-field legacy spelling is rejected"
-        );
+        let mut spec = crate::runtime::tests::fixture();
+        spec.snapshot
+            .components
+            .first_mut()
+            .expect("test: component")
+            .as_object_mut()
+            .expect("test: object")
+            .insert("fields".into(), serde_json::json!([]));
+        spec.signed_hash = spec.snapshot.hash().expect("test: updated hash");
+        assert!(spec.validate().is_err(), "legacy fields are not admitted by the v3 catalog");
     }
 }

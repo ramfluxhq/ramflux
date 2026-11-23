@@ -31,11 +31,15 @@ impl Drop for Intent {
         self.text.zeroize();
     }
 }
-fn invalid(message: &str) -> SdkError {
-    crate::bindings::AdapterError::new(
+fn invalid(message: &str, reason: &'static str) -> SdkError {
+    let error = crate::bindings::AdapterError::new(
         crate::bindings::GeneratedErrorCode::InvalidArgument,
         message,
-    )
+    );
+    crate::bindings::AdapterError {
+        details: crate::bindings::ErrorDetails::Reason { reason: reason.into() },
+        ..error
+    }
     .into()
 }
 
@@ -51,14 +55,17 @@ pub(in crate::bus) async fn send_account(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let intent: Intent = serde_json::from_value(request.body.clone())?;
+    let mut intent: Intent = serde_json::from_value(request.body.clone())?;
     admit_prepares(&intent)?;
+    canonicalize_group_conversation(account, &mut intent)?;
     let account_id = request_account_id(request)?;
     let operation = request
         .operation_id
         .as_deref()
         .filter(|key| !key.is_empty() && key.len() <= 256)
-        .ok_or_else(|| invalid("conversation.send requires operation_id"))?;
+        .ok_or_else(|| {
+            invalid("conversation.send requires operation_id", "operation_id_required")
+        })?;
     let message_id = ramflux_crypto::blake3_256_base64url(
         "ramflux.conversation.send.v1",
         &ramflux_protocol::canonical_json_bytes(&(account_id, operation))?,
@@ -144,12 +151,36 @@ pub(in crate::bus) async fn send_account(
     Ok(local_bus_ok(body))
 }
 
+fn canonicalize_group_conversation(
+    account: &LocalBusAccountState,
+    intent: &mut Intent,
+) -> Result<(), SdkError> {
+    let group = if let Some(group) = intent.group_id.clone() {
+        group
+    } else if account.client.born_v3_account.is_some()
+        && account.client.account_db()?.shared_group_state(&intent.conversation_id)?.is_some()
+    {
+        intent.conversation_id.clone()
+    } else {
+        return Ok(());
+    };
+    intent.conversation_id =
+        crate::bus::group_conversation::resolve(&account.client, &group, &intent.conversation_id)?;
+    if intent.group_id.is_none() {
+        intent.group_id = Some(group);
+    }
+    Ok(())
+}
+
 /// A group that exists but has not sent yet has no conversation record. It is created from the
 /// verified group, never from the caller's word alone.
 fn group_thread(account: &LocalBusAccountState, intent: &Intent) -> Result<Value, SdkError> {
-    let group = intent.group_id.as_deref().ok_or_else(|| invalid("conversation absent"))?;
+    let group = intent
+        .group_id
+        .as_deref()
+        .ok_or_else(|| invalid("conversation absent", "conversation_absent"))?;
     if super::super::group_delivery::directory(&account.client, group)?.is_empty() {
-        return Err(invalid("group absent"));
+        return Err(invalid("group absent", "group_absent"));
     }
     let record = json!({
         "title": null, "direct_route": null, "kind": "group",
@@ -227,28 +258,54 @@ pub(in crate::bus) fn peer_root(
     let participants = thread
         .get("participants")
         .and_then(Value::as_array)
-        .ok_or_else(|| invalid("direct participants absent"))?;
+        .ok_or_else(|| invalid("direct participants absent", "direct_participants_absent"))?;
     if thread.get("kind").and_then(Value::as_str) != Some("direct")
         || participants.len() != 2
         || !participants.iter().any(|id| id.as_str() == Some(principal))
     {
-        return Err(invalid("direct conversation membership mismatch"));
+        return Err(invalid(
+            "direct conversation membership mismatch",
+            "direct_membership_mismatch",
+        ));
     }
     let peer = participants
         .iter()
         .filter_map(Value::as_str)
         .find(|id| *id != principal)
-        .ok_or_else(|| invalid("direct peer absent"))?;
-    let identity = account
-        .client
-        .account_db()?
-        .client_record("identity", peer)?
-        .ok_or_else(|| invalid("direct peer identity absent"))?;
-    let root = identity
-        .get("contact_identity_commitment")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid("direct peer commitment absent"))?;
-    Ok((peer.into(), root.into()))
+        .ok_or_else(|| invalid("direct peer absent", "direct_peer_absent"))?;
+    Ok((peer.into(), peer_commitment(account, thread, peer)?))
+}
+
+fn peer_commitment(
+    account: &LocalBusAccountState,
+    thread: &Value,
+    peer: &str,
+) -> Result<String, SdkError> {
+    if let Some(identity) = account.client.account_db()?.client_record("identity", peer)? {
+        return identity
+            .get("contact_identity_commitment")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                invalid("direct peer commitment absent", "direct_peer_commitment_absent")
+            });
+    }
+    // History import records the author root before the contact identity row exists.
+    let own = account.client.own_account_anchor()?;
+    let mut foreign = thread
+        .get("participant_roots")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|root| *root != own);
+    let root = foreign
+        .next()
+        .ok_or_else(|| invalid("direct peer identity absent", "direct_peer_identity_absent"))?;
+    if foreign.next().is_some() {
+        return Err(invalid("direct peer identity absent", "direct_peer_identity_absent"));
+    }
+    Ok(root.to_owned())
 }
 
 struct DirectSend<'a> {
@@ -273,7 +330,10 @@ async fn send_direct(
     account.apply_session_metadata(engine);
     let manifest = manifest?;
     if manifest.principal_id != peer || manifest.devices.is_empty() || manifest.devices.len() > 64 {
-        return Err(invalid("direct peer manifest mismatch or capacity exceeded"));
+        return Err(invalid(
+            "direct peer manifest mismatch or capacity exceeded",
+            "direct_peer_manifest_mismatch",
+        ));
     }
     let mut deliveries = Vec::new();
     for device in manifest.devices {
@@ -333,7 +393,7 @@ fn complete_intent(client: &RamfluxClient, operation: &str) -> Result<(), SdkErr
         let key = receipt_key(operation);
         let mut receipt = db
             .load_actor_state::<SendReceipt>(&key)?
-            .ok_or_else(|| invalid("operation receipt absent"))?;
+            .ok_or_else(|| invalid("operation receipt absent", "operation_receipt_absent"))?;
         receipt.completed = true;
         receipt.completed_at = Some(now_unix_timestamp());
         db.persist_actor_state(&key, &receipt)?;

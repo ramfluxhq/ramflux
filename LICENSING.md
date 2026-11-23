@@ -7,8 +7,8 @@ end-to-end-encrypted system — stay copyleft.
 
 | Component | Repository / path | License | Why |
 |-----------|-------------------|---------|-----|
-| Core: node services (gateway, router, notify, federation, relay, signaling, retention), SDK, `rf` CLI, protocol, crypto, storage, transport | `ramflux` (this workspace) | **BSD-3-Clause** | An open, auditable core is a *trust* asset. Anyone can read, verify, fork, and self-host it. |
-| GUI / terminal clients (`rf-tui`, future desktop/mobile) | `ramflux-tui`, `ramflux-desktop`, `ramflux-app` | **AGPL-3.0-or-later** (with an App-Store Exception, AGPL §7) | The installed client is where the no-logs / E2EE claim actually lives; copyleft keeps modified clients honest and auditable. |
+| Core: node services (gateway, router, notify, federation, relay, signaling, retention), SDK, `rf` CLI, protocol, crypto, storage, transport, voice media engine (`crates/ramflux-media`) | `ramflux` (this workspace) | **BSD-3-Clause** | An open, auditable core is a *trust* asset. Anyone can read, verify, fork, and self-host it. Platform audio I/O stays in each client. |
+| GUI / terminal clients (`rf-tui`, desktop, iOS and Android) | `ramflux-tui`, `ramflux-desktop`, `ramflux-ios`, `ramflux-android` | **AGPL-3.0-or-later** (with an App-Store Exception, AGPL §7) | The installed client is where the no-logs / E2EE claim actually lives; copyleft keeps modified clients honest and auditable. |
 | Managed / commercial control plane (hosted console, billing) | private | Proprietary | Funds the project; never required to self-host. |
 | Name and logo | — | Trademark — see `TRADEMARKS.md` | The code license does not grant brand rights. |
 

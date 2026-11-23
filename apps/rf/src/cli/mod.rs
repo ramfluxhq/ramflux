@@ -5,6 +5,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) use crate::{DEFAULT_DATA_ROOT, DEFAULT_SOCKET};
 
 mod a2i;
@@ -14,6 +15,8 @@ mod agent;
 mod attachment;
 mod call_bot;
 mod contact;
+mod username;
+pub(crate) use username::*;
 mod conversation_ops;
 mod daemon;
 mod device;
@@ -22,6 +25,7 @@ mod dm;
 mod grant;
 mod group;
 mod keychain;
+mod prx;
 mod vault;
 pub(crate) use vault::*;
 mod mcp;
@@ -44,6 +48,7 @@ pub(crate) use conversation_ops::*;
 pub(crate) use daemon::*;
 pub(crate) use device::*;
 pub(crate) use diag::*;
+pub(crate) use prx::*;
 mod pairing;
 mod transfer;
 #[cfg(feature = "itest-memory-vault")]
@@ -67,6 +72,10 @@ pub(crate) use transfer_export_probe::*;
     about = "Ramflux reference CLI over the local SDK bus"
 )]
 pub(crate) struct Cli {
+    #[cfg(target_os = "linux")]
+    #[arg(long, global = true)]
+    pub(crate) socket: Option<PathBuf>,
+    #[cfg(not(target_os = "linux"))]
     #[arg(long, global = true, default_value = DEFAULT_SOCKET)]
     pub(crate) socket: PathBuf,
     #[command(subcommand)]
@@ -79,11 +88,14 @@ pub(crate) enum Command {
     Node(NodeCommand),
     Account(AccountCommand),
     Contact(ContactCommand),
+    Username(UsernameCommand),
     Device(DeviceCommand),
     /// Native SAS pairing preview (default-off).
     Pairing(PairingCommand),
     /// Agent accounts: create, decide, list, show, edit, access, delete, status (desktop bus).
     Agent(AgentCommand),
+    /// Find or start the local PRX daemon.
+    Prx(PrxCommand),
     /// Full-account primary transfer preview (default-off).
     Transfer(TransferCommand),
     Dm(DmCommand),

@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+- Native Linux x86_64/aarch64 CLI and TUI release bundles with checksums, an Arch `ramflux-cli` source package, and Arch/Omarchy installation instructions.
+- Describe connection policy, gateway reset, dependency patches, username directory, custody, task limits and agent provisioning without internal process records; correct the client repository list in licensing guidance.
+- Consolidate message identity, transient delivery, Unsupported diagnostics, revision entropy and native group snapshot rules in one protocol specification; repair the storage-profile link.
+- Remove historical session-push and revocation design-round records and their README links; keep the current node interface manual.
+- Remove unused manual acceptance fixtures and the superseded C ABI header helper; retain the process-level refusal test and current header checker.
+- Remove deployment-specific host references from agent setup and pairing documentation; retain forward-secrecy fixture integrity metadata without internal design-history dumps.
+
+## [0.2.6] - 2026-11-23
+- Align release metadata with product version 0.2.6.
+
 ## [0.2.5] - 2026-11-22
 
 - Relay: legacy v2 relay tokens are removed; a relay store from earlier versions must be reset before upgrading. Account runtime: sessions run on their own thread, so database work no longer freezes session timers; a late best-effort exchange no longer retires the session, and retirement logs name the reason. A newly added device receives the owner's earlier history. Call invites fail at once with a typed error when calls are not wired. Agent creation can be driven end to end from the rf CLI. PRX client repinned to 296a83367. Retired bus methods removed.

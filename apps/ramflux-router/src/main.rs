@@ -3,6 +3,8 @@
 
 mod attachment_renew_home;
 mod attachment_source;
+mod cross_node_forward;
+mod cross_node_submit;
 mod custody_listener;
 #[cfg(test)]
 mod durable_ingress_registry;
@@ -14,6 +16,7 @@ mod handlers;
 mod home_migration;
 mod identity_authority;
 mod inbox_maintenance;
+mod ingress_decode;
 mod lifecycle;
 mod migration_courier;
 mod migration_drain;
@@ -28,6 +31,7 @@ mod router_runtime;
 mod send_authority;
 mod serve;
 mod startup;
+mod username_directory;
 
 use std::sync::Arc;
 
@@ -105,6 +109,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             home_node_forward,
             config.node_id.clone(),
         ));
+        cross_node_forward::configure(&config, &router)?;
         if let Some(configured) = config.gateway_client_capabilities.as_deref() {
             router.install_gateway_client_capabilities(configured);
         }

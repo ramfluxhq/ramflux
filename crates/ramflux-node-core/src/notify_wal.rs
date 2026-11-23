@@ -955,6 +955,7 @@ struct NotifyWalWriterState {
     segment_id: u64,
     offset: u64,
     file: File,
+    compacted_fingerprint: Option<[u8; 32]>,
 }
 
 impl NotifyWalWriterState {
@@ -979,7 +980,14 @@ impl NotifyWalWriterState {
         let offset = file
             .seek(io::SeekFrom::End(0))
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
-        Ok(Self { root, segment_bytes, segment_id, offset, file })
+        let compacted_fingerprint = if offset == u64::try_from(NOTIFY_WAL_MAGIC.len()).unwrap_or(0)
+            && notify_wal_segment_ids(&root)?.len() == 1
+        {
+            Some([0; 32])
+        } else {
+            None
+        };
+        Ok(Self { root, segment_bytes, segment_id, offset, file, compacted_fingerprint })
     }
 
     fn append_batch(
@@ -987,6 +995,9 @@ impl NotifyWalWriterState {
         payloads: &[NotifyWalPayload],
     ) -> Result<Vec<NotifyWalRecordLocation>, NodeCoreError> {
         let mut locations = Vec::with_capacity(payloads.len());
+        if !payloads.is_empty() {
+            self.compacted_fingerprint = None;
+        }
         for payload in payloads {
             let stored = StoredNotifyWalPayload::try_from(payload)?;
             let encoded = postcard::to_allocvec(&stored)
@@ -1035,6 +1046,12 @@ impl NotifyWalWriterState {
     }
 
     fn compact(&mut self, payloads: &[NotifyWalPayload]) -> Result<(), NodeCoreError> {
+        let fingerprint = notify_wal_compaction_fingerprint(payloads)?;
+        if self.compacted_fingerprint == Some(fingerprint) {
+            return Ok(());
+        }
+        // A failed rewrite must never leave an older fingerprint eligible for a no-op.
+        self.compacted_fingerprint = None;
         self.file.sync_all().map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         let mut old_segments = notify_wal_segment_ids(&self.root)?;
         old_segments.sort_unstable();
@@ -1091,8 +1108,27 @@ impl NotifyWalWriterState {
                 self.offset
             )));
         }
+        self.compacted_fingerprint = Some(fingerprint);
         Ok(())
     }
+}
+
+// Hash the stored representation in replay order without retaining another full queue copy.
+fn notify_wal_compaction_fingerprint(
+    payloads: &[NotifyWalPayload],
+) -> Result<[u8; 32], NodeCoreError> {
+    let mut fingerprint = [0; 32];
+    for payload in payloads {
+        let stored = StoredNotifyWalPayload::try_from(payload)?;
+        let encoded = postcard::to_allocvec(&stored)
+            .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+        let payload_hash = ramflux_crypto::blake3_256("ramflux.notify.wal.payload.v1", &encoded);
+        fingerprint = ramflux_crypto::blake3_256(
+            "ramflux.notify.wal.compaction.v1",
+            &[fingerprint.as_slice(), payload_hash.as_slice()].concat(),
+        );
+    }
+    Ok(fingerprint)
 }
 
 fn notify_wal_writer_loop(

@@ -140,8 +140,8 @@ fn host_custody_preflight_drives_real_creation_and_releases_after_close() {
     );
     assert_eq!(
         host.calls.load(Ordering::SeqCst),
-        1,
-        "preflight must run once before phrase creation"
+        2,
+        "open and phrase creation must each preflight custody"
     );
     assert_eq!(host.released.load(Ordering::SeqCst), 0, "live supervisor must retain the context");
     assert_eq!(ramflux_v2_client_close(client), 0, "close must drain provider tasks");

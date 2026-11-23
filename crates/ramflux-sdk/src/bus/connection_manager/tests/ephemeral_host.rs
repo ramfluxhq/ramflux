@@ -74,7 +74,7 @@ async fn ephemeral_worker_disconnect_reconnect_keeps_consumer_and_dedup_clears_p
         let (opened, mut sessions) = mpsc::unbounded_channel();
         let connector = Arc::new(HeldConnector { opened, permits: Semaphore::new(1) });
         let handle =
-            ConnectionHandle::start_with(config()?, None, limits(), connector.clone(), None);
+            ConnectionHandle::start_with(config()?, None, limits(), connector.clone(), None, None);
         let io = sessions.recv().await.ok_or("first connection missing")?;
         handle.require_live(Duration::from_secs(600)).await?;
         let inbox = handle

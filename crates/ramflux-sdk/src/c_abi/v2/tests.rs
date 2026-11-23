@@ -225,12 +225,7 @@ fn preadmission_cancel_never_reaches_the_supervisor() {
     let bytes = crate::bus::inprocess::encode_request(frame).expect("test: encoded mutation");
     client
         .commands
-        .try_send(Command {
-            id: 1,
-            deadline_ms: None,
-            bytes: zeroize::Zeroizing::new(bytes),
-            operation: Arc::clone(&operation),
-        })
+        .try_send(Command::carrier(1, zeroize::Zeroizing::new(bytes), Arc::clone(&operation), None))
         .map_err(|_| "send failed")
         .expect("test: queue cancelled operation");
     let until = Instant::now() + Duration::from_secs(10);
@@ -880,7 +875,7 @@ fn bundled_card_trust_verifies_and_renders_all_components() -> Result<(), Box<dy
     let mut buffer = std::ptr::null_mut();
     assert_eq!(ramflux_v2_card_trust_package(&raw mut buffer), 0);
     let index = take_buffer(buffer);
-    assert_eq!(index["card_abi_major"], 4);
+    assert_eq!(index["card_abi_major"], 5);
     assert_eq!(index["release"]["app_id"], "ramflux.native");
     let decode = |name: &str| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         Ok(ramflux_protocol::decode_base64url(

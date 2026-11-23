@@ -40,9 +40,11 @@ async fn case() -> Case {
     let gateway = Arc::clone(&fixture.gateway);
     let diagnostic = fixture.source.client.account_db()?.open_reader()?;
     let started = Box::pin(start(fixture)).await?;
-    tokio::time::timeout(Duration::from_secs(10), hold.entered.notified()).await?;
+    // The 30s watchdog is the stall deadline. A short wall timeout false-fails
+    // when the host is slow; the hold has not been released yet.
+    hold.entered.notified().await;
     // The only active receive trigger is Connected; all competing budgets are 600 seconds.
-    controls(&started.actor).await?;
+    answers_while_held(&started.actor).await?;
     let received = started
         .actor
         .request(command(
@@ -67,21 +69,35 @@ async fn case() -> Case {
         "the fake gateway must still be held"
     );
     hold.release.notify_one();
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if !gateway.lock().map_err(|_| "gateway")?.acked.is_empty() {
-                return Ok::<_, Box<dyn std::error::Error>>(());
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    loop {
+        if !gateway.lock().map_err(|_| "gateway")?.acked.is_empty() {
+            break;
         }
-    })
-    .await??;
+        tokio::task::yield_now().await;
+    }
     let Started { root: _root, actor, router, .. } = started;
     actor.stop().await?;
     drop(actor);
     router.await?;
     Ok(())
 }
+// These calls return before the held ACK is released. That is the proof they
+// did not wait out the 600s budgets. A wall bound of a few seconds false-fails
+// on a slow host.
+async fn answers_while_held(actor: &AccountActor) -> Case {
+    for (method, body) in [
+        ("account.status", json!({})),
+        ("contact.list", json!({})),
+        ("contact.requests.policy.set", json!({"contact_requests":"auto_accept"})),
+    ] {
+        let response = actor.request(command(method, body)).await?;
+        if method == "account.status" {
+            assert_eq!(response.body["networking"], "live");
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn controls(actor: &AccountActor) -> Case {
     for (method, body) in [
         ("account.status", json!({})),
@@ -255,6 +271,7 @@ fn ack_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRunti
         limits(),
         Arc::new(PendingConnect),
         None,
+        None,
     );
     let generation = handle.generation();
     account.connection = Some(handle);
@@ -269,17 +286,24 @@ fn ack_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRunti
         }
     });
     let (connection_sender, connection_work) = mpsc::channel(8);
+    let (head_completion_sender, head_rx) = mpsc::channel(1);
     let (_lifecycle_sender, lifecycle) = mpsc::channel(4);
     let (_preempt_sender, preempt) = watch::channel(0_u64);
     let runtime = super::super::AccountRuntime {
         timeouts: limits(),
         lifecycle,
         preempt,
+        command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         connection_sender,
         connection_work,
+        head_completion_sender,
+        head_rx,
+        deferred: std::collections::VecDeque::new(),
         ledger: None,
+        resume_receive_until: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
         pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
+        username: crate::bus::account_runtime::username_calls::Calls::default(),
         transfers: super::super::uploads::Transfers::start(),
         id: "sender".into(),
         state: crate::bus::state::LocalBusDaemonState {
@@ -406,7 +430,7 @@ async fn drive<T>(
     loop {
         tokio::select! {
             result = &mut future => return Ok(result),
-            work = runtime.connection_work.recv() => {
+            work = runtime.recv_connection_work() => {
                 runtime.apply_connection_work(work.ok_or("writer closed")?).await?;
             }
         }

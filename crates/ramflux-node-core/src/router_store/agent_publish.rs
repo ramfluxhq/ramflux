@@ -4,7 +4,10 @@
 //! Consumed agent-publication authorizations, written in the same redb transaction as the
 //! custody directory record they admitted.
 
+pub(crate) mod agent_host;
+
 use crate::{NodeCoreError, RouterRedbStore, custody_authority::CustodyAccountState};
+use agent_host::AgentHostBinding;
 use ramflux_protocol::custody::{AgentPublishReceipt, CustodyRefusal};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -26,6 +29,7 @@ pub(crate) struct AgentPublicationWrite<'a> {
     pub expected: Option<&'a CustodyAccountState>,
     pub source: std::net::IpAddr,
     pub now: u64,
+    pub host: &'a AgentHostBinding,
 }
 
 /// One consumed authorization. `receipt` is the exact receipt returned to the publisher.
@@ -106,11 +110,12 @@ impl RouterRedbStore {
         &self,
         write: &AgentPublicationWrite<'_>,
     ) -> Result<(), NodeCoreError> {
-        let AgentPublicationWrite { request_id, row, anchor, state, expected, source, now } =
+        let AgentPublicationWrite { request_id, row, anchor, state, expected, source, now, host } =
             *write;
         self.prune_custody_history(now)?;
         let prepared = self.prepare_notify_owner(state, now)?;
         let tx = self.begin_write().map_err(error)?;
+        Self::insert_agent_host_in_tx(&tx, anchor, host)?;
         Self::record_agent_publish_in_tx(&tx, request_id, row)?;
         self.record_custody_account_in_tx(
             &tx,

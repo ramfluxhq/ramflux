@@ -21,15 +21,18 @@ fn federation_redb_store_restores_trust_state() -> Result<(), Box<dyn std::error
     record.node_public_key.clone_from(&node_b_public_key);
     sign_federation_server_record_with_seed(&mut record, node_b_seed)?;
     state.resolve_discovery_result(&request, Some(&record), None)?;
-    state.apply_bad_node_advisory(BadNodeAdvisory {
-        advisory_id: "adv_1".to_owned(),
-        issuer_node_id: "node_a.example".to_owned(),
-        subject_node_id: "node_c.example".to_owned(),
-        reason_code: "warning".to_owned(),
-        issued_at: 1_760_000_000,
-        expires_at: 1_762_592_000,
-        signature_hash: "signature_hash".to_owned(),
-    });
+    state.apply_bad_node_advisory(
+        BadNodeAdvisory {
+            advisory_id: "adv_1".to_owned(),
+            issuer_node_id: "node_a.example".to_owned(),
+            subject_node_id: "node_c.example".to_owned(),
+            reason_code: "warning".to_owned(),
+            issued_at: 1_760_000_000,
+            expires_at: 1_762_592_000,
+            signature_hash: "signature_hash".to_owned(),
+        },
+        1_760_000_001,
+    )?;
     store.save_state(&state)?;
     drop(store);
 

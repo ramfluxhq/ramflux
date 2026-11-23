@@ -244,7 +244,7 @@ async fn run_account(
         };
         retire_resident(handle, &resident, reason, generation);
         let why = resident.terminal_why.clone();
-        drop(resident);
+        resident.shutdown_transport().await;
         if matches!(reason, DisconnectReason::Stop | DisconnectReason::Lock) {
             break;
         }
@@ -257,8 +257,8 @@ async fn run_account(
     }
 }
 
-/// A retired resident session reconnects after the retry boundary; the log names the real
-/// retirement reason, not a connect-attempt timeout.
+/// A retired resident session waits out the reconnect cooldown. The snapshot names
+/// grant expiry, renewal refusal, or that cooldown. A real dial timeout stays elsewhere.
 fn reconnect_after_retirement(
     handle: &ConnectionHandle,
     retry: &mut AdmissionRetry,
@@ -269,13 +269,33 @@ fn reconnect_after_retirement(
     let error = SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS };
     retry.record(&error, Instant::now());
     let delay = backoff(handle, retry, &error);
+    let named = retirement_status(why);
+    update(handle, |snapshot| {
+        snapshot.last_reason = Some(named.to_owned());
+        // NodeTimeout is the reconnect delay. It is not why a revoked grant closed.
+        if named == "renewal_refused" {
+            snapshot.cause = None;
+        }
+    });
     tracing::warn!(
         ?reason,
         why = why.unwrap_or(""),
+        status = named,
         generation,
         retry_after_ms = ?delay,
         "resident account session retired; reconnecting"
     );
+}
+
+fn retirement_status(why: Option<&str>) -> &'static str {
+    let why = why.unwrap_or("");
+    if why.contains("renewal_refused") {
+        "renewal_refused"
+    } else if why.contains("grant_expired") {
+        "grant_expired"
+    } else {
+        "cooldown"
+    }
 }
 
 async fn wait_for_network(

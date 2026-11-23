@@ -30,6 +30,8 @@ pub(crate) mod pairing;
 #[cfg(not(unix))]
 #[path = "pairing_unsupported.rs"]
 pub(crate) mod pairing;
+pub(crate) mod prx;
+pub(crate) mod username;
 #[cfg(windows)]
 mod windows_console;
 #[cfg(not(unix))]
@@ -46,9 +48,11 @@ pub(crate) mod task;
 #[cfg(feature = "itest-memory-vault")]
 pub(crate) mod transfer_export_probe;
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) use crate::DEFAULT_DATA_ROOT;
+pub(crate) use crate::RfError;
 pub(crate) use crate::cli::*;
 pub(crate) use crate::utils::*;
-pub(crate) use crate::{DEFAULT_DATA_ROOT, RfError};
 pub(crate) use ramflux_sdk::{
     GatewayQuicEndpointConfig, LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest,
     LocalBusAccountBackupExportRequest, LocalBusAccountBackupImportRequest,

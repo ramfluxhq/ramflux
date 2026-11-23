@@ -5,14 +5,25 @@ Native SAS device pairing is released. Clients pair by default
 the pairing routes and advertises `device_pairing_v2` and `primary_transfer_full_v1`
 only when its operator sets `RAMFLUX_DEVICE_PAIRING_ENABLED=1`; a node without the
 opt-in advertises neither. A client refuses to start a ceremony with a node whose
-discovery record does not advertise `device_pairing_v2`. Desktop and mobile pairing
-companions are not covered by this release.
+discovery record does not advertise `device_pairing_v2`. A phone joins an
+existing account through in-process C ABI v2. Desktop GUI pairing companions
+remain outside this release.
 
 The product follows a phone-first account model: the phone is the primary device,
 desktop clients mainly host agents, and the web client is a linked secondary.
 Primary authority follows the verified native device role and keys; a desktop
-session is not a prerequisite for pairing. The SDK and reference CLI exercise
-this shared flow while the phone companion remains outside this release.
+session is not a prerequisite for pairing. The SDK, the reference CLI, and a
+phone that calls `ramflux_v2_set_credential_provider` exercise this shared flow.
+
+The phone installs that callback before `device.pair.join`. The supervisor asks
+on the same in-process connection. Pairing join uses action `setup`. A call that
+already uses the private channel may ask for `unlock` or `phrase`. The callback
+writes the code into SDK-owned buffers. It is not a JSON field, an event, or a
+log line, and the SDK zeroizes it when the callback returns. Joining does not
+open a second daemon socket. An `account.unlock` request whose body omits
+`passphrase` uses the same callback. `account.passphrase.rotate` still places
+its codes in the request body; the bridge wipes that body after encoding and
+does not ask the callback.
 
 Pairing enrolls a separately generated device branch. Each device keeps its own
 signing and agreement keys, local encrypted store and data passphrase. Pairing

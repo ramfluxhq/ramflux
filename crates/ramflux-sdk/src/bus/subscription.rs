@@ -45,13 +45,7 @@ pub(super) async fn start(
     let first = readers.request(query.clone()).await?;
     let bounds: JournalBounds = serde_json::from_value(first["bounds"].clone())?;
     if first["resync_required"] == true {
-        let mut error =
-            local_bus_error(&request, &SdkError::LocalBus("resync_required".to_owned()));
-        error.body = serde_json::json!({"floor_seq":bounds.floor_seq,"head_seq":bounds.head_seq});
-        if let Some(body) = &mut error.error {
-            "resync_required".clone_into(&mut body.code);
-        }
-        outbound.send(error).await.map_err(|_| closed())?;
+        outbound.send(resync(&request, &bounds)).await.map_err(|_| closed())?;
         return Ok(None);
     }
     let cursor = body.since_seq.unwrap_or(bounds.head_seq);
@@ -65,6 +59,71 @@ pub(super) async fn start(
     Ok(Some(tokio::task::spawn_local(async move {
         let _ = tail(readers, query, request, outbound, body.topics, cursor).await;
     })))
+}
+
+pub(super) struct JournalFollow {
+    readers: AccountReaders,
+    query: LocalBusFrame,
+    request: LocalBusFrame,
+    outbound: super::outbound::LocalBusOutbound,
+    topics: BTreeSet<String>,
+    cursor: u64,
+}
+
+/// Journal cursor for an opener that sends its own acknowledgement.
+/// `None` means `resync_required` was already sent.
+pub(super) async fn prepare_follow(
+    readers: AccountReaders,
+    request: &LocalBusFrame,
+    outbound: &super::outbound::LocalBusOutbound,
+) -> Result<Option<JournalFollow>, SdkError> {
+    let body: Subscribe = serde_json::from_value(request.body.clone())?;
+    if body.topics.len() > 64
+        || body.topics.iter().any(|topic| topic.is_empty() || topic.len() > 128)
+    {
+        return Err(SdkError::LocalBus("invalid subscription topics".to_owned()));
+    }
+    let mut query = request.clone();
+    query.body = serde_json::json!({"since_seq": body.since_seq});
+    let first = readers.request(query.clone()).await?;
+    let bounds: JournalBounds = serde_json::from_value(first["bounds"].clone())?;
+    if first["resync_required"] == true {
+        outbound.send(resync(request, &bounds)).await.map_err(|_| closed())?;
+        return Ok(None);
+    }
+    let cursor = body.since_seq.unwrap_or(bounds.head_seq);
+    "stream.read".clone_into(&mut query.method);
+    Ok(Some(JournalFollow {
+        readers,
+        query,
+        request: request.clone(),
+        outbound: outbound.clone(),
+        topics: body.topics,
+        cursor,
+    }))
+}
+
+pub(super) fn spawn_tail(follow: JournalFollow) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_local(async move {
+        let _ = tail(
+            follow.readers,
+            follow.query,
+            follow.request,
+            follow.outbound,
+            follow.topics,
+            follow.cursor,
+        )
+        .await;
+    })
+}
+
+fn resync(request: &LocalBusFrame, bounds: &JournalBounds) -> LocalBusFrame {
+    let mut error = local_bus_error(request, &SdkError::LocalBus("resync_required".to_owned()));
+    error.body = serde_json::json!({"floor_seq": bounds.floor_seq, "head_seq": bounds.head_seq});
+    if let Some(body) = &mut error.error {
+        "resync_required".clone_into(&mut body.code);
+    }
+    error
 }
 
 async fn tail(

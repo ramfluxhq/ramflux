@@ -14,9 +14,10 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 mod generation_fence;
+mod park;
 pub(crate) use generation_fence::require_deadline as require_generation_rebase_deadline;
 
-type Job = Box<dyn FnOnce(&mut rusqlite::Connection) + Send>;
+type Job = Box<dyn FnOnce(Option<&mut rusqlite::Connection>) + Send>;
 
 #[derive(Clone)]
 pub(crate) struct Connection {
@@ -59,8 +60,12 @@ struct Worker {
     work_probe: Mutex<Option<crate::SqlWorkProbe>>,
     account_writer: Option<std::sync::Arc<crate::account_writer::AccountWriter>>,
     account_generation: u64,
-    _generation_reader: Option<crate::account_generation::GenerationReadLease>,
-    sender: Option<SyncSender<Job>>,
+    keeps_generation_lease: bool,
+    generation_reader: Mutex<Option<crate::account_generation::GenerationReadLease>>,
+    released: std::sync::atomic::AtomicBool,
+    sqlite_closed: std::sync::atomic::AtomicBool,
+    gate: Mutex<()>,
+    sender: Option<SyncSender<park::WorkerMsg>>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -137,80 +142,10 @@ impl Connection {
         let account_generation = writer.as_ref().map_or(Ok(0), |owner| {
             owner.generation.read().map(|epoch| *epoch).map_err(|_| Error::InvalidQuery)
         })?;
+        let keeps_generation_lease = generation_reader.is_some();
         let path = path.to_path_buf();
         let connection_id = NEXT_CONNECTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (sender, receiver) = mpsc::sync_channel::<Job>(64);
-        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-        let worker_path = path.clone();
-        let checkpoint_writer = writer.clone();
-        let worker = std::thread::Builder::new()
-            .name("ramflux-db".to_owned())
-            .spawn(move || {
-                let opened =
-                    rusqlite::Connection::open_with_flags(&worker_path, flags).and_then(|db| {
-                        db.busy_timeout(std::time::Duration::from_secs(5))?;
-                        Ok(db)
-                    });
-                match opened {
-                    Ok(mut db) => {
-                        let worker_checkpoints =
-                            std::sync::Arc::new(BackgroundCheckpoint::for_path(&worker_path));
-                        if ready_tx.send(Ok(worker_checkpoints.clone())).is_ok() {
-                            loop {
-                                let next_job = if let Some(wait) = worker_checkpoints.wait_timeout()
-                                {
-                                    receiver.recv_timeout(wait)
-                                } else {
-                                    receiver
-                                        .recv()
-                                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-                                };
-                                match next_job {
-                                    Ok(job) => {
-                                        let changes = db.total_changes();
-                                        let transaction = !db.is_autocommit();
-                                        job(&mut db);
-                                        if worker_checkpoints.enabled()
-                                            && (db.total_changes() != changes
-                                                || transaction && db.is_autocommit())
-                                            && crate::database_checkpoint::durable_erasure_pending(
-                                                &db,
-                                            )
-                                            .unwrap_or(true)
-                                        {
-                                            worker_checkpoints.request();
-                                        }
-                                    }
-                                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                        // SQLite checkpoints on the last connection close. If a
-                                        // peer connection remains, its shared pending schedule
-                                        // retains responsibility for the next attempt.
-                                        break;
-                                    }
-                                }
-                                // Each job has delivered its reply before checkpoint I/O starts.
-                                if let Some(owner) = &checkpoint_writer {
-                                    // Maintenance can clear a durable privacy marker too.
-                                    // It obeys the same G2 fence and never mutates a retired DB.
-                                    if let Ok(selected) = owner.generation.try_read()
-                                        && *selected == account_generation
-                                    {
-                                        worker_checkpoints.maintain(&db);
-                                    }
-                                } else {
-                                    worker_checkpoints.maintain(&db);
-                                }
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let _ = ready_tx.send(Err(error));
-                    }
-                }
-            })
-            .map_err(|_| Error::InvalidQuery)?;
-        let checkpoints = ready_rx.recv().map_err(|_| Error::InvalidQuery)??;
+        let started = park::start(path.clone(), flags, writer.clone(), account_generation)?;
         Ok(Self {
             rebase: None,
             inner: std::sync::Arc::new(Worker {
@@ -218,14 +153,18 @@ impl Connection {
                 path,
                 search_watch: std::sync::Arc::new(Mutex::new(None)),
                 transaction_mode: Mutex::new(None),
-                checkpoints,
+                checkpoints: started.checkpoints,
                 #[cfg(feature = "itest-work-budget")]
                 work_probe: Mutex::new(None),
                 account_writer: writer,
                 account_generation,
-                _generation_reader: generation_reader,
-                sender: Some(sender),
-                handle: Some(worker),
+                keeps_generation_lease,
+                generation_reader: Mutex::new(generation_reader),
+                released: std::sync::atomic::AtomicBool::new(false),
+                sqlite_closed: std::sync::atomic::AtomicBool::new(false),
+                gate: Mutex::new(()),
+                sender: Some(started.sender),
+                handle: Some(started.handle),
             }),
         })
     }
@@ -308,13 +247,21 @@ impl Connection {
         &self,
         f: impl FnOnce(&mut rusqlite::Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        let _gate = self.inner.lock_gate_for_dispatch()?;
+        if self.inner.released.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(park::released_error());
+        }
         let (sender, receiver) = mpsc::sync_channel(1);
         let search_watch = std::sync::Arc::clone(&self.inner.search_watch);
         self.inner
             .sender
             .as_ref()
             .ok_or(Error::InvalidQuery)?
-            .send(Box::new(move |db| {
+            .send(park::WorkerMsg::Job(Box::new(move |db| {
+                let Some(db) = db else {
+                    let _ = sender.send(Err(park::released_error()));
+                    return;
+                };
                 let result = f(db);
                 let watch =
                     search_watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
@@ -322,7 +269,7 @@ impl Connection {
                     watch.refresh(db);
                 }
                 let _ = sender.send(result);
-            }))
+            })))
             .map_err(|_| Error::InvalidQuery)?;
         receiver.recv().map_err(|_| Error::InvalidQuery)?
     }
@@ -352,8 +299,11 @@ impl Connection {
     }
 
     fn wake_checkpoint_worker(&self) {
+        if self.inner.released.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
         if let Some(sender) = &self.inner.sender {
-            let _ = sender.try_send(Box::new(|_| {}));
+            let _ = sender.try_send(park::WorkerMsg::Job(Box::new(|_| {})));
         }
     }
 
@@ -532,6 +482,11 @@ impl Connection {
         if let Some(name) = &savepoint {
             self.execute_batch(&format!("SAVEPOINT {name}"))?;
         } else {
+            // Yield before BEGIN when a queued account command is waiting. The
+            // statement has not started, so the caller can retry this attempt.
+            if immediate && crate::writer_budget::should_pause() {
+                return Err(crate::writer_budget::pause_error());
+            }
             let transaction_id =
                 NEXT_TRANSACTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mode =
@@ -735,6 +690,7 @@ impl Transaction<'_> {
             self.connection.execute_batch(&format!("RELEASE SAVEPOINT {name}"))?;
         } else {
             self.connection.execute_batch("COMMIT")?;
+            crate::writer_budget::note_durable_commit();
         }
         self.committed = true;
         Ok(())
@@ -822,10 +778,10 @@ mod tests {
             .sender
             .as_ref()
             .ok_or("owner channel")?
-            .send(Box::new(move |_| {
+            .send(super::park::WorkerMsg::Job(Box::new(move |_| {
                 let _ = entered_tx.send(());
                 let _ = release_rx.recv();
-            }))
+            })))
             .map_err(|_| "owner command")?;
         entered_rx.recv()?;
         let requester = db.clone();

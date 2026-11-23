@@ -7,7 +7,8 @@
 //! public creation records only.
 use super::conversation_ops::commit_write;
 use super::{
-    AgentAccessArgs, AgentAction, AgentCommand, AgentPersonaArgs, LocalBusClient, PathBuf, RfError,
+    AgentAccessArgs, AgentAction, AgentCommand, AgentJobAction, AgentPersonaArgs, LocalBusClient,
+    PathBuf, RfError,
 };
 use ramflux_sdk::LocalBusFrame;
 use serde_json::{Value, json};
@@ -60,9 +61,21 @@ pub(crate) fn review_of(status: &Value) -> Option<Value> {
 pub(crate) fn request_of(action: AgentAction) -> Result<(&'static str, Value), RfError> {
     Ok(match action {
         AgentAction::Create { persona, model, access, role, confirm } => {
+            let mut config = serde_json::Map::new();
+            config.insert("provider".into(), json!(model.provider));
+            config.insert("model".into(), json!(model.model));
+            if model.max_concurrent_turns.is_some() || model.max_cost_per_day_cents.is_some() {
+                config.insert(
+                    "limits".into(),
+                    json!({
+                        "max_concurrent_turns": model.max_concurrent_turns,
+                        "max_cost_per_day_cents": model.max_cost_per_day_cents,
+                    }),
+                );
+            }
             let mut body = json!({
                 "persona": persona_value(&persona),
-                "config": {"provider": model.provider, "model": model.model},
+                "config": serde_json::Value::Object(config),
                 "access": access_value(&access),
                 "role": role,
             });
@@ -101,12 +114,34 @@ pub(crate) fn request_of(action: AgentAction) -> Result<(&'static str, Value), R
             confirmed(&mut body, confirm);
             ("agent.delete", body)
         }
+        AgentAction::Retire { agent, confirm } => {
+            let mut body = json!({"agent_anchor": agent});
+            confirmed(&mut body, confirm);
+            ("agent.retire", body)
+        }
         AgentAction::Status { operation_id } => {
             ("agent.operation.get", json!({"operation_id": operation_id}))
         }
         // An empty operation id asks the daemon for the next request that waits for this device.
         AgentAction::Pending => ("agent.operation.get", json!({"operation_id": ""})),
+        AgentAction::Job(command) => job_request(command.action),
     })
+}
+
+fn job_request(action: AgentJobAction) -> (&'static str, Value) {
+    match action {
+        AgentJobAction::List { agent } => ("agent.job.list", json!({"agent": agent})),
+        AgentJobAction::Pause { agent, kind, id } => {
+            ("agent.job.pause", json!({"agent": agent, "kind": kind, "id": id}))
+        }
+        AgentJobAction::Resume { agent, kind, id } => {
+            ("agent.job.resume", json!({"agent": agent, "kind": kind, "id": id}))
+        }
+        AgentJobAction::Remove { agent, kind, id } => {
+            ("agent.job.remove", json!({"agent": agent, "kind": kind, "id": id}))
+        }
+        AgentJobAction::Sessions { agent } => ("agent.job.sessions", json!({"agent": agent})),
+    }
 }
 
 fn persona_value(args: &AgentPersonaArgs) -> Value {

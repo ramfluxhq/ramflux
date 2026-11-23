@@ -48,8 +48,8 @@ cargo run -p ramflux-agent-host -- \
 
 The first successful import stores the data passphrase in the operator Mac Keychain,
 removes the bundle, and unlocks the rfd account. Later starts need only `--config`.
-For an sd001 demo, run rfd and the agent host on the operator Mac, configure rfd with
-the signed sd001 node profile, create and unlock the human owner first, then run:
+Run rfd and the agent host on the operator Mac with the signed profile for the
+chosen node. Create and unlock the human owner first, then run:
 
 ```sh
 rf account create --display-name "Demo agent" --kind headless_ai --custodian "$OWNER_ACCOUNT"
@@ -59,42 +59,33 @@ rf account export-agent-credentials --account "$AGENT_ACCOUNT" --out /private/pa
 The owner account must remain the active unlocked account for export. Record the service
 phrase shown once by the first command. Export is one-shot: if the bundle is lost, recover
 the agent with that phrase rather than trying to export the credential again. Add the two
-native principals as contacts, and then start the host with the bundle. Linux production
-is not supported until `ID-02-VAULT-LINUX-01`; do not copy the
-bundle to the Linux service host. Integration tests compile the explicit
+native principals as contacts, and then start the host with the bundle. Linux production provisioning requires a supported credential-vault provider;
+do not copy the bundle to a Linux service host without that support. Integration tests compile the explicit
 `--itest-memory-vault` alternative, which is volatile and unavailable in production.
 
 ## PRX engine
 
 PRX can provide the model and tool-execution layer while rfd remains responsible for identity,
-membership, signed delivery, and human approval evidence. Initialize PRX, then edit its active
-configuration for the chosen authorization mode. The default supervised mode requires
-the causal decision plane:
+membership, signed delivery, and human approval evidence. The desktop finds or starts PRX.
+`rf prx bootstrap` reads `<state>/runtime.json`. When that file is stale or missing it runs
+`prx init --provider <id> --from-stdin`, `prx token issue --out <state>/owner.token`, and
+`prx service install --user --yes`, then starts the user service.
+
+The provider key is the passphrase of keychain account `prx-provider:<id>` (service `ramflux`).
+When that entry is absent, bootstrap reads one key from standard input, stores it, and writes
+it to `prx init` on a private pipe. The key is not an argument, an environment variable, or a
+log line.
 
 ```sh
-prx init --interactive
+rf prx bootstrap --provider <id> --model <model>
+rf prx status
 ```
 
-```toml
-[autonomy]
-level = "supervised"
-
-[causal_tree]
-enabled = true
-```
-
-Start the local PRX daemon. It prints a one-time pairing code when no client is paired. Exchange
-that code locally and write only the returned bearer to a private file:
-
-```sh
-install -d -m 700 "$HOME/.local/state/ramflux-agent"
-umask 077
-curl --fail --silent --show-error -X POST \
-  -H "X-Pairing-Code: $PAIR_CODE" \
-  http://localhost:16830/pair \
-  | jq -er .token > "$HOME/.local/state/ramflux-agent/prx.token"
-chmod 600 "$HOME/.local/state/ramflux-agent/prx.token"
-```
+`rf prx status` prints the runtime path, `api_base`, pid, and `started_at`. It does not print
+the token. Point the agent host at the printed `api_base` and at `<state>/owner.token`.
+`rf daemon start --prx-state-dir <state>` does the same when the runtime is already fresh.
+It does not install or start PRX. The explicit `--prx-base-url` and `--prx-token-file` pair
+remains for a fake daemon and is not combined with `--prx-state-dir`.
 
 Do not put the bearer in the agent configuration. Select PRX instead of `rules` with an
 `engine.prx` object:
@@ -119,7 +110,8 @@ Do not put the bearer in the agent configuration. Select PRX instead of `rules` 
 }
 ```
 
-For native headless account provisioning and the one-shot bundle flow, see AGENT-V3-01.
+For native headless account provisioning and the one-shot bundle flow, see
+[local-bus account creation](../../docs/local_bus_account_creation.md).
 After the account is provisioned and unlocked, launch with the PRX configuration above.
 The bundle and the PRX bearer are separate credentials and neither belongs in the checkpoint.
 
@@ -153,7 +145,7 @@ For full authorization, set `authorization: "full"` here and `[autonomy] level =
 PRX must execute within its own configured scopes without asking the bridge for human approval.
 An unexpected `awaiting_approval` is declined with `authorization_mismatch` and a fixed diagnostic
 logged once per host process. This configuration setting is the interim authorization control;
-the per-account bus switch/standing grant is deferred to PRX-BRIDGE-02.
+a per-account bus switch and standing grant are not available.
 
 Every detached job, including a resumed job, has a persisted wall-clock deadline set by
 `turn_timeout_s` (default 120 seconds). At expiry the host cancels the job, returns
@@ -164,7 +156,7 @@ PRX decisions, and removes local session mappings. PRX's console API exposes no 
 endpoint, so remote console history remains under PRX's retention policy.
 
 PRX `[IMAGE:path]` markers are removed from text replies and no attachment is sent in this release.
-Attachment transfer and externally streamed turns are deferred to PRX-BRIDGE-02. PRX network
+Attachment transfer and externally streamed turns are not available. PRX network
 failures are silent with one log per 60-second window. A message whose submission fails while PRX
 is unavailable is dropped after the host advances its cursor; it is not retried automatically.
 Other terminal failures produce one short typed reply. The owner-only token file is read at

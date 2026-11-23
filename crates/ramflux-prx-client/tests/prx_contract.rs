@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at d9b7946a4d6cdc5914f8e1fba6f94fe43e52fe15>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 238fa1706eb81dc43da11ea5d9607883f9ba7681>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -19,14 +19,16 @@
 )]
 
 use ramflux_prx_client::{
-    AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, AgentConfig, AgentName, AgentRuns,
-    AgentStatus, ApiCode, ApplyOutcome, Autonomy, BatchItem, BuildCommit, CAPABILITIES_V1,
-    Capabilities, Chat, ChatKind, ClientConfig, ConfigRevision, EraseNotice, ForgetCounts,
-    ForgetReport, ForgetWrites, HistoryRow, JobState, JobStatus, MESSAGE_CONTEXT_DELIVERY_V1,
+    AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_LIMITS_V1, AGENT_MAIN_READBACK_V1,
+    AGENT_MEMORY_PURGE_V1, AgentConfig, AgentName, AgentRuns, AgentStatus, ApiCode, ApplyOutcome,
+    Autonomy, BatchItem, BuildCommit, CAPABILITIES_V1, Capabilities, Chat, ChatKind, ClientConfig,
+    ConfigRevision, EraseNotice, ForgetCounts, ForgetReport, ForgetWrites, HISTORY_ERASE_V1,
+    HOST_BOOTSTRAP_V1, HistoryRow, JobState, JobStatus, LimitsFacts, MESSAGE_CONTEXT_DELIVERY_V1,
     MESSAGE_DELETE_V1, MESSAGE_FORGET_WRITES_V1, MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1,
     NotReadyReason, OWNER_ID_STABLE_V1, PROMPT_MAX_BYTES, PrxClient, PrxError, PutKind,
-    ReloadStatus, RfMessage, RowBody, RunCode, RunState, SESSION_KEY_V1, Sender,
-    TARGETED_AGENTS_V1, Target, Tools, TurnDisposition,
+    RUN_APPROVALS_V1, ReloadStatus, RfMessage, RowBody, RunCode, RunState, SESSION_KEY_V1,
+    STREAM_FRAMES_V1, SYNC_SNAPSHOT_V1, SYNC_WS_V1, Sender, TARGETED_AGENTS_V1, Target, Tools,
+    TurnDisposition,
 };
 use serde_json::Value;
 use std::fs::File;
@@ -37,7 +39,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "d9b7946a4d6cdc5914f8e1fba6f94fe43e52fe15";
+const PIN: &str = "238fa1706eb81dc43da11ea5d9607883f9ba7681";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -521,6 +523,8 @@ fn config(
         autonomy: Autonomy::Full,
         tools,
         enabled,
+        limits: None,
+        approval_wait_secs: ramflux_prx_client::DEFAULT_APPROVAL_WAIT_SECS,
     }
 }
 
@@ -542,13 +546,16 @@ async fn bounded<F: std::future::Future<Output = ()>>(body: F) {
         .expect("test: contract test exceeded its deadline");
 }
 
-/// The tokens K-AC2-1 accepts at the pin: the AC-2 cards plus the B1, B2a, B2b, HOST-1a and
-/// forget-writes tokens.
-const LANDED_AT_PIN: [&str; 11] = [
+/// The tokens K-AC2-1 accepts at the pin. `host_bootstrap_v1` is advertised and not
+/// called. `targeted_agents_v1` stays out unless the daemon enables it.
+const LANDED_AT_PIN: [&str; 19] = [
     CAPABILITIES_V1,
     AGENT_CATALOG_V1,
     AGENT_CRUD_V1,
+    AGENT_LIMITS_V1,
     AGENT_MAIN_READBACK_V1,
+    AGENT_MEMORY_PURGE_V1,
+    HISTORY_ERASE_V1,
     SESSION_KEY_V1,
     MESSAGE_TARGET_V1,
     MESSAGE_CONTEXT_DELIVERY_V1,
@@ -556,6 +563,11 @@ const LANDED_AT_PIN: [&str; 11] = [
     MESSAGE_IDEMPOTENCY_V1,
     MESSAGE_DELETE_V1,
     MESSAGE_FORGET_WRITES_V1,
+    SYNC_SNAPSHOT_V1,
+    SYNC_WS_V1,
+    STREAM_FRAMES_V1,
+    RUN_APPROVALS_V1,
+    HOST_BOOTSTRAP_V1,
 ];
 
 #[tokio::test]
@@ -689,6 +701,8 @@ async fn k_ac2_6_stored_credential_for_non_default_provider() {
             autonomy: Autonomy::Supervised,
             tools: Tools::All,
             enabled: true,
+            limits: None,
+            approval_wait_secs: ramflux_prx_client::DEFAULT_APPROVAL_WAIT_SECS,
         };
         let rev = list_revision(&client, &caps).await;
         let outcome = client
@@ -1012,10 +1026,17 @@ async fn k_ac1a_agent_rows() {
             .put(&caps, &name, &config("ollama", "codellama", None, Tools::List(vec!["no_such_tool_zz".to_owned()]), true), &rev, false)
             .await;
         assert!(matches!(unknown_tool, Err(PrxError::Api { status: 400, code: ApiCode::AgentToolsInvalid, .. })), "K-AC1a-8: unknown tool: {unknown_tool:?}");
+        assert!(caps.has(AGENT_LIMITS_V1), "K-AC1a-8: agent_limits_v1 is advertised");
         let (status, text) = daemon
             .raw_authorized(reqwest::Method::PUT, &format!("/api/agents/{}", name.as_str()), Some(rev.as_str()), Some(serde_json::json!({"provider":"ollama","model":"m","autonomy":"full","tools":["*"],"enabled":true,"limits":{}})))
             .await;
-        assert_eq!((status, error_code(&text).as_deref()), (400, Some("field_invalid")), "K-AC1a-8: extra field");
+        assert_eq!((status, error_code(&text).as_deref()), (200, None), "K-AC1a-8: empty limits object");
+        let body: Value = serde_json::from_str(&text).expect("K-AC1a-8: readback is JSON");
+        assert!(
+            body.pointer("/config/limits/max_concurrent_turns").is_some_and(Value::is_null)
+                && body.pointer("/config/limits/max_cost_per_day_cents").is_some_and(Value::is_null),
+            "K-AC1a-8: empty limits stores no bound"
+        );
         report("K-AC1a-8");
 
         // K-AC1a-11 (with a second agent, which also covers the list shape and retirement later)
@@ -1310,7 +1331,8 @@ async fn paired_rf_daemon(extra: &str) -> (Daemon, ModelStub) {
 /// A `ModelStub`: a loopback OpenAI-compatible endpoint that counts the model requests it
 /// receives and answers `500` after `hold` (zero: at once). It is the only model endpoint the
 /// rf rows use, so a count that does not move proves that no model request was made, and a
-/// long `hold` keeps a turn live for the rows that need one.
+/// long `hold` keeps a turn live for the rows that need one. A completing stub answers a JSON
+/// chat completion, or an SSE stream when the request sets `"stream":true`.
 struct ModelStub {
     port: u16,
     requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -1341,24 +1363,50 @@ impl ModelStub {
                 let counter = counter.clone();
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = vec![0_u8; 16_384];
-                    if matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {
-                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut buf = Vec::new();
+                    let mut chunk = [0_u8; 8_192];
+                    loop {
+                        if buf.len() >= 262_144
+                            || http_request_complete(&buf)
+                            || headers_without_content_length(&buf)
+                        {
+                            break;
+                        }
+                        match stream.read(&mut chunk).await {
+                            Ok(n @ 1..) => {
+                                if buf.is_empty() {
+                                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                }
+                                buf.extend_from_slice(&chunk[..n]);
+                            }
+                            Ok(0) | Err(_) => break,
+                        }
                     }
+                    let streaming = request_asks_for_stream(&buf);
                     tokio::time::sleep(hold).await;
-                    let (status, body) = if complete {
+                    let (status, content_type, body): (&str, &str, &str) = if !complete {
+                        (
+                            "500 Internal Server Error",
+                            "application/json",
+                            r#"{"error":{"message":"contract stub: no model","type":"stub"}}"#,
+                        )
+                    } else if streaming {
                         (
                             "200 OK",
-                            r#"{"id":"stub-1","object":"chat.completion","created":0,"model":"stub-model","choices":[{"index":0,"message":{"role":"assistant","content":"stub reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+                            "text/event-stream",
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"stub reply\"}}]}\n\n\
+                             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                             data: [DONE]\n\n",
                         )
                     } else {
                         (
-                            "500 Internal Server Error",
-                            r#"{"error":{"message":"contract stub: no model","type":"stub"}}"#,
+                            "200 OK",
+                            "application/json",
+                            r#"{"id":"stub-1","object":"chat.completion","created":0,"model":"stub-model","choices":[{"index":0,"message":{"role":"assistant","content":"stub reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
                         )
                     };
                     let response = format!(
-                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
@@ -1379,6 +1427,29 @@ impl ModelStub {
     }
 }
 
+/// Headers with no `Content-Length` are complete. Waiting for EOF would stall the client.
+fn headers_without_content_length(buf: &[u8]) -> bool {
+    let Some(split) = buf.windows(4).position(|mark| mark == b"\r\n\r\n") else {
+        return false;
+    };
+    content_length(&String::from_utf8_lossy(&buf[..split])).is_none()
+}
+
+fn request_asks_for_stream(bytes: &[u8]) -> bool {
+    let body = match bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+        Some(split) => {
+            let header = String::from_utf8_lossy(&bytes[..split]);
+            let body = &bytes[split + 4..];
+            match content_length(&header) {
+                Some(length) if body.len() >= length => &body[..length],
+                _ => body,
+            }
+        }
+        None => bytes,
+    };
+    body.windows(13).any(|window| window == b"\"stream\":true")
+}
+
 impl Drop for ModelStub {
     fn drop(&mut self) {
         self.task.abort();
@@ -1394,22 +1465,8 @@ async fn k_b1_sessions_and_message_validation() {
         let caps = capabilities(&client).await;
 
         // K-B1-16: exactly the tokens landed at this pin, none of the not-yet-landed ones.
-        let expected: std::collections::BTreeSet<String> = [
-            "agent_catalog_v1",
-            "agent_crud_v1",
-            "agent_main_readback_v1",
-            "capabilities_v1",
-            "message_context_delivery_v1",
-            "message_delete_v1",
-            "message_forget_writes_v1",
-            "message_idempotency_v1",
-            "message_target_v1",
-            "owner_id_stable_v1",
-            "session_key_v1",
-        ]
-        .iter()
-        .map(|t| (*t).to_owned())
-        .collect();
+        let expected: std::collections::BTreeSet<String> =
+            LANDED_AT_PIN.iter().map(|token| (*token).to_owned()).collect();
         assert_eq!(caps.capabilities, expected, "K-B1-16: advertised tokens at the pin");
         assert!(!caps.has(TARGETED_AGENTS_V1), "K-B1-16: targeted_agents_v1 is off here");
         assert_eq!(caps.commit, BuildCommit::Sha(PIN.to_owned()), "K-B1-16: commit is the pin");
@@ -2224,21 +2281,22 @@ async fn k_b3_partitioned_reads_and_capabilities() {
         let client = daemon.client();
         let caps = capabilities(&client).await;
 
-        // K-B3-0: the advertised set at the pin with targeting on: the landed B1, B2a and B3
-        // tokens; none of the tokens that have not landed.
-        for token in [TARGETED_AGENTS_V1, MESSAGE_IDEMPOTENCY_V1, MESSAGE_DELETE_V1] {
-            assert!(caps.has(token), "K-B3-0: {token} is advertised");
-        }
+        // K-B3-0: the advertised set at the pin with targeting on, including stream frames,
+        // run approvals, and host bootstrap.
         for token in [
-            "sync_snapshot_v1",
-            "sync_ws_v1",
-            "stream_frames_v1",
-            "run_approvals_v1",
-            "history_erase_v1",
-            "agent_memory_purge_v1",
-            "agent_limits_v1",
+            TARGETED_AGENTS_V1,
+            MESSAGE_IDEMPOTENCY_V1,
+            MESSAGE_DELETE_V1,
+            HISTORY_ERASE_V1,
+            AGENT_MEMORY_PURGE_V1,
+            AGENT_LIMITS_V1,
+            SYNC_SNAPSHOT_V1,
+            SYNC_WS_V1,
+            STREAM_FRAMES_V1,
+            RUN_APPROVALS_V1,
+            HOST_BOOTSTRAP_V1,
         ] {
-            assert!(!caps.has(token), "K-B3-0: {token} must not be advertised yet");
+            assert!(caps.has(token), "K-B3-0: {token} is advertised");
         }
         report("K-B3-0");
 
@@ -3189,6 +3247,7 @@ async fn k_fw_family_too_large_retries_as_a_plain_delete() {
                 .map(str::to_owned)
                 .collect(),
             available: std::collections::BTreeSet::new(),
+            limits_facts: LimitsFacts::default(),
         };
         let erased =
             client.erase_for_everyone(&caps, "rf-fw", "rf-fw-large").await.expect("K-FW-5");
@@ -3218,3 +3277,6 @@ async fn k_fw_family_too_large_retries_as_a_plain_delete() {
     })
     .await;
 }
+
+#[path = "prx_contract/unit_a.rs"]
+mod unit_a;

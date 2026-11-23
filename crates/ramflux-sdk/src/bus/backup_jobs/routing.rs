@@ -17,7 +17,7 @@ impl Supervisor {
         self.backup_human_scope(request.account_id.as_deref())?;
         if request.method == "account.backup.jobs" {
             let body = self.backup_jobs_listing(&request).await?;
-            return Ok(ActorResponse { body, events: Vec::new(), nodes: None });
+            return Ok(ActorResponse { body, events: Vec::new(), nodes: None, owner_copy: None });
         }
         let attended = connection.attended_account_id.is_some()
             || self.daemon_attended.borrow().contains(&connection.connection_id);
@@ -109,7 +109,12 @@ impl Supervisor {
             }
             _ => return Err(refused("unsupported_version")),
         };
-        Ok(ActorResponse { body: serde_json::json!({"job":row}), events: Vec::new(), nodes: None })
+        Ok(ActorResponse {
+            body: serde_json::json!({"job":row}),
+            events: Vec::new(),
+            nodes: None,
+            owner_copy: None,
+        })
     }
     fn native_restore_setup(
         &self,

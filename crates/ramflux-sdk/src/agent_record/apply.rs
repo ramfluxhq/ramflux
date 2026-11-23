@@ -57,6 +57,10 @@ pub(crate) fn apply_metadata(
         lifecycle: if retired { LIFECYCLE_RETIRED } else { LIFECYCLE_ACTIVE }.into(),
         identity: identity.clone(),
         change_seq: 0,
+        provider: None,
+        model: None,
+        max_concurrent_turns: None,
+        max_cost_per_day_cents: None,
     };
     check_record(&candidate).map_err(|_| refused())?;
     let Some(current) = store.load(&metadata.agent_anchor)? else {

@@ -202,6 +202,8 @@ crates/ramflux-sdk/src/bus/shared_group_sync/mod.rs | federation_route | 1 | E |
 crates/ramflux-sdk/src/bus/shared_group_sync/mod.rs | ownership_transfer | 1 | E | excluded=local group actor value; outside the signed-envelope closure
 crates/ramflux-sdk/src/bus/shared_group_sync/mod.rs | verified_member | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/state.rs | restore_gateway_resume_checkpoint | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/subscription.rs | prepare_follow | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/subscription.rs | prepare_follow | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/subscription.rs | start | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/subscription.rs | start | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/subscription.rs | tail | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -382,3 +384,8 @@ crates/ramflux-sdk/src/client/surface/generated.rs | rpc | 1 | D | admitted-befo
 crates/ramflux-sdk/src/client/surface/history_generated.rs | to_generated | 1 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
 crates/ramflux-sdk/src/client/surface/history_generated.rs | to_generated | 2 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
 crates/ramflux-sdk/src/prekey.rs | sdk_policy_gateway_request | 1 | C | admission=crates/ramflux-sdk/src/prekey.rs#sdk_policy_gateway_request#1
+crates/ramflux-sdk/src/bus/username_directory.rs | prepare | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/username_directory.rs | prepare | 2 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/username_directory/retry.rs | delivery_retry | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/username_directory/submission.rs | prepare | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/account_local.rs | confirm | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

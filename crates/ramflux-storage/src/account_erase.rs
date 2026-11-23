@@ -40,8 +40,7 @@ pub(crate) fn set_open_race_hook(hook: Option<OpenRaceHook>) {
 }
 
 impl AccountIndex {
-    /// Tombstones an account under an exclusive writer lease, then removes its root payload
-    /// (dormant; nothing calls it yet).
+    /// Tombstones an account under an exclusive writer lease, then removes its root payload.
     ///
     /// The lease is taken before the tombstone, so a refused erase leaves the state and
     /// the wrapped key unchanged. The tombstone sets `removed` and clears the wrapped key.

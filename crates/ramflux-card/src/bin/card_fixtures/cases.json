@@ -1,0 +1,294 @@
+[
+  {
+    "kind": "Text",
+    "variant": "caption",
+    "expect": "tree",
+    "components": [
+      {"component": "Text", "id": "root", "text": "Caption", "variant": "caption"}
+    ]
+  },
+  {
+    "kind": "Text",
+    "variant": "body",
+    "expect": "tree",
+    "components": [
+      {"component": "Text", "id": "root", "text": "Body", "variant": "body"}
+    ]
+  },
+  {
+    "kind": "Icon",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"component": "Icon", "id": "root", "name": "check"}
+    ]
+  },
+  {
+    "kind": "Row",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"align": "stretch", "children": ["label"], "component": "Row", "id": "root", "justify": "start"},
+      {"component": "Text", "id": "label", "text": "Item"}
+    ]
+  },
+  {
+    "kind": "Column",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"align": "stretch", "children": ["label"], "component": "Column", "id": "root", "justify": "start"},
+      {"component": "Text", "id": "label", "text": "Item"}
+    ]
+  },
+  {
+    "kind": "List",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"align": "stretch", "children": ["label"], "component": "List", "direction": "vertical", "id": "root"},
+      {"component": "Text", "id": "label", "text": "Item"}
+    ]
+  },
+  {
+    "kind": "Card",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"child": "label", "component": "Card", "id": "root"},
+      {"component": "Text", "id": "label", "text": "Item"}
+    ]
+  },
+  {
+    "kind": "Tabs",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"component": "Tabs", "id": "root", "tabs": [{"child": "one", "title": "One"}, {"child": "two", "title": "Two"}]},
+      {"component": "Text", "id": "one", "text": "First"},
+      {"component": "Text", "id": "two", "text": "Second"}
+    ]
+  },
+  {
+    "kind": "Modal",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"component": "Modal", "content": "content", "id": "root", "trigger": "trigger"},
+      {"component": "Text", "id": "content", "text": "Sheet"},
+      {"component": "Text", "id": "trigger", "text": "Open"}
+    ]
+  },
+  {
+    "kind": "Divider",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"axis": "horizontal", "component": "Divider", "id": "root"}
+    ]
+  },
+  {
+    "kind": "Button",
+    "variant": "default",
+    "expect": "tree",
+    "components": [
+      {"action": {"event": {"name": "press"}}, "child": "label", "component": "Button", "id": "root", "variant": "default"},
+      {"component": "Text", "id": "label", "text": "Continue"}
+    ]
+  },
+  {
+    "kind": "Button",
+    "variant": "primary",
+    "expect": "tree",
+    "components": [
+      {"action": {"event": {"name": "press"}}, "child": "label", "component": "Button", "id": "root", "variant": "primary"},
+      {"component": "Text", "id": "label", "text": "Continue"}
+    ]
+  },
+  {
+    "kind": "Button",
+    "variant": "borderless",
+    "expect": "tree",
+    "components": [
+      {"action": {"event": {"name": "press"}}, "child": "label", "component": "Button", "id": "root", "variant": "borderless"},
+      {"component": "Text", "id": "label", "text": "Continue"}
+    ]
+  },
+  {
+    "kind": "TextField",
+    "variant": "longText",
+    "expect": "tree",
+    "components": [
+      {"component": "TextField", "id": "root", "label": "Name", "value": {"@path": "/name"}, "variant": "longText"}
+    ],
+    "dataModel": {"name": "Ada"}
+  },
+  {
+    "kind": "TextField",
+    "variant": "number",
+    "expect": "tree",
+    "components": [
+      {"component": "TextField", "id": "root", "label": "Name", "value": {"@path": "/name"}, "variant": "number"}
+    ],
+    "dataModel": {"name": "42"}
+  },
+  {
+    "kind": "TextField",
+    "variant": "shortText",
+    "expect": "tree",
+    "components": [
+      {"component": "TextField", "id": "root", "label": "Name", "value": {"@path": "/name"}, "variant": "shortText"}
+    ],
+    "dataModel": {"name": "Ada"}
+  },
+  {
+    "kind": "TextField",
+    "variant": "obscured",
+    "expect": "refused",
+    "components": [
+      {"component": "TextField", "id": "root", "label": "Name", "value": {"@path": "/name"}, "variant": "obscured"}
+    ],
+    "dataModel": {"name": "secret"}
+  },
+  {
+    "kind": "CheckBox",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"component": "CheckBox", "id": "root", "label": "Agree", "value": {"@path": "/agree"}}
+    ],
+    "dataModel": {"agree": true}
+  },
+  {
+    "kind": "ChoicePicker",
+    "variant": "multipleSelection",
+    "expect": "tree",
+    "components": [
+      {
+        "component": "ChoicePicker",
+        "displayStyle": "checkbox",
+        "id": "root",
+        "label": "Color",
+        "options": [{"label": "Blue", "value": "blue"}, {"label": "Red", "value": "red"}],
+        "value": {"@path": "/color"},
+        "variant": "multipleSelection"
+      }
+    ],
+    "dataModel": {"color": ["blue", "red"]}
+  },
+  {
+    "kind": "ChoicePicker",
+    "variant": "mutuallyExclusive",
+    "expect": "tree",
+    "components": [
+      {
+        "component": "ChoicePicker",
+        "displayStyle": "checkbox",
+        "id": "root",
+        "label": "Color",
+        "options": [{"label": "Blue", "value": "blue"}, {"label": "Red", "value": "red"}],
+        "value": {"@path": "/color"},
+        "variant": "mutuallyExclusive"
+      }
+    ],
+    "dataModel": {"color": ["blue"]}
+  },
+  {
+    "kind": "Slider",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"component": "Slider", "id": "root", "label": "Amount", "max": 100, "min": 0, "value": {"@path": "/amount"}}
+    ],
+    "dataModel": {"amount": 40}
+  },
+  {
+    "kind": "DateTimeInput",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"component": "DateTimeInput", "enableDate": true, "id": "root", "label": "When", "value": {"@path": "/when"}}
+    ],
+    "dataModel": {"when": "2026-11-22"}
+  },
+  {
+    "kind": "Image",
+    "variant": "icon",
+    "expect": "tree",
+    "components": [
+      {"attachment": {"manifest_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "object_id": "object-1"}, "component": "Image", "description": "Example attachment", "fit": "fill", "id": "root", "variant": "icon"}
+    ]
+  },
+  {
+    "kind": "Image",
+    "variant": "avatar",
+    "expect": "tree",
+    "components": [
+      {"attachment": {"manifest_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "object_id": "object-1"}, "component": "Image", "description": "Example attachment", "fit": "fill", "id": "root", "variant": "avatar"}
+    ]
+  },
+  {
+    "kind": "Image",
+    "variant": "smallFeature",
+    "expect": "tree",
+    "components": [
+      {"attachment": {"manifest_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "object_id": "object-1"}, "component": "Image", "description": "Example attachment", "fit": "fill", "id": "root", "variant": "smallFeature"}
+    ]
+  },
+  {
+    "kind": "Image",
+    "variant": "mediumFeature",
+    "expect": "tree",
+    "components": [
+      {"attachment": {"manifest_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "object_id": "object-1"}, "component": "Image", "description": "Example attachment", "fit": "fill", "id": "root", "variant": "mediumFeature"}
+    ]
+  },
+  {
+    "kind": "Image",
+    "variant": "largeFeature",
+    "expect": "tree",
+    "components": [
+      {"attachment": {"manifest_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "object_id": "object-1"}, "component": "Image", "description": "Example attachment", "fit": "fill", "id": "root", "variant": "largeFeature"}
+    ]
+  },
+  {
+    "kind": "Image",
+    "variant": "header",
+    "expect": "tree",
+    "components": [
+      {"attachment": {"manifest_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "object_id": "object-1"}, "component": "Image", "description": "Example attachment", "fit": "fill", "id": "root", "variant": "header"}
+    ]
+  },
+  {
+    "kind": "Approval",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"component": "Approval", "explanation": "Please review this request.", "id": "root", "requestRef": "request-1", "taskBinding": {"step_id": "step-1", "task_id": "task-1"}}
+    ]
+  },
+  {
+    "kind": "Task",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"component": "Task", "id": "root", "owner": "You", "progress": 42, "requester": "Agent", "status": "running", "steps": [{"id": "compile", "status": "completed", "text": "Compile"}, {"id": "test", "status": "running", "text": "Test"}], "taskRef": "task-1", "title": "Build release"}
+    ]
+  },
+  {
+    "kind": "Chart",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"component": "Chart", "id": "root", "kind": "line", "scale": 1, "series": [{"id": "a", "label": "Before", "points": [{"label": "Mon", "value": 20}, {"label": "Tue", "value": 25}]}, {"id": "b", "label": "After", "points": [{"label": "Wed", "value": 10}, {"label": "Thu", "value": 12}]}], "unit": "ms"}
+    ]
+  },
+  {
+    "kind": "Table",
+    "variant": null,
+    "expect": "tree",
+    "components": [
+      {"columns": [{"key": "name", "label": "Name"}], "component": "Table", "id": "root", "rows": [{"cells": ["Ada"], "key": "one"}]}
+    ]
+  }
+]

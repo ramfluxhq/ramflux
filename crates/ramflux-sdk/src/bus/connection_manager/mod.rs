@@ -11,6 +11,7 @@ pub(crate) mod resync;
 pub(crate) use receive::{ReceiveApplied, ReceiveEntry, ReceivePlan, ReceiveTrigger};
 mod account_work;
 mod background_children;
+mod grant_renewal;
 mod metadata_child;
 #[cfg_attr(
     not(test),
@@ -154,6 +155,7 @@ struct Shared {
     receive_wake: Arc<Notify>,
     courier_wakes: std::collections::BTreeMap<&'static str, Arc<Notify>>,
     account_work: Option<mpsc::Sender<AccountWork>>,
+    head_completion: Option<mpsc::Sender<AccountWork>>,
     call_changed: Arc<Notify>,
     receive_idle: Notify,
     stop_reason: std::sync::Mutex<Option<DisconnectReason>>,
@@ -197,6 +199,7 @@ fn new_shared(
     timeouts: &RuntimeTimeouts,
     generation: u64,
     account_work: Option<mpsc::Sender<AccountWork>>,
+    head_completion: Option<mpsc::Sender<AccountWork>>,
 ) -> Arc<Shared> {
     let (changed, _) = watch::channel(generation);
     let (events, _) = broadcast::channel(64);
@@ -237,6 +240,7 @@ fn new_shared(
         .map(|name| (name, Arc::new(Notify::new())))
         .collect(),
         account_work,
+        head_completion,
         call_changed: Arc::new(Notify::new()),
         receive_idle: Notify::new(),
         #[cfg(test)]
@@ -487,9 +491,10 @@ impl ConnectionHandle {
         timeouts: RuntimeTimeouts,
         connector: Arc<dyn SessionConnector>,
         account_work: Option<mpsc::Sender<AccountWork>>,
+        head_completion: Option<mpsc::Sender<AccountWork>>,
     ) -> Self {
         let generation = new_generation();
-        let shared = new_shared(&config, &timeouts, generation, account_work);
+        let shared = new_shared(&config, &timeouts, generation, account_work, head_completion);
         let (calls, receive) = mpsc::channel(2 * CALL_QUEUE);
         let (children, registrations) = mpsc::channel(32);
         let (stop, stopping) = watch::channel(false);

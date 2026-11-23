@@ -3,11 +3,14 @@
 
 pub mod a2i;
 pub mod account;
+pub(crate) mod agent_activity;
+pub(crate) mod agent_jobs;
 pub(in crate::bus) mod attachment_prepare;
 pub(crate) mod call;
 pub mod call_bot;
+pub(crate) mod card_session;
 pub mod contact;
-mod contact_resolution;
+pub(in crate::bus) mod contact_resolution;
 pub(crate) mod conversation_delivery;
 pub(crate) mod conversation_journal;
 pub(crate) mod conversation_mutation;

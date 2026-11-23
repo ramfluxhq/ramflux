@@ -7,27 +7,35 @@ use super::actor::{AccountCommand, AccountInitializer};
 use super::events::EventBatch;
 use super::readers::AccountReaders;
 use crate::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as RoutingMutex};
 
+mod background;
 mod commands;
+mod maintenance;
+use maintenance::Maintenance;
 mod transient;
 pub(super) use transient::TransientHost;
 mod agent_calls;
+mod agent_contacts;
 mod connection;
 mod pairing_calls;
 mod pairing_data;
 mod pairing_own_sync;
+mod username_calls;
 #[cfg(test)]
 pub(crate) use connection::apply_ack_flush;
 #[cfg(test)]
 pub(crate) use connection::settle_retained;
 mod directory;
 pub(super) mod fetches;
+mod head_demand;
 pub(crate) mod head_refresh;
 pub(crate) mod lifecycle_fence;
 mod readers;
 pub(crate) mod session_thread;
 pub(super) mod uploads;
+pub(super) mod writer_slice;
 
 #[cfg(test)]
 type ReceiveGateHook = (tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>);
@@ -36,6 +44,9 @@ type ReaderSlot = Arc<RoutingMutex<Option<AccountReaders>>>;
 
 /// Depth of the account writer's connection-work queue.
 const CONNECTION_WORK_QUEUE: usize = 2;
+
+/// One demanded head Apply. The fetch pass awaits that Apply before the next root.
+const HEAD_COMPLETION_QUEUE: usize = 1;
 
 // Two five-second directory attempts plus local backfill staging.
 
@@ -51,6 +62,7 @@ pub(super) struct Bootstrap {
     pub lifecycle: mpsc::Receiver<AccountCommand>,
     pub preempt: watch::Receiver<u64>,
     pub readers: ReaderSlot,
+    pub command_waiting: Arc<AtomicUsize>,
     pub shutdown: watch::Receiver<bool>,
     pub ready: std::sync::mpsc::SyncSender<()>,
 }
@@ -63,6 +75,7 @@ struct AccountRuntime {
     lifecycle: mpsc::Receiver<AccountCommand>,
     preempt: watch::Receiver<u64>,
     readers: ReaderSlot,
+    command_waiting: Arc<AtomicUsize>,
     events: mpsc::Sender<EventBatch>,
     shutdown: watch::Receiver<bool>,
     courier: Option<super::task_courier::TaskCourier>,
@@ -71,10 +84,19 @@ struct AccountRuntime {
     networking_observation_warned: bool,
     transfers: uploads::Transfers,
     connection_sender: mpsc::Sender<super::connection_manager::AccountWork>,
+    head_completion_sender: mpsc::Sender<super::connection_manager::AccountWork>,
     connection_work: mpsc::Receiver<super::connection_manager::AccountWork>,
+    /// Demanded head-refresh Apply. The runtime retains the sender.
+    head_rx: mpsc::Receiver<super::connection_manager::AccountWork>,
+    /// Generic connection work skipped so a demanded head can be applied first.
+    deferred: std::collections::VecDeque<super::connection_manager::AccountWork>,
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
+    /// After resume, redrive receive until this instant so a peer reply is not stuck behind
+    /// the push safety sweep.
+    resume_receive_until: Option<tokio::time::Instant>,
     transient: TransientHost,
     pairing: pairing_calls::Calls,
+    username: username_calls::Calls,
     #[cfg(test)]
     receive_gate_hook: Option<ReceiveGateHook>,
     #[cfg(test)]
@@ -108,6 +130,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         lifecycle,
         preempt,
         readers,
+        command_waiting,
         shutdown,
         ready,
     } = bootstrap;
@@ -136,6 +159,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         subscribers: BTreeMap::new(),
     };
     let (connection_sender, connection_work) = mpsc::channel(CONNECTION_WORK_QUEUE);
+    let (head_completion_sender, head_rx) = mpsc::channel(HEAD_COMPLETION_QUEUE);
     let mut account = AccountRuntime {
         timeouts,
         id: account_id,
@@ -144,6 +168,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         lifecycle,
         preempt,
         readers,
+        command_waiting,
         events,
         shutdown,
         courier: None,
@@ -152,16 +177,22 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         networking_observation_warned: false,
         transfers: uploads::Transfers::start(),
         connection_sender,
+        head_completion_sender,
         connection_work,
+        head_rx,
+        deferred: std::collections::VecDeque::new(),
         ledger: None,
+        resume_receive_until: None,
         transient: TransientHost::default(),
         pairing: pairing_calls::Calls::default(),
+        username: username_calls::Calls::default(),
         #[cfg(test)]
         receive_gate_hook: None,
         #[cfg(test)]
         courier_events: None,
     };
     let result = Box::pin(account.serve(ready)).await;
+    account.username.stop().await;
     account.pairing.stop().await;
     account.ledger = None;
     account.transfers.stop().await;
@@ -177,7 +208,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         "account.flush",
         serde_json::json!({}),
     );
-    let flushed = account.publish(&request).await;
+    let flushed = flush_if_open(&account, &request).await;
     account.close_readers().await;
     let pairing = crate::custody::pairing::remove_actor_and_drain(
         &account.state.config.data_root,
@@ -186,6 +217,11 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
     .await;
     result.and(flushed).and(pairing)
 }
+
+#[cfg(not(test))]
+type WriterBudget = ramflux_storage::writer_budget::Armed;
+#[cfg(test)]
+type WriterBudget = ();
 
 impl AccountRuntime {
     fn networking_expiry_request(&self) -> LocalBusFrame {
@@ -311,17 +347,27 @@ impl AccountRuntime {
     }
 
     fn queued_command(&mut self, checkpoints: &mut u8) -> Option<AccountCommand> {
-        if *checkpoints < 8 {
-            return None;
+        // A waiting command skips the eight-checkpoint gate. Its residence
+        // budget is five seconds; a page can wait.
+        let waiting = self.command_waiting.load(Ordering::Acquire) > 0;
+        if !waiting {
+            if *checkpoints < 8 {
+                return None;
+            }
+            *checkpoints = 0;
         }
-        *checkpoints = 0;
-        self.lifecycle
+        let command = self
+            .lifecycle
             .try_recv()
             .inspect(|_| {
                 self.preempt.borrow_and_update();
             })
             .or_else(|_| self.receiver.try_recv())
-            .ok()
+            .ok();
+        if command.is_some() {
+            self.note_command_taken();
+        }
+        command
     }
 
     async fn initialize_actor(
@@ -329,7 +375,7 @@ impl AccountRuntime {
         ready: std::sync::mpsc::SyncSender<()>,
     ) -> Result<bool, SdkError> {
         self.initialize_readers()?;
-        self.start_connection()?;
+        self.start_connection_or_defer();
         self.start_courier();
         let _ = ready.send(());
         let restore = LocalBusFrame::request(
@@ -362,7 +408,7 @@ impl AccountRuntime {
             tracing::warn!(account_id = %self.id, "task preparation courier stopped; restarting");
             self.stop_courier().await;
             tokio::time::sleep(Duration::from_millis(100)).await;
-            self.start_connection()?;
+            self.start_connection_or_defer();
             self.start_courier();
         }
         Ok(())
@@ -382,22 +428,55 @@ impl AccountRuntime {
         }
     }
 
-    async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
-        if !self.initialize_actor(ready).await? {
-            return Ok(());
-        }
-        let mut schedule = super::sync_driver::Schedule {
+    /// Unlock writes in `initialize_actor` finish before a queued command can pause the writer.
+    #[cfg(not(test))]
+    fn arm_writer_budget(waiting: &Arc<std::sync::atomic::AtomicUsize>) -> WriterBudget {
+        ramflux_storage::writer_budget::Armed::arm(
+            Arc::clone(waiting),
+            super::runtime_limits::WRITER_SLICE,
+        )
+    }
+
+    /// Unit-test runtimes keep the unbudgeted writer.
+    #[cfg(test)]
+    fn arm_writer_budget(_waiting: &Arc<std::sync::atomic::AtomicUsize>) -> WriterBudget {}
+
+    /// Arms the writer budget (non-test builds) and starts the receive schedule after unlock.
+    fn serve_setup(&self) -> (WriterBudget, super::sync_driver::Schedule, tokio::time::Instant) {
+        let (schedule, next) = self.receive_schedule();
+        (Self::arm_writer_budget(&self.command_waiting), schedule, next)
+    }
+
+    fn receive_schedule(&self) -> (super::sync_driver::Schedule, tokio::time::Instant) {
+        let schedule = super::sync_driver::Schedule {
             min: self.timeouts.receive_min,
             max: self.timeouts.receive_max,
             interval: self.timeouts.receive_min,
         };
-        let mut next = tokio::time::Instant::now() + schedule.min;
+        let next = tokio::time::Instant::now() + schedule.min;
+        (schedule, next)
+    }
+
+    async fn prepare_receive_turn(
+        &mut self,
+    ) -> Result<(Option<tokio::time::Instant>, Option<tokio::time::Instant>), SdkError> {
+        self.refresh_transient_host().await;
+        self.publish_transient_updates();
+        let transient = self.transient_deadline();
+        let username = self.username.deadline();
+        Box::pin(self.refresh_pairing_reader_generation()).await?;
+        Ok((transient, username))
+    }
+
+    async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
+        if !self.initialize_actor(ready).await? {
+            return Ok(());
+        }
+        let (_writer_budget, mut schedule, mut next) = self.serve_setup();
         let mut checkpoints = 0_u8;
         loop {
-            self.refresh_transient_host().await;
-            self.publish_transient_updates();
-            let transient_deadline = self.transient_deadline();
-            Box::pin(self.refresh_pairing_reader_generation()).await?;
+            let prepared = self.background_or_prepare().await?;
+            let Some((transient_deadline, username_deadline)) = prepared else { break };
             if let Some(command) = self.queued_command(&mut checkpoints) {
                 if Box::pin(self.apply(command)).await? {
                     break;
@@ -412,11 +491,11 @@ impl AccountRuntime {
                 _ = self.shutdown.changed() => break,
                 command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
                 checkpoint=self.transfers.receive.recv()=>{checkpoints += 1;if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}continue;},
-                work=self.connection_work.recv()=>{
+                work = recv(&mut self.deferred, &mut self.head_rx, &mut self.connection_work) => {
                     checkpoints += 1;
                     if let Some(work)=work {
                         let mut shutdown=self.shutdown.clone();let mut preempt=self.preempt.clone();
-                        tokio::select! {biased;_=shutdown.changed()=>break,_=preempt.changed()=>{},result=self.apply_connection_work(work)=>result?}
+                        tokio::select! {biased;_=shutdown.changed()=>break,_=preempt.changed()=>{},result=self.finish_connection_work(work)=>result?}
                     }
                     continue;
                 },
@@ -430,6 +509,16 @@ impl AccountRuntime {
                         None => std::future::pending().await,
                     }
                 } => { self.publish_transient_updates(); continue; },
+                completion = self.username.receive() => {
+                    if let Some(completion) = completion && Box::pin(self.finish_username(completion)).await? { break; }
+                    continue;
+                },
+                () = async {
+                    match username_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => { self.start_username_delivery(); continue; },
                 completion = self.pairing.receive() => {
                     if let Some(completion) = completion
                         && self.finish_pairing_begin(completion).await? { break; }
@@ -451,28 +540,27 @@ impl AccountRuntime {
                 },
                 () = tokio::time::sleep_until(next), if !self.state.accounts.is_empty() => {
                     self.maintain_expired_object_holds();
-                    let mut shutdown = self.shutdown.clone();
-                    let active = tokio::select! {
-                        _ = shutdown.changed() => break,
-                        result = self.sync() => match result {
-                            Ok(active) => active,
-                            Err(error) => {
-                                tracing::warn!(account_id = %self.id, %error,
-                                    error_code = local_bus_error_code(&error),
-                                    "background synchronization deferred; account remains open");
-                                false
-                            }
-                        },
-                    };
-                    schedule.completed(active);
-                    next = tokio::time::Instant::now() + schedule.interval;
-                    continue;
+                    match Box::pin(self.maintain_until_command()).await {
+                        Maintenance::Stopped => break,
+                        Maintenance::Interrupted => continue,
+                        Maintenance::Command(command) => Some(*command),
+                        Maintenance::Username(completion) => {
+                            if Box::pin(self.finish_username(*completion)).await? { break; }
+                            continue;
+                        }
+                        Maintenance::Completed(active) => {
+                            schedule.completed(active);
+                            next = tokio::time::Instant::now() + schedule.interval;
+                            continue;
+                        }
+                    }
                 },
             };
             checkpoints = 0;
             let Some(command) = command else {
                 break;
             };
+            self.note_command_taken();
             if Box::pin(self.apply(command)).await? {
                 break;
             }
@@ -489,21 +577,13 @@ impl AccountRuntime {
 
     async fn sync_pass(&mut self) -> Result<bool, SdkError> {
         self.refresh_networking_expiry().await;
+        self.service_waiting_commands().await?;
         self.maintain_pairing_own_sync().await;
+        self.service_waiting_commands().await?;
         self.maintain_agent_record_broadcast();
-        let Some(account) = self.state.accounts.get_mut(&self.id) else {
-            return Ok(false);
-        };
-        let result = super::sync_driver::maintain_local(account);
-        let reason = result.as_ref().err().map(local_bus_error_code);
-        let (state, activity) = match result {
-            Ok(count) => (if count == 0 { "idle" } else { "running" }, count > 0),
-            Err(error) => {
-                tracing::debug!(%error,"account local maintenance failed");
-                ("error", false)
-            }
-        };
-        super::sync_status::record_with_reason(account, state, now_unix_timestamp(), reason)?;
+        self.maintain_agent_owner_contact().await;
+        self.service_waiting_commands().await?;
+        let activity = self.record_local_maintenance().await?;
         // Native admission may have completed on this sync pass after a local-only unlock.
         self.start_courier();
         let request = LocalBusFrame::request(
@@ -519,10 +599,62 @@ impl AccountRuntime {
         self.publish(&request).await?;
         Ok(activity || fetched)
     }
+
+    async fn record_local_maintenance(&mut self) -> Result<bool, SdkError> {
+        loop {
+            ramflux_storage::writer_budget::begin_attempt();
+            let activity = {
+                let _scope = ramflux_storage::writer_budget::PauseScope::enter();
+                let Some(account) = self.state.accounts.get_mut(&self.id) else {
+                    return Ok(false);
+                };
+                let result = super::sync_driver::maintain_local(account);
+                let paused = matches!(&result, Err(error) if writer_slice::is_writer_pause(error));
+                if paused {
+                    None
+                } else {
+                    let reason = result.as_ref().err().map(local_bus_error_code);
+                    let (state, activity) = match result {
+                        Ok(count) => (if count == 0 { "idle" } else { "running" }, count > 0),
+                        Err(error) => {
+                            tracing::debug!(%error, "account local maintenance failed");
+                            ("error", false)
+                        }
+                    };
+                    match super::sync_status::record_with_reason(
+                        account,
+                        state,
+                        now_unix_timestamp(),
+                        reason,
+                    ) {
+                        Err(error) if writer_slice::is_writer_pause(&error) => None,
+                        Err(error) => return Err(error),
+                        Ok(()) => Some(activity),
+                    }
+                }
+            };
+            match activity {
+                Some(activity) => return Ok(activity),
+                None => self.service_waiting_commands().await?,
+            }
+        }
+    }
+}
+
+async fn flush_if_open(account: &AccountRuntime, request: &LocalBusFrame) -> Result<(), SdkError> {
+    if background::files_released() { Ok(()) } else { account.publish(request).await }
 }
 
 fn stopped() -> SdkError {
     SdkError::LocalBus("account runtime stopped".to_owned())
+}
+
+async fn recv(
+    deferred: &mut std::collections::VecDeque<super::connection_manager::AccountWork>,
+    completion: &mut mpsc::Receiver<super::connection_manager::AccountWork>,
+    incoming: &mut mpsc::Receiver<super::connection_manager::AccountWork>,
+) -> Option<super::connection_manager::AccountWork> {
+    head_demand::recv(deferred, completion, incoming).await
 }
 
 #[cfg(test)]

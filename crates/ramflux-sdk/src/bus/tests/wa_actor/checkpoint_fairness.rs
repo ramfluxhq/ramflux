@@ -12,7 +12,7 @@ use std::{
 
 #[tokio::test(flavor = "current_thread")]
 async fn writer_checkpoint_yields_to_ready_session_tasks() -> Case {
-    watch(60, async {
+    watch(async {
         LocalSet::new()
             .run_until(async {
                 let root = tempfile::tempdir()?;

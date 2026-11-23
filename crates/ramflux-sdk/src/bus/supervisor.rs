@@ -26,12 +26,12 @@ pub(super) struct Supervisor {
     owner: RefCell<std::rc::Weak<Supervisor>>,
     pub(super) index: AccountIndex,
     nodes: RefCell<crate::node::NodeStore>,
-    node_actor: AccountActor,
+    pub(super) node_actor: AccountActor,
     pub(super) backup_jobs: super::backup_jobs::BackupJobs,
     pub(super) daemon_attended: RefCell<BTreeSet<u64>>,
     pub(super) installing: RefCell<BTreeSet<String>>,
     backup_expiry: RefCell<Option<tokio::task::JoinHandle<()>>>,
-    accounts: RefCell<BTreeMap<String, AccountActor>>,
+    pub(super) accounts: RefCell<BTreeMap<String, AccountActor>>,
     restore_states: RefCell<BTreeMap<String, RestoreState>>,
     subscribers: Rc<RefCell<BTreeMap<u64, LocalBusSubscriber>>>,
     events: mpsc::Sender<EventBatch>,
@@ -45,6 +45,12 @@ pub(super) struct Supervisor {
     lifecycle_tasks: RefCell<tokio::task::JoinSet<()>>,
     lifecycle_changed: tokio::sync::Notify,
     lifecycle_registry: super::lifecycle_registry::Registry,
+}
+
+pub(super) enum OpenJournal {
+    Unavailable,
+    Resync,
+    Ready(Box<super::subscription::JournalFollow>),
 }
 
 impl Supervisor {
@@ -306,7 +312,7 @@ impl Supervisor {
         }
         let credential_call =
             super::credentials::call(&self.config.data_root, &request, connection)?;
-        if request.method == "account.lock" {
+        if matches!(request.method.as_str(), "account.lock" | "account.sign_out") {
             crate::custody::pairing::private_credential::cancel_call(
                 &self.config.data_root,
                 request_account_id(&request)?,
@@ -315,7 +321,7 @@ impl Supervisor {
         if request.method == "account.unlock"
             && let Some(call) = &credential_call
         {
-            return self.private_unlock(&request, call).await;
+            return self.private_unlock(&request, call, connection.credential_prompts).await;
         }
         if !super::lifecycle::handles(&request.method) {
             return Box::pin(self.route(request, connection)).await;
@@ -376,6 +382,7 @@ impl Supervisor {
         &self,
         request: &LocalBusFrame,
         call: &crate::custody::pairing::private_credential::PrivateCredentialCall,
+        prompts: bool,
     ) -> Result<ActorResponse, SdkError> {
         self.ensure_request_allowed(request)?;
         if request.body.as_object().is_none_or(|body| !body.is_empty()) {
@@ -386,30 +393,81 @@ impl Supervisor {
         // is refused before the provider is asked for the passphrase.
         self.refuse_unusable_agent(&id)?;
         self.require_restore_ready(&id, true)?;
+        if let Some(result) = self.open_device_unlock(&id).await? {
+            return Ok(reply(serde_json::to_value(result)?));
+        }
+        if self.silently_unlockable(&id)? {
+            let result = self.unlock_native_silently(&id).await?;
+            self.restore_states.borrow_mut().remove(&id);
+            self.set_active(&id).await?;
+            return Ok(reply(serde_json::to_value(result)?));
+        }
+        // The in-process carrier cannot answer `device.credential.request`. Sending it makes the
+        // C ABI reader tear the worker down, and every later call completes as Closed.
+        if !prompts {
+            return Err(code_required());
+        }
+        self.prompted_unlock(call, &id).await
+    }
+}
+
+fn code_required() -> SdkError {
+    SdkError::LocalBusRefused {
+        code: "AuthFailed".into(),
+        message: "account code is required".into(),
+        body: Box::new(serde_json::Value::Null),
+    }
+}
+
+impl Supervisor {
+    async fn open_device_unlock(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::LocalBusCreatedAccount>, SdkError> {
+        let Some(actor) = self.accounts.borrow().get(id).cloned() else {
+            return Ok(None);
+        };
+        if !actor.is_open() {
+            return Ok(None);
+        }
+        let result =
+            actor.unlock_native(super::native_account::NativeUnlockSecret::Device, None).await?;
+        self.restore_states.borrow_mut().remove(id);
+        self.set_active(id).await?;
+        self.set_unlocked(id, true).await?;
+        self.advance_after_unlock(id).await;
+        Ok(Some(result))
+    }
+
+    async fn prompted_unlock(
+        &self,
+        call: &crate::custody::pairing::private_credential::PrivateCredentialCall,
+        id: &str,
+    ) -> Result<ActorResponse, SdkError> {
         let secret =
-            super::credentials::unlock_secret(self.config.data_root.clone(), id.clone()).await?;
+            super::credentials::unlock_secret(self.config.data_root.clone(), id.to_owned()).await?;
         call.require_live()?;
-        let existing = self.accounts.borrow().get(&id).cloned();
+        let existing = self.accounts.borrow().get(id).cloned();
         let actor = if let Some(actor) = existing {
             actor
         } else {
             let actor = AccountActor::start(
-                id.clone(),
+                id.to_owned(),
                 self.config.clone(),
                 self.nodes.borrow().clone(),
                 self.index.clone(),
                 self.events.clone(),
             )?;
-            self.accounts.borrow_mut().insert(id.clone(), actor.clone());
+            self.accounts.borrow_mut().insert(id.to_owned(), actor.clone());
             actor
         };
         let result = actor
             .unlock_native(super::native_account::NativeUnlockSecret::Code(secret), None)
             .await?;
-        self.restore_states.borrow_mut().remove(&id);
-        self.set_active(&id).await?;
-        self.set_unlocked(&id, true).await?;
-        self.advance_after_unlock(&id).await;
+        self.restore_states.borrow_mut().remove(id);
+        self.set_active(id).await?;
+        self.set_unlocked(id, true).await?;
+        self.advance_after_unlock(id).await;
         Ok(reply(serde_json::to_value(result)?))
     }
 
@@ -520,6 +578,9 @@ impl Supervisor {
             "account.export_agent_credentials" => {
                 return self.export_agent_credentials(&request, connection).await;
             }
+            "account.remove_local" => {
+                return self.remove_local(request).await;
+            }
             _ => {}
         }
         if request.method.starts_with("node.")
@@ -576,12 +637,12 @@ impl Supervisor {
         } else {
             return Err(self.account_unavailable(&id));
         };
-        let locking = request.method == "account.lock";
+        let locking = matches!(request.method.as_str(), "account.lock" | "account.sign_out");
         let unlocking = request.method == "account.unlock";
         let mut request = command(request, connection);
         request.attended = self.attended.borrow().values().any(|account| account == &id);
         request.nodes = Some(self.nodes.borrow().clone());
-        let response = if matches!(
+        let requested = if matches!(
             request.request.method.as_str(),
             "device.transfer.begin"
                 | "device.transfer.status"
@@ -593,6 +654,15 @@ impl Supervisor {
             super::command_admission::RETAIN_COMPLETION.scope((), actor.request(request)).await
         } else {
             actor.request(request).await
+        };
+        let response = match requested {
+            Ok(mut response) => {
+                if let Some(activity) = response.owner_copy.take() {
+                    self.deliver_owner_copy(*activity).await?;
+                }
+                Ok(response)
+            }
+            Err(error) => Err(error),
         };
         if creating && response.is_ok() {
             self.restore_states.borrow_mut().remove(&id);
@@ -724,65 +794,96 @@ impl Supervisor {
         Ok(result)
     }
 
+    async fn remove_local(&self, mut request: LocalBusFrame) -> Result<ActorResponse, SdkError> {
+        let confirmed = super::account_local::confirm(&request);
+        super::account_local::wipe_confirmation(&mut request.body);
+        confirmed?;
+        let id = request_account_id(&request)?.to_owned();
+        let index = self.index.clone();
+        let root = self.config.data_root.clone();
+        let present = {
+            let index = index.clone();
+            let root = root.clone();
+            let id = id.clone();
+            super::lifecycle::spawn_blocking(move || {
+                super::account_local::present(&index, &root, &id)
+            })
+            .await
+            .map_err(|error| SdkError::LocalBus(format!("index reader failed: {error}")))??
+        };
+        if !present && !self.accounts.borrow().contains_key(&id) {
+            return Err(super::account_local::missing());
+        }
+        if self.accounts.borrow().contains_key(&id) {
+            self.lock_account_session(&id).await?;
+            self.clear_device_wrap(&id).await?;
+        }
+        let vault = super::custody_setup::primary_provider(&self.config);
+        let removed = id.clone();
+        super::lifecycle::spawn_blocking(move || {
+            super::account_local::erase(&index, &root, vault.as_ref(), &removed)
+        })
+        .await
+        .map_err(|error| SdkError::LocalBus(format!("account erase failed: {error}")))??;
+        Ok(reply(serde_json::json!({"local_account_id": id, "removed": true})))
+    }
+
     async fn account_list(&self) -> Result<ActorResponse, SdkError> {
         let index = self.index.clone();
         let root = self.config.data_root.clone();
-        let (active,known) = super::lifecycle::spawn_blocking(move || -> Result<_,SdkError> {
-            let mut known=Vec::new();
-            for id in index.known_account_ids()? {
-                if crate::custody::account_exists(&root,&id)? { continue; }
-                let path=local_bus_account_manifest_path(&root,&id);
-                let (manifest,unreadable)=if super::daemon::account_manifest_available(&path) {
-                    if let Ok(manifest)=read_local_bus_account_manifest(&path) {
-                        (Some(manifest),false)
-                    }else{
-                        tracing::warn!(account_id=%id,reason_code="manifest_unreadable","account list omitted unreadable manifest metadata");
-                        (None,true)
-                    }
-                }else{(None,false)};
-                known.push((serde_json::json!({"id":id,"label":manifest.as_ref().and_then(|m|m.label.as_ref()),"kind":manifest.as_ref().and_then(|m|m.kind.as_ref()),"principal_id":manifest.as_ref().map(|m|&m.principal_id)}),unreadable));
-            }
-            for mut account in crate::custody::list_accounts(&root,super::custody_setup::now()?)? {
-                account["id"]=account["local_account_id"].clone();
-                known.push((account, false));
-            }
-            Ok((index.active_account()?,known))
+        let (active, mut known) = super::lifecycle::spawn_blocking(move || {
+            super::account_local::known_rows(&index, &root)
         })
-            .await
-            .map_err(|error| SdkError::LocalBus(format!("index reader failed: {error}")))??;
-        let accounts = self
+        .await
+        .map_err(|error| SdkError::LocalBus(format!("index reader failed: {error}")))??;
+        let open = self
             .accounts
             .borrow()
             .iter()
             .filter(|(_, actor)| actor.is_open())
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
-        let active = active.filter(|id| accounts.contains(id));
+        super::account_local::include_open(&mut known, &open);
+        let active = active.filter(|id| open.contains(id));
         let restore_states = self.restore_states.borrow().clone();
-        let mut known = known;
         for (row, manifest_unreadable) in &mut known {
-            if row["custody_v3_observed"].as_bool() == Some(true) {
-                row["networking"] = row["state"].clone();
+            if row.get("custody_v3_observed").and_then(serde_json::Value::as_bool) == Some(true) {
+                let networking = row.get("state").cloned().unwrap_or(serde_json::Value::Null);
+                if let Some(map) = row.as_object_mut() {
+                    map.insert("networking".to_owned(), networking);
+                }
             }
-            let id =
-                row.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
-            row["state"] = serde_json::json!(match restore_states.get(&id) {
+            let id = super::account_local::row_id(row).to_owned();
+            let state = match restore_states.get(&id) {
                 Some(RestoreState::Pending(_)) => "restore_pending",
                 Some(RestoreState::Failed(_)) => "restore_failed",
                 None if *manifest_unreadable => "restore_failed",
-                None if accounts.iter().any(|account| account == &id) => "unlocked",
+                None if open.iter().any(|account| account == &id) => "unlocked",
                 None => "locked",
-            });
-            if let Some(RestoreState::Failed(reason)) = restore_states.get(&id) {
-                row["restore_error_code"] = serde_json::json!(reason);
-            } else if *manifest_unreadable {
-                row["restore_error_code"] = serde_json::json!("manifest_unreadable");
+            };
+            if let Some(map) = row.as_object_mut() {
+                map.insert("state".to_owned(), serde_json::Value::from(state));
+                if let Some(RestoreState::Failed(reason)) = restore_states.get(&id) {
+                    map.insert(
+                        "restore_error_code".to_owned(),
+                        serde_json::Value::from(reason.clone()),
+                    );
+                } else if *manifest_unreadable {
+                    map.insert(
+                        "restore_error_code".to_owned(),
+                        serde_json::Value::from("manifest_unreadable"),
+                    );
+                }
             }
+            super::account_local::attach_from_state(row);
         }
-        let known = known.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
-        Ok(reply(
-            serde_json::json!({"accounts":accounts, "account_details":known, "active_account_id":active}),
-        ))
+        let details = known.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
+        let accounts = super::account_local::picker(&details);
+        Ok(reply(serde_json::json!({
+            "accounts": accounts,
+            "account_details": details,
+            "active_account_id": active,
+        })))
     }
 
     async fn prepare_import(
@@ -1067,6 +1168,39 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Tails the journal only when this account's reader pool is already open.
+    /// A missing pool stays ephemeral so restore and attended opens still acknowledge.
+    pub(super) async fn prepare_open_journal(
+        &self,
+        request: &LocalBusFrame,
+        connection: &LocalBusConnectionState,
+    ) -> Result<OpenJournal, SdkError> {
+        let Some(id) = request.account_id.as_deref() else {
+            return Ok(OpenJournal::Unavailable);
+        };
+        let Some(actor) = self.accounts.borrow().get(id).cloned() else {
+            return Ok(OpenJournal::Unavailable);
+        };
+        let Ok(readers) = actor.reader_pool() else {
+            return Ok(OpenJournal::Unavailable);
+        };
+        match super::subscription::prepare_follow(readers, request, &connection.outbound).await? {
+            None => Ok(OpenJournal::Resync),
+            Some(follow) => Ok(OpenJournal::Ready(Box::new(follow))),
+        }
+    }
+
+    pub(super) fn install_stream(&self, id: u64, task: tokio::task::JoinHandle<()>) {
+        self.clear_stream(id);
+        self.streams.borrow_mut().insert(id, task);
+    }
+
+    pub(super) fn clear_stream(&self, id: u64) {
+        if let Some(previous) = self.streams.borrow_mut().remove(&id) {
+            previous.abort();
+        }
+    }
+
     pub(super) fn subscribe(&self, connection: &LocalBusConnectionState, account_id: String) {
         if let Some(id) = &connection.attended_account_id {
             self.attended.borrow_mut().insert(connection.connection_id, id.clone());
@@ -1154,8 +1288,39 @@ fn command(request: LocalBusFrame, connection: &LocalBusConnectionState) -> Acco
 fn not_open(id: &str) -> SdkError {
     SdkError::AccountNotOpen(id.to_owned())
 }
+
+impl Supervisor {
+    /// Commits an agent-activity row on the human owner's actor.
+    ///
+    /// # Errors
+    /// `AccountNotOpen` when that actor is not unlocked. The agent's own row stays stored.
+    pub(super) async fn deliver_owner_copy(
+        &self,
+        activity: super::actor::OwnerActivity,
+    ) -> Result<(), SdkError> {
+        let owner_id = activity.owner_id.clone();
+        let actor = self.accounts.borrow().get(&owner_id).filter(|actor| actor.is_open()).cloned();
+        let Some(actor) = actor else {
+            tracing::warn!(
+                owner_id = %owner_id,
+                reason_code = "owner_not_open",
+                "agent activity owner copy was not stored"
+            );
+            return Err(not_open(&owner_id));
+        };
+        actor.project_activity(activity).await.map_err(|error| {
+            tracing::warn!(
+                %error,
+                owner_id = %owner_id,
+                reason_code = "owner_copy_failed",
+                "agent activity owner copy was not stored"
+            );
+            error
+        })
+    }
+}
 fn reply(body: serde_json::Value) -> ActorResponse {
-    ActorResponse { body, events: Vec::new(), nodes: None }
+    ActorResponse { body, events: Vec::new(), nodes: None, owner_copy: None }
 }
 
 fn opens_account(method: &str) -> bool {

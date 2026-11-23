@@ -58,6 +58,7 @@ impl Harness {
             super::super::runtime_limits::RuntimeTimeouts::held_for_test(),
             Arc::new(HeldAdmission),
             None,
+            None,
         ));
         let (commands, receiver) = mpsc::channel(8);
         let (stop, shutdown) = watch::channel(false);
@@ -83,6 +84,7 @@ impl Harness {
             }
         });
         let (connection_sender, connection_work) = mpsc::channel(2);
+        let (head_completion_sender, head_rx) = mpsc::channel(1);
         let (lifecycle_sender, lifecycle) = mpsc::channel(4);
         let (preempt_sender, preempt) = watch::channel(0);
         let mut control_shutdown = shutdown.clone();
@@ -94,11 +96,17 @@ impl Harness {
             timeouts: super::super::runtime_limits::RuntimeTimeouts::default(),
             lifecycle,
             preempt,
+            command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             connection_sender,
             connection_work,
+            head_completion_sender,
+            head_rx,
+            deferred: std::collections::VecDeque::new(),
             ledger: None,
+            resume_receive_until: None,
             transient: crate::bus::account_runtime::TransientHost::default(),
             pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
+            username: crate::bus::account_runtime::username_calls::Calls::default(),
             transfers: super::uploads::Transfers::start(),
             id: "expiry-runtime".into(),
             state: LocalBusDaemonState {

@@ -21,6 +21,14 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         Class::NonIngress("custody publication API; no envelope delivery effect"),
     ),
     (
+        "custody_authority/agent_fence.rs:envelope_reaches_fenced_agent",
+        Class::NonIngress("read-only agent fence predicate; no envelope persistence"),
+    ),
+    (
+        "custody_authority/agent_fence.rs:fenced_submit_outcome",
+        Class::NonIngress("read-only agent fence refusal; no envelope persistence"),
+    ),
+    (
         "custody_authority/forwarded.rs:authenticated_native_forwarded_source_with_floors",
         Class::Sink,
     ),
@@ -162,9 +170,9 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         "router.rs:complete_home_node_forward",
         Class::NonIngress("completes an already admitted forward reservation"),
     ),
-    ("router.rs:authenticated_envelope_source", Class::Sink),
-    ("router.rs:authenticated_envelope_source_durable", Class::Sink),
-    ("router.rs:authenticated_envelope_source_from", Class::Sink),
+    ("router/foreign_source.rs:authenticated_envelope_source", Class::Sink),
+    ("router/foreign_source.rs:authenticated_envelope_source_durable", Class::Sink),
+    ("router/foreign_source.rs:authenticated_envelope_source_from", Class::Sink),
     (
         "router.rs:refresh_registered_envelope_authority",
         Class::NonIngress("registered-source refresh; not an inbound delivery"),
@@ -211,7 +219,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
     assert_eq!(
         (ingress_count, sink_count, non_ingress_count),
-        (20, 6, 40),
+        (20, 6, 42),
         "registry counts match the classified live functions"
     );
     for (entry, class) in DURABLE_INGRESS {

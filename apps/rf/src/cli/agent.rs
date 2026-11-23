@@ -35,6 +35,12 @@ pub(crate) struct AgentModelArgs {
     /// The model of that provider.
     #[arg(long)]
     pub(crate) model: String,
+    /// Admission limit: concurrent turns for this agent (`1..=1024`).
+    #[arg(long)]
+    pub(crate) max_concurrent_turns: Option<u32>,
+    /// Admission limit: daily cost in cents (`1..=1000000000`).
+    #[arg(long)]
+    pub(crate) max_cost_per_day_cents: Option<u64>,
 }
 
 /// The access policy of an agent (contract 1 `AgentAccessPolicy`).
@@ -113,8 +119,15 @@ pub(crate) enum AgentAction {
         #[arg(long)]
         confirm: bool,
     },
-    /// Delete an agent that has not been bound (state U). Its custody record stays on the node.
+    /// Delete an agent in state U. The node retires the custody record and the local account goes.
     Delete {
+        #[arg(long, allow_hyphen_values = true)]
+        agent: String,
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Retire an agent from the current primary. The node retires the custody record.
+    Retire {
         #[arg(long, allow_hyphen_values = true)]
         agent: String,
         #[arg(long)]
@@ -124,5 +137,54 @@ pub(crate) enum AgentAction {
     Status {
         #[arg(long, allow_hyphen_values = true)]
         operation_id: String,
+    },
+    /// List, pause, resume, or remove one agent's jobs, or list job-run sessions.
+    Job(AgentJobCommand),
+}
+
+#[derive(Args)]
+pub(crate) struct AgentJobCommand {
+    #[command(subcommand)]
+    pub(crate) action: AgentJobAction,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum AgentJobAction {
+    /// List cron jobs, xin tasks, and xin goals for one agent.
+    List {
+        #[arg(long)]
+        agent: String,
+    },
+    /// Pause one job. `kind` is `cron`, `xin_task`, or `xin_goal`.
+    Pause {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        id: String,
+    },
+    /// Resume one job.
+    Resume {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        id: String,
+    },
+    /// Remove one job.
+    Remove {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        id: String,
+    },
+    /// List job-run sessions published for one agent.
+    Sessions {
+        #[arg(long)]
+        agent: String,
     },
 }
