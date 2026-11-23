@@ -25,11 +25,16 @@ pub(super) async fn serve(
     let root_lease = super::data_root_lock::DataRootLock::acquire(&config.data_root)?;
     crate::custody::reconcile_incomplete_markers(&config.data_root, &root_lease)?;
     let _ = std::fs::remove_dir_all(object_get_spool_dir(&config.data_root));
-    if let Some(parent) = config.socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if config.socket_path.exists() {
-        std::fs::remove_file(&config.socket_path)?;
+    #[cfg(unix)]
+    super::socket_dir::prepare(&config.socket_path).await?;
+    #[cfg(not(unix))]
+    {
+        if let Some(parent) = config.socket_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if config.socket_path.exists() {
+            std::fs::remove_file(&config.socket_path)?;
+        }
     }
     let listener = crate::platform::listener::bind(&config.socket_path)?;
     let owner = listener.owner()?;
