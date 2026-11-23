@@ -261,6 +261,7 @@ impl RamfluxClient {
         if db.message_is_deleted(&id)? || self.apply_generated_delete_fence(identity)? {
             return Ok(false);
         }
+        let peer = crate::client::call::history::bound_summary_peer(self, identity, summary)?;
         if let Some(stored) = db.message_content(&id)? {
             if stored != item.exact_inner {
                 return Err(SdkError::ReplayMismatch);
@@ -272,7 +273,7 @@ impl RamfluxClient {
             )?;
             return Ok(false);
         }
-        self.bind_imported_summary_conversation(identity, summary)?;
+        self.bind_imported_summary_conversation(identity, &peer)?;
         let sender = identity.author.as_ref().ok_or(EvidenceError::OriginCommitmentMismatch)?;
         db.import_direct_message_projection(ramflux_storage::DirectMessageWrite {
             conversation_id: &identity.conversation_id,
@@ -299,7 +300,7 @@ impl RamfluxClient {
     fn bind_imported_summary_conversation(
         &self,
         identity: &g::EventIdentity,
-        summary: &g::CallSummary,
+        peer_principal: &str,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         if db.client_record("conversation", &identity.conversation_id)?.is_some() {
@@ -307,11 +308,10 @@ impl RamfluxClient {
         }
         let own = self.own_account_anchor()?;
         let author = identity.author.as_ref().ok_or(EvidenceError::OriginCommitmentMismatch)?;
-        if author.account_anchor == own {
+        if author.account_anchor == own || peer_principal.is_empty() {
             return Err(EvidenceError::OriginCommitmentMismatch.into());
         }
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let caller = summary.caller.as_ref().ok_or(EvidenceError::OriginCommitmentMismatch)?;
         db.persist_client_record(
             "conversation",
             &identity.conversation_id,
@@ -320,7 +320,7 @@ impl RamfluxClient {
                 "group_id": null,
                 "title": null,
                 "direct_route": null,
-                "participants": [local.principal_id, caller.principal_id],
+                "participants": [local.principal_id, peer_principal],
                 "participant_roots": std::collections::BTreeSet::from([
                     own,
                     author.account_anchor.clone(),

@@ -229,7 +229,7 @@ pub(crate) fn open_summary_history(
 
 /// Remember the summary id the history import just stored. `call.list` reads this key.
 /// # Errors
-/// Refuses a call id that is not 16 bytes, or a storage failure.
+/// Refuses a call id that is not 16 bytes, a different id already stored for that call, or a storage failure.
 pub(crate) fn persist_summary_identity(
     client: &RamfluxClient,
     call_id: &[u8],
@@ -239,8 +239,81 @@ pub(crate) fn persist_summary_identity(
         return Err(refused("call id"));
     }
     let encoded = ramflux_protocol::encode_base64url(call_id);
-    client.account_db()?.persist_actor_state(&summary_key(&encoded), identity)?;
+    let key = summary_key(&encoded);
+    let db = client.account_db()?;
+    if let Some(stored) = db.load_actor_state::<g::EventIdentity>(&key)?
+        && stored.id.as_slice() != identity.id.as_slice()
+    {
+        return Err(SdkError::ReplayMismatch);
+    }
+    db.persist_actor_state(&key, identity)?;
     Ok(())
+}
+
+/// The other person named by a summary that `shared_identity` would have built.
+///
+/// The id uses epoch 1, the caller's device, and the sequence taken from the call id.
+/// The two principals are this person and the conversation's other participant.
+/// # Errors
+/// Refuses a summary that does not match that identity or those participants.
+pub(crate) fn bound_summary_peer(
+    client: &RamfluxClient,
+    identity: &g::EventIdentity,
+    summary: &g::CallSummary,
+) -> Result<String, SdkError> {
+    let author = identity.author.as_ref().ok_or_else(|| summary_evidence(false))?;
+    let caller = summary.caller.as_ref().ok_or_else(|| summary_evidence(false))?;
+    let encoded = ramflux_protocol::encode_base64url(&summary.call_id);
+    let sequence = summary_sequence(&encoded).map_err(|_| summary_evidence(false))?;
+    if author.device_epoch != 1
+        || caller.device_id.is_empty()
+        || caller.device_id != author.device_id
+        || caller.principal_id.is_empty()
+        || summary.callee_principal_id.is_empty()
+        || identity.device_sequence != sequence
+    {
+        return Err(summary_evidence(false));
+    }
+    let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    let own = client.own_account_anchor()?;
+    let we_called = same_principal(&caller.principal_id, &local.principal_id);
+    let we_answered = same_principal(&summary.callee_principal_id, &local.principal_id);
+    if we_called == we_answered || we_called != (author.account_anchor == own) {
+        return Err(summary_evidence(false));
+    }
+    let peer =
+        if we_called { summary.callee_principal_id.clone() } else { caller.principal_id.clone() };
+    if peer.is_empty() || same_principal(&peer, &local.principal_id) {
+        return Err(summary_evidence(false));
+    }
+    match client.account_db()?.client_record("conversation", &identity.conversation_id)? {
+        Some(thread) => {
+            let participants = thread_principals(&thread).ok_or_else(|| summary_evidence(false))?;
+            if !summary_names_participants(
+                &caller.principal_id,
+                &summary.callee_principal_id,
+                &participants,
+            ) {
+                return Err(summary_evidence(false));
+            }
+        }
+        None if we_called => return Err(summary_evidence(false)),
+        None => {}
+    }
+    Ok(peer)
+}
+
+fn thread_principals(thread: &Value) -> Option<Vec<String>> {
+    thread["participants"]
+        .as_array()
+        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+}
+
+fn summary_names_participants(placed: &str, received: &str, participants: &[String]) -> bool {
+    participants.len() == 2
+        && !same_principal(placed, received)
+        && participants.iter().any(|item| same_principal(item, placed))
+        && participants.iter().any(|item| same_principal(item, received))
 }
 
 fn encode_summary(
