@@ -98,7 +98,7 @@ mod tests {
             CardSession::open(spec, package).expect("test: real packed bytecode renders");
         assert_eq!(
             batch.mutations.len(),
-            4,
+            5,
             "release package must render the complete form fixture"
         );
     }

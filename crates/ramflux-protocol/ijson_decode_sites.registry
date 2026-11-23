@@ -6,8 +6,8 @@ crates/ramflux-protocol/src/a2ui/schema.rs | build | 1 | E | excluded=embedded i
 crates/ramflux-protocol/src/a2ui/schema.rs | function | 1 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
 crates/ramflux-protocol/src/a2ui/schema.rs | rpc_message | 1 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
 crates/ramflux-protocol/src/a2ui/schema.rs | rpc_message | 2 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
-crates/ramflux-protocol/src/a2ui/schema.rs | schemas | 1 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
-crates/ramflux-protocol/src/a2ui/schema.rs | schemas | 2 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
+crates/ramflux-protocol/src/a2ui/schema.rs | build_schemas | 1 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
+crates/ramflux-protocol/src/a2ui/schema.rs | build_schemas | 2 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
 crates/ramflux-protocol/src/a2ui/state.rs | from_checkpoint_bytes | 1 | C | admission=crates/ramflux-protocol/src/a2ui/wire.rs#decode_canonical#1
 crates/ramflux-protocol/src/a2ui/wire.rs | decode_canonical | 1 | A | strict=parse_i_json; admission=original canonical Surface frame bytes
 crates/ramflux-protocol/src/a2ui/wire.rs | decode_canonical | 2 | C | admission=crates/ramflux-protocol/src/a2ui/wire.rs#decode_canonical#1

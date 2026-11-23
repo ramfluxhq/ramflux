@@ -18,4 +18,5 @@ apps/rf/src/handlers/task.rs | body_file | 1 | E | excluded=decode is not an ing
 apps/rf/src/keychain.rs | decode_keychain_secret | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/rf/src/utils.rs | media_content | 1 | A | strict=parse_i_json; admission=rf CLI media descriptor file parsed through the strict I-JSON helper
 apps/rf/src/utils.rs | rf_http_post_json | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+apps/rf/src/handlers/surface.rs | resolve_view | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/rf/src/handlers/username.rs | mutate | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
