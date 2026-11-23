@@ -238,7 +238,11 @@ impl<E: EngineProvider> AgentHost<E> {
                             )
                             .await?;
                         }
-                        Err(Error::EngineUnavailable | Error::EngineTimeout) => {}
+                        Err(
+                            Error::EngineUnavailable
+                            | Error::EngineTimeout
+                            | Error::RateLimited { .. },
+                        ) => {}
                         Err(error) if error.stops_host() => return Err(error),
                         Err(_) => {
                             self.fail_approval(

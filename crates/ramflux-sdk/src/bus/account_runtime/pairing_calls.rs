@@ -95,7 +95,7 @@ impl AccountRuntime {
                     _=shutdown.changed()=>{cancelled=true;Err(stopped())},
                     _=preempt.changed()=>{cancelled=true;Err(stopped())},
                     ()=reply.closed()=>{cancelled=true;Err(stopped())},
-                    result=&mut work=>result.and_then(|result|Ok(ActorResponse {body:serde_json::to_value(result)?,events:Vec::new(),nodes:None})),
+                    result=&mut work=>result.and_then(|result|Ok(ActorResponse {body:serde_json::to_value(result)?,events:Vec::new(),nodes:None,owner_copy:None})),
                 }
             };
             if let Some(staged) = &staged {

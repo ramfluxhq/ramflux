@@ -9,7 +9,8 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
-const ACCOUNTS: TableDefinition<&str, &[u8]> = TableDefinition::new("custody_accounts_v3");
+pub(crate) const ACCOUNTS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("custody_accounts_v3");
 const BUDGETS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("custody_publication_budgets_v1");
 const MAX_ACCOUNTS: u64 = 65_536;
@@ -251,6 +252,7 @@ impl RouterRedbStore {
         input: CustodyAccountWrite<'_>,
     ) -> Result<(), NodeCoreError> {
         let CustodyAccountWrite { anchor, state, expected, is_new, source, now } = input;
+        super::agent_publish::require_republish_owner(tx, anchor, state)?;
         let bytes = serde_json::to_vec(state).map_err(error)?;
         if bytes.len() > 16 * 1024 * 1024 {
             crate::custody_budget_log::refuse(

@@ -144,9 +144,14 @@ fn load_entry_in(
     Ok(Some(entry))
 }
 
-/// The inventory binding of an agent account, found in whichever human creation store holds it.
-/// Stage E0 (decision r20): the activation guard reads this without opening any store, so no
-/// directory is created. `Ok(None)` when no human store has an entry for the agent.
+/// The inventory binding that decides whether an agent may activate.
+///
+/// Stage E0 (decision r20): this read does not open a store, so no directory is created. An
+/// open reassociation journal still forces [`RebindBinding::RebindPending`]. After that, the
+/// binding is the one stored for the agent's current custodian. A copy left in an earlier human
+/// store is not current: `remove_source_files` keeps it when the destination bytes diverged.
+/// An account with no custodian pointer still uses the first entry that exists.
+///
 /// # Errors
 /// `CustodySetupInvalid` for an invalid id or a corrupt entry; `CustodyVaultUnavailable` for I/O.
 pub fn paused_agent_binding(
@@ -154,6 +159,29 @@ pub fn paused_agent_binding(
     agent_account_id: &str,
 ) -> Result<Option<RebindBinding>, SdkError> {
     crate::custody::valid_id(agent_account_id)?;
+    if let Some(binding) = super::reassociate::fenced_agent_binding(root, agent_account_id)? {
+        return Ok(Some(binding));
+    }
+    if let Some(custodian) = crate::custody::stored_custodian_id(root, agent_account_id)? {
+        return inventory_binding(root, &custodian, agent_account_id);
+    }
+    first_inventory_binding(root, agent_account_id)
+}
+
+fn inventory_binding(
+    root: &std::path::Path,
+    human: &str,
+    agent_account_id: &str,
+) -> Result<Option<RebindBinding>, SdkError> {
+    crate::custody::valid_id(human)?;
+    let dir = root.join("custody_accounts").join(human).join("agent_creation").join(REBIND_DIR);
+    Ok(load_entry_in(&dir, agent_account_id)?.map(|entry| entry.binding))
+}
+
+fn first_inventory_binding(
+    root: &std::path::Path,
+    agent_account_id: &str,
+) -> Result<Option<RebindBinding>, SdkError> {
     let humans = match std::fs::read_dir(root.join("custody_accounts")) {
         Ok(humans) => humans,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -161,8 +189,9 @@ pub fn paused_agent_binding(
     };
     for human in humans {
         let human = human.map_err(|_| SdkError::CustodyVaultUnavailable)?;
-        let dir = human.path().join("agent_creation").join(REBIND_DIR);
-        if let Some(entry) = load_entry_in(&dir, agent_account_id)? {
+        if let Some(entry) =
+            load_entry_in(&human.path().join("agent_creation").join(REBIND_DIR), agent_account_id)?
+        {
             return Ok(Some(entry.binding));
         }
     }

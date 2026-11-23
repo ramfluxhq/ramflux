@@ -368,6 +368,14 @@ impl AccountSlot {
     }
 }
 
+/// True while this process still holds a non-cancelled reservation for `account_id`.
+#[must_use]
+pub(crate) fn reservation_held(root: &Path, account_id: &str) -> bool {
+    let map = slots().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    map.get(&slot_key(root, account_id))
+        .is_some_and(|slot| !slot.cancelled && !slot.reservation_id.is_empty())
+}
+
 fn slots() -> &'static Mutex<HashMap<SlotKey, AccountSlot>> {
     static SLOTS: OnceLock<Mutex<HashMap<SlotKey, AccountSlot>>> = OnceLock::new();
     SLOTS.get_or_init(|| Mutex::new(HashMap::new()))

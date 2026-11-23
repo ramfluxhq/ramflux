@@ -257,19 +257,21 @@ fn reserve_new(request: &StageNew<'_>) -> Result<StagedRecipient, SdkError> {
         device_id: encode_base64url(*random_32()?),
         device_epoch: 1,
     };
-    crate::custody::reserve_pairing_account(
-        request.root,
-        request.account_id,
-        &body.account_anchor,
-    )?;
-    persist_reservation(
-        request.root,
-        &PersistedReservation {
-            account_id: request.account_id.into(),
-            reservation_id: reservation_id.clone(),
-            frontend_generation: request.frontend_generation,
-        },
-    )?;
+    crate::custody::with_anchor_ceremony(&body.account_anchor, || {
+        crate::custody::reserve_pairing_account(
+            request.root,
+            request.account_id,
+            &body.account_anchor,
+        )?;
+        persist_reservation(
+            request.root,
+            &PersistedReservation {
+                account_id: request.account_id.into(),
+                reservation_id: reservation_id.clone(),
+                frontend_generation: request.frontend_generation,
+            },
+        )
+    })?;
     let hashed = crate::custody::custody_vault_reference(
         request.root,
         request.account_id,

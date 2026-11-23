@@ -470,7 +470,7 @@ async fn generated_a2i_requires_pinned_signature_and_device_binding() -> Result<
         .flat_map(|grant| [false, true].map(|unknown| (grant, unknown)))
     {
         let (a, mut b) = pair(233, 235).await?;
-        let mut event = a2i_event(&a, &b, "a2i-closed")?;
+        let mut event = a2i_event(&a, &b, "a2i-open")?;
         event.grant_id = grant.map(str::to_owned);
         let branch = a.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         event.signed.signature = String::new();
@@ -482,22 +482,32 @@ async fn generated_a2i_requires_pinned_signature_and_device_binding() -> Result<
                 crate::client::routed::native_control::a2i::to_generated(&event)?,
             )),
         };
-        let entry = manual_entry(&a, &b, "a2i-closed", &control, unknown)?;
+        let entry = manual_entry(&a, &b, "a2i-open", &control, unknown)?;
         let result = run(&mut b, &entry).await;
-        assert!(
-            refused(&result, Authority),
-            "signed A2I grant={grant:?} unknown={unknown}: {result:?}"
-        );
-        assert!(refused(
-            &a.client.generated_a2i_inner(&event, &b.client.own_account_anchor()?),
-            Authority
-        ));
         let db = b.client.account_db()?;
-        assert_eq!(db.actor_state_keys("a2i/scoped/")?.len(), 0);
-        assert_eq!(db.actor_state_keys("routed/control/")?.len(), 0);
-        assert_eq!(db.actor_state_keys(APPLIED)?.len(), 0);
-        assert_eq!(db.unsupported_raw_quota(None)?.raw_bytes, 0);
+        if unknown {
+            assert!(result.is_ok(), "unknown field grant={grant:?}: {result:?}");
+            assert_eq!(db.actor_state_keys("a2i/scoped/")?.len(), 0);
+            assert_eq!(db.actor_state_keys(APPLIED)?.len(), 0);
+        } else {
+            assert!(result.is_ok(), "signed A2I grant={grant:?}: {result:?}");
+            assert_eq!(db.actor_state_keys("a2i/scoped/")?.len(), 1);
+            assert_eq!(db.actor_state_keys(APPLIED)?.len(), 1);
+        }
+        assert!(a.client.generated_a2i_inner(&event, &b.client.own_account_anchor()?).is_ok());
     }
+    let (a, mut b) = pair(233, 236).await?;
+    let mut event = a2i_event(&a, &b, "a2i-tamper")?;
+    event.signed.signature = "aa".into();
+    let control = g::Control {
+        operation: 11,
+        payload: Some(g::control::Payload::A2i(
+            crate::client::routed::native_control::a2i::to_generated(&event)?,
+        )),
+    };
+    let entry = manual_entry(&a, &b, "a2i-tamper", &control, false)?;
+    assert!(refused(&run(&mut b, &entry).await, Authority), "tampered signature stored");
+    assert_eq!(b.client.account_db()?.actor_state_keys("a2i/scoped/")?.len(), 0);
     Ok(())
 }
 

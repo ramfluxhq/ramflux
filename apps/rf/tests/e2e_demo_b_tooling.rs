@@ -3,7 +3,7 @@
 
 //! Demo B B9 through the rf binary, a real daemon and a real router: an owned-agent Surface v3 event
 //! built by the SDK encoder round-trips to the peer, a Task is displayed on the peer, and an
-//! A2I approval is refused with the typed `generated_authority` code.
+//! A2I append with an unknown control domain is a typed content refusal.
 #![cfg(all(unix, feature = "itest-memory-vault"))]
 
 #[path = "e2e/mod.rs"]
@@ -57,7 +57,7 @@ fn b9_surface_round_trip_task_display_and_a2i_refusal() -> e2e::Result<()> {
         scratch: scratch.path(),
     })?;
     task_display(&alice_d, bob_d, &alice, &bob, &conversation, scratch.path())?;
-    expect_a2i_authority_refusal(
+    expect_a2i_content_refusal(
         &alice_d,
         &[
             "a2i",
@@ -539,13 +539,15 @@ fn expect_typed_refusal(daemon: &Daemon, args: &[&str], code: &str) -> e2e::Resu
     Ok(value)
 }
 
-fn expect_a2i_authority_refusal(daemon: &Daemon, args: &[&str]) -> e2e::Result<()> {
+fn expect_a2i_content_refusal(daemon: &Daemon, args: &[&str]) -> e2e::Result<()> {
     let error = match rf_json(&daemon.socket, args) {
-        Ok(value) => return Err(format!("B9 approval unexpectedly succeeded: {value}").into()),
+        Ok(value) => {
+            return Err(format!("B9 unknown domain unexpectedly succeeded: {value}").into());
+        }
         Err(error) => error.to_string(),
     };
-    if !error.contains("generated_authority") {
-        return Err(format!("typed Authority reason missing: {error}").into());
+    if !error.contains("generated_content") {
+        return Err(format!("typed Content reason missing: {error}").into());
     }
     if !error.contains("exit status: 1") {
         return Err(format!("refusal must be a normal CLI exit: {error}").into());

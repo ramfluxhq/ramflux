@@ -118,7 +118,13 @@ pub fn step(method: hyper::Method, path: &'static str, status: StatusCode, body:
 }
 
 pub fn accepted(id: &str) -> Value {
-    json!({"status":"accepted","job_id":id,"poll_url":format!("/api/jobs/{id}"),"cancel_url":format!("/api/jobs/{id}/cancel")})
+    json!({
+        "status": "accepted",
+        "job_id": id,
+        "run_id": format!("run-{id}"),
+        "poll_url": format!("/api/jobs/{id}"),
+        "cancel_url": format!("/api/jobs/{id}/cancel")
+    })
 }
 
 pub fn approval_view(decision: &str, expiry: &str) -> Value {

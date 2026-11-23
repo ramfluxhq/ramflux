@@ -36,7 +36,8 @@ pub(crate) fn connection(
     outbound: impl Into<super::outbound::LocalBusOutbound>,
 ) -> ConnectionInput {
     let outbound = outbound.into();
-    ConnectionInput(Arc::new(PrivateCredentialChannel::new(
+    let host_outbound = outbound.clone();
+    let channel = PrivateCredentialChannel::new(
         id,
         Arc::new(move |generation, request| {
             let parent = parent_request_id(&root, &request.local_account_id)?;
@@ -59,7 +60,32 @@ pub(crate) fn connection(
             };
             outbound.try_send(frame).map_err(|_| SdkError::PairingCode("Busy"))
         }),
-    )))
+    );
+    channel.set_host_prompt(Arc::new(move |generation, provider| {
+        let frame = LocalBusFrame {
+            bus_protocol: "ramflux.local_bus.v1".into(),
+            frame_id: format!("host-credential-{generation}"),
+            kind: LocalBusFrameKind::Request,
+            request_id: format!("host-credential-{generation}"),
+            account_id: None,
+            sdk_api: "agent".into(),
+            method: "agent.host.credential".into(),
+            body: serde_json::json!({ "provider": provider, "action": "provider" }),
+            trace_id: None,
+            seq: None,
+            at: None,
+            deadline_ms: None,
+            operation_id: None,
+            ok: None,
+            error: None,
+        };
+        host_outbound.try_send(frame).map_err(|_| SdkError::LocalBusRefused {
+            code: "credential_unavailable".into(),
+            message: "provider key".into(),
+            body: Box::new(serde_json::json!({ "reason_code": "credential_unavailable" })),
+        })
+    }));
+    ConnectionInput(Arc::new(channel))
 }
 /// Public metadata/connection ownership is captured before an actor can invoke its provider.
 pub(super) fn call(
@@ -168,6 +194,18 @@ pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
             read_reply_after_discriminator(reader, prefix, discriminator[0], &action, generation)
                 .await?;
         channel.deliver_reply(id, reply)?;
+        return Ok(None);
+    }
+    if let Some(generation) = channel.host_generation() {
+        let reply = read_reply_after_discriminator(
+            reader,
+            prefix,
+            discriminator[0],
+            "provider",
+            generation,
+        )
+        .await?;
+        channel.deliver_host(id, reply)?;
         return Ok(None);
     }
     if discriminator[0] == 0xC1 {

@@ -4,7 +4,6 @@
 //! Peer-authored generated controls (`GROUP_KEY`, RECOVERY, A2I, `OBJECT_REVOKE`): one exact-replay
 //! ledger shared by the four native executors. Each executor lives in its own module.
 pub(super) mod a2i;
-mod a2i_authority;
 mod delivery;
 mod group_key;
 pub(in crate::client) mod guardian;

@@ -58,11 +58,12 @@ async fn direct_peer(bus: &mut impl AgentBus, message: &Value) -> Result<Value> 
     }
     Ok(peer)
 }
+/// Revalidates the headless account. Returns its custodian when that is a different account.
 pub(crate) async fn identity(
     bus: &mut impl AgentBus,
     state: &mut Checkpoint,
     account: &str,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let status = bus.request("account.status", json!({}), None).await?;
     if !status_ready(&status) {
         return Err(Error::IdentityLost);
@@ -92,7 +93,11 @@ pub(crate) async fn identity(
     state.principal_id = principal.into();
     state.device_id = device.into();
     state.native_account = status.get("client_mode").is_none();
-    Ok(())
+    Ok(status
+        .get("custodian_account_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && *id != account)
+        .map(str::to_owned))
 }
 
 fn status_ready(status: &Value) -> bool {

@@ -187,6 +187,7 @@ fn verify_agent(
 fn check_predecessors(
     registry: &IdentityRegistry,
     plan: &RegisterPlan,
+    human: &VerifiedRecord,
     human_head: &str,
 ) -> Result<Option<CustodyAccountState>, NodeCoreError> {
     if plan.human_head_hash != human_head {
@@ -211,6 +212,7 @@ fn check_predecessors(
             {
                 return Err(refused(CustodyRefusal::InvalidInput));
             }
+            super::agent_fence::require_active_desktop(human, &plan.desktop)?;
             Ok(expected)
         }
         _ => Err(refused(CustodyRefusal::InvalidInput)),
@@ -265,7 +267,7 @@ impl RouterCore {
         )
         .map_err(|_| refused(CustodyRefusal::InvalidInput))?;
         let agent = verify_agent(registry, input, &human, now)?;
-        let expected = check_predecessors(registry, input.plan, &human_head)?;
+        let expected = check_predecessors(registry, input.plan, &human, &human_head)?;
         let mut pins = registry.custody.pins_for(anchor);
         let previous = registry.custody.records.get(anchor).map(|entry| &entry.record);
         let outcome = pins

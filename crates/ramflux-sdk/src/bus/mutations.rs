@@ -25,6 +25,7 @@ pub(super) async fn execute(
             body: super::readers::read_account(state, account_id, &command.request)?,
             events: Vec::new(),
             nodes: None,
+            owner_copy: None,
         });
     }
     let mut connection =
@@ -35,7 +36,7 @@ pub(super) async fn execute(
     if let Some(account) = state.accounts.get(account_id) {
         let db = account.client.account_db()?;
         if let Some(body) = intent.lookup(db)? {
-            return Ok(ActorResponse { body, events: Vec::new(), nodes: None });
+            return Ok(ActorResponse { body, events: Vec::new(), nodes: None, owner_copy: None });
         }
     }
     // Fetch owns a durable retryable failure receipt, including admission failures.
@@ -53,7 +54,7 @@ pub(super) async fn execute(
     if let Some(account) = state.accounts.get(account_id)
         && let Some(body) = intent.reserve(account.client.account_db()?)?
     {
-        return Ok(ActorResponse { body, events: Vec::new(), nodes: None });
+        return Ok(ActorResponse { body, events: Vec::new(), nodes: None, owner_copy: None });
     }
     if let Some(nodes) = &command.nodes {
         state.nodes = nodes.clone();
@@ -110,6 +111,7 @@ pub(super) async fn execute(
         body: result.response_body,
         events,
         nodes: command.request.method.starts_with("node.").then(|| state.nodes.clone()),
+        owner_copy: result.owner_copy,
     })
 }
 

@@ -448,6 +448,12 @@ async fn prepare_entry(
         advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
         return Ok(None);
     }
+    // Parked `HeadChanged` waits for its refresh. A not-ready retry above, and
+    // this skip, both advance the cursor so one envelope cannot stall the page.
+    if head_inbound::head_waiting(account, &key) {
+        advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
+        return Ok(None);
+    }
     if replay && backpressure.saturated(&account.client, &entry, now)? {
         return Ok(None);
     }
@@ -491,30 +497,12 @@ async fn prepare_entry(
             pair_reply = reset_reply;
             true
         }
-        Err(mut error) => {
-            if super::contact_backpressure::deferred(&entry, &error)
-                && backpressure.record(&account.client, &entry, now)?
+        Err(error) => {
+            match hold_receive_error(account, engine, (&entry, &key), error, backpressure, context)?
             {
-                if !replay {
-                    advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
-                }
-                return Ok(None);
+                None => return Ok(None),
+                Some(accepted) => accepted,
             }
-            error = contact_capacity_refusal(error);
-            if !quarantine_failure(
-                &account.client,
-                &engine.config().device_id,
-                &entry,
-                &key,
-                &error,
-                now,
-            )? {
-                head_inbound::retain(account, &entry, &key, &error)?;
-                advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
-                return Ok(None);
-            }
-
-            false
         }
     };
     // Keep committed messages visible while acknowledgement retries remain pending.
@@ -617,6 +605,109 @@ fn contact_capacity_refusal(error: SdkError) -> SdkError {
     }
 }
 
+fn hold_receive_error(
+    account: &mut LocalBusAccountState,
+    engine: &mut impl GatewaySessionAccess,
+    (entry, key): (&GatewayInboxEntry, &str),
+    error: SdkError,
+    backpressure: &mut super::contact_backpressure::Backpressure,
+    context: PageContext<'_>,
+) -> Result<Option<bool>, SdkError> {
+    if super::contact_backpressure::deferred(entry, &error)
+        && backpressure.record(&account.client, entry, context.now)?
+    {
+        if !context.replay {
+            advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
+        }
+        return Ok(None);
+    }
+    let error = contact_capacity_refusal(error);
+    if matches!(error, SdkError::PairingCode("HeadChanged")) {
+        return park_head_changed(account, engine, entry, key, &error, context.now);
+    }
+    if !quarantine_failure(
+        &account.client,
+        &engine.config().device_id,
+        entry,
+        key,
+        &error,
+        context.now,
+    )? {
+        head_inbound::retain(account, entry, key, &error)?;
+        advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
+        return Ok(None);
+    }
+    Ok(Some(false))
+}
+
+/// First sight parks. A finished refresh that left the local epoch behind is final.
+fn park_head_changed(
+    account: &mut LocalBusAccountState,
+    engine: &mut impl GatewaySessionAccess,
+    entry: &GatewayInboxEntry,
+    key: &str,
+    error: &SdkError,
+    now: i64,
+) -> Result<Option<bool>, SdkError> {
+    let retry_bytes = serde_json::to_vec(entry)?;
+    if retry_bytes.len() > 1024 * 1024 {
+        quarantine_failure(&account.client, &engine.config().device_id, entry, key, error, now)?;
+        return Ok(Some(false));
+    }
+    if head_inbound::head_changed_final(account, key, entry)? {
+        finish_quarantine(
+            &InboxQuarantine {
+                client: &account.client,
+                device: &engine.config().device_id,
+                entry,
+                key,
+                error,
+                now,
+            },
+            Some("retry_exhausted"),
+        )?;
+        return Ok(Some(false));
+    }
+    // An exhausted attempt budget leaves the existing row in place. That row stays
+    // parked. A store that refuses a new row cannot be held, so the pass records it.
+    let held = crate::client::inbox_failure::defer_entry(
+        &account.client,
+        &engine.config().device_id,
+        entry,
+        key,
+        &retry_bytes,
+        now,
+    )?;
+    if held || account.client.account_db()?.has_inbox_retry(key)? {
+        head_inbound::arm(account, key);
+        head_inbound::retain(account, entry, key, error)?;
+        advance_cursor(&account.client, engine.target_delivery_id(), entry.inbox_seq)?;
+        return Ok(None);
+    }
+    finish_quarantine(
+        &InboxQuarantine {
+            client: &account.client,
+            device: &engine.config().device_id,
+            entry,
+            key,
+            error,
+            now,
+        },
+        Some("retry_exhausted"),
+    )?;
+    Ok(Some(false))
+}
+
+#[derive(Clone, Copy)]
+struct InboxQuarantine<'a> {
+    client: &'a RamfluxClient,
+    device: &'a str,
+    entry: &'a GatewayInboxEntry,
+    key: &'a str,
+    error: &'a SdkError,
+    now: i64,
+}
+
 pub(super) fn quarantine_failure(
     client: &RamfluxClient,
     device: &str,
@@ -625,6 +716,14 @@ pub(super) fn quarantine_failure(
     error: &SdkError,
     now: i64,
 ) -> Result<bool, SdkError> {
+    finish_quarantine(&InboxQuarantine { client, device, entry, key, error, now }, None)
+}
+
+fn finish_quarantine(
+    input: &InboxQuarantine<'_>,
+    force: Option<&'static str>,
+) -> Result<bool, SdkError> {
+    let InboxQuarantine { client, device, entry, key, error, now } = *input;
     if client.routed_seen_marker(entry)?.is_some() {
         return Ok(true);
     }
@@ -633,20 +732,29 @@ pub(super) fn quarantine_failure(
     let error = wire_error.as_ref().unwrap_or(error);
     let kind = inbound_failure_kind(error);
     let retry_bytes = serde_json::to_vec(entry)?;
-    let code = if let Some(code) = crate::client::inbox_failure::deterministic(error) {
+    let code = if wire_error.is_none()
+        && let Some(code) = force
+    {
+        code
+    } else if let Some(code) = crate::client::inbox_failure::deterministic(error) {
         code
     } else if retry_bytes.len() > 1024 * 1024 {
         "oversized_retry"
+    } else if crate::client::inbox_failure::defer_entry(
+        client,
+        device,
+        entry,
+        key,
+        &retry_bytes,
+        now,
+    )? {
+        tracing::info!(inbox_seq = entry.inbox_seq, kind,
+            envelope_id = %entry.envelope.envelope_id,
+            source_device_id = %entry.envelope.source_device_id,
+            target_delivery_id = %entry.target_delivery_id,
+            reason = %error, "gateway inbound entry held");
+        return Ok(false);
     } else {
-        if crate::client::inbox_failure::defer_entry(client, device, entry, key, &retry_bytes, now)?
-        {
-            tracing::info!(inbox_seq = entry.inbox_seq, kind,
-                envelope_id = %entry.envelope.envelope_id,
-                source_device_id = %entry.envelope.source_device_id,
-                target_delivery_id = %entry.target_delivery_id,
-                reason = %error, "gateway inbound entry held");
-            return Ok(false);
-        }
         "retry_exhausted"
     };
     let db = client.account_db()?;

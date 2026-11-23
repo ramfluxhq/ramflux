@@ -12,6 +12,8 @@
 
 mod agent;
 mod apply;
+mod approvals;
+mod automation;
 mod autonomy;
 mod capabilities;
 mod catalog;
@@ -29,6 +31,7 @@ mod purge;
 mod revision;
 mod run;
 mod session;
+mod sync;
 mod targeted;
 #[cfg(test)]
 mod test_support;
@@ -39,6 +42,8 @@ pub use agent::{
     MainReadback, PROMPT_MAX_BYTES, PutKind, PutOutcome, Retired, Tools,
 };
 pub use apply::ApplyOutcome;
+pub use approvals::ApprovalReceipt;
+pub use automation::{AutomationItem, AutomationKind};
 pub use autonomy::Autonomy;
 pub use capabilities::{
     AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_LIMITS_V1, AGENT_MAIN_READBACK_V1,
@@ -68,5 +73,11 @@ pub use purge::{PURGE_STORES, PurgeReceipt};
 pub use revision::{CatalogRevision, ConfigRevision};
 pub use run::{JobCancel, RunCancel, RunCode, RunState};
 pub use session::SessionCreated;
+pub use sync::{
+    ApprovalCopy, EraseCopy, JournalEvent, LiveBody, LiveNotice, MirrorOp, PONG_FRAME,
+    SNAPSHOT_MAX_BODY, SNAPSHOT_PAGE_LIMIT, ServerFrame, SnapshotPage, SnapshotRow, SyncCursor,
+    SyncDial, TurnBody, TurnCopy, ack_frame, decode_server, format_cursor, hello_frame,
+    parse_cursor,
+};
 pub use targeted::{ReloadReport, ReloadStatus, TargetedAgents};
 pub use transport::{ClientConfig, DEFAULT_MAX_BODY_BYTES, DEFAULT_REQUEST_TIMEOUT};
