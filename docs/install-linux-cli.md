@@ -50,6 +50,10 @@ makepkg -si
 ```
 
 The recipe's `pkgver` selects the version, independently of the clone's branch.
+The initial recipe pins the existing v0.2.5 sources, which predate Linux-host
+XDG/Secret Service support. Before the desktop Linux release, select matching
+tags containing that support and update the recipe; packaging alone does not
+change the behavior of older tags.
 Maintainers update both source hashes and the two commit IDs, then regenerate `.SRCINFO` with
 `makepkg --printsrcinfo > .SRCINFO` when changing `pkgver`. Rust must satisfy
 that tag's pinned toolchain. aarch64 packages require Arch Linux ARM; official

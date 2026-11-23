@@ -20,8 +20,8 @@ _product_commit=ee3d574ce3eb3cb833197fa8612d2135e6828f7e
 _tui_commit=02f2ca4402b7aae67f3b4dd089e3d18aca154a8d
 
 prepare() {
-  mv "ramfluxhq-ramflux-${_product_commit:0:7}" product
-  mv "ramfluxhq-ramflux-tui-${_tui_commit:0:7}" tui
+  mv ramfluxhq-ramflux-[[:xdigit:]]* product
+  mv ramfluxhq-ramflux-tui-* tui
 }
 
 build() {
@@ -29,7 +29,7 @@ build() {
   unset RAMFLUX_ITEST_BUILD
   export CARGO_TARGET_DIR="$srcdir/target"
   RAMFLUX_GIT_SHA="$_product_commit" cargo build --locked --release --manifest-path product/Cargo.toml -p ramflux-rf --bin rf
-  RAMFLUX_GIT_SHA="$_tui_commit" cargo build --locked --release --manifest-path tui/Cargo.toml --bin rf-tui
+  env -u RAMFLUX_GIT_SHA GIT_CEILING_DIRECTORIES="$srcdir" cargo build --locked --release --manifest-path tui/Cargo.toml --bin rf-tui
 }
 
 package() {
@@ -38,4 +38,6 @@ package() {
   install -Dm644 product/LICENSE "$pkgdir/usr/share/licenses/$pkgname/ramflux-LICENSE"
   install -Dm644 product/NOTICE "$pkgdir/usr/share/licenses/$pkgname/ramflux-NOTICE"
   install -Dm644 tui/LICENSE "$pkgdir/usr/share/licenses/$pkgname/ramflux-tui-LICENSE"
+  install -dm755 "$pkgdir/usr/share/doc/$pkgname"
+  printf 'version=%s\nramflux=%s\nramflux-tui=%s\n' "$pkgver" "$_product_commit" "$_tui_commit" > "$pkgdir/usr/share/doc/$pkgname/BUILD-INFO.txt"
 }

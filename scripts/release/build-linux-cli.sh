@@ -20,7 +20,7 @@ if product != tui:
 print(product)
 PY
 )"
-export RAMFLUX_GIT_SHA="${RAMFLUX_GIT_SHA:-$(git rev-parse HEAD)}"
+product_sha="${RAMFLUX_GIT_SHA:-$(git rev-parse HEAD)}"
 tui_sha="${RAMFLUX_TUI_SHA:-$(git -C "$tui" rev-parse HEAD)}"
 export RAMFLUX_PRODUCTION_BUILD=1
 unset RAMFLUX_ITEST_BUILD
@@ -28,9 +28,9 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}"
 mkdir -p "$CARGO_TARGET_DIR" "$dist"
 CARGO_TARGET_DIR="$(cd "$CARGO_TARGET_DIR" && pwd)"
 dist="$(cd "$dist" && pwd)"
-cargo build --locked --release --target "$target" -p ramflux-rf --bin rf
+RAMFLUX_GIT_SHA="$product_sha" cargo build --locked --release --target "$target" -p ramflux-rf --bin rf
 rf="$CARGO_TARGET_DIR/$target/release/rf"
-RAMFLUX_GIT_SHA="$tui_sha" cargo build --locked --release --target "$target" --manifest-path "$tui/Cargo.toml" --bin rf-tui
+env -u RAMFLUX_GIT_SHA GIT_CEILING_DIRECTORIES="$root" cargo build --locked --release --target "$target" --manifest-path "$tui/Cargo.toml" --bin rf-tui
 rf_tui="$CARGO_TARGET_DIR/$target/release/rf-tui"
 "$rf" --version
 "$rf_tui" --version
@@ -44,7 +44,11 @@ install -m644 LICENSE NOTICE "$stage/$bundle/licenses/ramflux/"
 install -m644 "$tui/LICENSE" "$stage/$bundle/licenses/ramflux-tui/"
 install -m644 docs/install-linux-cli.md "$stage/$bundle/README.md"
 {
-  printf 'version=%s\ntarget=%s\nramflux=%s\nramflux-tui=%s\n' "$version" "$target" "$RAMFLUX_GIT_SHA" "$tui_sha"
+  printf 'version=%s\ntarget=%s\nramflux=%s\nramflux-tui=%s\n' "$version" "$target" "$product_sha" "$tui_sha"
+  python3 - "$tui/Cargo.toml" <<'PY'
+import pathlib, sys, tomllib
+print('ramflux-tui-sdk=' + tomllib.loads(pathlib.Path(sys.argv[1]).read_text())['dependencies']['ramflux-sdk']['rev'])
+PY
   printf '\nRuntime libraries (GNU/Linux; system glibc is required):\n'
   ldd "$rf"
   ldd "$rf_tui"
