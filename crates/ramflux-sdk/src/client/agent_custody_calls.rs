@@ -50,15 +50,11 @@ fn primary_branch_expiry(record: &Envelope<DeviceSet>, primary: &DeviceRef) -> O
 }
 
 /// Build the `AgentCustodyStatus` of one stored request. The request and receipt bytes travel as
-/// their canonical form; failures are closed tokens.
+/// their canonical form; failures are closed tokens. `request_hash` is `register_plan_hash` of the
+/// stored plan, the value `agent.creation.decide` must repeat.
 pub(crate) fn status_of(record: &AgentCreationRecord) -> Result<g::AgentCustodyStatus, SdkError> {
     let plan = record.plan_bytes().ok().filter(|bytes| !bytes.is_empty());
-    let agent_anchor = match plan.as_deref() {
-        Some(bytes) => Some(
-            decode_register_plan(bytes).map_err(|_| SdkError::CustodySetupInvalid)?.agent_anchor,
-        ),
-        None => None,
-    };
+    let (agent_anchor, request_hash) = plan_fields(plan.as_deref())?;
     let receipt_json = match record.receipt_b64.as_deref() {
         Some(text) => Some(decode_base64url(text).map_err(|_| SdkError::CustodySetupInvalid)?),
         None => None,
@@ -71,7 +67,18 @@ pub(crate) fn status_of(record: &AgentCreationRecord) -> Result<g::AgentCustodyS
         request_json: plan,
         receipt_json,
         error: record.failure.map(|failure| failure_body(failure, record.state)),
+        request_hash,
     })
+}
+
+/// The plan's anchor and `register_plan_hash`. A status with no plan has neither.
+fn plan_fields(bytes: Option<&[u8]>) -> Result<(Option<String>, String), SdkError> {
+    let Some(bytes) = bytes else {
+        return Ok((None, String::new()));
+    };
+    let plan = decode_register_plan(bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
+    let hash = register_plan_hash(&plan).map_err(|_| SdkError::CustodySetupInvalid)?;
+    Ok((Some(plan.agent_anchor), hash))
 }
 
 /// `AgentFailure.effects` of a stored request (AGENT-IDENTITY-01 r13 item 3). `possible`: the node

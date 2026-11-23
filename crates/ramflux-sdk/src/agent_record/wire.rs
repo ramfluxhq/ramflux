@@ -3,7 +3,7 @@
 
 //! The wire view of a stored agent record (AGENT-IDENTITY-01 E4, contract 1 `AgentRecord`). The
 //! fields that belong to later modules (`host`, `config`, `revision`, `observation`, `cleanup`) are
-//! present in the message and always absent or empty here.
+//! present in the message and always absent or empty here. `base` is the stored event identity.
 use super::StoredAgentRecord;
 use ramflux_protocol::message as g;
 
@@ -21,5 +21,6 @@ pub(crate) fn to_wire(record: &StoredAgentRecord) -> g::AgentRecord {
         cleanup: String::new(),
         access: Some(record.access.clone()),
         role: record.role.clone(),
+        base: Some(record.identity.clone()),
     }
 }
