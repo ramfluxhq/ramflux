@@ -94,5 +94,6 @@ workflow builds each architecture natively and attaches both archives and
 checksums to the product GitHub release only after both builds succeed.
 Manual dispatch requires an existing matching tag; `publish=false` (default)
 keeps downloadable workflow artifacts without changing the release.
-Pull requests touching the workflow, release script or package also build both
-architectures without publishing. This workflow does not deploy any service.
+Promotion pull requests from `next` into `main` also build both architectures
+without publishing. Feature pull requests into `next` do not start CI. This
+workflow does not deploy any service.
