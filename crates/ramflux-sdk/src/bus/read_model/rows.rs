@@ -226,5 +226,6 @@ fn identity(client: &RamfluxClient, id: &str, mut saved: Value) -> Result<Value,
     saved["pair_recovery"] = json!(client.pair_recovery_metadata(id)?);
     saved["safety_number_available"] =
         json!(saved.get("safety_number").is_some_and(|number| !number.is_null()));
+    saved[crate::VerifiedClassification::FIELD] = json!(client.verified_classification(id)?);
     Ok(saved)
 }

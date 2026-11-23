@@ -457,12 +457,13 @@ impl RamfluxClient {
         )?;
 
         let contact = self.contact_entry(&record.principal_id)?;
-        Ok(
-            json!({"kind_asserted":contact["kind_asserted"],"kind_verified":contact["kind_verified"],"display_name":contact["display_name"],"display_name_confusable_with":contact["display_name_confusable_with"],"mixed_script":contact["mixed_script"],"request_id":record.request_id,"link_id":record.link_id,"principal_id":record.principal_id,
+        let mut preview = json!({"kind_asserted":contact["kind_asserted"],"kind_verified":contact["kind_verified"],"display_name":contact["display_name"],"display_name_confusable_with":contact["display_name_confusable_with"],"mixed_script":contact["mixed_script"],"request_id":record.request_id,"link_id":record.link_id,"principal_id":record.principal_id,
             "root_commitment":record.contact_identity_commitment,"direction":record.direction,"state":record.state,
             "expires_at":record.expires_at,"note":note,"message_count":held.len(),
             "preview":Self::contact_message_preview(held.first().map(Vec::as_slice))?,
-            "safety_number":safety}),
-        )
+            "safety_number":safety});
+        preview[crate::VerifiedClassification::FIELD] =
+            contact[crate::VerifiedClassification::FIELD].clone();
+        Ok(preview)
     }
 }

@@ -606,7 +606,7 @@ async fn contact02_r2_retired_authority_floors_are_bounded_and_reject_rollback_b
 }
 
 #[tokio::test]
-async fn contact02_r2_held_human_surface_release_creates_a_fallback_thread_without_renderer_recovery()
+async fn contact02_r2_held_human_surface_release_keeps_a_gap_until_the_create()
 -> Result<(), SdkError> {
     use crate::client::surface::test_support::{append_frame, create_frame, text_snapshot};
     use crate::client::surface::{Carrier, ControlKind, PayloadKind};
@@ -669,7 +669,10 @@ async fn contact02_r2_held_human_surface_release_creates_a_fallback_thread_witho
     contact(&mut state, "bob", "contact.accept", json!({"root_commitment":source})).await?;
     let receiver = account(&state, "bob")?;
     let pending = receiver.account_db()?.list_actor_states::<Value>("surface/pending/")?;
-    assert!(pending.is_empty(), "human-authored cards must not enter the renderer recovery queue");
+    assert!(
+        !pending.is_empty(),
+        "a peer append ahead of its create waits in the renderer recovery queue"
+    );
     let messages = receiver.direct_messages(&conversation)?;
     assert_eq!(
         messages.first().map(|message| message.created_at),
@@ -679,8 +682,8 @@ async fn contact02_r2_held_human_surface_release_creates_a_fallback_thread_witho
     assert!(
         receiver.surface_list(&conversation, "", 100)?["surfaces"]
             .as_array()
-            .is_some_and(Vec::is_empty),
-        "fallback-only authors must not bootstrap card state"
+            .is_some_and(|rows| !rows.is_empty()),
+        "a peer gap keeps a conversation-scoped placeholder until the create arrives"
     );
     assert!(receiver.account_db()?.client_record("conversation", &conversation)?.is_some());
     assert_eq!(receiver.direct_messages(&conversation)?.len(), 1);

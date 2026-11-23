@@ -9,6 +9,8 @@ pub(crate) enum HeadUse {
     #[default]
     NewAuthorization,
 }
+pub(crate) mod classification;
+pub use classification::VerifiedClassification;
 pub(crate) mod custody_directory;
 mod verification_cache;
 pub(crate) use verification_cache::VerifiedAuthorityCache;

@@ -5,6 +5,8 @@ import {resolve,dirname} from "node:path";
 import {fileURLToPath} from "node:url";
 import {createRequire} from "node:module";
 const {build}=createRequire(new URL("../library/package.json",import.meta.url))("esbuild");
+import {galleryData} from "./gallery-stories.mjs";
+const gallery=await galleryData();
 const checking=process.argv.includes("--check");
 const [prefix,policyPath,outputPath]=process.argv.slice(2).filter(arg=>arg!=="--check");
 if(!prefix || !policyPath)throw Error("usage: node web/build-web.mjs <release-prefix> <independently-pinned-host-policy.json>");
@@ -26,7 +28,17 @@ const releaseSource="// App-pinned public release material; no private signing k
 if(!checking)await writeFile(resolve(root,"release.js"),releaseSource);else if(await readFile(resolve(root,"release.js"),"utf8")!==releaseSource)throw Error("release drift");
 await mkdir(output,{recursive:true});
 const result=await build({entryPoints:[resolve(root,"worker.ts"),resolve(root,"adapter.ts"),resolve(root,"preview.ts")],outdir:output,
-  write:false,minify:true,bundle:true,format:"esm",platform:"browser",target:"es2022",alias:{env:resolve(root,"env.ts")},plugins:[{name:"generated-wasm",setup(build){build.onResolve({filter:/^\.\/pkg\.js$/},()=>({path:resolve(root,"pkg/ramflux_card.js")}))}}]});
+  write:false,minify:true,bundle:true,format:"esm",platform:"browser",target:"es2022",alias:{env:resolve(root,"env.ts")},plugins:[{name:"gallery-data",setup(build){build.onResolve({filter:/^gallery-data$/},()=>({path:"gallery-data",namespace:"gallery"}));build.onLoad({filter:/.*/,namespace:"gallery"},()=>({contents:JSON.stringify(gallery),loader:"json"}))}},{name:"generated-wasm",setup(build){build.onResolve({filter:/^\.\/pkg\.js$/},()=>({path:resolve(root,"pkg/ramflux_card.js")}))}}]});
 for(const file of result.outputFiles){if(checking){if(!Buffer.from(await readFile(file.path)).equals(Buffer.from(file.contents)))throw Error("web bundle drift: "+file.path)}else await writeFile(file.path,file.contents)}
 if(!checking)await cp(resolve(root,"pkg"),resolve(output,"pkg"),{recursive:true});
-console.log("WEB_BUNDLE_OK");
+const assets={
+ "index.html":await readFile(resolve(root,"gallery.html")),
+ "gallery.css":await readFile(resolve(root,"gallery.css")),
+ "stories.json":Buffer.from(JSON.stringify({schema:gallery.schema,stories:gallery.stories.map(({input,...story})=>({...story,input}))},null,2)+"\n")
+};
+for(const [name,contents]of Object.entries(assets)){
+ const destination=resolve(output,name);
+ if(checking){if(!Buffer.from(await readFile(destination)).equals(contents))throw Error("gallery asset drift: "+name)}
+ else await writeFile(destination,contents);
+}
+console.log("WEB_BUNDLE_OK "+gallery.stories.length+" stories");
