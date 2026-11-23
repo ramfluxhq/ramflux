@@ -30,6 +30,8 @@ pub(crate) enum ActorCodec {
     DirectoryConversation,
     /// `directory/config/`: the large-attachment authority pin, and nothing else.
     DirectoryConfig,
+    /// `directory/attachment-own/`: plaintext of files this account sent, under the snapshot cap.
+    DirectoryOwnAttachment,
 }
 
 impl BodyCodec {
@@ -47,7 +49,8 @@ impl ActorCodec {
             Self::EventIdentity
             | Self::DirectoryIdentity
             | Self::DirectoryConversation
-            | Self::DirectoryConfig => 1,
+            | Self::DirectoryConfig
+            | Self::DirectoryOwnAttachment => 1,
         }
     }
 
@@ -58,6 +61,7 @@ impl ActorCodec {
             Self::DirectoryIdentity => Some("directory/identity/"),
             Self::DirectoryConversation => Some("directory/conversation/"),
             Self::DirectoryConfig => Some("directory/config/"),
+            Self::DirectoryOwnAttachment => Some("directory/attachment-own/"),
             Self::EventIdentity => None,
         }
     }
@@ -115,6 +119,9 @@ pub(crate) fn canonical(
             directory_conversation(bytes)
         }
         (BodyCodec::ActorNamespace, Some(ActorCodec::DirectoryConfig)) => directory_config(bytes),
+        (BodyCodec::ActorNamespace, Some(ActorCodec::DirectoryOwnAttachment)) => {
+            directory_own_attachment(bytes)
+        }
         _ => Err(undeclared()),
     }
 }
@@ -314,6 +321,60 @@ struct DirectoryConfig {
     authority_public_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     home_node_id: Option<String>,
+}
+
+/// One own-sent file inside the account snapshot. Larger files stay on the source device.
+const OWN_ATTACHMENT_MAX: usize = 1_048_576;
+/// At most the product's per-message attachment count.
+const OWN_ATTACHMENT_FILES: usize = 16;
+
+/// Plaintext this account sent, so the next device can read it without the old device secret.
+/// Extra fields stay on A. A wrong type, a gap in `index`, or a body over the cap refuses.
+#[derive(serde::Serialize)]
+struct OwnFile {
+    index: u64,
+    body: String,
+}
+
+#[derive(serde::Serialize)]
+struct OwnAttachment {
+    files: Vec<OwnFile>,
+}
+
+fn directory_own_attachment(bytes: &[u8]) -> Result<Vec<u8>, StorageError> {
+    let map = json_object(bytes)?;
+    let Some(Value::Array(items)) = map.get("files") else {
+        return Err(undeclared());
+    };
+    if items.is_empty() || items.len() > OWN_ATTACHMENT_FILES {
+        return Err(undeclared());
+    }
+    let mut files = Vec::with_capacity(items.len());
+    for (position, item) in items.iter().enumerate() {
+        let Value::Object(fields) = item else {
+            return Err(undeclared());
+        };
+        let index = req_u64(fields, "index")?;
+        let position = u64::try_from(position).map_err(|_| undeclared())?;
+        if index != position {
+            return Err(undeclared());
+        }
+        files.push(OwnFile { index, body: req_hex_body(fields, "body")? });
+    }
+    Ok(serde_json::to_vec(&OwnAttachment { files })?)
+}
+
+/// Even-length lowercase hex of at most [`OWN_ATTACHMENT_MAX`] decoded bytes.
+fn req_hex_body(map: &serde_json::Map<String, Value>, key: &str) -> Result<String, StorageError> {
+    let text = any_string(map, key)?;
+    let raw = text.as_bytes();
+    if raw.len() % 2 != 0 || raw.len() / 2 > OWN_ATTACHMENT_MAX {
+        return Err(undeclared());
+    }
+    if !raw.iter().all(u8::is_ascii_hexdigit) {
+        return Err(undeclared());
+    }
+    Ok(text.to_ascii_lowercase())
 }
 
 fn directory_config(bytes: &[u8]) -> Result<Vec<u8>, StorageError> {

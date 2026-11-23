@@ -157,12 +157,16 @@ enum Source {
     Remote { opened: Box<Opened>, length: u64 },
     /// A file this account sealed: its own prepare row and account-sealed key.
     Owned { store: Store, row: Box<super::meta::Row>, length: u64 },
+    /// Plaintext carried in the account snapshot. The old device secret is not required.
+    AccountCopy { bytes: Vec<u8>, length: u64 },
 }
 
 impl Source {
     fn length(&self) -> u64 {
         match self {
-            Self::Remote { length, .. } | Self::Owned { length, .. } => *length,
+            Self::Remote { length, .. }
+            | Self::Owned { length, .. }
+            | Self::AccountCopy { length, .. } => *length,
         }
     }
 }
@@ -183,6 +187,15 @@ impl Source {
                 return Err(Refusal::new(CODE_LAYOUT_INVALID).into());
             }
             return Ok(Self::Owned { store, row: Box::new(row), length });
+        }
+        if let Some(bytes) = super::transfer_copy::copied(
+            client.account_db()?,
+            &body.message_id,
+            body.index,
+            length,
+            &reference.large_manifest.plaintext_digest,
+        )? {
+            return Ok(Self::AccountCopy { bytes, length });
         }
         let anchor = client.own_account_anchor()?;
         let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
@@ -241,6 +254,9 @@ fn stream(job: &Job, source: &Source, plane: &dyn Plane) -> Result<(), Refusal> 
         }
         Source::Owned { store, row, .. } => {
             import_job::stream_owned(store, row, &mut sink, &fenced, &job.meter)?;
+        }
+        Source::AccountCopy { bytes, .. } => {
+            sink.write_all(bytes).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
         }
     }
     sink.flush().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;

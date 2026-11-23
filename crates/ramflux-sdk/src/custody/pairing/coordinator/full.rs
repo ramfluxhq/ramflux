@@ -379,6 +379,12 @@ impl PairingActor {
                     participant.full_selected_db(db, None).inspect_err(|error| {
                         Self::note_source_preflight_failure("selected source", error);
                     })?;
+                    crate::attachment_send::transfer_copy::stage(
+                        db,
+                        &participant.root,
+                        participant.vault.as_ref(),
+                        &participant.account_id,
+                    )?;
                     let source = db
                         .prepare_full_transfer_source()
                         .map_err(SdkError::from)

@@ -13,6 +13,10 @@ pub(crate) struct ActorNamespace {
 }
 
 pub(crate) const ACTOR_EXPORTED: &[ActorNamespace] = &[
+    ActorNamespace {
+        prefix: "directory/attachment-own/",
+        codec: ActorCodec::DirectoryOwnAttachment,
+    },
     ActorNamespace { prefix: "directory/config/", codec: ActorCodec::DirectoryConfig },
     ActorNamespace { prefix: "directory/conversation/", codec: ActorCodec::DirectoryConversation },
     ActorNamespace { prefix: "directory/identity/", codec: ActorCodec::DirectoryIdentity },

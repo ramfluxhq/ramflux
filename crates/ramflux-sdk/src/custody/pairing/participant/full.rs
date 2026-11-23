@@ -311,6 +311,12 @@ impl LocalPairingParticipant {
         register: impl FnOnce(FullSourcePreparationCancel) -> Result<(), SdkError>,
     ) -> Result<(PreparedFullSource, FullSourcePreparationCancel), SdkError> {
         self.full_selected_db(db, None)?;
+        crate::attachment_send::transfer_copy::stage(
+            db,
+            &self.root,
+            self.vault.as_ref(),
+            &self.account_id,
+        )?;
         let mut source = db.prepare_full_transfer_source()?;
         let cancel = source.cancel_handle();
         register(cancel.clone())?;

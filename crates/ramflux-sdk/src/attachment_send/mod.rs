@@ -39,6 +39,7 @@ mod seal_job;
 mod section10;
 mod store;
 mod targets;
+pub(crate) mod transfer_copy;
 
 pub(crate) use bus::{AuthorityPin, authority, dispatch, open_store, plane_for, unix_now};
 pub(crate) use codes::{

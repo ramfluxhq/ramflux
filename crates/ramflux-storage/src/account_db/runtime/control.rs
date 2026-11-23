@@ -94,6 +94,23 @@ impl AccountDb {
             .collect()
     }
 
+    /// Identifier segment of each kind that starts with `prefix` (the prefix includes `/`).
+    ///
+    /// # Errors
+    /// `PairingField("NoSpace")` when more than 1024 kinds match, and SQLite errors.
+    pub fn list_actor_ids(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT substr(state_kind, length(?1)+1) FROM runtime_actor_state WHERE substr(state_kind,1,length(?1))=?1 ORDER BY state_kind LIMIT 1025",
+        )?;
+        let ids = statement
+            .query_map(params![prefix], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        if ids.len() > 1024 {
+            return Err(StorageError::PairingField("NoSpace"));
+        }
+        Ok(ids)
+    }
+
     /// # Errors
     /// Returns an error when the account-owned control state cannot be reconstructed.
     pub fn load_actor_state<T: serde::de::DeserializeOwned>(
