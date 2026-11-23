@@ -22,11 +22,13 @@ impl CompioMeshQuicServer {
         deadline: Instant,
     ) -> Result<CompioMeshQuicAcceptedRequest, TransportError> {
         compio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
-            let (mut send, mut recv) = connection
-                .connection
-                .accept_bi()
-                .await
-                .map_err(|e| TransportError::Quic(e.to_string()))?;
+            let (mut send, mut recv) = compio::time::timeout(
+                std::time::Duration::from_secs(2),
+                connection.connection.accept_bi(),
+            )
+            .await
+            .map_err(|_| expired())?
+            .map_err(|e| TransportError::Quic(e.to_string()))?;
             let mut prefix = [0; 4];
             compio_read_exact(&mut recv, &mut prefix).await?;
             let len = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| expired())?;

@@ -32,6 +32,7 @@ use crate::{
     read_quic_json_frame, write_quic_json_message,
 };
 pub(crate) mod admitted;
+mod federation;
 mod raw_request;
 use arc_swap::ArcSwap;
 pub(crate) use raw_request::mesh_quic_post_raw_with_deadline_sync;

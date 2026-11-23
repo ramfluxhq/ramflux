@@ -87,11 +87,13 @@ impl super::MeshQuicServer {
         deadline: Instant,
     ) -> Result<super::MeshQuicAcceptedRequest, TransportError> {
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-            let (mut send, mut recv) = connection
-                .connection
-                .accept_bi()
-                .await
-                .map_err(|e| TransportError::Quic(e.to_string()))?;
+            let (mut send, mut recv) = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                connection.connection.accept_bi(),
+            )
+            .await
+            .map_err(|_| expired())?
+            .map_err(|e| TransportError::Quic(e.to_string()))?;
             let mut prefix = [0; 4];
             recv.read_exact(&mut prefix).await.map_err(|e| TransportError::Quic(e.to_string()))?;
             let len = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| expired())?;

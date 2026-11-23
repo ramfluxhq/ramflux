@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     net::IpAddr,
     sync::{Arc, Condvar, Mutex, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 const ATTEMPTS_PER_HOUR: usize = 64;
@@ -212,16 +212,23 @@ impl Bootstrap<'_> {
             || candidate.record.as_ref().is_none_or(|record| record.expires_at <= now)
         {
             charge(ip, now)?;
+            // Discovery owns a fresh budget. A late/cancelled caller cannot poison this slot.
+            let discovery_deadline = Instant::now() + Duration::from_secs(10);
             let discovered = (|| {
-                let record = peer_pin::fetch_record_until(&request.source_node_id, now, deadline)?;
+                let record = peer_pin::fetch_record_classified(
+                    &request.source_node_id,
+                    now,
+                    discovery_deadline,
+                )?;
                 if record.node_id != request.source_node_id {
-                    return Err(refused());
+                    return Err(peer_pin::RecordFailure { error: refused(), authoritative: true });
                 }
                 peer_pin::checked_forward_endpoint_until(
                     &record.node_id,
                     &record.node_endpoint,
-                    deadline,
-                )?;
+                    discovery_deadline,
+                )
+                .map_err(|error| peer_pin::RecordFailure { error, authoritative: false })?;
                 Ok(record)
             })();
             match discovered {
@@ -230,12 +237,16 @@ impl Bootstrap<'_> {
                     candidate.cached_at = now;
                     candidate.failed_at = None;
                 }
-                Err(error) => {
-                    candidate.failed_at = Some(now);
+                Err(failure) => {
+                    candidate.failed_at =
+                        failure.authoritative.then_some(crate::now_unix_seconds()?);
                     candidate.record = None;
-                    return Err(error);
+                    return Err(failure.error);
                 }
             }
+        }
+        if Instant::now() >= deadline {
+            return Err(refused());
         }
         let record = candidate.record.as_ref().ok_or_else(refused)?;
         let mut staged = (*state.snapshot()?).clone();

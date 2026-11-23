@@ -66,6 +66,28 @@ pub(crate) fn fetch_record_until(
     now: u64,
     deadline: std::time::Instant,
 ) -> Result<FederationServerRecord, ramflux_node_core::NodeCoreError> {
+    fetch_record_classified(target, now, deadline).map_err(|failure| failure.error)
+}
+
+pub(crate) struct RecordFailure {
+    pub(crate) error: ramflux_node_core::NodeCoreError,
+    pub(crate) authoritative: bool,
+}
+
+pub(crate) fn fetch_record_classified(
+    target: &str,
+    now: u64,
+    deadline: std::time::Instant,
+) -> Result<FederationServerRecord, RecordFailure> {
+    let bytes = fetch_record_bytes(target, deadline)
+        .map_err(|error| RecordFailure { error, authoritative: false })?;
+    decode_record(&bytes, now).map_err(|error| RecordFailure { error, authoritative: true })
+}
+
+fn fetch_record_bytes(
+    target: &str,
+    deadline: std::time::Instant,
+) -> Result<Vec<u8>, ramflux_node_core::NodeCoreError> {
     let fixture = ramflux_transport::test_node_endpoints(target)
         .map_err(|error| invalid(&error.to_string()))?;
     let socket = match fixture {
@@ -74,11 +96,18 @@ pub(crate) fn fetch_record_until(
     };
     let bytes = ramflux_transport::fetch_server_well_known_until(target, socket, deadline)
         .map_err(|error| invalid(&error.to_string()))?;
+    Ok(bytes)
+}
+
+fn decode_record(
+    bytes: &[u8],
+    now: u64,
+) -> Result<FederationServerRecord, ramflux_node_core::NodeCoreError> {
     if bytes.len() > RECORD_LIMIT {
         return Err(invalid("federation discovery record exceeds size limit"));
     }
     let record: FederationServerRecord =
-        ramflux_protocol::parse_i_json(&bytes).map_err(|error| invalid(&error.to_string()))?;
+        ramflux_protocol::parse_i_json(bytes).map_err(|error| invalid(&error.to_string()))?;
     ramflux_node_core::verify_federation_server_record(&record, now)?;
     Ok(record)
 }

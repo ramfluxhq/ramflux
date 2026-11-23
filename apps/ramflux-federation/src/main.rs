@@ -20,6 +20,7 @@ mod http_response;
 #[cfg(test)]
 mod http_worker_tests;
 mod inbound_trust;
+mod ingress_limits;
 mod ingress_policy;
 #[cfg(feature = "itest-http")]
 mod itest_http;

@@ -118,6 +118,18 @@ pub fn authenticate_tcp_stream(
     stream: TcpStream,
     config: Arc<ServerConfig>,
 ) -> Result<MeshTlsAcceptedStream, TransportError> {
+    authenticate_tcp_stream_until(
+        stream,
+        config,
+        std::time::Instant::now() + Duration::from_secs(10),
+    )
+}
+
+fn authenticate_tcp_stream_until(
+    stream: TcpStream,
+    config: Arc<ServerConfig>,
+    deadline: std::time::Instant,
+) -> Result<MeshTlsAcceptedStream, TransportError> {
     stream.set_nonblocking(false)?;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -125,7 +137,6 @@ pub fn authenticate_tcp_stream(
     let connection =
         ServerConnection::new(config).map_err(|error| TransportError::Tls(error.to_string()))?;
     let mut stream = rustls::StreamOwned::new(connection, stream);
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while stream.conn.is_handshaking() {
         stream.conn.complete_io(&mut HandshakeIo { socket: &mut stream.sock, deadline })?;
     }
@@ -168,7 +179,11 @@ pub fn authenticate_federation_tcp_stream(
         Arc::new(move || Ok(roots.clone())),
         true,
     )?;
-    authenticate_tcp_stream(stream, Arc::new(config))
+    authenticate_tcp_stream_until(
+        stream,
+        Arc::new(config),
+        std::time::Instant::now() + Duration::from_secs(5),
+    )
 }
 
 /// # Errors

@@ -3,11 +3,7 @@
 
 //! One default-deny policy for all federation mesh transports.
 use ramflux_node_core::{MeshPeerIdentity, NodeCoreError};
-use std::{
-    collections::BTreeMap,
-    net::IpAddr,
-    sync::{Mutex, OnceLock},
-};
+use std::sync::OnceLock;
 
 pub(crate) const ENVELOPE_PATH: &str = "/s8/federation/envelope";
 pub(crate) const ENVELOPE_BODY_LIMIT: usize = 2 * 1024 * 1024;
@@ -35,7 +31,8 @@ impl AuthLevel {
 
 enum RoutePolicy {
     AnonymousSigned,
-    VerifiedPeer(&'static [&'static str]),
+    LocalPeer(&'static [&'static str]),
+    RemoteFederation,
     SameNodeRouter,
 }
 const SERVICES: &[&str] = &[
@@ -49,24 +46,23 @@ const SERVICES: &[&str] = &[
 fn policy(method: &str, path: &str) -> RoutePolicy {
     match (method, path) {
         ("POST", ENVELOPE_PATH) => RoutePolicy::AnonymousSigned,
-        ("GET", "/healthz" | "/mvp9/federation/trust-snapshot") => {
-            RoutePolicy::VerifiedPeer(SERVICES)
-        }
+        ("GET", "/healthz" | "/mvp9/federation/trust-snapshot") => RoutePolicy::LocalPeer(SERVICES),
         ("POST", ramflux_node_core::MIGRATION_PEER_PATH | crate::attachment_renewal::PEER_PATH) => {
-            RoutePolicy::VerifiedPeer(&["ramflux-federation"])
+            RoutePolicy::RemoteFederation
         }
         ("POST", ramflux_node_core::HOME_SUBMIT_FORWARD_PATH) => RoutePolicy::SameNodeRouter,
-        ("POST", "/internal/retention/gc_sweep") => {
-            RoutePolicy::VerifiedPeer(&["ramflux-retention"])
-        }
-        _ => RoutePolicy::VerifiedPeer(&[]),
+        ("POST", "/internal/retention/gc_sweep") => RoutePolicy::LocalPeer(&["ramflux-retention"]),
+        _ => RoutePolicy::LocalPeer(&[]),
     }
 }
 pub(crate) fn admit(auth: &AuthLevel, method: &str, path: &str, local: &str) -> bool {
     match policy(method, path) {
         RoutePolicy::AnonymousSigned => true, // Certificate never supplies envelope authority.
-        RoutePolicy::VerifiedPeer(services) => {
-            auth.service().is_some_and(|service| services.contains(&service))
+        RoutePolicy::LocalPeer(services) => {
+            matches!(auth, AuthLevel::Peer(peer) if peer.node_id == local && services.contains(&peer.service_id.as_str()))
+        }
+        RoutePolicy::RemoteFederation => {
+            matches!(auth, AuthLevel::Peer(peer) if peer.node_id != local && peer.service_id == "ramflux-federation")
         }
         RoutePolicy::SameNodeRouter => {
             matches!(auth, AuthLevel::Peer(peer) if peer.node_id == local && peer.service_id == "ramflux-router")
@@ -74,54 +70,7 @@ pub(crate) fn admit(auth: &AuthLevel, method: &str, path: &str, local: &str) -> 
     }
 }
 
-#[derive(Default)]
-struct Limits {
-    connections: BTreeMap<IpAddr, usize>,
-    requests: BTreeMap<IpAddr, usize>,
-}
-static LIMITS: OnceLock<Mutex<Limits>> = OnceLock::new();
-pub(crate) struct AnonymousPermit {
-    ip: IpAddr,
-    connection: bool,
-}
-impl AnonymousPermit {
-    pub(crate) fn acquire(
-        auth: &AuthLevel,
-        ip: IpAddr,
-        connection: bool,
-    ) -> Result<Option<Self>, NodeCoreError> {
-        if !auth.anonymous() {
-            return Ok(None);
-        }
-        let mut limits = LIMITS
-            .get_or_init(Mutex::default)
-            .lock()
-            .map_err(|_| crate::inbound_trust::refused())?;
-        let (rows, total, per_ip) = if connection {
-            (&mut limits.connections, 16, 2)
-        } else {
-            (&mut limits.requests, 8, 2)
-        };
-        if rows.values().sum::<usize>() >= total || rows.get(&ip).copied().unwrap_or(0) >= per_ip {
-            return Err(NodeCoreError::Capacity { resource: "anonymous federation ingress" });
-        }
-        *rows.entry(ip).or_default() += 1;
-        Ok(Some(Self { ip, connection }))
-    }
-}
-impl Drop for AnonymousPermit {
-    fn drop(&mut self) {
-        if let Ok(mut limits) = LIMITS.get_or_init(Mutex::default).lock() {
-            let rows = if self.connection { &mut limits.connections } else { &mut limits.requests };
-            if let Some(count) = rows.get_mut(&self.ip) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    rows.remove(&self.ip);
-                }
-            }
-        }
-    }
-}
+pub(crate) use crate::ingress_limits::{AnonymousPermit, HandshakePermit};
 
 fn worker_slot(
     pool: &'static OnceLock<std::sync::Arc<tokio::sync::Semaphore>>,
@@ -139,8 +88,4 @@ pub(crate) fn discovery_worker() -> Result<tokio::sync::OwnedSemaphorePermit, No
 pub(crate) fn request_worker() -> Result<tokio::sync::OwnedSemaphorePermit, NodeCoreError> {
     static POOL: OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = OnceLock::new();
     worker_slot(&POOL, 64)
-}
-pub(crate) fn handshake_worker() -> Result<tokio::sync::OwnedSemaphorePermit, NodeCoreError> {
-    static POOL: OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = OnceLock::new();
-    worker_slot(&POOL, 16)
 }

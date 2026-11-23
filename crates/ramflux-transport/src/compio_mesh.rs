@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 mod admitted;
+mod federation;
 use std::net::{SocketAddr, ToSocketAddrs};
 
 use compio_buf::bytes::Bytes;

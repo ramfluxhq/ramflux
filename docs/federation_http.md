@@ -55,13 +55,15 @@ mesh listener (Compose port 7443). Neither HTTP listener forwards these paths.
 | GET `/healthz` | Authenticated mesh health probes |
 | GET `/mvp9/federation/trust-snapshot` | Relay trust consumers over authenticated mesh |
 | POST `/s8/federation/envelope` | Node-signed envelopes; the client certificate supplies no authority |
-| POST `/internal/retention/gc_sweep` | Retention service only; peer service identity enforced |
+| POST `/internal/retention/gc_sweep` | Local retention service only; node and service identity enforced |
 
 The federation listener permits absent client certificates. Every route except
 `POST /s8/federation/envelope` requires a verified mesh identity, checked before body
 reads on TCP, Quinn and compio; unknown routes deny access. Health and trust snapshot
-require a known non-retention service. Retention can call only `gc_sweep` among protected
-routes. Migration and attachment renewal require the federation role. Envelope handling
+require a known non-retention service on this node. Retention can call only `gc_sweep`
+among protected routes and must belong to this node. Migration and attachment renewal
+require a remote federation identity: migration binds its node to the signed call's
+claimed peer, and renewal binds it to the requested home node. Envelope handling
 uses only the signed request, regardless of whether a verified certificate is present.
 
 Envelope senders use server-authenticated TLS with pinned server roots, without a client
@@ -73,15 +75,32 @@ fit the 2 MiB body cap, have TTL at most 604800 seconds, be unexpired and be no 
 well-formed signature for an unknown source requires its discovered key to verify.
 
 Inbound discovery has 64 attempts/hour, four per remote IP/hour, four concurrent workers,
-a 128-node coalescing cache and a 60-second negative cache. Failures never create node
-blocks. Its 16 new pins/hour sub-quota is recorded by `InboundSigned` pin provenance and
-survives restart, within the shared 32/hour and 1024 total pin limits. Outbound discovery
-retains its separate 32-attempt/hour allowance. These limits isolate other IPs and outbound
-traffic; callers sharing an IP share its allowance. Anonymous connections are capped at
-16 process-wide and two per IP; anonymous in-flight requests at eight and two per IP;
-each anonymous connection serves at most four requests. Header/body reads and discovery
-share a 10-second absolute request deadline. QUIC synchronous work runs in bounded
-workers whose permits survive cancellation. TCP pending handshakes have a separate cap.
+a 128-node coalescing cache and a 60-second negative cache. Only invalid records from
+completed canonical discovery fetches enter the negative cache; DNS, transport, deadline
+and capacity refusals do not. Discovery owns a fresh ten-second deadline independent of
+the triggering request. A late caller cannot publish a pin, but successful discovery stays
+cached for a genuine caller. Failures never create node blocks. The 16 new pins/hour
+sub-quota is recorded by `InboundSigned` pin provenance and survives restart within the
+shared 32/hour and 1024 total pin limits. Outbound discovery retains its separate
+32-attempt/hour allowance. Sixteen source IPs can exhaust the 64/hour inbound budget;
+callers sharing an IP share its allowance.
+
+New-source connections and handshakes each have 16 process-wide slots, two per IP and
+two per IPv4 /24 or IPv6 /64. Repeat network groups cannot consume the final four slots.
+New-source requests have eight slots, two per IP/group, with two slots reserved for new
+groups. Previously verified source addresses use separate 16-slot connection/handshake
+and 32-slot request pools (four per group, two per IP, four-slot new-group headroom).
+The address cache is process-local, expires after one hour and holds at most 128 entries;
+only verified TLS identities or authenticated signed requests populate it. Address hints
+provide scheduling capacity, never certificate or envelope authority. Verified mTLS
+connections bypass anonymous connection/request pools. Enough distinct groups can still
+exhaust a finite pool, and co-located callers share fairness limits.
+
+Anonymous connections serve at most four requests. TCP anonymous headers and QUIC
+pre-stream idle waits expire after two seconds; request bodies/processing retain a
+10-second absolute deadline. Handshakes expire after five seconds. Quinn and compio
+accept new arrivals independently of outstanding handshakes; all transports share source
+accounting. QUIC synchronous workers retain their permits through cancellation.
 
 QUIC frames place `method` and `path` before `body`, as the mesh request serializer does.
 A bounded routing header is admitted before any body value is read; body-first or
