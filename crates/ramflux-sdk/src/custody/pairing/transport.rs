@@ -50,7 +50,14 @@ impl PairingConfig {
     /// Refuses non-Unicode values, every enabled value other than unset, `0` or `1`, and an
     /// integration CA file that is missing, empty, not UTF-8, or larger than 64 KiB.
     pub fn from_env() -> Result<Self, SdkError> {
-        let mut config = Self::enabled_from_env()?;
+        let config = Self::enabled_from_env()?;
+        #[cfg(feature = "itest-memory-vault")]
+        let config = Self::apply_itest_pairing_ca(config)?;
+        Ok(config)
+    }
+
+    #[cfg(feature = "itest-memory-vault")]
+    fn apply_itest_pairing_ca(mut config: Self) -> Result<Self, SdkError> {
         if let Some(pem) = itest_pairing_ca_pem()? {
             config.enabled = true;
             config.extra_root_ca_pem = Some(pem);
@@ -814,11 +821,6 @@ fn rustls_peer_rejected(error: &rustls::Error) -> bool {
 #[cfg(feature = "itest-memory-vault")]
 fn itest_pairing_ca_pem() -> Result<Option<String>, SdkError> {
     read_itest_pairing_ca_file()
-}
-
-#[cfg(not(feature = "itest-memory-vault"))]
-fn itest_pairing_ca_pem() -> Result<Option<String>, SdkError> {
-    Ok(None)
 }
 
 /// Bounded read of the integration pairing root. Absent means the fixed trust roots only.
