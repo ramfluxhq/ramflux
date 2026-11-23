@@ -9,6 +9,7 @@ mod commit;
 mod delete;
 mod host_revoked;
 mod machine;
+mod operable;
 mod publish;
 mod reassociate;
 mod rebind;
@@ -49,6 +50,7 @@ pub use machine::{
     BeginInput, BeginOutcome, PrimarySigning, apply_decision, begin, cancel, primary_sign_decision,
     receive_plan, resume_request,
 };
+pub(crate) use operable::require_agent_operable;
 pub(crate) use publish::complete_with_receipt;
 pub(crate) use publish::{AgentPublishing, first_action, load_publishing};
 pub(crate) use reassociate::{

@@ -373,9 +373,7 @@ impl LiveCall {
         }
     }
     pub fn control(&mut self, body: CallAction, now: i64) -> Result<CallControl, SdkError> {
-        if self.call_ref.is_some()
-            && !matches!(body, CallAction::Invite { .. } | CallAction::AnsweredElsewhere)
-        {
+        if self.holds_media_for(&body) {
             let peer = self.media_peer().clone();
             self.hold_media_for(&peer);
         }
@@ -396,6 +394,24 @@ impl LiveCall {
             signature: String::new(),
         })
     }
+    /// An answered call already has a media grant. Continue actions must not
+    /// take it back while the next resolution is in flight.
+    fn holds_media_for(&self, body: &CallAction) -> bool {
+        if self.call_ref.is_none()
+            || matches!(body, CallAction::Invite { .. } | CallAction::AnsweredElsewhere)
+        {
+            return false;
+        }
+        !(self.gateway_answered
+            && matches!(
+                body,
+                CallAction::Ack { .. }
+                    | CallAction::Ready { .. }
+                    | CallAction::Rekey { .. }
+                    | CallAction::RekeyAck { .. }
+            ))
+    }
+
     /// Remember an answer that arrived before the gateway released media.
     pub(crate) fn request_answer(&mut self) {
         self.held_answer = HeldAnswer::Requested;

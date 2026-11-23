@@ -217,6 +217,11 @@ impl RamfluxClient {
             { return Err(invalid("principal root changed")); }
             let previous_name = old.as_ref().and_then(|row| row["display_name"].as_str()).map(str::to_owned);
             let previous_fingerprint = old.as_ref().and_then(|row| row["device_set_hash"].as_str()).map(str::to_owned);
+            let previous_commitment = old
+                .as_ref()
+                .and_then(|row| row["contact_identity_commitment"].as_str())
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
             let fingerprint = native_fingerprint(verified)?;
             let retained = retained_routes(old.as_ref(), verified, expected, now);
             let mut row = old.unwrap_or_else(|| json!({"id":body.principal_id,"principal_id":body.principal_id}));
@@ -238,6 +243,9 @@ impl RamfluxClient {
             }).collect::<Result<Vec<_>, SdkError>>()?);
             if manifest.devices.is_empty() {
                 row["devices"] = json!(retained);
+                if let Some(previous) = previous_commitment {
+                    row["contact_identity_commitment"] = json!(previous);
+                }
             }
             if previous_name.as_deref().is_some_and(|name| name != body.profile.display_name) {
                 db.append_journal(&format!("identity-public-name:{expected}:{}", body.device_set_epoch), "contact.changed",
