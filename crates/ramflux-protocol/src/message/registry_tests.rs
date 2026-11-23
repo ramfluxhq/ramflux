@@ -228,12 +228,12 @@ fn all_kind_binding_round_trip() -> TestResult {
             payload: Some(task::Payload::OwnHistory(TaskHistoryExport::default())),
         }),
         content::Value::Call(Call {
-            control: Some(CallControl {
+            payload: Some(call::Payload::Control(CallControl {
                 body: Some(CallAction {
                     value: Some(call_action::Value::Ringing(CallActionRinging {})),
                 }),
                 ..Default::default()
-            }),
+            })),
         }),
         content::Value::SelfSync(SelfSync { operation: 3, revision: 1, ..Default::default() }),
     ];

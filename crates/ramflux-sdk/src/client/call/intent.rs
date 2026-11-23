@@ -169,7 +169,12 @@ fn bind_cancel(
     target: &IntentTarget,
     now: u64,
 ) -> Result<Option<BoundCallIntent>, SdkError> {
-    let cancel_key = storage_key(&control.call_id, &target.device_id, "cancel");
+    // The envelope id is the DM message id. A shared cancel would make the later
+    // Hangup a duplicate of AnsweredElsewhere, so the loser never revises its summary.
+    let Some(slot) = cancel_slot(&control.body) else {
+        return Ok(None);
+    };
+    let cancel_key = storage_key(&control.call_id, &target.device_id, slot);
     if let Some(stored) = load(account, &cancel_key)? {
         return Ok(reusable(&stored, target));
     }
@@ -203,6 +208,24 @@ fn bind_cancel(
     let signed = sign(account, body)?;
     store(account, &cancel_key, &envelope_id, &signed)?;
     Ok(Some(BoundCallIntent { envelope_id, signed }))
+}
+
+fn cancel_slot(action: &CallAction) -> Option<&'static str> {
+    match action {
+        CallAction::Reject => Some("cancel/reject"),
+        CallAction::Hangup => Some("cancel/hangup"),
+        CallAction::Timeout => Some("cancel/timeout"),
+        CallAction::Failed => Some("cancel/failed"),
+        CallAction::Busy => Some("cancel/busy"),
+        CallAction::AnsweredElsewhere => Some("cancel/answered-elsewhere"),
+        CallAction::Invite { .. }
+        | CallAction::Ringing
+        | CallAction::Answer { .. }
+        | CallAction::Ack { .. }
+        | CallAction::Ready { .. }
+        | CallAction::Rekey { .. }
+        | CallAction::RekeyAck { .. } => None,
+    }
 }
 
 fn reusable(stored: &StoredCallIntent, target: &IntentTarget) -> Option<BoundCallIntent> {

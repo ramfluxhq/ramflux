@@ -63,6 +63,17 @@ impl RamfluxClient {
         let exact_inner = db.message_content(&id)?.ok_or(EvidenceError::OriginEvidenceMissing)?;
         let inner = g::Inner::decode(exact_inner.as_slice())
             .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
+        // A call summary is this device's record. It was never a sender envelope, so the
+        // history item carries the exact inner and no origin proof. A later device imports
+        // that inner and does not ring.
+        if let Some((identity, _)) =
+            crate::client::call::history::open_summary_history(&exact_inner)?
+        {
+            if identity.id.as_slice() != message_id {
+                return Err(EvidenceError::OriginCommitmentMismatch.into());
+            }
+            return Ok(g::HistoryItem { exact_inner, ..g::HistoryItem::default() });
+        }
         if inner.kind == 3 {
             let original = db
                 .load_actor_state::<OriginalHeader>(&format!("routed/original-header/{id}"))?
