@@ -1,30 +1,18 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Device-authenticated task relations; peer principal kinds await signed identity metadata.
+//! Device-authenticated task relations. Account kind is not an authorization input.
 use super::{carrier::Carrier, invalid};
-use crate::{LocalBusClientMode, RamfluxClient, SdkError};
+use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::{ActorType, Task, TaskEventBody};
 
-/// Temporary role adapter: role class never authenticates a peer's principal kind.
+/// Signer label only. Lifecycle authority and kind verification do not read it.
 /// Every operation must pass `authorize_task_relations` before protocol reduction.
 pub(super) const fn relation_role(event: &TaskEventBody) -> ActorType {
     match event {
         TaskEventBody::Proposal(_) | TaskEventBody::Update(_) => ActorType::Bot,
         _ => ActorType::Human,
     }
-}
-pub(crate) fn require_local_human(
-    mode: &LocalBusClientMode,
-    kind: Option<&str>,
-) -> Result<(), SdkError> {
-    if *mode != LocalBusClientMode::AttendedCli || kind != Some("human") {
-        return Err(crate::task_refusal::refused(
-            crate::TaskRefusalCode::HumanRequired,
-            "task human decision requires attended human account",
-        ));
-    }
-    Ok(())
 }
 impl RamfluxClient {
     pub(super) fn require_task_member(

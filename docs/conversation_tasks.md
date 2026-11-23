@@ -47,7 +47,7 @@ observed `base_revision`. Reason fields are not accepted.
 
 Refusals use typed `error.code`: `invalid_request`, `invalid_event`,
 `not_requester`, `not_assignee`, `not_member`, `not_eligible_acceptor`,
-`human_required`, `stale_revision`, `terminal`, `task_stalled`, `not_found`,
+`stale_revision`, `terminal`, `task_stalled`, `not_found`,
 `already_exists`, `no_local_role`, `quota_exhausted`, `rate_limited`,
 `decision_consumed`, or `decision_mismatch`. Transport failures keep their
 transport error codes. Clients never need to parse English messages.
@@ -64,13 +64,14 @@ one account DB writer transaction. Reader methods use the account reader pool.
 
 ## Authority and decisions
 
-Local start, accept, decline, cancel and resolve require an attended human
-account. Proposal requires a headless AI account. Receiving verifies the
+Any conversation participant may propose, start, accept, decline, resolve, or
+cancel. Account kind is not an authorization input. Receiving verifies the
 original device signature, conversation membership and relations: updates
 require the assignee, resolution and cancellation require the requester, and
 proposal acceptance or decline requires a member distinct from both proposer
-and assignee. The temporary role adapter records `actor_kind_verified=false`;
-a peer's self-asserted kind is never trusted.
+and assignee. A consumed decision stays refused on replay. `actor_kind_verified`
+is true only when the actor's device is on the signed profile. A self-asserted
+kind is never trusted.
 
 Approval refers to a single-use, argument-bound decision accepted by the
 existing MCP approval flow. The grant signature must belong to a verified
@@ -81,7 +82,7 @@ devices as an assignee-signed, pair-E2EE control inside the conversation.
 approval, a scoped `approval_id`, the original `decision_id`, `grant_id` and
 `task_binding` (conversation/task/step/opening revision/requester/assignee/executor).
 The requester calls `grant.approve {approval_id}` or `grant.deny {approval_id}`.
-Its attended daemon signs the immutable grant body and queues the decision
+The requester's daemon signs the immutable grant body and queues the decision
 back to the executor and its own siblings. The response's `decision_id` is the
 ID to pass to `task.resolve`; the scoped UI approval ID is not a grant ID.
 For existing clients, `task.resolve.decision_id` also accepts that scoped UI

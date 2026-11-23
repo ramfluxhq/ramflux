@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Signed task lifecycle inside encrypted conversation messages. Identity, actor role,
+//! Signed task lifecycle inside encrypted conversation messages. Identity,
 //! conversation membership and external grant/surface decision verification belong to the
 //! caller's trust boundary. This module verifies signatures and pure lifecycle authority;
 //! applying a resolution never mints an MCP grant or executes a surface action.

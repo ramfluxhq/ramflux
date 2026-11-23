@@ -18,13 +18,12 @@ mod historical;
 mod intervention;
 mod lifecycle;
 mod local_pending;
+pub(crate) mod own_history;
 pub(crate) mod pending;
 mod projection;
 mod quota;
-mod rejected_task;
-pub(crate) use authority::require_local_human;
-pub(crate) mod own_history;
 mod read;
+mod rejected_task;
 mod roster;
 use crate::SdkError;
 pub(crate) use projection::Delivery;
@@ -96,27 +95,15 @@ pub(crate) fn actor_kind_verified(
     client.read_profile_facts(principal).is_some_and(|facts| facts.matches_device(device))
 }
 
-/// Presentation of a relation role must not turn a signed bot profile into a verified human.
-pub(crate) fn actor_role_kind_verified(
-    client: &crate::RamfluxClient,
-    principal: &str,
-    device: &str,
-    role: ramflux_protocol::ActorType,
-) -> bool {
-    client.read_profile_facts(principal).is_some_and(|facts| facts.matches_role(device, role))
-}
+/// Kind is verified when the signing device is on the signed profile, independent of relation.
 pub(crate) fn carrier_kind_verified(
     client: &crate::RamfluxClient,
     carrier: &carrier::Carrier,
 ) -> bool {
-    carrier.event().is_ok_and(|event| {
-        actor_role_kind_verified(
-            client,
-            &carrier.principal_id,
-            &carrier.device_id,
-            authority::relation_role(event.event()),
-        )
-    })
+    carrier.event().is_ok()
+        && client
+            .read_profile_facts(&carrier.principal_id)
+            .is_some_and(|facts| facts.matches_device(&carrier.device_id))
 }
 
 /// Authenticated kind is independent of whether it matches the task action's role class.

@@ -5,7 +5,7 @@ use ramflux_protocol::*;
 use task_support::*;
 
 #[test]
-fn proposals_cannot_execute_until_a_human_accepts_and_declines_are_terminal() -> Result {
+fn proposals_stay_provisional_until_another_member_accepts_and_declines_are_terminal() -> Result {
     let human = Actor::human();
     let agent = Actor::agent();
     let mut state = TaskState::default();
@@ -22,7 +22,7 @@ fn proposals_cannot_execute_until_a_human_accepts_and_declines_are_terminal() ->
         &agent
             .event(TaskEventBody::Accept(TaskAccept { task_id: "task".to_owned(), version: 2 }))?,
         &agent.signer(),
-        &TaskReject::HumanRequired,
+        &TaskReject::WrongSigner,
     )?;
     let mut declined = state.clone();
     declined.apply(
@@ -49,7 +49,7 @@ fn proposals_cannot_execute_until_a_human_accepts_and_declines_are_terminal() ->
     Ok(())
 }
 #[test]
-fn only_the_assignee_updates_and_only_the_human_requester_cancels() -> Result {
+fn only_the_assignee_updates_and_only_the_requester_cancels() -> Result {
     let human = Actor::human();
     let agent = Actor::agent();
     let other = Actor::other();
@@ -61,7 +61,7 @@ fn only_the_assignee_updates_and_only_the_human_requester_cancels() -> Result {
         &TaskReject::WrongSigner,
     )?;
     let cancel = TaskEventBody::Cancel(TaskCancel { task_id: "task".to_owned(), base_revision: 1 });
-    reject(&mut state, &agent.event(cancel.clone())?, &agent.signer(), &TaskReject::HumanRequired)?;
+    reject(&mut state, &agent.event(cancel.clone())?, &agent.signer(), &TaskReject::WrongSigner)?;
     reject(&mut state, &other.event(cancel.clone())?, &other.signer(), &TaskReject::WrongSigner)?;
     reject(
         &mut state,
@@ -74,14 +74,14 @@ fn only_the_assignee_updates_and_only_the_human_requester_cancels() -> Result {
     Ok(())
 }
 #[test]
-fn starts_and_proposals_require_their_named_authenticated_actor_roles() -> Result {
+fn starts_and_proposals_require_their_named_authenticated_principals() -> Result {
     let human = Actor::human();
     let agent = Actor::agent();
     let other = Actor::other();
     let mut state = TaskState::default();
-    reject(&mut state, &agent.event(start())?, &agent.signer(), &TaskReject::HumanRequired)?;
+    reject(&mut state, &agent.event(start())?, &agent.signer(), &TaskReject::WrongSigner)?;
     reject(&mut state, &other.event(start())?, &other.signer(), &TaskReject::WrongSigner)?;
-    reject(&mut state, &human.event(proposal())?, &human.signer(), &TaskReject::AgentRequired)?;
+    reject(&mut state, &human.event(proposal())?, &human.signer(), &TaskReject::WrongSigner)?;
     let automated = Actor::new("other", ActorType::Workflow, 51);
     reject(
         &mut state,
@@ -170,14 +170,14 @@ fn an_assignee_cannot_drop_retarget_rename_or_resolve_its_open_intervention() ->
         &mut state,
         &agent.event(resolve(3, approval(), TaskDecision::Resume))?,
         &agent.signer(),
-        &TaskReject::HumanRequired,
+        &TaskReject::WrongSigner,
     )?;
     let steps = vec![blocked("s", approval()), step("parallel", TaskStatus::Done)];
     state.apply(&agent.event(update(3, TaskStatus::NeedsMe, steps))?, &agent.signer())?;
     Ok(())
 }
 #[test]
-fn human_resolution_is_bound_to_requester_step_target_and_single_use_decision() -> Result {
+fn resolution_is_bound_to_requester_step_target_and_single_use_decision() -> Result {
     let human = Actor::human();
     let other = Actor::other();
     let agent = Actor::agent();
