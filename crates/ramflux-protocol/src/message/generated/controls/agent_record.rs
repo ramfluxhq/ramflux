@@ -7,7 +7,8 @@ use super::super::*;
 
 /// The agent record (AGENT-CONFIG-01 contract 1). `host`, `config`, `revision`, `observation` and
 /// `cleanup` belong to the bound-runtime stages: they are present in the message but always absent or
-/// empty in this module. `access` is RF-owned and validated by the record store.
+/// empty in this module. `access` is RF-owned and validated by the record store. `base` is the stored
+/// event identity that `agent.access.set` must send back unchanged.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AgentRecord {
     #[prost(string, tag = "1")]
@@ -32,6 +33,8 @@ pub struct AgentRecord {
     pub access: ::core::option::Option<AgentAccessPolicy>,
     #[prost(string, tag = "11")]
     pub role: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "12")]
+    pub base: ::core::option::Option<EventIdentity>,
 }
 impl serde::Serialize for AgentRecord {
     #[allow(deprecated)]
@@ -74,6 +77,9 @@ impl serde::Serialize for AgentRecord {
         if !self.role.is_empty() {
             len += 1;
         }
+        if self.base.is_some() {
+            len += 1;
+        }
         let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.AgentRecord", len)?;
         if !self.agent_anchor.is_empty() {
             struct_ser.serialize_field("agentAnchor", &self.agent_anchor)?;
@@ -108,6 +114,9 @@ impl serde::Serialize for AgentRecord {
         if !self.role.is_empty() {
             struct_ser.serialize_field("role", &self.role)?;
         }
+        if let Some(v) = self.base.as_ref() {
+            struct_ser.serialize_field("base", v)?;
+        }
         struct_ser.end()
     }
 }
@@ -131,6 +140,7 @@ impl<'de> serde::Deserialize<'de> for AgentRecord {
             "cleanup",
             "access",
             "role",
+            "base",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
@@ -145,6 +155,7 @@ impl<'de> serde::Deserialize<'de> for AgentRecord {
             Cleanup,
             Access,
             Role,
+            Base,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -179,6 +190,7 @@ impl<'de> serde::Deserialize<'de> for AgentRecord {
                             "cleanup" => Ok(GeneratedField::Cleanup),
                             "access" => Ok(GeneratedField::Access),
                             "role" => Ok(GeneratedField::Role),
+                            "base" => Ok(GeneratedField::Base),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -207,6 +219,7 @@ impl<'de> serde::Deserialize<'de> for AgentRecord {
                 let mut cleanup__ = None;
                 let mut access__ = None;
                 let mut role__ = None;
+                let mut base__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -279,6 +292,12 @@ impl<'de> serde::Deserialize<'de> for AgentRecord {
                             }
                             role__ = Some(map_.next_value()?);
                         }
+                        GeneratedField::Base => {
+                            if base__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("base"));
+                            }
+                            base__ = map_.next_value()?;
+                        }
                     }
                 }
                 Ok(AgentRecord {
@@ -293,6 +312,7 @@ impl<'de> serde::Deserialize<'de> for AgentRecord {
                     cleanup: cleanup__.unwrap_or_default(),
                     access: access__,
                     role: role__.unwrap_or_default(),
+                    base: base__,
                 })
             }
         }

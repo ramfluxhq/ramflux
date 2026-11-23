@@ -222,6 +222,30 @@ impl PrimaryVault for HostVault {
     fn load_provisioning_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
         self.invoke(RamfluxV2CustodyOperation::LoadProvisioning, reference, &[])
     }
+    /// The unlocked host is presence. The platform store releases the same primary
+    /// item and primary branch the local path uses; this signs that exact decision.
+    fn sign_agent_register_decision(
+        &self,
+        request: crate::custody::AgentDecisionSigning<'_>,
+    ) -> Result<ramflux_protocol::custody::RegisterDecision, SdkError> {
+        crate::custody::require_vault_reference(request.branch_reference, "branch:")?;
+        // Bind the body to the exact plan first: a refused plan never asks the store.
+        let body = ramflux_protocol::custody::register_decision_body(request.request)
+            .map_err(|_| SdkError::CustodySetupInvalid)?;
+        {
+            let primary = self
+                .load_primary(request.primary_reference)
+                .map_err(|_| crate::custody::agent_key_unavailable())?;
+            if primary.public_key() != request.expected_primary_public_key {
+                return Err(crate::custody::agent_key_unavailable());
+            }
+        }
+        let branch = self
+            .load_branch(request.branch_reference, request.principal_id, &request.request.signer)
+            .map_err(|_| crate::custody::agent_key_unavailable())?;
+        ramflux_crypto::custody::sign_register_decision(&branch.signing, body)
+            .map_err(|_| crate::custody::agent_key_unavailable())
+    }
 }
 
 #[cfg(test)]
