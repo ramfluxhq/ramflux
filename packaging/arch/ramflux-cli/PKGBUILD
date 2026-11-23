@@ -17,7 +17,7 @@ source=("ramflux-v${pkgver}.tar.gz::https://github.com/ramfluxhq/ramflux/archive
 sha256sums=('b5ee171f352cbbcf570715590504b4c0941e8afe5062ed55722f851a52687d4e'
             '3808aa604ea27e46fee12e95bf2a73a472b77f58b38795a22323eaadcdc30304')
 _product_commit=ee3d574ce3eb3cb833197fa8612d2135e6828f7e
-_tui_commit=02f2ca4402b7aae67f3b4dd089e3d18aca154a8d
+_tui_commit=881b1be7bcb71944fcb58e62643da9f6310efe67
 
 prepare() {
   # Isolate the TUI lockfile when makepkg runs inside the product checkout.
