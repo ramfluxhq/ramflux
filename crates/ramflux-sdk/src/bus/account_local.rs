@@ -138,6 +138,8 @@ pub(super) fn present(index: &AccountIndex, root: &Path, id: &str) -> Result<boo
 
 /// Local wipe: vault items, the account database, the custody tree, then the active pointer.
 ///
+/// When the removed account was active, the pointer moves to another on-disk account.
+/// When none remains, the pointer is cleared and a later list still succeeds.
 /// A busy writer fails before the custody tree is removed. `AccountNotFound` from the index
 /// is success for a custody-only account. There is no network call.
 ///
@@ -152,7 +154,7 @@ pub(super) fn erase(
     delete_secrets(root, vault, id)?;
     forget_database(index, id)?;
     crate::custody::remove_custody_tree(root, id)?;
-    index.clear_active_account(id)?;
+    index.release_active_account(id)?;
     Ok(())
 }
 
