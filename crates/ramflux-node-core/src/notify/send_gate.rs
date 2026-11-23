@@ -248,7 +248,7 @@ impl NotifyRedbStore {
     pub fn prune_notification_authority(&self, now: u64) -> Result<usize, NodeCoreError> {
         let now = self.send_authority.retention_clock(now)?;
         let _writer = self.local_writer.try_lock().map_err(|_| SendAuthorityError::Busy)?;
-        self.prune_wake_ledger(now)?;
+        self.prune_wake_ledger_at(now)?;
         self.send_authority.prune_local_roots(
             now,
             |root| {

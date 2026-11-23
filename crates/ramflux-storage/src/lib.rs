@@ -137,6 +137,9 @@ pub use account_db::transfer_export::export_contract_digest;
 pub use account_db::transfer_export::probe::{
     DirectoryKeys, ProbeExport, ProbeOpen, itest_transfer_open,
 };
+pub use account_db::username_candidates::UsernameRecoveryCandidate;
+pub use account_db::username_directory::{UsernameFloor, UsernameNamePin, UsernameStorageError};
+pub use account_db::{ConversationReadPosition, DirectoryTotals};
 pub use account_db::{
     ResidueHit, ResidueScan, ResidueScanStatus, ResidueTable, ResidueTableStatus, residue_needles,
 };

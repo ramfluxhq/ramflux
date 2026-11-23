@@ -59,6 +59,7 @@ impl AccountRuntime {
     }
 
     async fn preempt_network_tasks(&mut self) -> Result<(), SdkError> {
+        self.username.stop().await;
         self.pairing.stop().await;
         self.transfers.stop().await;
         if let Some(account) = self.state.accounts.get(&self.id) {
@@ -218,16 +219,13 @@ impl AccountRuntime {
                 return Ok(false);
             }
         }
-        if matches!(
-            command.request.method.as_str(),
-            "device.transfer.begin"
-                | "device.transfer.status"
-                | "device.pair.join"
-                | "device.transfer.join"
-                | "object.fetch"
-                | "object.put.finish"
-        ) {
+        if owned_command(&command.request.method) {
             self.start_owned_command(command, reply).await?;
+            return Ok(false);
+        }
+        if super::super::username_directory::handles(&command.request.method) {
+            // Boxed: the username handler's future would otherwise enlarge every account command future on the stack.
+            Box::pin(self.start_username(command, reply)).await;
             return Ok(false);
         }
         #[cfg(test)]
@@ -334,4 +332,16 @@ impl AccountRuntime {
         }
         Ok(())
     }
+}
+
+fn owned_command(method: &str) -> bool {
+    matches!(
+        method,
+        "device.transfer.begin"
+            | "device.transfer.status"
+            | "device.pair.join"
+            | "device.transfer.join"
+            | "object.fetch"
+            | "object.put.finish"
+    )
 }

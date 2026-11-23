@@ -10,13 +10,17 @@ use crate::prelude::*;
 use std::sync::{Arc, Mutex as RoutingMutex};
 
 mod commands;
+mod maintenance;
+use maintenance::Maintenance;
 mod transient;
 pub(super) use transient::TransientHost;
 mod agent_calls;
+mod agent_contacts;
 mod connection;
 mod pairing_calls;
 mod pairing_data;
 mod pairing_own_sync;
+mod username_calls;
 #[cfg(test)]
 pub(crate) use connection::apply_ack_flush;
 #[cfg(test)]
@@ -75,6 +79,7 @@ struct AccountRuntime {
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
     transient: TransientHost,
     pairing: pairing_calls::Calls,
+    username: username_calls::Calls,
     #[cfg(test)]
     receive_gate_hook: Option<ReceiveGateHook>,
     #[cfg(test)]
@@ -156,12 +161,14 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         ledger: None,
         transient: TransientHost::default(),
         pairing: pairing_calls::Calls::default(),
+        username: username_calls::Calls::default(),
         #[cfg(test)]
         receive_gate_hook: None,
         #[cfg(test)]
         courier_events: None,
     };
     let result = Box::pin(account.serve(ready)).await;
+    account.username.stop().await;
     account.pairing.stop().await;
     account.ledger = None;
     account.transfers.stop().await;
@@ -382,22 +389,36 @@ impl AccountRuntime {
         }
     }
 
-    async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
-        if !self.initialize_actor(ready).await? {
-            return Ok(());
-        }
-        let mut schedule = super::sync_driver::Schedule {
+    fn receive_schedule(&self) -> (super::sync_driver::Schedule, tokio::time::Instant) {
+        let schedule = super::sync_driver::Schedule {
             min: self.timeouts.receive_min,
             max: self.timeouts.receive_max,
             interval: self.timeouts.receive_min,
         };
-        let mut next = tokio::time::Instant::now() + schedule.min;
+        let next = tokio::time::Instant::now() + schedule.min;
+        (schedule, next)
+    }
+
+    async fn prepare_receive_turn(
+        &mut self,
+    ) -> Result<(Option<tokio::time::Instant>, Option<tokio::time::Instant>), SdkError> {
+        self.refresh_transient_host().await;
+        self.publish_transient_updates();
+        let transient = self.transient_deadline();
+        let username = self.username.deadline();
+        Box::pin(self.refresh_pairing_reader_generation()).await?;
+        Ok((transient, username))
+    }
+
+    async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
+        if !self.initialize_actor(ready).await? {
+            return Ok(());
+        }
+        let (mut schedule, mut next) = self.receive_schedule();
         let mut checkpoints = 0_u8;
         loop {
-            self.refresh_transient_host().await;
-            self.publish_transient_updates();
-            let transient_deadline = self.transient_deadline();
-            Box::pin(self.refresh_pairing_reader_generation()).await?;
+            let (transient_deadline, username_deadline) =
+                Box::pin(self.prepare_receive_turn()).await?;
             if let Some(command) = self.queued_command(&mut checkpoints) {
                 if Box::pin(self.apply(command)).await? {
                     break;
@@ -430,6 +451,16 @@ impl AccountRuntime {
                         None => std::future::pending().await,
                     }
                 } => { self.publish_transient_updates(); continue; },
+                completion = self.username.receive() => {
+                    if let Some(completion) = completion && Box::pin(self.finish_username(completion)).await? { break; }
+                    continue;
+                },
+                () = async {
+                    match username_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => { self.start_username_delivery(); continue; },
                 completion = self.pairing.receive() => {
                     if let Some(completion) = completion
                         && self.finish_pairing_begin(completion).await? { break; }
@@ -451,22 +482,20 @@ impl AccountRuntime {
                 },
                 () = tokio::time::sleep_until(next), if !self.state.accounts.is_empty() => {
                     self.maintain_expired_object_holds();
-                    let mut shutdown = self.shutdown.clone();
-                    let active = tokio::select! {
-                        _ = shutdown.changed() => break,
-                        result = self.sync() => match result {
-                            Ok(active) => active,
-                            Err(error) => {
-                                tracing::warn!(account_id = %self.id, %error,
-                                    error_code = local_bus_error_code(&error),
-                                    "background synchronization deferred; account remains open");
-                                false
-                            }
-                        },
-                    };
-                    schedule.completed(active);
-                    next = tokio::time::Instant::now() + schedule.interval;
-                    continue;
+                    match Box::pin(self.maintain_until_command()).await {
+                        Maintenance::Stopped => break,
+                        Maintenance::Interrupted => continue,
+                        Maintenance::Command(command) => Some(*command),
+                        Maintenance::Username(completion) => {
+                            if Box::pin(self.finish_username(*completion)).await? { break; }
+                            continue;
+                        }
+                        Maintenance::Completed(active) => {
+                            schedule.completed(active);
+                            next = tokio::time::Instant::now() + schedule.interval;
+                            continue;
+                        }
+                    }
                 },
             };
             checkpoints = 0;
@@ -491,6 +520,7 @@ impl AccountRuntime {
         self.refresh_networking_expiry().await;
         self.maintain_pairing_own_sync().await;
         self.maintain_agent_record_broadcast();
+        self.maintain_agent_owner_contact().await;
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };

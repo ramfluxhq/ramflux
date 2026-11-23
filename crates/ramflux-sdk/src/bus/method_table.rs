@@ -53,7 +53,7 @@ methods! {
     LocalMutation(Always) => Actor: ["search.index.rebuild"];
     LocalRead(Always) => Actor: ["account.config.get", "diag.residue"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
-    LocalFirst(Always) => Actor: ["object.get", "object.get.begin"];
+    LocalFirst(Always) => Actor: ["object.get", "object.get.begin", "username.mutate", "profile.update"];
     LocalRead(Always) => Actor: ["a2i.list_pending", "device.pair.status", "device.transfer.status"];
     LocalMutation(Always) => Actor: [
         "account.config.set",
@@ -190,6 +190,7 @@ methods! {
         "node.list",
     ];
     NeedsNetwork(Always) => Actor: [
+        "username.status", "username.resolve", "username.contact.add",
         "a2i.append",
         "call.answer",
         "call.hangup",

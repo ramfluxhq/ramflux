@@ -26,6 +26,8 @@ pub enum SessionPushReason {
     BootMismatch,
     #[error("recipient_unsupported")]
     RecipientUnsupported,
+    #[error("recipient_unreachable")]
+    RecipientUnreachable,
 }
 #[derive(Debug, Serialize, thiserror::Error)]
 #[error("{reason}")]
