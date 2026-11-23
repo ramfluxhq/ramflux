@@ -15,6 +15,7 @@ use maintenance::Maintenance;
 mod transient;
 pub(super) use transient::TransientHost;
 mod agent_calls;
+mod agent_contacts;
 mod connection;
 mod pairing_calls;
 mod pairing_data;
@@ -519,6 +520,7 @@ impl AccountRuntime {
         self.refresh_networking_expiry().await;
         self.maintain_pairing_own_sync().await;
         self.maintain_agent_record_broadcast();
+        self.maintain_agent_owner_contact().await;
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };

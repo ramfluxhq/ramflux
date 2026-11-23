@@ -348,6 +348,9 @@ async fn router_connection(
                     )?
                 } else if request.path.starts_with("/mvp1/inbox/") {
                     capable_page(&system, &request.path)?
+                } else if let Some(target) = request.path.strip_prefix("/s1/session/") {
+                    // The session fence asks whether this target's router session was closed.
+                    serde_json::to_value(system.router.session(target))?
                 } else if let Some(target) = request.path.strip_prefix("/mvp0/cursor/") {
                     serde_json::to_value(
                         system

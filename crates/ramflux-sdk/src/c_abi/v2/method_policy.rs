@@ -71,6 +71,7 @@ policies! {
     "agent.operation.get" => ("agent", false, false, false, false),
     "agent.persona.edit" => ("agent", false, false, false, false),
     "agent.delete" => ("agent", false, false, false, false),
+    "agent.retire" => ("agent", false, false, false, false),
     "agent.watch" => ("agent", false, false, false, false),
     "attachment.enable" => ("account", true, true, false, false),
     "attachment.import.begin" => ("account", true, true, false, false),
