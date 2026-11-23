@@ -18,6 +18,7 @@ mod credential;
 mod custody;
 #[cfg(test)]
 mod custody_tests;
+mod data_root;
 mod exports;
 mod input;
 mod input_config;
@@ -31,6 +32,7 @@ mod state;
 mod suspend;
 #[cfg(test)]
 mod tests;
+mod username;
 
 pub use custody::{RamfluxV2CustodyOperation, RamfluxV2CustodyProvider, RamfluxV2CustodyRequest};
 pub use exports::ramflux_v2_client_open_with_custody;
@@ -43,6 +45,6 @@ pub use exports::{
     ramflux_v2_conversation_project, ramflux_v2_event_poll, ramflux_v2_event_reset,
     ramflux_v2_execute, ramflux_v2_negotiate, ramflux_v2_operation_cancel,
     ramflux_v2_operation_poll, ramflux_v2_operation_release, ramflux_v2_receipt_present,
-    ramflux_v2_set_credential_provider,
+    ramflux_v2_set_credential_provider, ramflux_v2_username_authorize,
 };
 pub use suspend::{ramflux_v2_client_resume, ramflux_v2_client_suspend};

@@ -617,15 +617,37 @@ impl GatewaySessionEngine {
             .call_context
             .clone()
             .ok_or_else(|| SdkError::GatewaySessionRejected("call_context_missing".into()))?;
+        // An already-due control must not hit the wire. The gateway would still answer,
+        // and that reply would arrive after this call had stopped reading.
+        if deadline <= tokio::time::Instant::now() {
+            return Err(SdkError::GatewaySessionRejected("call_resolution_timeout".into()));
+        }
         let deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(10));
         self.pending_calls.install(context.clone(), deadline)?;
-        let result = tokio::time::timeout_at(deadline, async {
-            match self.submit_frame(submit).await? {
-                Ok(_) => {}
-                Err(refusal) => return Err(SdkError::gateway_nack(refusal.reason().to_owned())),
-            }
+        let writes = self.wire_writes;
+        let admitted = tokio::time::timeout_at(deadline, self.submit_frame(submit)).await;
+        let result = match admitted {
+            Ok(Ok(Ok(_))) => self.await_call_decision(&context, action, deadline).await,
+            Ok(Ok(Err(refusal))) => Err(SdkError::gateway_nack(refusal.reason().to_owned())),
+            Ok(Err(error)) => Err(error),
+            // The submit is on the wire and its reply is still owed. Cancelling the read
+            // leaves a Nack for the idle reader, which retires the session.
+            Err(_) if self.wire_writes != writes => self.drain_owed_submit_reply().await,
+            Err(_) => Err(SdkError::GatewaySessionRejected("call_resolution_timeout".into())),
+        };
+        self.pending_calls.retire(&context);
+        result
+    }
+
+    async fn await_call_decision(
+        &mut self,
+        context: &ramflux_protocol::CallSubmitContext,
+        action: super::call_resolution::CallOperationAction,
+        deadline: tokio::time::Instant,
+    ) -> Result<super::call_resolution::CallSubmitOutcome, SdkError> {
+        let wait = async {
             loop {
-                if let Some(decision) = self.pending_calls.decision(&context)? {
+                if let Some(decision) = self.pending_calls.decision(context)? {
                     return Ok(super::call_resolution::CallSubmitOutcome {
                         context: context.clone(),
                         decision,
@@ -634,14 +656,72 @@ impl GatewaySessionEngine {
                     });
                 }
                 let frame = self.read_raw_gateway_frame("call resolution").await?;
+                // A refusal is this submit's result. Dispatching it with no expected reply
+                // retires the session, and the next command sees NetworkingPending.
+                if let GatewayServerFrame::Nack { reason } = &frame {
+                    return Err(SdkError::gateway_nack(reason.clone()));
+                }
                 self.dispatch_frame(&frame, None)?;
             }
-        })
-        .await
-        .map_err(|_| SdkError::GatewaySessionRejected("call_resolution_timeout".into()))
-        .and_then(|result| result);
-        self.pending_calls.retire(&context);
-        result
+        };
+        match tokio::time::timeout_at(deadline, wait).await {
+            Ok(result) => result,
+            Err(_) => Err(SdkError::GatewaySessionRejected("call_resolution_timeout".into())),
+        }
+    }
+
+    /// The business deadline fired after the submit was written. Read the owed reply
+    /// instead of leaving a Nack for the next idle read.
+    async fn drain_owed_submit_reply(
+        &mut self,
+    ) -> Result<super::call_resolution::CallSubmitOutcome, SdkError> {
+        let bound = tokio::time::Instant::now() + Duration::from_secs(2);
+        match tokio::time::timeout_at(bound, self.read_owed_submit_reply()).await {
+            Ok(result) => result,
+            Err(_) => self.abandon_owed_submit(),
+        }
+    }
+
+    async fn read_owed_submit_reply(
+        &mut self,
+    ) -> Result<super::call_resolution::CallSubmitOutcome, SdkError> {
+        use super::frame_dispatch::ExpectedReply;
+        use super::host_frames::{Step, Wait};
+        for _ in 0..8 {
+            match self.read_step("call resolution", Wait::Submit).await? {
+                Step::Legacy(frame) => {
+                    if let GatewayServerFrame::Nack { reason } = frame.as_ref() {
+                        return Err(SdkError::gateway_nack(reason.clone()));
+                    }
+                    if self.dispatch_frame(frame.as_ref(), Some(ExpectedReply::Submit))? {
+                        return Err(Self::call_resolution_timeout());
+                    }
+                }
+                Step::SubmitAccepted(_) => return Err(Self::call_resolution_timeout()),
+                Step::Refused(reason) => {
+                    return Err(SdkError::gateway_nack(reason.as_str().to_owned()));
+                }
+                Step::ResumePage(_) | Step::Reply(_) => {
+                    return Err(self.retire("unexpected capable reply while draining a submit"));
+                }
+            }
+        }
+        self.abandon_owed_submit()
+    }
+
+    fn abandon_owed_submit(
+        &mut self,
+    ) -> Result<super::call_resolution::CallSubmitOutcome, SdkError> {
+        if self.terminal_reason.is_none() {
+            self.terminal_reason =
+                Some(crate::bus::connection_manager::DisconnectReason::CallTimeout);
+            self.terminal_why = Some("call submit reply was not drained".into());
+        }
+        Err(Self::call_resolution_timeout())
+    }
+
+    fn call_resolution_timeout() -> SdkError {
+        SdkError::GatewaySessionRejected("call_resolution_timeout".into())
     }
 
     async fn submit_frame(

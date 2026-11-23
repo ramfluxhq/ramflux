@@ -76,6 +76,8 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
         .await?;
     let mut active = false;
     for id in ids {
+        let promote_id = id.clone();
+        writer.apply(move |account| promote_requested_answer(account, &promote_id)).await?;
         let owned_id = id.clone();
         let prepared = writer.apply(move |account| prepare(account, &owned_id)).await?;
         let Some(prepared) = prepared else { continue };
@@ -146,7 +148,11 @@ fn prepare(account: &LocalBusAccountState, id: &str) -> Result<Option<Prepared>,
     }))
 }
 fn current(account: &LocalBusAccountState, plan: &Plan) -> Result<bool, SdkError> {
-    Ok(account.client.voice_calls.get(&plan.original.row.call_id) == Some(&plan.original)
+    Ok(account
+        .client
+        .voice_calls
+        .get(&plan.original.row.call_id)
+        .is_some_and(|live| live.same_signaling(&plan.original))
         && account
             .client
             .account_db()?
@@ -154,12 +160,36 @@ fn current(account: &LocalBusAccountState, plan: &Plan) -> Result<bool, SdkError
             .as_ref()
             == Some(&plan.thread))
 }
-fn install(account: &mut LocalBusAccountState, next: LiveCall) -> Result<(), SdkError> {
+fn promote_requested_answer(account: &mut LocalBusAccountState, id: &str) -> Result<(), SdkError> {
+    let Some(call) = account.client.voice_calls.get(id) else { return Ok(()) };
+    if call.held_answer != call::state::HeldAnswer::Requested
+        || call.media_held
+        || call.row.state != "incoming_ringing"
+    {
+        return Ok(());
+    }
+    let mut next = call.clone();
+    next.queue_requested_answer(now_unix_timestamp())?;
+    if next.row.state == "incoming_ringing" {
+        return Ok(());
+    }
+    install(account, next)
+}
+fn install(account: &mut LocalBusAccountState, mut next: LiveCall) -> Result<(), SdkError> {
+    if next.row.state == "incoming_ringing"
+        && account
+            .client
+            .voice_calls
+            .get(&next.row.call_id)
+            .is_some_and(|old| old.held_answer == call::state::HeldAnswer::Requested)
+    {
+        next.held_answer = call::state::HeldAnswer::Requested;
+    }
     if account.client.voice_calls.get(&next.row.call_id).is_none_or(|old| old.row != next.row) {
         account
             .client
             .account_db()?
-            .write_transaction(|| account.client.persist_call_row(&next.row))?;
+            .write_transaction(|| account.client.persist_live_call(&next))?;
     }
     account.client.voice_calls.insert(next.row.call_id.clone(), next);
     Ok(())
@@ -387,6 +417,14 @@ fn note_control_result(
         .map(crate::gateway::call_resolution::CallOperationAction::from_control)
         .collect::<std::collections::BTreeSet<_>>();
     let mut next = plan.original;
+    if account
+        .client
+        .voice_calls
+        .get(&next.row.call_id)
+        .is_some_and(|live| live.held_answer == call::state::HeldAnswer::Requested)
+    {
+        next.held_answer = call::state::HeldAnswer::Requested;
+    }
     #[cfg(feature = "test-support")]
     {
         next.last_control_error = outcome.error;
@@ -459,6 +497,7 @@ fn note_control_result(
             next.pending.clear();
         }
     }
+    next.queue_requested_answer(now)?;
     install(account, next)
 }
 fn prepare_controls(

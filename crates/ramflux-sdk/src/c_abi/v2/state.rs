@@ -179,6 +179,7 @@ impl Shared {
 
     pub fn close(&self) {
         self.closed.store(true, std::sync::atomic::Ordering::Release);
+        self.credentials.clear_username();
         let ids = self
             .operations
             .lock()

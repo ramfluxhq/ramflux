@@ -188,10 +188,11 @@ fn daemon_restart_ends_unrecoverable_calls_and_retains_a_public_timeline_record(
         ),
     )?;
     assert_eq!(
-        page["messages"],
-        json!([]),
-        "a public call-cache row alone cannot fabricate a generated history event"
+        page["messages"].as_array().map(Vec::len),
+        Some(1),
+        "restart records one call summary and does not leave the page empty"
     );
+    assert!(account.client.voice_calls.is_empty(), "a restarted call does not ring");
     assert!(crate::bus::readers::is_reader_request("call.list"));
     assert_eq!(crate::bus::readers::read(&account.client, &request("call.list", &id))?, listed);
     drop(state);

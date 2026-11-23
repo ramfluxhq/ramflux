@@ -412,6 +412,35 @@ async fn read_responses(
     }
 }
 
+fn refusal_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// Code 16 is the unmapped class. Keep the bus refusal string as `name` so a client can
+/// tell Replay from an unrelated internal failure without a new numeric status.
+fn name_unmapped_refusal(frame: &mut serde_json::Value, code: i32) {
+    if code != super::super::RamfluxErrorCode::Internal as i32 {
+        return;
+    }
+    for key in ["error", "result"] {
+        let Some(object) = frame.get_mut(key).and_then(serde_json::Value::as_object_mut) else {
+            continue;
+        };
+        if object.get("name").and_then(serde_json::Value::as_str).is_some_and(refusal_token) {
+            continue;
+        }
+        let Some(bus) = object.get("code").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !refusal_token(bus) {
+            continue;
+        }
+        object.insert("name".to_owned(), serde_json::Value::String(bus.to_owned()));
+    }
+}
+
 fn handle_public(shared: &Shared, bytes: &[u8]) -> Result<bool, SdkError> {
     // The authenticated in-process server emits both ordinary bus and compatibility
     // custody envelopes. Preserve either representation, including unknown business data.
@@ -448,6 +477,7 @@ fn handle_public(shared: &Shared, bytes: &[u8]) -> Result<bool, SdkError> {
             let code = error
                 .and_then(serde_json::Value::as_str)
                 .map_or(if failed { 16 } else { 0 }, super::error_code);
+            name_unmapped_refusal(&mut frame, code);
             stop_requested = code == 0
                 && frame.get("method").and_then(serde_json::Value::as_str) == Some("daemon.stop");
             if code == 0

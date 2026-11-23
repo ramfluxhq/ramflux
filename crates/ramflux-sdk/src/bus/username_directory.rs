@@ -103,8 +103,11 @@ pub(super) fn prepare(
 }
 
 impl Prepared {
-    pub(super) async fn exchange(&self) -> Result<directory::UsernameNetworkReply, SdkError> {
-        self.exchange_with_recovery().await
+    pub(super) async fn exchange(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<directory::UsernameNetworkReply, SdkError> {
+        self.exchange_with_recovery(deadline).await
     }
 }
 
@@ -166,6 +169,8 @@ pub(crate) async fn dispatch(
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let prepared = prepare(request, state)?;
-    let result = prepared.exchange().await?;
+    let deadline = tokio::time::Instant::now() + super::runtime_limits::COMMAND_DEADLINE
+        - std::time::Duration::from_secs(1);
+    let result = prepared.exchange(deadline).await?;
     apply(state, request_account_id(request)?, prepared, result).await
 }

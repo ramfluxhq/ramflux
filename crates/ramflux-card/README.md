@@ -59,14 +59,21 @@ peer `theme`, `host`, script and unknown fields are refused.
 
 The resolver owns graph expansion, input ownership, expressions, checks and
 action declarations. Rust resolves display calls before the library runs.
-`resolve_for_locale` supports launch locales `en` and `zh-CN`, including nested
-`formatString`, grouped numbers, currency, TR35 date tokens and plural category
-selection. Unknown locale identifiers, malformed dates/patterns and unsupported
-patterns refuse. Both locales use three-digit numeric groups, `.` decimals,
-zero number decimals by default and two currency decimals (JPY/KRW use zero).
-Date-only values use midnight UTC, RFC3339 values retain their encoded offset,
-and integer timestamps are Unix milliseconds. Formats are display only; raw
-values drive checks and egress. No JS `Intl` or second expression evaluator.
+`resolve_for_locale` never fails because a locale tag is unknown. String
+catalogs fall back exact tag, then language (Traditional Chinese is not treated
+as Simplified), then `zh-TW` / `zh-HK` / `zh-Hant` to `zh-CN` only when the card
+ships no Traditional Chinese strings, then `en`. Numbers, dates and plurals use
+CLDR (ICU4X 2.1, Unicode-3.0) for `ar`, `de`, `en`, `es`, `fr`, `hi`, `id`,
+`it`, `ja`, `ko`, `pt-BR`, `ru`, `tr`, `zh-CN` and `zh-TW`. A language-only tag
+uses that launch locale (`zh-Hant` uses `zh-TW`, bare `zh` uses `zh-CN`); any
+other tag uses `en`. The resolved tree reports `locale` (string catalog),
+`format_locale` (CLDR tag) and `direction` (`rtl` for Arabic, otherwise `ltr`).
+Currency symbols stay on the launch table because ICU4X 2.1 has no stable
+currency formatter: English USD is `$` and Chinese USD is `US$`. Malformed
+dates and unsupported pattern tokens still refuse. Date-only values use
+midnight UTC, RFC3339 values retain their encoded offset, and integer
+timestamps are Unix milliseconds. Formats are display only; raw values drive
+checks and egress. No JS `Intl` or second expression evaluator.
 
 The signed base remains immutable. Session drafts hold at most 32 owned
 pointers/4 KiB and are never persisted or sent as model updates. Signed updates
@@ -78,7 +85,9 @@ are cancelled on a signed update. Every accepted edit increments `editSeq`.
 ## Native tree and events
 
 `ramflux.card.tree.v1` is a flat preorder tree with session, signed version/hash,
-edit sequence, tree version, root key, nodes and a complete host-slot array.
+edit sequence, tree version, root key, nodes, a complete host-slot array, and
+`locale`, `format_locale` and `direction`. Mutation batches carry the same three
+fields so a locale switch is visible when no node changes.
 Keys canonically encode `[component_id, source_instance, route]`; edges are keys.
 Every node corresponds to exactly one resolver instance. The library handles
 all 20 kinds: Text, Icon, Row, Column, List, Card, Tabs, Modal, Divider, Button,

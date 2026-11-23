@@ -65,7 +65,7 @@ pub(crate) fn from_native(value: &n::CallControl) -> Result<g::Call, SdkError> {
         return Err(refused("call Start byte budget"));
     }
     Ok(g::Call {
-        control: Some(g::CallControl {
+        payload: Some(g::call::Payload::Control(g::CallControl {
             schema: value.schema.clone(),
             call_id: value.call_id.clone(),
             conversation_id: value.conversation_id.clone(),
@@ -78,13 +78,15 @@ pub(crate) fn from_native(value: &n::CallControl) -> Result<g::Call, SdkError> {
             signature: value.signature.clone(),
             call_ref: value.call_ref.clone(),
             call_start,
-        }),
+        })),
     })
 }
 
 pub(crate) fn to_native(value: g::Call) -> Result<n::CallControl, SdkError> {
     super::validate_generated_call(&value)?;
-    let control = value.control.ok_or_else(|| refused("call control missing"))?;
+    let Some(g::call::Payload::Control(control)) = value.payload else {
+        return Err(refused("call control missing"));
+    };
     let action =
         control.body.and_then(|body| body.value).ok_or_else(|| refused("call action missing"))?;
     Ok(n::CallControl {
@@ -193,7 +195,7 @@ mod tests {
                 device_id: "device".into(),
             };
             let call = g::Call {
-                control: Some(g::CallControl {
+                payload: Some(g::call::Payload::Control(g::CallControl {
                     schema: "ramflux.call.control.v1".into(),
                     call_id: "call".into(),
                     conversation_id: "direct".into(),
@@ -211,7 +213,7 @@ mod tests {
                     signature: "signature".into(),
                     call_ref: Some("reference".into()),
                     call_start: Some(proof),
-                }),
+                })),
             };
             assert!(to_native(call).is_err(), "invalid Start proof reached native projection");
         }

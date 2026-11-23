@@ -64,6 +64,11 @@ fn is_group(row: &Value) -> bool {
 }
 
 fn other_principal(row: &Value) -> Option<String> {
+    if let Some(peer) = row.get("peer_principal_id").and_then(Value::as_str)
+        && !peer.is_empty()
+    {
+        return Some(peer.to_owned());
+    }
     let own = row.get("self_principal_id").and_then(Value::as_str);
     row.get("participants").and_then(Value::as_array).and_then(|participants| {
         participants

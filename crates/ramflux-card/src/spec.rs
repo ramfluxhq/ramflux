@@ -79,7 +79,7 @@ impl CardSpec {
     }
     /// Supply host-owned presentation separately from signed/peer state.
     /// # Errors
-    /// Refuses unsupported locales, incomplete or excessive theme catalogs.
+    /// Refuses incomplete or excessive theme catalogs. Unknown locales fall back.
     pub fn with_presentation(
         mut self,
         presentation: crate::Presentation,
@@ -126,7 +126,7 @@ impl CardSpec {
         Ok(())
     }
     pub(crate) fn resolved(&self) -> Result<ResolvedSurface, CardError> {
-        let locale = DisplayLocale::parse(&self.presentation()?.locale)?;
+        let locale = DisplayLocale::parse(&self.presentation()?.locale);
         Ok(self.snapshot.resolve_for_locale(&self.drafts, locale)?)
     }
     pub(crate) fn render_input(&self) -> Result<String, CardError> {

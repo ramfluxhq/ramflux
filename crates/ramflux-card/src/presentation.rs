@@ -22,14 +22,17 @@ pub enum Direction {
     Rtl,
 }
 impl Presentation {
-    /// Load the app-bundled launch catalogs; additional locales/themes use `parse`.
+    /// Load host chrome for `locale`. Unknown tags use the English catalog
+    /// (Traditional Chinese uses `zh-CN` until a Traditional catalog ships)
+    /// and never fail. Arabic is right-to-left. The stored tag is the request.
     /// # Errors
-    /// Rejects unsupported bundled locale/theme names.
+    /// Rejects a theme catalog that cannot be decoded.
     pub fn bundled(locale: &str, dark: bool) -> Result<Self, CardError> {
-        let strings = match locale {
-            "en" => include_str!("../locales/en.json"),
-            "zh-CN" => include_str!("../locales/zh-CN.json"),
-            _ => return Err(CardError::Invalid("host locale")),
+        let parsed = ramflux_protocol::a2ui::DisplayLocale::parse(locale);
+        let strings = if parsed.uses_zh_cn_copy() {
+            include_str!("../locales/zh-CN.json")
+        } else {
+            include_str!("../locales/en.json")
         };
         let tokens = if dark {
             include_str!("../themes/dark.json")
@@ -37,8 +40,8 @@ impl Presentation {
             include_str!("../themes/light.json")
         };
         Ok(Self {
-            locale: locale.into(),
-            direction: Direction::Ltr,
+            locale: parsed.requested_tag().to_owned(),
+            direction: if parsed.is_rtl() { Direction::Rtl } else { Direction::Ltr },
             strings: serde_json::from_str(strings)?,
             tokens: serde_json::from_str(tokens)?,
         })
@@ -53,7 +56,6 @@ impl Presentation {
         Ok(value)
     }
     pub(crate) fn validate(&self) -> Result<(), CardError> {
-        ramflux_protocol::a2ui::DisplayLocale::parse(&self.locale)?;
         let reference = Self::bundled("en", false)?;
         if self.locale.is_empty()
             || self.locale.len() > 35
