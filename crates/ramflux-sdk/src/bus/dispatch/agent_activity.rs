@@ -68,8 +68,13 @@ fn progress(
     }
     let slot = idx % u64::from(MAX_SLOTS);
     let state_kind = format!("agent-progress/{run_id}/{kind}/{slot}");
-    stored(state, &account_id, &state_kind, record)?;
-    Ok(local_bus_ok(json!({"run_id": run_id, "idx": idx, "kind": kind})))
+    finish(
+        state,
+        &account_id,
+        &state_kind,
+        record,
+        json!({"run_id": run_id, "idx": idx, "kind": kind}),
+    )
 }
 
 fn publish(
@@ -80,8 +85,7 @@ fn publish(
     let record = approval_record(&request.body, "prx")?;
     let id = required(&record, "approval_id")?;
     let state_kind = format!("agent-approval/{id}");
-    stored(state, &account_id, &state_kind, record.clone())?;
-    Ok(local_bus_ok(record))
+    finish(state, &account_id, &state_kind, record.clone(), record)
 }
 
 fn decide(
@@ -130,8 +134,7 @@ fn decide(
     record["decision"] = json!(decision);
     record["source"] = json!("owner");
     record.as_object_mut().ok_or_else(|| field_invalid("record"))?.remove("cause");
-    stored(state, &account_id, &state_kind, record.clone())?;
-    Ok(local_bus_ok(record))
+    finish(state, &account_id, &state_kind, record.clone(), record)
 }
 
 fn list(
@@ -154,30 +157,44 @@ fn list(
     Ok(local_bus_ok(json!({"approvals": approvals})))
 }
 
-fn stored(
+fn finish(
     state: &mut LocalBusDaemonState,
     account_id: &str,
     state_kind: &str,
     record: Value,
-) -> Result<(), SdkError> {
-    let owner = custodian_of(state, account_id);
+    response_body: Value,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let owner = owner_id(state, account_id)?;
+    let mut result = local_bus_ok(response_body);
     if !commit_one(state, account_id, state_kind, record.clone())? {
-        return Ok(());
+        return Ok(result);
     }
     if let Some(owner) = owner {
-        project_owner(state, account_id, &owner, state_kind, record);
+        result.owner_copy =
+            Some(Box::new(owner_activity(state, account_id, &owner, state_kind, record)?));
     }
-    Ok(())
+    Ok(result)
 }
 
-fn custodian_of(state: &LocalBusDaemonState, account_id: &str) -> Option<String> {
-    let id = local_bus_account(state, account_id)
-        .ok()?
-        .client
-        .born_v3_account
-        .as_ref()?
-        .custodian_account_id()?;
-    if id.is_empty() || id == account_id { None } else { Some(id.to_owned()) }
+/// The human custodian of a headless agent. `Ok(None)` is an account with no owner copy.
+fn owner_id(state: &LocalBusDaemonState, account_id: &str) -> Result<Option<String>, SdkError> {
+    let Some(born) = local_bus_account(state, account_id)?.client.born_v3_account.as_ref() else {
+        return Ok(None);
+    };
+    if born.record().body.principal_kind != ramflux_protocol::PrincipalKind::HeadlessAi {
+        return Ok(None);
+    }
+    match born.custodian_account_id() {
+        Some(id) if !id.is_empty() && id != account_id => Ok(Some(id.to_owned())),
+        _ => {
+            tracing::warn!(
+                account_id,
+                reason_code = "owner_missing",
+                "agent activity owner copy was not stored"
+            );
+            Err(owner_missing())
+        }
+    }
 }
 
 fn commit_one(
@@ -194,28 +211,66 @@ fn commit_one(
     Ok(true)
 }
 
-/// Copies one agent-account row onto the open custodian, on the owner-agent conversation.
-fn project_owner(
-    state: &mut LocalBusDaemonState,
+/// The owner copy, with the owner-agent conversation. The owner's actor commits it.
+fn owner_activity(
+    state: &LocalBusDaemonState,
     agent_id: &str,
     owner_id: &str,
     state_kind: &str,
     mut record: Value,
-) {
-    let Some(scope) = owner_scope(state, agent_id, owner_id) else {
-        return;
-    };
-    let Some(object) = record.as_object_mut() else {
-        return;
-    };
+) -> Result<super::super::actor::OwnerActivity, SdkError> {
+    let scope = owner_scope(state, agent_id, owner_id)?;
+    let object = record.as_object_mut().ok_or_else(|| field_invalid("record"))?;
     object.insert("conversation_id".to_owned(), json!(scope));
-    let _ = commit_one(state, owner_id, state_kind, record);
+    Ok(super::super::actor::OwnerActivity {
+        owner_id: owner_id.to_owned(),
+        state_kind: state_kind.to_owned(),
+        record,
+    })
 }
 
-fn owner_scope(state: &LocalBusDaemonState, agent_id: &str, owner_id: &str) -> Option<String> {
-    let agent = local_bus_account(state, agent_id).ok()?.client.own_account_anchor().ok()?;
-    let owner = local_bus_account(state, owner_id).ok()?.client.own_account_anchor().ok()?;
-    crate::custody::agent_creation::expected_scope(&owner, &agent).ok()
+fn owner_scope(
+    state: &LocalBusDaemonState,
+    agent_id: &str,
+    owner_id: &str,
+) -> Result<String, SdkError> {
+    let agent = match local_bus_account(state, agent_id)?.client.own_account_anchor() {
+        Ok(anchor) => anchor,
+        Err(error) => return Err(noted("owner_scope_unavailable", owner_id, error)),
+    };
+    let now = match super::super::custody_setup::now() {
+        Ok(now) => now,
+        Err(error) => return Err(noted("owner_scope_unavailable", owner_id, error)),
+    };
+    let owner = match crate::custody::load_account(&state.config.data_root, owner_id, now) {
+        Ok(owner) => owner,
+        Err(error) => return Err(noted("owner_scope_unavailable", owner_id, error)),
+    };
+    match crate::custody::agent_creation::expected_scope(
+        &owner.record().body.account_anchor,
+        &agent,
+    ) {
+        Ok(scope) => Ok(scope),
+        Err(error) => Err(noted("owner_scope_unavailable", owner_id, error)),
+    }
+}
+
+fn noted(reason: &'static str, owner_id: &str, error: SdkError) -> SdkError {
+    tracing::warn!(
+        %error,
+        owner_id,
+        reason_code = reason,
+        "agent activity owner copy was not stored"
+    );
+    error
+}
+
+fn owner_missing() -> SdkError {
+    SdkError::LocalBusRefused {
+        code: "owner_missing".into(),
+        message: "owner_missing".into(),
+        body: Box::new(json!({"reason_code":"owner_missing"})),
+    }
 }
 
 fn approval_record(body: &Value, source: &str) -> Result<Value, SdkError> {

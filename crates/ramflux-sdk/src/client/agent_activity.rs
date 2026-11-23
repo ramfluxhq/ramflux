@@ -84,6 +84,28 @@ pub(crate) fn commit(
     Ok(Some(record))
 }
 
+/// Stores one owner copy with the same journal fence as `commit`, then stages siblings.
+///
+/// # Errors
+/// Returns a record, journal, or sibling-stage refusal. A duplicate stage is success.
+pub(crate) fn store_owner_copy(
+    client: &RamfluxClient,
+    state_kind: &str,
+    record: Value,
+) -> Result<(), SdkError> {
+    let Some(stored) = commit(client, state_kind, record)? else {
+        return Ok(());
+    };
+    fan_out(client, state_kind, &stored).map_err(|error| {
+        tracing::warn!(
+            %error,
+            reason_code = "owner_fanout_failed",
+            "agent activity owner copy is stored; sibling delivery was not staged"
+        );
+        error
+    })
+}
+
 /// Sends the stored record to the other devices of this root.
 /// Only an owner-agent `dm:` conversation is staged. A stage failure does not undo the row.
 pub(crate) fn fan_out(

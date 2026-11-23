@@ -240,6 +240,8 @@ async fn restore_local_bus_account_impl(
 pub(crate) struct LocalBusDispatchResult {
     pub(crate) response_body: serde_json::Value,
     pub(crate) event: Option<LocalBusFrame>,
+    /// Set when the publishing actor stored a row that the owner's actor must commit.
+    pub(crate) owner_copy: Option<Box<super::actor::OwnerActivity>>,
 }
 
 pub(crate) async fn dispatch_local_bus_request(

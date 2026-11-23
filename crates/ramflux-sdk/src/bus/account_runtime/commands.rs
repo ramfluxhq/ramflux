@@ -155,6 +155,11 @@ impl AccountRuntime {
                 let result = self.authorize_backup(generation);
                 let _ = reply.send(result);
             }
+            super::super::actor::PrivateCommand::ProjectActivity { activity, reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.store_owner_activity(*activity));
+                }
+            }
             super::super::actor::PrivateCommand::Agent(command) => self.apply_agent(*command),
             super::super::actor::PrivateCommand::Capture(reply) => {
                 if !reply.is_closed() {
@@ -314,6 +319,27 @@ impl AccountRuntime {
 }
 
 impl AccountRuntime {
+    fn store_owner_activity(
+        &self,
+        activity: super::super::actor::OwnerActivity,
+    ) -> Result<(), SdkError> {
+        if activity.owner_id != self.id {
+            tracing::warn!(
+                owner_id = %activity.owner_id,
+                account_id = %self.id,
+                reason_code = "owner_actor_mismatch",
+                "agent activity owner copy was not stored"
+            );
+            return Err(SdkError::AccountNotOpen(activity.owner_id));
+        }
+        let client = &local_bus_account(&self.state, &self.id)?.client;
+        crate::client::agent_activity::store_owner_copy(
+            client,
+            &activity.state_kind,
+            activity.record,
+        )
+    }
+
     pub(super) async fn start_owned_command(
         &mut self,
         command: AccountCommand,

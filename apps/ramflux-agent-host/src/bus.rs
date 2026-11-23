@@ -98,11 +98,18 @@ impl AgentBus for RfdBus {
         );
         frame.operation_id = operation.map(str::to_owned);
         frame.deadline_ms = Some(now_ms().saturating_add(30_000));
-        let response = self.client.request_frame_response(frame).await.map_err(|_| Error::Bus)?;
+        let response = match self.client.request_frame_response(frame).await {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("prx bus {method} failed: {error}");
+                return Err(Error::Bus);
+            }
+        };
         if response.kind == ramflux_sdk::LocalBusFrameKind::Error {
             let error = response
                 .error
                 .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::InvalidRequest))?;
+            eprintln!("prx bus {method} refused: {}", error.code);
             if error.code == "resync_required" {
                 return Err(Error::Resync);
             }
