@@ -1000,6 +1000,7 @@ pub(super) fn native_issue_refused_when_disabled() -> TestResult {
 }
 
 // The real background DATA handshake must advance even while the test awaits its owner.
+// Idle retention uses the manual clock so that wall stall is not peer silence.
 struct RelayClock {
     manual: Arc<TestPairingClock>,
     started: std::time::Instant,
@@ -1012,5 +1013,8 @@ impl PairingClock for RelayClock {
         self.manual
             .monotonic_ms()
             .saturating_add(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX))
+    }
+    fn activity_ms(&self) -> u64 {
+        self.manual.monotonic_ms()
     }
 }

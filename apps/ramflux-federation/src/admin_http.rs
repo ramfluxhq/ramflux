@@ -181,6 +181,17 @@ fn admin_response(
         ("GET", "/healthz") => HttpResponse::json(&serde_json::json!({
             "service": "ramflux-federation-admin", "status": "ok"
         }))?,
+        #[cfg(unix)]
+        ("POST", ramflux_node_core::username_directory::USERNAME_LOCAL_PATH) => {
+            let reply = crate::username_directory::local_home(&request.body, context, accepted_at)
+                .map_err(|error| {
+                    tracing::warn!(%error, "username home request failed");
+                    ramflux_node_core::NodeCoreError::Unauthorized(
+                        "username home unavailable".into(),
+                    )
+                })?;
+            HttpResponse::json(&reply)?
+        }
         ("POST", ramflux_node_core::MIGRATION_LOCAL_PATH) => {
             let local = ramflux_protocol::home_migration::decode(
                 &request.body,

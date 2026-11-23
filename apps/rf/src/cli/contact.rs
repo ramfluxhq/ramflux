@@ -24,14 +24,17 @@ pub(crate) enum ContactAction {
     Block(ContactLinkSelector),
     Unblock(ContactLinkSelector),
     List(AccountSelector),
+    Requests(AccountSelector),
     Verify(ContactVerify),
     SafetyNumber(ContactSafetySelector),
     Verification(ContactVerificationCommand),
 }
 
 #[derive(Args)]
-#[command(group(clap::ArgGroup::new("contact_selector").args(["principal", "card", "target"]).required(true).multiple(false)))]
+#[command(group(clap::ArgGroup::new("contact_selector").args(["principal", "card", "target", "username"]).required(true).multiple(false)))]
 pub(crate) struct ContactAdd {
+    /// Exact @username to resolve and add.
+    pub(crate) username: Option<String>,
     #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]

@@ -594,6 +594,7 @@ impl RouterHandle {
         let allow = std::env::var("RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING").as_deref() == Ok("1");
         let settings = ramflux_node_core::CustodyIssuanceSettings::from_env()?;
         let migration = crate::home_migration::configured(config, &record, now)?;
+        let username = crate::username_directory::configured(migration.as_ref())?;
         self.store().validate_home_migration_runtime(
             migration.as_ref().map(|_| (config.node_id.as_str(), trusted.as_str())),
         )?;
@@ -611,6 +612,9 @@ impl RouterHandle {
         )?;
         if let Some(migration) = migration {
             service = service.with_home_migration(migration)?;
+        }
+        if let Some(username) = username {
+            service = service.with_username_directory(username)?;
         }
         if let Some(secret) = pairing_seed {
             let origin = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ORIGIN")
@@ -652,6 +656,20 @@ impl RouterHandle {
     pub(crate) fn home_migration_enabled(&self) -> bool {
         let Self::Tokio(runtime) = self;
         runtime.custody.get().is_some_and(|service| service.home_migration_enabled())
+    }
+    pub(crate) fn username_home_history(
+        &self,
+        root: &str,
+    ) -> anyhow::Result<ramflux_protocol::home_migration::ResolveResult> {
+        let Self::Tokio(runtime) = self;
+        let service =
+            runtime.custody.get().ok_or_else(|| anyhow::anyhow!("native custody unavailable"))?;
+        Ok(service.username_home_history(
+            self.state(),
+            self.store(),
+            root,
+            ramflux_node_core::now_unix_seconds(),
+        )?)
     }
     pub(crate) fn migration_peer(
         &self,

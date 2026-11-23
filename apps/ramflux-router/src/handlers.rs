@@ -594,6 +594,20 @@ fn handle_mesh_request_inner(
         );
         return Ok(MeshResponse::json(reply.status, reply.body));
     }
+    if method == "POST" && path == ramflux_node_core::username_directory::USERNAME_HISTORY_PATH {
+        if peer_service_id != "ramflux-federation" {
+            return Ok(MeshResponse::text(
+                "403 Forbidden",
+                "username history requires federation identity",
+            ));
+        }
+        let request: ramflux_node_core::username_directory::UsernameHistoryRequest =
+            ramflux_protocol::home_migration::decode(&body, 1024)?;
+        return Ok(MeshResponse::json(
+            "200 OK",
+            ramflux_protocol::canonical_json_bytes(&router.username_home_history(&request.root)?)?,
+        ));
+    }
     if method == "POST" && path == ramflux_node_core::MIGRATION_PEER_PATH {
         if peer_service_id != "ramflux-federation" {
             return Ok(MeshResponse::text(
