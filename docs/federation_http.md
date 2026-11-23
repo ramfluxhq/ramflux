@@ -62,6 +62,14 @@ TCP mTLS also serves `POST /internal/cross-node/forward` only to the exact
 endpoint from `mesh.endpoints.federation`, authenticates its service certificate
 with the configured mesh CA, and submits `{target_node, envelope}` within a
 10-second absolute deadline, bounded headers and a 1 MiB reply cap before allocation.
+The TCP reader checks the exact same-node router identity after bounded headers and
+before reading or allocating the body; a refusal closes the connection with 403.
+This route's compact request cap is 1,048,669 bytes: the 1 MiB complete envelope cap,
+a 63-byte ASCII target node id and 30 bytes of JSON framing. The router applies the
+same request cap before writing and refuses explicit endpoint schemes other than
+`https://`; bare mesh socket addresses still use TLS. Cross-node QUIC submit jobs
+hold a separate eight-job permit inside the existing 64-job blocking dispatcher,
+including across caller cancellation, leaving 56 slots for other routes.
 The handoff writes at most once; transport retries remain caller-owned.
 Federation supplies the local source node, attaches
 source authority and signs through the ordinary outbound flow. This same-node

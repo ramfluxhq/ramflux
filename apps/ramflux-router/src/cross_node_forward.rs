@@ -22,6 +22,9 @@ pub(crate) fn configure(
     let Some(endpoint) = config.mesh.endpoints.get("federation").filter(|s| !s.is_empty()) else {
         return Ok(());
     };
+    if endpoint.contains("://") && !endpoint.starts_with("https://") {
+        anyhow::bail!("federation mesh endpoint requires TLS");
+    }
     router.install_cross_node_forward(Client {
         endpoint: endpoint.clone(),
         tls: MeshTlsConfig {
@@ -40,6 +43,9 @@ impl Client {
     ) -> Result<FederatedEnvelopeForwardResponse, NodeCoreError> {
         let deadline = Instant::now() + FORWARD_TIMEOUT;
         let body = serde_json::to_vec(request).map_err(forward_error)?;
+        if body.len() > ramflux_node_core::HOME_SUBMIT_FORWARD_MAX_BYTES {
+            return Err(forward_error("federation forward exceeds body budget"));
+        }
         let response = self
             .http
             .post_raw(&RawMeshPost {

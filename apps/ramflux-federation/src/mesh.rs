@@ -326,12 +326,48 @@ pub(crate) fn serve_mesh_mtls(
 }
 
 /// The body cap for a request, decided from its path before any body byte is read. The
-/// attachment renewal route is bounded at 16 KiB; everything else keeps the migration frame cap.
+/// attachment renewal and local forward routes have their own caps.
 pub(crate) fn mesh_body_cap(_method: &str, path: &str) -> usize {
     if path == crate::attachment_renewal::PEER_PATH {
         crate::attachment_renewal::MAX_BODY
+    } else if path == ramflux_node_core::HOME_SUBMIT_FORWARD_PATH {
+        ramflux_node_core::HOME_SUBMIT_FORWARD_MAX_BYTES
     } else {
         ramflux_protocol::home_migration::MAX_FRAME_BYTES
+    }
+}
+
+fn read_mesh_request(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    peer_spiffe_uri: Option<&str>,
+    context: &MeshServerContext,
+) -> Result<Option<ramflux_transport::MeshHttpRequest>, ramflux_node_core::NodeCoreError> {
+    let expected = format!("spiffe://{}/ramflux-router", context.discovery.node_id);
+    let request = ramflux_transport::read_bounded_mesh_http_request_with_admission(
+        stream,
+        &mesh_body_cap,
+        |_, _, path, _, _| {
+            if path == ramflux_node_core::HOME_SUBMIT_FORWARD_PATH
+                && peer_spiffe_uri != Some(expected.as_str())
+            {
+                return Err(ramflux_transport::TransportError::NotAuthenticated);
+            }
+            Ok(None::<()>)
+        },
+    );
+    match request {
+        Ok(request) => Ok(request.map(|request| request.into_parts().0)),
+        Err(ramflux_transport::TransportError::NotAuthenticated) => {
+            ramflux_transport::write_mesh_text_response(
+                stream,
+                "403 Forbidden",
+                "same-node router required",
+            )
+            .map_err(|error| mesh_transport_error(&error))?;
+            // The body remains unread. Close rather than interpreting it as another request.
+            Ok(None)
+        }
+        Err(error) => Err(mesh_transport_error(&error)),
     }
 }
 
@@ -344,10 +380,7 @@ pub(crate) fn handle_mesh_request(
 ) -> Result<bool, ramflux_node_core::NodeCoreError> {
     let received = std::time::Instant::now();
     let _deadline = migration_request_deadline(stream, context, received)?;
-    let Some(request) =
-        ramflux_transport::read_bounded_mesh_http_request_by_path(stream, &mesh_body_cap)
-            .map_err(|error| mesh_transport_error(&error))?
-    else {
+    let Some(request) = read_mesh_request(stream, peer_spiffe_uri, context)? else {
         return Ok(false);
     };
     let Some(_request) = connection.begin_request() else {

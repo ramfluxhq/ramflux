@@ -760,6 +760,16 @@ async fn handle_mesh_blocking(
     // publication may drive a runtime, so none may run on the async QUIC worker.
     // Bound jobs before spawning; cancellation must not release a running job's slot.
     static ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(64);
+    static FORWARD_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+    let forward_permit =
+        if request.method == "POST" && request.path == "/internal/cross-node/submit" {
+            let Ok(permit) = FORWARD_ADMISSION.try_acquire() else {
+                return Ok(MeshResponse::text("503 Service Unavailable", "router forward busy"));
+            };
+            Some(permit)
+        } else {
+            None
+        };
     let Ok(permit) = ADMISSION.try_acquire() else {
         return Ok(MeshResponse::text("503 Service Unavailable", "router mesh busy"));
     };
@@ -767,6 +777,7 @@ async fn handle_mesh_blocking(
     let peer = peer.clone();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        let _forward_permit = forward_permit;
         handle_mesh_request_value(request, &router, &peer)
     })
     .await?
