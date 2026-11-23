@@ -58,3 +58,7 @@ ignored = ["rquickjs-core", "rquickjs-sys"]
 name = "card-render"
 path = "examples/card-render.rs"
 required-features = ["compiler"]
+
+[[bin]]
+name = "card-fixtures"
+path = "src/bin/card_fixtures/main.rs"

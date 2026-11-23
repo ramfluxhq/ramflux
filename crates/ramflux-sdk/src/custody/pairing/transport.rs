@@ -44,9 +44,28 @@ pub struct PairingConfig {
 
 impl PairingConfig {
     /// Production reader: env once at process start. Pairing is on by default; `0` turns it off.
+    /// Integration builds (`itest-memory-vault`) also load `RAMFLUX_ITEST_PAIRING_CA_FILE`,
+    /// the same fixture root the `rf` daemon trusts. Production builds do not read that variable.
     /// # Errors
-    /// Refuses non-Unicode values and every value other than unset, `0` or `1`.
+    /// Refuses non-Unicode values, every enabled value other than unset, `0` or `1`, and an
+    /// integration CA file that is missing, empty, not UTF-8, or larger than 64 KiB.
     pub fn from_env() -> Result<Self, SdkError> {
+        let config = Self::enabled_from_env()?;
+        #[cfg(feature = "itest-memory-vault")]
+        let config = Self::apply_itest_pairing_ca(config)?;
+        Ok(config)
+    }
+
+    #[cfg(feature = "itest-memory-vault")]
+    fn apply_itest_pairing_ca(mut config: Self) -> Result<Self, SdkError> {
+        if let Some(pem) = itest_pairing_ca_pem()? {
+            config.enabled = true;
+            config.extra_root_ca_pem = Some(pem);
+        }
+        Ok(config)
+    }
+
+    fn enabled_from_env() -> Result<Self, SdkError> {
         match std::env::var("RAMFLUX_DEVICE_PAIRING_ENABLED") {
             Ok(value) => Self::from_value(Some(&value)),
             Err(std::env::VarError::NotPresent) => Self::from_value(None),
@@ -758,11 +777,67 @@ async fn post(
 }
 
 fn http_error(error: reqwest::Error) -> SdkError {
+    if pairing_peer_rejected(&error) {
+        return SdkError::PairingCode("UntrustedPeer");
+    }
     if error.is_connect() || error.is_timeout() {
         SdkError::PairingCode("ResumeRequired")
     } else {
         SdkError::LocalBus(error.without_url().to_string())
     }
+}
+
+/// Certificate rejection on the pairing HTTPS client. The token is static; the chain is not copied.
+fn pairing_peer_rejected(error: &reqwest::Error) -> bool {
+    peer_rejected(error, 0)
+}
+
+fn peer_rejected(error: &(dyn std::error::Error + 'static), depth: u8) -> bool {
+    if depth == 8 {
+        return false;
+    }
+    if error.downcast_ref::<rustls::Error>().is_some_and(rustls_peer_rejected) {
+        return true;
+    }
+    if let Some(io) = error.downcast_ref::<std::io::Error>()
+        && let Some(inner) = io.get_ref()
+        && peer_rejected(inner, depth.saturating_add(1))
+    {
+        return true;
+    }
+    error.source().is_some_and(|source| peer_rejected(source, depth.saturating_add(1)))
+}
+
+fn rustls_peer_rejected(error: &rustls::Error) -> bool {
+    matches!(
+        error,
+        rustls::Error::InvalidCertificate(_)
+            | rustls::Error::NoCertificatesPresented
+            | rustls::Error::UnsupportedNameType
+            | rustls::Error::InvalidCertRevocationList(_)
+    )
+}
+
+#[cfg(feature = "itest-memory-vault")]
+fn itest_pairing_ca_pem() -> Result<Option<String>, SdkError> {
+    read_itest_pairing_ca_file()
+}
+
+/// Bounded read of the integration pairing root. Absent means the fixed trust roots only.
+/// # Errors
+/// The file cannot be read, is empty, is not UTF-8, or is larger than 64 KiB.
+#[cfg(feature = "itest-memory-vault")]
+fn read_itest_pairing_ca_file() -> Result<Option<String>, SdkError> {
+    use std::io::Read;
+    let Some(path) = std::env::var_os("RAMFLUX_ITEST_PAIRING_CA_FILE") else {
+        return Ok(None);
+    };
+    let mut pem = String::new();
+    std::fs::File::open(path)?.take(65_537).read_to_string(&mut pem)?;
+    if pem.is_empty() || pem.len() > 65_536 {
+        return Err(SdkError::PairingField("RAMFLUX_ITEST_PAIRING_CA_FILE"));
+    }
+    Ok(Some(pem))
 }
 
 const _: () = assert!(POLL_SECS >= 1);

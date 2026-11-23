@@ -133,8 +133,8 @@ file is private and matches the configured account, imports the passphrase into 
 operator Mac Keychain, deletes the file after the successful import, and unlocks the
 account before processing messages. Integration builds may explicitly use
 `--itest-memory-vault`; that volatile provider is unavailable in production. Linux
-production provisioning waits for `ID-02-VAULT-LINUX-01`, so run the demo agent on
-the operator Mac until that provider exists. No environment-variable, command-line,
+production provisioning requires a supported credential-vault provider; use the
+operator Mac when that Linux provider is unavailable. No environment-variable, command-line,
 or piped phrase/passphrase path is accepted.
 
 After confirmation use ordinary methods on a normal connection. `account.lock`

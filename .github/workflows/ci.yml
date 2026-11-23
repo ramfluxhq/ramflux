@@ -5,7 +5,9 @@ on:
   # start a second identical run per push.
   push:
     branches: ["main"]
+  # Owner workflow 2026-11-23: CI gates only the next -> main promotion and main itself; next is verified by real runs.
   pull_request:
+    branches: ["main"]
   workflow_dispatch:
     inputs:
       mutants_base:
