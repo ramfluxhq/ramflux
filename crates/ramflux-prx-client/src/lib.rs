@@ -35,17 +35,18 @@ mod test_support;
 mod transport;
 
 pub use agent::{
-    AgentConfig, AgentLimits, AgentList, AgentReadback, AgentStatus, MainReadback,
-    PROMPT_MAX_BYTES, PutKind, PutOutcome, Retired, Tools,
+    AgentConfig, AgentLimits, AgentList, AgentReadback, AgentStatus, DEFAULT_APPROVAL_WAIT_SECS,
+    MainReadback, PROMPT_MAX_BYTES, PutKind, PutOutcome, Retired, Tools,
 };
 pub use apply::ApplyOutcome;
 pub use autonomy::Autonomy;
 pub use capabilities::{
     AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_LIMITS_V1, AGENT_MAIN_READBACK_V1,
     AGENT_MEMORY_PURGE_V1, BuildCommit, CAPABILITIES_V1, Capabilities, HISTORY_ERASE_V1,
-    MESSAGE_CONTEXT_DELIVERY_V1, MESSAGE_DELETE_V1, MESSAGE_FORGET_WRITES_V1,
-    MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1, OWNER_ID_STABLE_V1, SESSION_KEY_V1,
-    SYNC_SNAPSHOT_V1, SYNC_WS_V1, TARGETED_AGENTS_V1, require,
+    HOST_BOOTSTRAP_V1, LimitsFacts, MESSAGE_CONTEXT_DELIVERY_V1, MESSAGE_DELETE_V1,
+    MESSAGE_FORGET_WRITES_V1, MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1, OWNER_ID_STABLE_V1,
+    RUN_APPROVALS_V1, SESSION_KEY_V1, STREAM_FRAMES_V1, SYNC_SNAPSHOT_V1, SYNC_WS_V1,
+    TARGETED_AGENTS_V1, require,
 };
 pub use catalog::{Catalog, CatalogModel, CatalogTool};
 pub use client::PrxClient;
