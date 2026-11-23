@@ -211,6 +211,11 @@ fn strip_content_media_keys(content: &mut g::Content) {
                 strip_media_keys(replacement);
             }
         }
+        Some(g::content::Value::Call(call))
+            if !matches!(call.payload, Some(g::call::Payload::Summary(_))) =>
+        {
+            call.payload = None;
+        }
         _ => {}
     }
 }
@@ -497,6 +502,9 @@ impl RamfluxClient {
                 view.kind = content.value.as_ref().map_or("unspecified", kind_name);
                 if let Some(g::content::Value::Message(body)) = content.value.as_ref() {
                     view.text = Some(body.text.clone());
+                }
+                if let Some(direction) = crate::client::call::history::present(self, &mut content) {
+                    view.text = Some(direction);
                 }
                 view.content = Some(content);
                 view.revision = self

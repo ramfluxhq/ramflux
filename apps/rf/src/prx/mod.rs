@@ -120,7 +120,6 @@ fn static_code(code: &str) -> &'static str {
         "memory_missing" => "memory_missing",
         "model_capabilities_unknown" => "model_capabilities_unknown",
         "provider_missing" => "provider_missing",
-        "prx_command" => "prx_command",
         "prx_missing" => "prx_missing",
         "prx_spawn" => "prx_spawn",
         "runtime_invalid" => "runtime_invalid",

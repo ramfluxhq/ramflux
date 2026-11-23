@@ -154,12 +154,9 @@ impl TryFrom<&g::OwnContext> for OwnContext {
                             target_delivery_id: route.target_delivery_id.clone(),
                             federation: route.federation.as_ref().map(|route| {
                                 crate::LocalBusFederationRoute {
-                                    federation_url: route.federation_url.clone(),
                                     source_node_id: route.source_node_id.clone(),
                                     target_node_id: route.target_node_id.clone(),
                                     required_capability: route.required_capability.clone(),
-                                    admin_token: route.admin_token.clone(),
-                                    recipient_prekey_url: route.recipient_prekey_url.clone(),
                                 }
                             }),
                         })

@@ -171,15 +171,17 @@ impl AccountDb {
         conversation_id: &str,
         reader_id: Option<&str>,
     ) -> Result<Option<String>, StorageError> {
+        // NULLIF turns a cleared '' cursor into SQL NULL. That is absence.
         self.connection
             .query_row(
                 "SELECT NULLIF(read_through_message_id, '')
                    FROM conversation_read_state
                   WHERE conversation_id = ?1 AND reader_id = ?2",
                 params![conversation_id, reader_id],
-                |row| row.get(0),
+                |row| row.get::<_, Option<String>>(0),
             )
             .optional()
+            .map(Option::flatten)
             .map_err(StorageError::from)
     }
 

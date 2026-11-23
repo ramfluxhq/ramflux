@@ -76,6 +76,8 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
         .await?;
     let mut active = false;
     for id in ids {
+        let promote_id = id.clone();
+        writer.apply(move |account| promote_requested_answer(account, &promote_id)).await?;
         let owned_id = id.clone();
         let prepared = writer.apply(move |account| prepare(account, &owned_id)).await?;
         let Some(prepared) = prepared else { continue };
@@ -86,8 +88,9 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
         let manifest = if lease_due {
             match prepared.input {
                 Ok(input) => {
-                    federation::manifest(
+                    federation::manifest_for_route(
                         &context,
+                        &writer,
                         &prepared.plan.config,
                         &input.root,
                         input.federation.as_ref(),
@@ -146,7 +149,11 @@ fn prepare(account: &LocalBusAccountState, id: &str) -> Result<Option<Prepared>,
     }))
 }
 fn current(account: &LocalBusAccountState, plan: &Plan) -> Result<bool, SdkError> {
-    Ok(account.client.voice_calls.get(&plan.original.row.call_id) == Some(&plan.original)
+    Ok(account
+        .client
+        .voice_calls
+        .get(&plan.original.row.call_id)
+        .is_some_and(|live| live.same_signaling(&plan.original))
         && account
             .client
             .account_db()?
@@ -154,12 +161,36 @@ fn current(account: &LocalBusAccountState, plan: &Plan) -> Result<bool, SdkError
             .as_ref()
             == Some(&plan.thread))
 }
-fn install(account: &mut LocalBusAccountState, next: LiveCall) -> Result<(), SdkError> {
+fn promote_requested_answer(account: &mut LocalBusAccountState, id: &str) -> Result<(), SdkError> {
+    let Some(call) = account.client.voice_calls.get(id) else { return Ok(()) };
+    if call.held_answer != call::state::HeldAnswer::Requested
+        || call.media_held
+        || call.row.state != "incoming_ringing"
+    {
+        return Ok(());
+    }
+    let mut next = call.clone();
+    next.queue_requested_answer(now_unix_timestamp())?;
+    if next.row.state == "incoming_ringing" {
+        return Ok(());
+    }
+    install(account, next)
+}
+fn install(account: &mut LocalBusAccountState, mut next: LiveCall) -> Result<(), SdkError> {
+    if next.row.state == "incoming_ringing"
+        && account
+            .client
+            .voice_calls
+            .get(&next.row.call_id)
+            .is_some_and(|old| old.held_answer == call::state::HeldAnswer::Requested)
+    {
+        next.held_answer = call::state::HeldAnswer::Requested;
+    }
     if account.client.voice_calls.get(&next.row.call_id).is_none_or(|old| old.row != next.row) {
         account
             .client
             .account_db()?
-            .write_transaction(|| account.client.persist_call_row(&next.row))?;
+            .write_transaction(|| account.client.persist_live_call(&next))?;
     }
     account.client.voice_calls.insert(next.row.call_id.clone(), next);
     Ok(())
@@ -299,9 +330,14 @@ async fn send_controls(
             return Ok((false, None, Vec::new()));
         }
         let input = prepared.input?;
-        let manifest =
-            federation::manifest(context, &plan.config, &input.root, input.federation.as_ref())
-                .await?;
+        let manifest = federation::manifest_for_route(
+            context,
+            writer,
+            &plan.config,
+            &input.root,
+            input.federation.as_ref(),
+        )
+        .await?;
         let captured = plan.clone();
         let controls =
             writer.apply(move |account| prepare_controls(account, &captured, manifest)).await?;
@@ -313,12 +349,17 @@ async fn send_controls(
                 &mut control.request,
                 SendMaterialRequest { root: None, prekey: None },
             );
-            let material = federation::material(
+            let commitment = input.root.clone();
+            let material = federation::material_for_route(
                 context,
                 &plan.config,
                 request,
                 crate::bus::connection_manager::CallClass::Priority,
-                control.target.federation.as_ref(),
+                federation::HomeLookup {
+                    writer,
+                    commitment: &commitment,
+                    route: control.target.federation.as_ref(),
+                },
             )
             .await?;
             let route = control.target.federation.clone();
@@ -342,6 +383,8 @@ async fn send_controls(
                 resolutions.push(resolved);
             } else {
                 // The destination federation forward admits the envelope only.
+                let root = input.root.clone();
+                let route = federation::pinned_submit_route(writer, &root, route).await?;
                 federation::submit_until(context, envelope, route, context.call_deadline(), true)
                     .await?;
             }
@@ -387,6 +430,14 @@ fn note_control_result(
         .map(crate::gateway::call_resolution::CallOperationAction::from_control)
         .collect::<std::collections::BTreeSet<_>>();
     let mut next = plan.original;
+    if account
+        .client
+        .voice_calls
+        .get(&next.row.call_id)
+        .is_some_and(|live| live.held_answer == call::state::HeldAnswer::Requested)
+    {
+        next.held_answer = call::state::HeldAnswer::Requested;
+    }
     #[cfg(feature = "test-support")]
     {
         next.last_control_error = outcome.error;
@@ -459,6 +510,7 @@ fn note_control_result(
             next.pending.clear();
         }
     }
+    next.queue_requested_answer(now)?;
     install(account, next)
 }
 fn prepare_controls(
@@ -585,6 +637,7 @@ fn sign_control(
         wake_id: None,
         call_ref: control.call_ref.clone(),
         call_terminal: call::resolution_terminal(control),
+        target_node: None,
     };
     Ok(SignedControl { id, extras, bytes, intent_created_at })
 }

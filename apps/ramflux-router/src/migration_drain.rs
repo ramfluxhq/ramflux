@@ -198,26 +198,13 @@ pub(crate) fn forward(
         Err(_) => return Ok(MigrationDrainOutcome::Held),
     }
     let envelope = &envelope;
-    let native = envelope
-        .ext
-        .ext
-        .get("source_device_authority")
-        .and_then(|a| a.get("custody_authority"))
-        .is_some_and(|a| !a.is_null());
-    let source = if native {
-        state.authenticated_native_forwarded_source_with_floors(
-            envelope,
-            &[],
-            store,
-            RouterEnvelopeOrigin::Federation,
-        )
-    } else {
-        state.authenticated_envelope_source_from(
-            envelope,
-            Some(store),
-            RouterEnvelopeOrigin::Federation,
-        )
-    };
+    // Drain rows carry no authenticated peer. Ordinary admission accepts local registrations
+    // and refuses foreign custody rather than creating an anonymous quota owner.
+    let source = state.authenticated_envelope_source_from(
+        envelope,
+        Some(store),
+        RouterEnvelopeOrigin::Federation,
+    );
     let source = match source {
         Ok(source) => source,
         Err(error @ NodeCoreError::Redb(_)) => return Err(error),

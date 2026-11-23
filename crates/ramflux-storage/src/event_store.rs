@@ -184,13 +184,15 @@ impl ProjectionStore for AccountDb {
     }
 
     fn projection_checkpoint(&self, projection_name: &str) -> Result<Option<String>, StorageError> {
-        Ok(self
+        // `last_event_id` is nullable. A NULL cell is an absent checkpoint.
+        let stored: Option<Option<String>> = self
             .connection
             .query_row(
                 "SELECT last_event_id FROM projection_checkpoint WHERE projection_name = ?1",
                 params![projection_name],
                 |row| row.get(0),
             )
-            .optional()?)
+            .optional()?;
+        Ok(stored.flatten())
     }
 }

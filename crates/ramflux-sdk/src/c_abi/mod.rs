@@ -139,6 +139,7 @@ struct CAbiEventQueue {
 struct CAbiError {
     code: RamfluxErrorCode,
     message: String,
+    status: Option<i32>,
 }
 
 type CAbiResult<T> = Result<T, CAbiError>;
@@ -935,7 +936,6 @@ macro_rules! sdk_invalid_argument {
             | SdkError::TaskDeliveryTooLarge { .. }
             | SdkError::SurfaceDeliveryTooLarge { .. }
             | SdkError::ContactConfirmationRequired(_)
-            | SdkError::ContactHomeNodeUnsupported
             | SdkError::ContactInput(_)
             | SdkError::AccountNotOpen(_)
             | SdkError::AccountRestorePending(_)
@@ -1164,7 +1164,11 @@ fn current_millis() -> u128 {
 
 impl CAbiError {
     fn new(code: RamfluxErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self { code, message: message.into(), status: None }
+    }
+
+    pub(super) fn with_status(status: i32, message: impl Into<String>) -> Self {
+        Self { code: RamfluxErrorCode::Internal, message: message.into(), status: Some(status) }
     }
 }
 

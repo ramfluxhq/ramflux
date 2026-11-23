@@ -63,8 +63,9 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
         let root = self.contact_candidate_manifest_request(entry)?;
+        let origin = self.sender_manifest_origin(&entry.envelope, &root)?;
         let manifest =
-            crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?;
+            crate::client::foreign_manifest::fetch_sender_manifest(gateway, origin, &root).await?;
         let own = self.accept_contact_candidate_manifest(entry, &manifest)?;
         self.cache_verified_device_manifest(gateway, &own, "contact-request-self").await?;
         Ok(manifest)

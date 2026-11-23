@@ -165,7 +165,6 @@ fn bus_reason_code(error: &SdkError) -> Option<String> {
         SdkError::CustodyConfirmRejected(reason) => reason.token().to_owned(),
         SdkError::CustodyExpired => "deadline".into(),
         SdkError::ContactConfirmationRequired(_) => "root_replacement_confirmation_required".into(),
-        SdkError::ContactHomeNodeUnsupported => "invalid_card".into(),
         SdkError::PairingCode(code) => {
             let token = pairing_https_token(code)?;
             token.to_owned()
@@ -241,6 +240,9 @@ fn redirected_bus_code(error: &SdkError) -> Option<&'static str> {
     }
     if matches!(error, SdkError::LocalBusRefused { code, .. } if code == "transfer_requires_sync") {
         return Some("transfer_requires_sync");
+    }
+    if matches!(error, SdkError::LocalBusRefused { code, .. } if code == "ClientSuspended") {
+        return Some("ClientSuspended");
     }
     if let SdkError::GroupRefused { operation, .. } = error {
         return Some(operation.error_code());

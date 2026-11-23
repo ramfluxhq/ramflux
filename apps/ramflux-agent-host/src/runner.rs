@@ -16,6 +16,7 @@ pub struct AgentHost<E> {
     pub(crate) engine: E,
     pub(crate) store: CheckpointStore,
     pub(crate) state: Checkpoint,
+    pub(crate) held_owner: Vec<crate::runner_retry::HeldOwner>,
 }
 struct IntentDelivery<'a> {
     conversation_id: &'a str,
@@ -57,7 +58,7 @@ impl<E: EngineProvider> AgentHost<E> {
         {
             return Err(Error::State);
         }
-        Ok(Self { config, owner_account: None, engine, store, state })
+        Ok(Self { config, owner_account: None, engine, store, state, held_owner: Vec::new() })
     }
     pub(crate) fn save_state(&mut self) -> Result<()> {
         self.state.engine = self.engine.checkpoint()?;
@@ -556,10 +557,29 @@ impl<E: EngineProvider> AgentHost<E> {
                         {
                             return Err(Error::Resync);
                         }
-                        crate::runner_run_approval::forward(bus, &mut self.engine, &frame).await?;
+                        match crate::runner_run_approval::forward(bus, &mut self.engine, &frame).await
+                        {
+                            Ok(()) => {}
+                            Err(error) if error.stops_host() => return Err(error),
+                            Err(Error::RateLimited { retry_after_ms }) => {
+                                self.hold_owner(frame, retry_after_ms);
+                            }
+                            Err(error) => {
+                                eprintln!("prx approval forward deferred: {error}");
+                                self.hold_owner(frame, 3_000);
+                            }
+                        }
                     }
                 }
-                _ = tick.tick() => self.poll(bus, crate::bus::now_ms()).await?,
+                _ = tick.tick() => {
+                    let now_ms = crate::bus::now_ms();
+                    self.flush_held_owner(bus).await?;
+                    if self.engine.job_poll_ready() {
+                        self.poll(bus, now_ms).await?;
+                    } else {
+                        self.poll_with(bus, now_ms, false).await?;
+                    }
+                }
             }
         }
     }

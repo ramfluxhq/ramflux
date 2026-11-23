@@ -19,6 +19,7 @@ type OwnerFrame = std::result::Result<ramflux_sdk::LocalBusFrame, Error>;
 
 enum Wake {
     Slept,
+    Flush,
     Event(Box<OwnerFrame>),
 }
 
@@ -46,11 +47,15 @@ pub(super) async fn wait_and_forward<E: EngineProvider>(
     }
     let sleep = tokio::time::sleep(delay);
     tokio::pin!(sleep);
+    let mut flush = tokio::time::interval(Duration::from_millis(250));
+    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    flush.tick().await;
     let mut replaced = false;
     loop {
         // `owner_frame` borrows `owner`. Drop that future before `forward_one` borrows it again.
         let wake = tokio::select! {
             () = &mut sleep => Wake::Slept,
+            _ = flush.tick() => Wake::Flush,
             result = tokio::signal::ctrl_c() => {
                 result.map_err(|_| Error::State)?;
                 return Ok(Wait::Stop);
@@ -59,6 +64,7 @@ pub(super) async fn wait_and_forward<E: EngineProvider>(
         };
         match wake {
             Wake::Slept => return Ok(Wait::Slept),
+            Wake::Flush => host.flush_held_posts().await?,
             Wake::Event(event) => {
                 if let Err(error) = forward_one(config, host, owner, &mut replaced, *event).await {
                     eprintln!("prx approval forward deferred: {error}");
@@ -92,11 +98,19 @@ async fn forward_one<E: EngineProvider>(
             return Err(error);
         }
     };
-    if let Err(error) = host.post_owner_decision(&frame).await {
-        replace_owner(config, host, owner, replaced).await?;
-        return Err(error);
+    match host.post_owner_decision(&frame).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.stops_host() => Err(error),
+        Err(ramflux_agent_host::Error::RateLimited { retry_after_ms }) => {
+            host.hold_owner(frame, retry_after_ms);
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!("prx approval forward deferred: {error}");
+            host.hold_owner(frame, 3_000);
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 async fn replace_owner<E: EngineProvider>(

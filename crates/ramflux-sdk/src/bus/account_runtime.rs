@@ -10,6 +10,7 @@ use crate::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as RoutingMutex};
 
+mod background;
 mod commands;
 mod maintenance;
 use maintenance::Maintenance;
@@ -90,6 +91,9 @@ struct AccountRuntime {
     /// Generic connection work skipped so a demanded head can be applied first.
     deferred: std::collections::VecDeque<super::connection_manager::AccountWork>,
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
+    /// After resume, redrive receive until this instant so a peer reply is not stuck behind
+    /// the push safety sweep.
+    resume_receive_until: Option<tokio::time::Instant>,
     transient: TransientHost,
     pairing: pairing_calls::Calls,
     username: username_calls::Calls,
@@ -178,6 +182,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         head_rx,
         deferred: std::collections::VecDeque::new(),
         ledger: None,
+        resume_receive_until: None,
         transient: TransientHost::default(),
         pairing: pairing_calls::Calls::default(),
         username: username_calls::Calls::default(),
@@ -203,7 +208,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         "account.flush",
         serde_json::json!({}),
     );
-    let flushed = account.publish(&request).await;
+    let flushed = flush_if_open(&account, &request).await;
     account.close_readers().await;
     let pairing = crate::custody::pairing::remove_actor_and_drain(
         &account.state.config.data_root,
@@ -370,7 +375,7 @@ impl AccountRuntime {
         ready: std::sync::mpsc::SyncSender<()>,
     ) -> Result<bool, SdkError> {
         self.initialize_readers()?;
-        self.start_connection()?;
+        self.start_connection_or_defer();
         self.start_courier();
         let _ = ready.send(());
         let restore = LocalBusFrame::request(
@@ -403,7 +408,7 @@ impl AccountRuntime {
             tracing::warn!(account_id = %self.id, "task preparation courier stopped; restarting");
             self.stop_courier().await;
             tokio::time::sleep(Duration::from_millis(100)).await;
-            self.start_connection()?;
+            self.start_connection_or_defer();
             self.start_courier();
         }
         Ok(())
@@ -470,8 +475,8 @@ impl AccountRuntime {
         let (_writer_budget, mut schedule, mut next) = self.serve_setup();
         let mut checkpoints = 0_u8;
         loop {
-            let (transient_deadline, username_deadline) =
-                Box::pin(self.prepare_receive_turn()).await?;
+            let prepared = self.background_or_prepare().await?;
+            let Some((transient_deadline, username_deadline)) = prepared else { break };
             if let Some(command) = self.queued_command(&mut checkpoints) {
                 if Box::pin(self.apply(command)).await? {
                     break;
@@ -490,7 +495,7 @@ impl AccountRuntime {
                     checkpoints += 1;
                     if let Some(work)=work {
                         let mut shutdown=self.shutdown.clone();let mut preempt=self.preempt.clone();
-                        tokio::select! {biased;_=shutdown.changed()=>break,_=preempt.changed()=>{},result=self.apply_connection_work(work)=>result?}
+                        tokio::select! {biased;_=shutdown.changed()=>break,_=preempt.changed()=>{},result=self.finish_connection_work(work)=>result?}
                     }
                     continue;
                 },
@@ -634,6 +639,10 @@ impl AccountRuntime {
             }
         }
     }
+}
+
+async fn flush_if_open(account: &AccountRuntime, request: &LocalBusFrame) -> Result<(), SdkError> {
+    if background::files_released() { Ok(()) } else { account.publish(request).await }
 }
 
 fn stopped() -> SdkError {

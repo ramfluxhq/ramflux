@@ -22,11 +22,27 @@ impl Origin {
     async fn named(directory: &Directory, node_id: &str) -> Result<Self, SdkError> {
         Self::bound(directory, node_id, "127.0.0.1:0", None).await
     }
+    pub(super) async fn with_manifests(
+        directory: &Directory,
+        node_id: &str,
+        manifests: Arc<std::sync::Mutex<Vec<crate::prekey::SdkDeviceManifestResponse>>>,
+    ) -> Result<Self, SdkError> {
+        Self::serve(directory, node_id, "127.0.0.1:0", None, Some(manifests)).await
+    }
     async fn bound(
         directory: &Directory,
         node_id: &str,
         bind: &str,
         host: Option<&str>,
+    ) -> Result<Self, SdkError> {
+        Self::serve(directory, node_id, bind, host, None).await
+    }
+    async fn serve(
+        directory: &Directory,
+        node_id: &str,
+        bind: &str,
+        host: Option<&str>,
+        manifests: Option<Arc<std::sync::Mutex<Vec<crate::prekey::SdkDeviceManifestResponse>>>>,
     ) -> Result<Self, SdkError> {
         let listener = tokio::net::TcpListener::bind(bind).await?;
         let addr = listener.local_addr()?;
@@ -58,7 +74,7 @@ impl Origin {
             &ramflux_protocol::client_discovery_signing_bytes(&record)?,
             [91; 32],
         );
-        let body = serde_json::to_vec(&record)?;
+        let record_body = serde_json::to_vec(&record)?;
         let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = requests.clone();
         let proxy_request = format!("GET {url}/.well-known/ramflux/client ");
@@ -68,12 +84,18 @@ impl Origin {
                 let n = stream.read(&mut buf).await?;
                 observed.fetch_add(1, Ordering::SeqCst);
                 let request = String::from_utf8_lossy(&buf[..n]);
-                assert!(
-                    request.starts_with("GET /.well-known/ramflux/client ")
-                        || request.starts_with(&proxy_request)
-                );
-                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await?;
-                stream.write_all(&body).await?;
+                let path = request.split_whitespace().nth(1).unwrap_or("");
+                let payload = if path.starts_with("/.well-known/ramflux/client")
+                    || request.starts_with(&proxy_request)
+                {
+                    record_body.clone()
+                } else if let Some(commitment) = path.strip_prefix("/mvp1/device-manifest/") {
+                    manifest_payload(manifests.as_ref(), commitment)?
+                } else {
+                    return Err(invalid("unexpected discovery request"));
+                };
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",payload.len()).as_bytes()).await?;
+                stream.write_all(&payload).await?;
                 stream.shutdown().await?;
             }
             Ok(())
@@ -81,6 +103,19 @@ impl Origin {
         Ok(Self { url, record, requests, task })
     }
 }
+fn manifest_payload(
+    manifests: Option<&Arc<std::sync::Mutex<Vec<crate::prekey::SdkDeviceManifestResponse>>>>,
+    commitment: &str,
+) -> Result<Vec<u8>, SdkError> {
+    let manifests = manifests.ok_or_else(|| invalid("manifest request without a directory"))?;
+    let records = manifests.lock().map_err(|_| invalid("directory mutex"))?;
+    let manifest = records
+        .iter()
+        .find(|manifest| manifest.principal_commitment == commitment)
+        .ok_or_else(|| invalid("manifest"))?;
+    Ok(serde_json::to_vec(manifest)?)
+}
+
 pub(super) fn install_native_home(
     origin: &Origin,
     state: &mut LocalBusDaemonState,
@@ -275,8 +310,7 @@ fn resigned_native_card(
 }
 
 #[tokio::test]
-async fn a_card_for_another_home_node_is_rejected_before_contact_or_route_publication()
--> Result<(), SdkError> {
+async fn a_card_for_another_home_node_pins_that_home() -> Result<(), SdkError> {
     let mut a = crate::client::native_test_support::Fixture::named("alice", "alice", "alice")
         .await
         .map_err(native_account)?;
@@ -286,7 +320,8 @@ async fn a_card_for_another_home_node_is_rejected_before_contact_or_route_public
     let directory =
         Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
     let home = Origin::new(&directory).await?;
-    let foreign = Origin::named(&directory, "foreign.test").await?;
+    let foreign =
+        Origin::with_manifests(&directory, "foreign.test", directory.records.clone()).await?;
     let vault = a.vault.clone();
     let mut s = born_state(&mut a, &mut b, &directory)?;
     s.config.custody_vault = Some(vault);
@@ -298,22 +333,15 @@ async fn a_card_for_another_home_node_is_rejected_before_contact_or_route_public
         now_unix_timestamp(),
     )?;
     let card = resigned_native_card(&s, "alice", &foreign.url, &body.node.key_fingerprint)?;
-    let error = call(&mut s, "bob", "contact.add", json!({"card":card}))
-        .await
-        .err()
-        .ok_or_else(|| invalid("foreign home accepted"))?;
-    assert!(matches!(error, SdkError::ContactHomeNodeUnsupported));
-    assert_eq!(
-        foreign.requests.load(Ordering::SeqCst),
-        0,
-        "foreign locator was contacted before rejection"
-    );
-    let wire = crate::bus::io::local_bus_error_body(&error);
-    assert_eq!(wire.code, "ValidationFailed");
-    assert_eq!(wire.reason_code.as_deref(), Some("invalid_card"));
+    let added = call(&mut s, "bob", "contact.add", json!({"card":card})).await?;
+    assert_eq!(added["contact"]["principal_id"], "alice");
+    assert!(foreign.requests.load(Ordering::SeqCst) >= 1, "signed home record was not fetched");
     let client = &s.accounts.get("bob").ok_or_else(|| invalid("bob"))?.client;
-    assert_eq!(client.friend_links()?.len(), 0);
-    assert!(client.account_db()?.client_record("identity", "alice")?.is_none());
+    let identity = client
+        .account_db()?
+        .client_record("identity", "alice")?
+        .ok_or_else(|| invalid("identity"))?;
+    assert_eq!(identity["home_node_id"], "foreign.test");
     Ok(())
 }
 

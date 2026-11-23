@@ -105,6 +105,10 @@ enum HttpFailure {
     Invalid,
     /// HTTP 429 `agent_busy` or `agent_budget_exhausted`. Not retried.
     Admission(EngineFailure),
+    /// Shared HTTP 429. The job or decision stays and is retried after the delay.
+    RateLimited {
+        retry_after_secs: u64,
+    },
 }
 
 struct HttpResponse {
@@ -119,6 +123,8 @@ pub struct PrxEngine {
     max_conversations: usize,
     state: PrxState,
     last_unavailable_log: Option<Instant>,
+    /// Earliest time the bus tick may spend another `GET /api/jobs` request.
+    next_job_poll: Option<Instant>,
     authorization: PrxAuthorization,
     turn_timeout_ms: u64,
     approval_timeout_ms: u64,
@@ -175,6 +181,7 @@ impl PrxEngine {
             max_conversations,
             state: PrxState::default(),
             last_unavailable_log: None,
+            next_job_poll: None,
             authorization: config.authorization,
             turn_timeout_ms: config.turn_timeout_s.saturating_mul(1000),
             approval_timeout_ms: config.approval_timeout_s.saturating_mul(1000),
@@ -412,6 +419,10 @@ impl PrxEngine {
                         decision_id,
                         approval,
                     })),
+                    Err(HttpFailure::RateLimited { retry_after_secs }) => {
+                        self.defer_job_poll(retry_after_secs);
+                        Ok(None)
+                    }
                     Err(error) => {
                         self.revoke_pending(conversation_id).await;
                         if matches!(error, HttpFailure::Unavailable | HttpFailure::Timeout) {
@@ -453,6 +464,9 @@ impl PrxEngine {
         let approval_path = format!("api/sessions/{session}/approvals/{decision_id}");
         if !approved {
             let response = self.request(Method::DELETE, &approval_path, None).await;
+            if let Err(HttpFailure::RateLimited { retry_after_secs }) = response {
+                return Err(HttpFailure::RateLimited { retry_after_secs });
+            }
             // A terminal local decline must free the conversation even during an outage.
             self.state.pending.remove(conversation_id);
             let response = response?;
@@ -507,6 +521,7 @@ impl PrxEngine {
                         || matches!(response.status.as_u16(), 408 | 429) => {}
                 Err(HttpFailure::Unavailable | HttpFailure::Timeout) => {}
                 Err(HttpFailure::Admission(reason)) => return Err(HttpFailure::Admission(reason)),
+                Err(error @ HttpFailure::RateLimited { .. }) => return Err(error),
                 Ok(_) | Err(HttpFailure::Invalid | HttpFailure::Rejected) => {
                     return Err(HttpFailure::Rejected);
                 }
@@ -603,6 +618,17 @@ impl PrxEngine {
             _ => eprintln!("prx cancel outcome unknown"),
         }
     }
+
+    fn note_job_poll(&mut self) {
+        self.next_job_poll = Some(Instant::now() + std::time::Duration::from_secs(3));
+    }
+
+    fn defer_job_poll(&mut self, retry_after_secs: u64) {
+        let at = Instant::now() + std::time::Duration::from_secs(retry_after_secs.clamp(3, 120));
+        if self.next_job_poll.is_none_or(|current| at > current) {
+            self.next_job_poll = Some(at);
+        }
+    }
 }
 
 impl EngineProvider for PrxEngine {
@@ -642,6 +668,9 @@ impl EngineProvider for PrxEngine {
                 message_id: input.conversation.message_id.to_owned(),
                 reason,
             }]),
+            Err(HttpFailure::RateLimited { retry_after_secs }) => {
+                Err(Error::RateLimited { retry_after_ms: retry_after_secs.saturating_mul(1000) })
+            }
             Err(error @ (HttpFailure::Timeout | HttpFailure::Rejected | HttpFailure::Invalid)) => {
                 Ok(vec![EngineEvent::VisibleFailure {
                     conversation_id: input.conversation.conversation_id.to_owned(),
@@ -656,6 +685,10 @@ impl EngineProvider for PrxEngine {
         }
     }
 
+    fn job_poll_ready(&self) -> bool {
+        self.next_job_poll.is_none_or(|at| Instant::now() >= at)
+    }
+
     async fn poll(&mut self, now_ms: u64) -> Result<Vec<EngineEvent>> {
         let mut events = self
             .state
@@ -663,6 +696,7 @@ impl EngineProvider for PrxEngine {
             .iter()
             .map(|(conversation, completed)| completed.event(conversation))
             .collect::<Vec<_>>();
+        self.note_job_poll();
         let jobs = self
             .state
             .jobs
@@ -687,6 +721,10 @@ impl EngineProvider for PrxEngine {
                 }
                 Ok(None) => {}
                 Err(HttpFailure::Unavailable | HttpFailure::Timeout) => self.note_unavailable(),
+                Err(HttpFailure::RateLimited { retry_after_secs }) => {
+                    self.defer_job_poll(retry_after_secs);
+                    break;
+                }
                 Err(HttpFailure::Admission(reason)) => {
                     self.state.jobs.remove(&conversation);
                     let event = EngineEvent::VisibleFailure {
@@ -728,6 +766,9 @@ impl EngineProvider for PrxEngine {
                 Err(Error::EngineUnavailable)
             }
             Err(HttpFailure::Timeout) => Err(Error::EngineTimeout),
+            Err(HttpFailure::RateLimited { retry_after_secs }) => {
+                Err(Error::RateLimited { retry_after_ms: retry_after_secs.saturating_mul(1000) })
+            }
             Err(HttpFailure::Admission(_) | HttpFailure::Rejected | HttpFailure::Invalid) => {
                 Err(Error::EngineRejected)
             }
@@ -1169,15 +1210,20 @@ fn classify_too_many(
         ramflux_prx_client::PrxError::AgentBudgetExhausted { retry_after_secs } => {
             Err(HttpFailure::Admission(EngineFailure::AgentBudgetExhausted { retry_after_secs }))
         }
+        ramflux_prx_client::PrxError::RateLimited { retry_after_ms } => {
+            Err(HttpFailure::RateLimited {
+                retry_after_secs: retry_seconds(retry_after_ms, header_seconds),
+            })
+        }
         _ => {
-            let body = if bytes.is_empty() {
-                Value::Null
-            } else {
-                serde_json::from_slice(bytes).unwrap_or(Value::Null)
-            };
-            Ok(HttpResponse { status: StatusCode::TOO_MANY_REQUESTS, body })
+            Err(HttpFailure::RateLimited { retry_after_secs: retry_seconds(None, header_seconds) })
         }
     }
+}
+
+fn retry_seconds(retry_after_ms: Option<u64>, header_seconds: Option<u64>) -> u64 {
+    let from_body = retry_after_ms.map(|millis| millis.saturating_add(999) / 1000);
+    from_body.or(header_seconds).unwrap_or(3).clamp(1, 120)
 }
 
 fn stored_history_ok(row: &StoredHistory) -> bool {

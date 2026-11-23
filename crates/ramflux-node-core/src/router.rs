@@ -33,6 +33,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 mod ack_batch;
 mod c1_view;
 mod committed_forward;
+mod foreign_source;
 mod retention;
 #[cfg(any(test, feature = "test-support"))]
 pub use c1_view::EphemeralDispatchObservation;
@@ -1602,100 +1603,6 @@ impl RouterCore {
         for target in snapshot.deleted_delivery_targets {
             self.target_shard(&target).deleted_delivery_targets.insert(target);
         }
-    }
-
-    /// Authenticate the root-selected branch before using any claimed sender in a key.
-    /// # Errors
-    /// Rejects missing root claims, absent/revoked signed-set entries and forged signatures.
-    pub fn authenticated_envelope_source(
-        &self,
-        envelope: &ramflux_protocol::Envelope,
-    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
-        ramflux_protocol::ephemeral::require_durable(envelope)?;
-        self.authenticated_envelope_source_from(envelope, None, RouterEnvelopeOrigin::Gateway)
-    }
-
-    /// Authenticate a source and persist its highest foreign authority before accepting delivery.
-    /// # Errors
-    /// Rejects stale or forged authority and durable storage failures.
-    pub fn authenticated_envelope_source_durable(
-        &self,
-        envelope: &ramflux_protocol::Envelope,
-        store: &crate::RouterRedbStore,
-    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
-        ramflux_protocol::ephemeral::require_durable(envelope)?;
-        self.authenticated_envelope_source_from(
-            envelope,
-            Some(store),
-            RouterEnvelopeOrigin::Gateway,
-        )
-    }
-
-    /// Authenticate an envelope using provenance from an already authenticated mesh peer.
-    /// # Errors
-    /// Rejects forged, stale, over-capacity or gateway-supplied foreign authority.
-    pub fn authenticated_envelope_source_from(
-        &self,
-        envelope: &ramflux_protocol::Envelope,
-        store: Option<&crate::RouterRedbStore>,
-        origin: RouterEnvelopeOrigin,
-    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
-        ramflux_protocol::ephemeral::require_durable(envelope)?;
-        let reject = || NodeCoreError::ItestHttp("envelope root authority mismatch".into());
-        let root = envelope
-            .ext
-            .ext
-            .get("source_root_commitment")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(reject)?;
-        let lookup = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
-            .map_err(|_| reject())?;
-        let mut control = lock_unpoisoned(&self.control);
-        let registry = &mut control.mvp1_identities;
-        let registered = registry
-            .resolve_device_selector(&lookup)
-            .and_then(|identity| registry.device_auth_key(&identity));
-        let local_registration = registered.is_some();
-        let (authority, source) = if let Some(authority) = registered {
-            let source = authority.verify_envelope_source(envelope)?;
-            (authority, source)
-        } else {
-            if origin != RouterEnvelopeOrigin::Federation {
-                return Err(NodeCoreError::Unauthorized(
-                    "foreign authority requires an authenticated federation peer".into(),
-                ));
-            }
-            let (authority, source) = DeviceAuthKeyResponse::forwarded_envelope_source(envelope)?;
-            if registry
-                .signed_device_set(root)
-                .is_some_and(|current| authority.signed_device_set.as_ref() != Some(current))
-            {
-                return Err(reject());
-            }
-            (authority, source)
-        };
-        // Native registration already supplies the current unfenced certificate chain.
-        // Its envelope signature was checked above; a legacy signed device set is absent
-        // by design. Foreign evidence still requires the durable admission path below.
-        if local_registration && authority.custody_authority.is_some() {
-            return Ok(source);
-        }
-        let record = authority.signed_device_set.as_ref().ok_or_else(reject)?;
-        if local_registration {
-            if let Some(fence) = control.foreign_device_heads.fences.get(root) {
-                fence.check(crate::foreign_device_heads::EpochFence::of(record)?)?;
-            }
-            return Ok(source);
-        }
-
-        let observation = if let Some(store) = store {
-            store.observe_foreign_device_set(record)?
-        } else {
-            control.foreign_device_heads.prepare(record)?
-        };
-        control.foreign_device_heads.apply(record, observation);
-        observation.admitted()?;
-        Ok(source)
     }
 
     /// Refresh locally registered authority before delivery or forwarding.

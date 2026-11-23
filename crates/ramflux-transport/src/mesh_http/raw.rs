@@ -37,6 +37,7 @@ impl MeshHttpClient {
         let endpoint = normalized_endpoint(request.endpoint);
         let timeouts = MeshHttpTimeouts::DEFAULT.with_deadline(request.deadline);
         let connection_request = MeshHttpClientRequest {
+            signed_envelope: false,
             method: "POST",
             endpoint,
             path: request.path,

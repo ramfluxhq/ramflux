@@ -34,12 +34,14 @@ pub(super) fn candidates(
 impl Prepared {
     pub(super) async fn exchange_with_recovery(
         &self,
+        deadline: tokio::time::Instant,
     ) -> Result<directory::UsernameNetworkReply, SdkError> {
         let original = directory::exchange_username(
             &self.gateway,
             &self.transport,
             self.pin.clone(),
             self.action.clone(),
+            deadline,
         )
         .await;
         if !matches!(
@@ -58,6 +60,7 @@ impl Prepared {
                 &self.transport,
                 self.pin.clone(),
                 action,
+                deadline,
             )
             .await
             {
@@ -67,6 +70,7 @@ impl Prepared {
                         &self.transport,
                         self.pin.clone(),
                         self.action.clone(),
+                        deadline,
                     )
                     .await;
                 }

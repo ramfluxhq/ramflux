@@ -36,7 +36,10 @@ impl<E: EngineProvider> AgentHost<E> {
     ) -> Result<()> {
         match result {
             Ok(()) => Ok(()),
-            Err(error) if error.stops_host() || matches!(error, Error::Bus | Error::Resync) => {
+            Err(error)
+                if error.stops_host()
+                    || matches!(error, Error::Bus | Error::Resync | Error::RateLimited { .. }) =>
+            {
                 Err(error)
             }
             Err(error) => {

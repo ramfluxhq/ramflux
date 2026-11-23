@@ -34,7 +34,7 @@ impl GroupOperation {
             "group.member.add" => Some(Self::MemberAdd),
             "group.send" => Some(Self::Send),
             "group.name.set" => Some(Self::Rename),
-            "group.member.remove" => Some(Self::MemberRemove),
+            "group.leave" | "group.member.remove" => Some(Self::MemberRemove),
             _ => None,
         }
     }
@@ -312,10 +312,6 @@ pub enum SdkError {
     SurfaceCheckpointMismatch,
     #[error("contact root replacement requires confirmation")]
     ContactConfirmationRequired(Box<crate::ContactRootChange>),
-    #[error(
-        "contact card names a different home node; automatic cross-node contact routing is unavailable"
-    )]
-    ContactHomeNodeUnsupported,
     #[error("contact lookup unavailable: {0}")]
     ContactUnavailable(#[source] Box<SdkError>),
     #[error(transparent)]

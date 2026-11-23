@@ -1,0 +1,114 @@
+name: Linux CLI release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    branches: ['main']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing matching product and TUI tag (vX.Y.Z)'
+        required: true
+        type: string
+      publish:
+        description: 'Attach archives to the tagged GitHub release'
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-cli-release-${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  linux-cli:
+    name: Linux CLI ${{ matrix.target }}
+    if: github.event_name != 'pull_request' || github.head_ref == 'next'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: product
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - name: Checkout product source
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          path: product
+          persist-credentials: false
+      - name: Resolve matching version tag
+        id: version
+        env:
+          REQUESTED_TAG: ${{ inputs.tag || (github.event_name == 'push' && github.ref_name) || '' }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, tomllib
+          version = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version']
+          assert re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version), 'Invalid release version'
+          tag = f'v{version}'
+          assert not os.environ['REQUESTED_TAG'] or os.environ['REQUESTED_TAG'] == tag, 'Tag does not match workspace version'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'tag={tag}\n')
+          PY
+      - name: Checkout matching TUI tag
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          repository: ramfluxhq/ramflux-tui
+          ref: refs/tags/${{ steps.version.outputs.tag }}
+          path: tui
+          persist-credentials: false
+      - name: Native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config perl libssl-dev zlib1g-dev libzstd-dev
+          rustup target add '${{ matrix.target }}'
+      - name: Cache native compilation
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          key: linux-cli-${{ matrix.target }}
+          workspaces: product -> target
+      - name: Build and package production binaries
+        run: bash scripts/release/build-linux-cli.sh ../tui '${{ matrix.target }}' dist
+      - name: Keep dry-run archives
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: linux-cli-${{ matrix.target }}
+          path: |
+            product/dist/*.tar.gz
+            product/dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Attach Linux CLI archives
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    needs: linux-cli
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download both architectures
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: linux-cli-*
+          merge-multiple: true
+          path: dist
+      - name: Attach to the selected release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256

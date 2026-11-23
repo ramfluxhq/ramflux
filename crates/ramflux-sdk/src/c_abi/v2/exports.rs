@@ -24,6 +24,11 @@ pub enum RamfluxV2Status {
     Closed = 26,
     /// Event credit was exhausted. Re-read projections and reopen the subscription.
     ResyncRequired = 27,
+    /// The client released its files. 28 and 29 belong to pairing on `RamfluxErrorCode`.
+    /// A refused call had no business effects. An admitted call reports effects `unknown`.
+    Suspended = 30,
+    /// Host custody is locked, including before the first device unlock. No client was opened.
+    VaultLocked = 31,
 }
 
 #[derive(Default)]
@@ -106,6 +111,14 @@ fn refuse_raw_submit(client: &Client, request: &Request) -> Result<(), CAbiError
     }
     Ok(())
 }
+fn refuse_closed(client: &Client) -> Result<(), CAbiError> {
+    if client.closing.load(std::sync::atomic::Ordering::Acquire)
+        || client.shared.closed.load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err(CAbiError::new(RamfluxErrorCode::TransportUnavailable, "client closed"));
+    }
+    Ok(())
+}
 fn internal() -> CAbiError {
     CAbiError::new(RamfluxErrorCode::Internal, "bridge lock poisoned")
 }
@@ -116,7 +129,7 @@ fn next_id(registry: &mut Registry) -> Result<u64, CAbiError> {
     registry.next = registry.next.checked_add(1).ok_or_else(busy)?;
     Ok(registry.next)
 }
-fn client(handle: u64) -> Result<Arc<Client>, CAbiError> {
+pub(super) fn client(handle: u64) -> Result<Arc<Client>, CAbiError> {
     REGISTRY
         .lock()
         .map_err(|_| internal())?
@@ -146,7 +159,7 @@ pub(super) fn call(action: impl FnOnce() -> Result<(), CAbiError>) -> i32 {
         action()
     })) {
         Ok(Ok(())) => 0,
-        Ok(Err(error)) => error.code as i32,
+        Ok(Err(error)) => error.status.unwrap_or(error.code as i32),
         Err(payload) => {
             // Arbitrary panic payload destructors may panic again. Never unwind from this boundary.
             std::mem::forget(payload);
@@ -203,6 +216,7 @@ pub extern "C" fn ramflux_v2_negotiate(
 }
 
 /// Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?,allow_secret_exports?}`.
+/// The host must supply an existing private directory; see the shared-root contract.
 /// This may block during startup; invoke off the UI thread. Output is zero on failure.
 #[unsafe(no_mangle)]
 #[must_use]
@@ -216,7 +230,8 @@ pub extern "C" fn ramflux_v2_client_open(
 
 /// Open with trusted host OS credential storage (provider ABI version 1).
 /// The table is borrowed only during this call; retained context lives through shutdown.
-/// Android M4 supplies non-synchronizing Keystore wrapping; iOS may supply Keychain storage.
+/// Custody preflight runs before startup; locked custody returns `VaultLocked` (31).
+/// Mobile providers must allow background use after the first device unlock.
 #[unsafe(no_mangle)]
 #[must_use]
 pub extern "C" fn ramflux_v2_client_open_with_custody(
@@ -264,12 +279,11 @@ fn open_inner(
 ) -> Result<(), CAbiError> {
     write_handle(out_client, 0)?;
     let mut config: Config = input(config, len)?;
-    if config.data_root.is_empty() || !std::path::Path::new(&config.data_root).is_absolute() {
-        return Err(invalid("data_root must be absolute"));
+    if let Some(vault) = &vault {
+        vault.preflight().map_err(|error| super::data_root::custody_error(&error))?;
     }
-    std::fs::create_dir_all(&config.data_root).map_err(|_| invalid("data_root"))?;
-    let candidate_root =
-        std::fs::canonicalize(&config.data_root).map_err(|_| invalid("data_root"))?;
+    let candidate_root = super::data_root::validate(&config.data_root)?;
+    config.data_root = candidate_root.to_str().ok_or_else(|| invalid("data_root encoding"))?.into();
     // A registered root remains reserved until shutdown is acknowledged, even if
     // its OS lease is released just before the worker publishes completion.
     // No bridge registry lock spans filesystem I/O.
@@ -425,11 +439,7 @@ pub extern "C" fn ramflux_v2_execute(
                 ));
             }
         }
-        if client.closing.load(std::sync::atomic::Ordering::Acquire)
-            || client.shared.closed.load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Err(CAbiError::new(RamfluxErrorCode::TransportUnavailable, "client closed"));
-        }
+        refuse_closed(&client)?;
         let subscription = matches!(request.method.as_str(), "subscription.open" | "bus.subscribe");
         let id = next_id(&mut *REGISTRY.lock().map_err(|_| internal())?)?;
         let frame_method_close = request.method == "subscription.close";
@@ -457,6 +467,9 @@ pub extern "C" fn ramflux_v2_execute(
             OperationKind::Request
         };
         let mut operations = client.shared.operations.lock().map_err(|_| internal())?;
+        if client.shared.suspended.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(CAbiError::with_status(RamfluxV2Status::Suspended as i32, "suspended"));
+        }
         if operations.len() >= MAX_OPERATIONS {
             return Err(busy());
         }
@@ -578,8 +591,45 @@ pub extern "C" fn ramflux_v2_operation_release(handle: u64, id: u64) -> i32 {
         if finished {
             operations.remove(&id);
         }
+        client.shared.credentials.forget_username(id);
         Ok(())
     })
+}
+
+/// Authorize a username draft with the account master recovery phrase.
+/// `phrase_bytes` is borrowed for this call and is not placed in JSON or logs.
+/// Cancellation writes no signed output and does not submit. A lost submit reply
+/// is reconciled with `username.status`; this function does not sign a replacement.
+#[unsafe(no_mangle)]
+#[must_use]
+pub extern "C" fn ramflux_v2_username_authorize(
+    handle: u64,
+    public_request_json: *const u8,
+    public_request_len: usize,
+    phrase_bytes: *const u8,
+    phrase_len: usize,
+    out_signed_json: *mut *mut RamfluxBuffer,
+    out_error_json: *mut *mut RamfluxBuffer,
+) -> i32 {
+    let mut cancelled = false;
+    let code = call(|| {
+        super::super::clear_out_ptr(out_signed_json)?;
+        super::super::clear_out_ptr(out_error_json)?;
+        let client = client(handle)?;
+        cancelled = super::username::authorize(
+            &client,
+            &super::username::AuthorizeInput {
+                public_json: public_request_json,
+                public_len: public_request_len,
+                phrase: phrase_bytes,
+                phrase_len,
+                out_signed: out_signed_json,
+                out_error: out_error_json,
+            },
+        )?;
+        Ok(())
+    });
+    if code == 0 && cancelled { RamfluxV2Status::Cancelled as i32 } else { code }
 }
 
 /// Poll one subscription event without blocking. Subscribe using execute(subscription.open/bus.subscribe).
@@ -714,7 +764,7 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "not_authorized"
         | "desktop_required"
         | "ancestor_rejected" => E::PermissionDenied as i32,
-        "RateLimited" | "rate_limited" | "quota_exceeded" => E::RateLimited as i32,
+        "RateLimited" | "rate_limited" | "Busy" | "quota_exceeded" => E::RateLimited as i32,
         "AccountBusy" | "DataRootInUse" | "account_busy" => E::AccountBusy as i32,
         "ObjectErased" | "attachment_deleted" => E::ObjectErased as i32,
         "ObjectIdentityConflict" => E::ObjectIdentityConflict as i32,
@@ -722,6 +772,7 @@ pub(super) fn error_code(name: &str) -> i32 {
         "CustodyForkFenced" => E::CustodyForkFenced as i32,
         "SchemaResetRequired" | "schema_reset_required" => E::SchemaResetRequired as i32,
         "resync_required" => RamfluxV2Status::ResyncRequired as i32,
+        "ClientSuspended" => RamfluxV2Status::Suspended as i32,
         _ => E::Internal as i32,
     }
 }

@@ -4,6 +4,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use std::{future::Future, io};
 
@@ -129,9 +130,109 @@ pub trait GatewaySessionTransport: GatewaySessionFrameSink + GatewaySessionFrame
 impl<T> GatewaySessionTransport for T where T: GatewaySessionFrameSink + GatewaySessionFrameSource {}
 
 pub struct QuicGatewayClient {
-    _endpoint: quinn::Endpoint,
+    // Connection before the endpoint: the handle drops first. The guard then polls the driver
+    // until the UDP socket closes, including a drop that never called `shutdown`.
     connection: quinn::Connection,
+    endpoint: BoundQuicEndpoint,
     timeout: Duration,
+}
+
+const QUIC_SOCKET_CLOSE_BUDGET: Duration = Duration::from_secs(2);
+
+static ABANDONED_QUIC: AtomicUsize = AtomicUsize::new(0);
+static QUIC_DRAIN: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// An endpoint whose UDP socket is closed if the owner is dropped without [`QuicGatewayClient::shutdown`].
+struct BoundQuicEndpoint {
+    endpoint: Option<quinn::Endpoint>,
+}
+
+struct AbandonedQuic;
+
+impl Drop for AbandonedQuic {
+    fn drop(&mut self) {
+        if ABANDONED_QUIC.fetch_sub(1, Ordering::AcqRel) == 1 {
+            QUIC_DRAIN.notify_waiters();
+        }
+    }
+}
+
+impl BoundQuicEndpoint {
+    fn bind(bind_addr: SocketAddr) -> Result<Self, io::Error> {
+        Ok(Self { endpoint: Some(quinn::Endpoint::client(bind_addr)?) })
+    }
+
+    fn set_default_client_config(&mut self, config: quinn::ClientConfig) {
+        if let Some(endpoint) = self.endpoint.as_mut() {
+            endpoint.set_default_client_config(config);
+        }
+    }
+
+    fn open(
+        &mut self,
+        peer_addr: SocketAddr,
+        server_name: &str,
+    ) -> Result<quinn::Connecting, TransportError> {
+        let Some(endpoint) = self.endpoint.as_mut() else {
+            return Err(TransportError::Quic("quic endpoint already released".to_owned()));
+        };
+        endpoint.connect(peer_addr, server_name).map_err(crate::quic_errors::connect)
+    }
+
+    fn take(&mut self) -> Option<quinn::Endpoint> {
+        self.endpoint.take()
+    }
+}
+
+impl Drop for BoundQuicEndpoint {
+    fn drop(&mut self) {
+        if let Some(endpoint) = self.endpoint.take() {
+            abandon_quic_endpoint(endpoint);
+        }
+    }
+}
+
+fn abandon_quic_endpoint(endpoint: quinn::Endpoint) {
+    ABANDONED_QUIC.fetch_add(1, Ordering::Release);
+    let guard = AbandonedQuic;
+    let task = async move {
+        let _guard = guard;
+        wait_endpoint_idle(endpoint).await;
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => drop(handle.spawn(task)),
+        Err(_) => drop(task),
+    }
+}
+
+async fn wait_endpoint_idle(endpoint: quinn::Endpoint) {
+    let idle = tokio::time::timeout(QUIC_SOCKET_CLOSE_BUDGET, endpoint.wait_idle());
+    let _ = idle.await;
+    drop(endpoint);
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+}
+
+/// Wait until endpoints dropped without [`QuicGatewayClient::shutdown`] have closed their UDP
+/// sockets, or until the close budget passes.
+///
+/// Process suspend calls this after every client has been stopped or dropped. Resume opens a
+/// new socket.
+pub async fn drain_abandoned_quic() {
+    let deadline = tokio::time::Instant::now() + QUIC_SOCKET_CLOSE_BUDGET;
+    loop {
+        if ABANDONED_QUIC.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        // Enroll before the second read. `notify_waiters` only wakes waiters already queued.
+        let notified = QUIC_DRAIN.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if ABANDONED_QUIC.load(Ordering::Acquire) == 0 || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        let _ = tokio::time::timeout_at(deadline, notified.as_mut()).await;
+    }
 }
 
 /// Structured outcome of a pooled connect attempt (see [`QuicGatewayClient::connect_pooled`]). A
@@ -224,10 +325,9 @@ impl QuicGatewayClient {
         ca_cert: &Path,
         timeout: Duration,
     ) -> Result<Self, TransportError> {
-        let mut endpoint = quinn::Endpoint::client(bind_addr)?;
+        let mut endpoint = BoundQuicEndpoint::bind(bind_addr)?;
         endpoint.set_default_client_config(quic_gateway_client_config(ca_cert)?);
-        let connecting =
-            endpoint.connect(peer_addr, server_name).map_err(crate::quic_errors::connect)?;
+        let connecting = endpoint.open(peer_addr, server_name)?;
         // Keep the handshake future bounded when embedded in larger SDK operations.
         let connection = match Box::pin(tokio::time::timeout(timeout, connecting)).await {
             Ok(Ok(connection)) => connection,
@@ -238,7 +338,7 @@ impl QuicGatewayClient {
                 )));
             }
         };
-        Ok(Self { _endpoint: endpoint, connection, timeout })
+        Ok(Self { connection, endpoint, timeout })
     }
 
     /// Connects with an explicit, pre-built quinn client config and separate handshake/request
@@ -260,11 +360,11 @@ impl QuicGatewayClient {
         handshake_timeout: Duration,
         request_timeout: Duration,
     ) -> Result<Self, QuicConnectPhase> {
-        let mut endpoint = quinn::Endpoint::client(bind_addr)
+        let mut endpoint = BoundQuicEndpoint::bind(bind_addr)
             .map_err(|error| QuicConnectPhase::Setup(error.to_string()))?;
         endpoint.set_default_client_config(client_config);
         let connecting = endpoint
-            .connect(peer_addr, server_name)
+            .open(peer_addr, server_name)
             .map_err(|error| QuicConnectPhase::Setup(error.to_string()))?;
         match Box::pin(tokio::time::timeout(handshake_timeout, connecting)).await {
             Err(_elapsed) => Err(QuicConnectPhase::HandshakeTimeout),
@@ -272,9 +372,7 @@ impl QuicGatewayClient {
                 TransportError::Tls(message) => Err(QuicConnectPhase::HandshakeSecurity(message)),
                 other => Err(QuicConnectPhase::HandshakeFailed(other.to_string())),
             },
-            Ok(Ok(connection)) => {
-                Ok(Self { _endpoint: endpoint, connection, timeout: request_timeout })
-            }
+            Ok(Ok(connection)) => Ok(Self { connection, endpoint, timeout: request_timeout }),
         }
     }
 
@@ -341,6 +439,21 @@ impl QuicGatewayClient {
     /// connection after a transport failure so the old connection cannot be reused.
     pub fn close(&self) {
         self.connection.close(quinn::VarInt::from_u32(0), b"relay pool evict");
+    }
+
+    /// Close the connection and wait until the endpoint driver drops the UDP socket.
+    ///
+    /// The socket stays open until the driver is polled with no remaining connections and no
+    /// endpoint handles. A plain drop schedules the same wait; [`drain_abandoned_quic`] joins it.
+    pub async fn shutdown(self) {
+        let Self { connection, mut endpoint, timeout: _ } = self;
+        connection.close(quinn::VarInt::from_u32(0), b"session closed");
+        // The endpoint keeps the connection until this handle is gone and the driver drains it.
+        drop(connection);
+        let Some(raw) = endpoint.take() else {
+            return;
+        };
+        wait_endpoint_idle(raw).await;
     }
 
     /// # Errors
