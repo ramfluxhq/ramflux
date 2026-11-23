@@ -158,8 +158,9 @@ subscription by itself.
 
 
 Open the account journal via `execute` using `bus.subscribe`. `subscription.open`
-remains the ephemeral, backup, pairing, and attended-frontend opener; on an open
-account it also tails journal topics after its acknowledgement.
+remains the ephemeral, backup, pairing, and attended-frontend opener. A journal
+topic, including `*`, is refused on an open account. Phones do not use it to
+tail the journal.
 `event_poll` consumes one frame without blocking. It returns Pending (24),
 Closed (26) with a null buffer. ResyncRequired (27) includes an owned, generation-tagged gap event. Event
 credit is bounded to 64 frames and 4 MiB; a single frame is at most 1 MiB.

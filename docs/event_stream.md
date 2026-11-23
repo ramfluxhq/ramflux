@@ -8,11 +8,13 @@ by live changes. The response acknowledgement precedes replay on the same connec
 Events carry `seq` and `at`.
 
 `subscription.open` opens ephemeral topics, backup jobs, pairing, and the
-attended-frontend marker (an empty topic list). On an open account it also tails
-the journal for the topics it was given, after `{"subscribed": true}`, so that
-opener is not a silent subscription. A cursor outside the retained window is
-`resync_required` and does not also acknowledge success. `bus.subscribe` is the
-supported live-update method for phones.
+attended-frontend marker (an empty topic list). The ephemeral topics are
+`state.changed`, `account.restore.finished`, `mcp.approval.request`, and
+`message.transient`. That opener acknowledges `{"subscribed": true}` and
+delivers those live events. A journal topic, including `*`, is refused with
+`unsupported reader request` when the account reader is open, and `*` is refused
+the same way before the reader exists. `bus.subscribe` is the supported
+live-update method for phones.
 
 ## Resume and recovery
 

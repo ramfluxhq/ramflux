@@ -303,14 +303,9 @@ pub(super) async fn configure_subscription(
         return supervisor.subscribe_stream(request.clone(), connection).await;
     }
     let body: LocalBusSubscriptionOpenRequest = serde_json::from_value(request.body.clone())?;
-    // Phones follow the journal with bus.subscribe. This opener stays the ephemeral,
-    // backup, pairing, and attended-frontend path. Named topics on an open account
-    // also tail the journal after the acknowledgement, so the subscription is not silent.
-    let journal = if body.topics.iter().any(|topic| !topic.is_empty()) {
-        supervisor.prepare_open_journal(request, connection).await?
-    } else {
-        super::supervisor::OpenJournal::Unavailable
-    };
+    // Phones follow the journal with bus.subscribe. Live topics stay on this
+    // ephemeral router so account start-up can publish. A journal topic is refused.
+    let journal = open_named_journal(supervisor, connection, request, &body.topics).await?;
     if matches!(journal, super::supervisor::OpenJournal::Resync) {
         supervisor.clear_stream(connection.connection_id);
         return Ok(());
@@ -329,6 +324,41 @@ pub(super) async fn configure_subscription(
             .install_stream(connection.connection_id, super::subscription::spawn_tail(*follow));
     }
     Ok(())
+}
+
+/// Journal replay is `bus.subscribe`. Live event names stay on the ephemeral router.
+async fn open_named_journal(
+    supervisor: &Supervisor,
+    connection: &LocalBusConnectionState,
+    request: &LocalBusFrame,
+    topics: &[String],
+) -> Result<super::supervisor::OpenJournal, SdkError> {
+    if !asks_for_journal(topics) {
+        return Ok(super::supervisor::OpenJournal::Unavailable);
+    }
+    let opened = supervisor.prepare_open_journal(request, connection).await?;
+    // A wildcard before the account reader exists would otherwise acknowledge and deliver nothing.
+    if matches!(opened, super::supervisor::OpenJournal::Unavailable)
+        && topics.iter().any(|topic| topic == "*")
+    {
+        return Err(SdkError::LocalBus("unsupported reader request".to_owned()));
+    }
+    Ok(opened)
+}
+
+fn asks_for_journal(topics: &[String]) -> bool {
+    topics.iter().any(|topic| !topic.is_empty() && !ephemeral_subscription_topic(topic))
+}
+
+/// Topics the subscription router delivers without reading the account journal.
+fn ephemeral_subscription_topic(topic: &str) -> bool {
+    matches!(
+        topic,
+        "state.changed"
+            | "account.restore.finished"
+            | "mcp.approval.request"
+            | ramflux_protocol::message::TRANSIENT_TOPIC
+    )
 }
 
 fn rejected_request(request: &mut LocalBusFrame, error: &SdkError) -> LocalBusFrame {
