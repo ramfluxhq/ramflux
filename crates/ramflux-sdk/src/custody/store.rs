@@ -14,6 +14,7 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 mod genesis;
+mod group_participant;
 mod networking;
 pub(crate) mod pairing;
 mod publication;
@@ -413,11 +414,29 @@ impl BornAccount {
         })
     }
 
+    /// Human-primary lease for custody: pairing, recovery, transfer, device revoke and
+    /// home declaration. Group operations use [`Self::group_operation_signer`].
     pub(crate) fn group_primary(
         &self,
         vault: &dyn PrimaryVault,
     ) -> Result<super::PrimarySigningLease, SdkError> {
         self.primary_lease(vault, false)
+    }
+    /// Signer for group create, invite, membership and settings changes. A human signs
+    /// on the device named by the master certificate. A hosted agent signs with its own
+    /// self-signing key on the device that hosts it. A retired agent, or one whose
+    /// approving primary or host desktop is no longer active, is refused.
+    ///
+    /// # Errors
+    /// `PairingCode("PrimaryRequired")` when a human is not on its primary device.
+    /// `AgentCreationRefused("agent_retired")` when the hosted agent or its host is no
+    /// longer operable. Other failures match the custody lease.
+    pub(crate) fn group_operation_signer(
+        &self,
+        vault: &dyn PrimaryVault,
+    ) -> Result<super::PrimarySigningLease, SdkError> {
+        group_participant::admit(self)?;
+        self.primary_lease(vault, self.hosts_agent_locally()?)
     }
     /// The signer of this account's contact card and contact consent. A human signs on its
     /// primary device. An agent's record names its custodian's primary phone as primary, and that
