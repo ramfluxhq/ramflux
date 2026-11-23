@@ -8,8 +8,8 @@ use super::refused;
 use crate::SdkError;
 use ramflux_prx_client::{ClientConfig, HOST_BOOTSTRAP_V1, PrxClient};
 use serde::Deserialize;
-use std::io::Read;
-use std::os::unix::fs::MetadataExt;
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -45,6 +45,31 @@ pub(crate) fn check_dir(path: &Path, memory: bool) -> Result<(), SdkError> {
         }
     }
     Ok(())
+}
+
+/// Bytes of a valid `runtime.json`, or `None` when the file is missing or refused.
+pub(crate) fn snapshot(dir: &Path) -> Option<Vec<u8>> {
+    let path = dir.join("runtime.json");
+    let bytes = read_capped(&path, 8192)?;
+    read_runtime(&path).ok()?;
+    Some(bytes)
+}
+
+/// Write `bytes` back only when stop removed `runtime.json`. A newer file is left in place.
+///
+/// # Errors
+/// Returns an I/O error when the retained file cannot be created mode 0600.
+pub(crate) fn restore_if_missing(dir: &Path, bytes: Option<&[u8]>) -> Result<(), SdkError> {
+    let Some(bytes) = bytes.filter(|saved| !saved.is_empty() && saved.len() <= 8192) else {
+        return Ok(());
+    };
+    let path = dir.join("runtime.json");
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    write_new_private(&path, bytes)
 }
 
 pub(crate) async fn inspect(dir: &Path) -> Result<Option<RuntimeView>, SdkError> {
@@ -99,6 +124,50 @@ fn chain(start: &Path) -> Result<Vec<PathBuf>, SdkError> {
         }
     }
     Ok(out)
+}
+
+fn write_new_private(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
+    let parent = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .ok_or_else(|| refused("field_invalid", "runtime.json"))?;
+    let name = path.file_name().ok_or_else(|| refused("field_invalid", "runtime.json"))?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".{}", std::process::id()));
+    let tmp = parent.join(tmp_name);
+    let mut file =
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+    drop(file);
+    if let Err(error) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+    place_exclusive(&tmp, path)
+}
+
+fn place_exclusive(tmp: &Path, path: &Path) -> Result<(), SdkError> {
+    match rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        tmp,
+        rustix::fs::CWD,
+        path,
+        rustix::fs::RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) if std::io::Error::from(error).kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(tmp);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(tmp);
+            Err(std::io::Error::from(error).into())
+        }
+    }
 }
 
 fn read_runtime(path: &Path) -> Result<Wire, SdkError> {

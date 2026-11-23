@@ -130,16 +130,85 @@ async fn restart(request: &Request, dir: &Path) -> Result<Status, SdkError> {
 }
 
 async fn stop(request: &Request, dir: &Path) -> Result<Status, SdkError> {
+    let saved = runtime::snapshot(dir);
     service(request, dir, &["service", "stop"]).await?;
+    runtime::restore_if_missing(dir, saved.as_deref())?;
     status_of(dir).await
 }
 
 async fn uninstall(request: &Request, dir: &Path) -> Result<Status, SdkError> {
+    disable_user_unit(dir).await;
     let _ = service(request, dir, &["service", "stop"]).await;
     service(request, dir, &["service", "uninstall"]).await?;
+    clear_enable_links(dir).await?;
     remove_private(dir.join("runtime.json"), "runtime.json must be mode 0600")?;
     remove_private(dir.join("owner.token"), "owner.token must be mode 0600")?;
     Ok(absent())
+}
+
+async fn disable_user_unit(dir: &Path) {
+    let _ = run_child(spawn::spec(
+        Path::new("systemctl"),
+        dir,
+        &["--user", "disable", "prx.service"],
+        None,
+    ))
+    .await;
+}
+
+async fn clear_enable_links(dir: &Path) -> Result<(), SdkError> {
+    let links = enable_links();
+    for path in &links {
+        remove_enable_link(path)?;
+    }
+    let _ = run_child(spawn::spec(Path::new("systemctl"), dir, &["--user", "daemon-reload"], None))
+        .await;
+    for path in &links {
+        confirm_link_absent(path)?;
+    }
+    Ok(())
+}
+
+fn enable_links() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(unit_wants(&PathBuf::from(home).join(".config")));
+    }
+    if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
+        let path = unit_wants(&PathBuf::from(config));
+        if !paths.iter().any(|have| have == &path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+fn unit_wants(config_home: &Path) -> PathBuf {
+    config_home.join("systemd/user/default.target.wants/prx.service")
+}
+
+fn remove_enable_link(path: &Path) -> Result<(), SdkError> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !meta.file_type().is_symlink() {
+        return Err(refused("prx_command", "enable link"));
+    }
+    let target = std::fs::read_link(path)?;
+    if target.file_name().and_then(|name| name.to_str()) != Some("prx.service") {
+        return Err(refused("prx_command", "enable link"));
+    }
+    std::fs::remove_file(path).map_err(SdkError::from)
+}
+
+fn confirm_link_absent(path: &Path) -> Result<(), SdkError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(refused("prx_command", "enable link")),
+        Err(error) => Err(error.into()),
+    }
 }
 
 async fn status_of(dir: &Path) -> Result<Status, SdkError> {
@@ -159,7 +228,7 @@ fn from_view(view: &RuntimeView) -> Status {
         prx_version: view.prx_version.clone(),
         capabilities: if view.fresh { vec!["host_bootstrap_v1".to_owned()] } else { Vec::new() },
         api_base: view.api_base.clone(),
-        pid: view.pid,
+        pid: if view.alive { view.pid } else { 0 },
         owner_id: view.owner_id.clone(),
         started_at: view.started_at.clone(),
         fresh: view.fresh,
