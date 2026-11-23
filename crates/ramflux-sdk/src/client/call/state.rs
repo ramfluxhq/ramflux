@@ -64,6 +64,44 @@ pub(crate) struct LiveCall {
     pub(crate) last_control_error: Option<String>,
 }
 
+/// One outcome for every device of the person. A device that lost the answer still records
+/// `completed` once the hangup names the call's end.
+pub(crate) fn revise_person_row(row: &mut CallRow, control: &CallControl) -> bool {
+    let reason = person_reason(row.end_reason.as_deref(), row.answered_at.is_some(), &control.body);
+    if row.end_reason.as_deref() == Some(reason) && row.ended_at == Some(control.created_at) {
+        return false;
+    }
+    row.seq = row.seq.saturating_add(1);
+    row.end_reason = Some(reason.to_owned());
+    if reason != "failed" {
+        row.failure_reason = None;
+        row.peer_reason = None;
+    }
+    row.ended_at = Some(control.created_at);
+    true
+}
+
+fn person_reason(current: Option<&str>, answered: bool, body: &CallAction) -> &'static str {
+    if answered || matches!(current, Some("answered_elsewhere" | "completed")) {
+        return "completed";
+    }
+    match current {
+        Some("declined") => "declined",
+        Some("busy") => "busy",
+        Some("cancelled") => "cancelled",
+        Some("missed") => "missed",
+        Some("timeout") => "timeout",
+        Some("failed") => "failed",
+        _ => {
+            if matches!(body, CallAction::Timeout) {
+                "missed"
+            } else {
+                "cancelled"
+            }
+        }
+    }
+}
+
 pub(super) fn invalid(message: &str) -> SdkError {
     SdkError::InboundRejected(format!("voice call: {message}"))
 }
@@ -508,6 +546,10 @@ impl LiveCall {
                 if self.local == self.caller && c.callee != self.callee {
                     return Ok(false);
                 }
+                // The selected device's terminal is the clock every other device stores.
+                if self.local == self.caller {
+                    self.relay_terminal(c)?;
+                }
                 let reason = if matches!(c.body, CallAction::Timeout) {
                     if self.local == self.caller { "timeout" } else { "missed" }
                 } else if self.row.answered_at.is_some() {
@@ -653,21 +695,32 @@ impl LiveCall {
         }
         Ok(())
     }
-    /// A later caller Hangup carries the clock every callee shares. An answered-elsewhere row
-    /// becomes the same completed summary the winner publishes, without naming a device.
-    fn adopt_later_end(&mut self, control: &CallControl) -> bool {
-        let from_caller = control.sender == self.caller
+    /// A caller Hangup or Timeout is the person's end, including after this device already stopped.
+    pub(crate) fn accepts_authoritative_end(&self, control: &CallControl) -> bool {
+        self.row.state == "ended"
+            && control.sender == self.caller
             && control.callee == self.local
-            && matches!(control.body, CallAction::Hangup | CallAction::Timeout);
-        if !from_caller {
+            && matches!(control.body, CallAction::Hangup | CallAction::Timeout)
+    }
+
+    /// Copy the terminal clock to every invited device except the one that produced it.
+    fn relay_terminal(&mut self, source: &CallControl) -> Result<(), SdkError> {
+        let targets =
+            self.invited.iter().filter(|peer| *peer != &source.callee).cloned().collect::<Vec<_>>();
+        for target in targets {
+            let mut control = self.control(CallAction::Hangup, source.created_at)?;
+            control.callee = target;
+            self.pending.push(control);
+        }
+        Ok(())
+    }
+
+    /// The hangup clock replaces a device-local end. An answered sibling becomes `completed`.
+    fn adopt_later_end(&mut self, control: &CallControl) -> bool {
+        if !self.accepts_authoritative_end(control) {
             return false;
         }
-        if self.row.end_reason.as_deref() == Some("answered_elsewhere") {
-            self.row.end_reason = Some("completed".into());
-            self.row.failure_reason = None;
-            self.row.peer_reason = None;
-        }
-        self.row.ended_at = Some(control.created_at);
+        revise_person_row(&mut self.row, control);
         true
     }
 

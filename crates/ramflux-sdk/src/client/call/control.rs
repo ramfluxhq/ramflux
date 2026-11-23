@@ -328,6 +328,59 @@ impl RamfluxClient {
         self.project_native_call_control(entry, conversation, group, &c, body)
     }
 
+    /// A call that already ended still accepts the caller's hangup, which is the shared end.
+    fn revise_ended_call(&self, control: &CallControl, body: &[u8]) -> Result<bool, SdkError> {
+        let now = crate::time::now_unix_timestamp();
+        let live = self.voice_calls.get(&control.call_id).cloned();
+        if let Some(call) = live {
+            return self.revise_live_end(&call, control, body, now);
+        }
+        self.revise_stored_end(control, now)?;
+        Ok(true)
+    }
+
+    fn revise_live_end(
+        &self,
+        call: &LiveCall,
+        control: &CallControl,
+        body: &[u8],
+        now: i64,
+    ) -> Result<bool, SdkError> {
+        if !call.accepts_authoritative_end(control) {
+            return Ok(true);
+        }
+        let mut next = call.clone();
+        let before = next.row.clone();
+        if next.apply(control, now).is_err() || next.row == before {
+            return Ok(true);
+        }
+        self.account_db()?.join_write(|| self.persist_live_call(&next))?;
+        self.voice_transition.replace(Some((transition_key(body), Box::new(next))));
+        Ok(true)
+    }
+
+    fn revise_stored_end(&self, control: &CallControl, now: i64) -> Result<(), SdkError> {
+        if control.created_at > now.saturating_add(60) {
+            return Ok(());
+        }
+        let local = self.call_local_endpoint()?;
+        let key = format!("voice/public/{}", control.call_id);
+        let Some(mut row) = self.account_db()?.load_actor_state::<CallRow>(&key)? else {
+            return Ok(());
+        };
+        if !stored_accepts_end(&row, control, &local) {
+            return Ok(());
+        }
+        if !super::state::revise_person_row(&mut row, control) {
+            return Ok(());
+        }
+        self.account_db()?.write_transaction(|| {
+            self.persist_call_row(&row)?;
+            super::history::publish(self, &row)?;
+            Ok(())
+        })
+    }
+
     pub(crate) fn project_native_call_control(
         &self,
         entry: &GatewayInboxEntry,
@@ -350,7 +403,7 @@ impl RamfluxClient {
             .load_actor_state::<CallRow>(&format!("voice/public/{}", c.call_id))?
             .is_some_and(|row| row.state == "ended")
         {
-            return Ok(true);
+            return self.revise_ended_call(c, body);
         }
         let receipt = format!(
             "voice/control/{}/{}",
@@ -436,6 +489,17 @@ impl RamfluxClient {
         self.voice_calls.remove(&c.call_id);
         Ok(true)
     }
+}
+
+fn stored_accepts_end(row: &CallRow, control: &CallControl, local: &CallEndpoint) -> bool {
+    row.state == "ended"
+        && row.direction == "incoming"
+        && control.callee == *local
+        && control.sender.principal_id == row.peer_id
+        && matches!(
+            control.body,
+            ramflux_protocol::CallAction::Hangup | ramflux_protocol::CallAction::Timeout
+        )
 }
 
 pub(crate) fn transition_key(body: &[u8]) -> String {

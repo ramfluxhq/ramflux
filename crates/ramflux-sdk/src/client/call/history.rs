@@ -10,7 +10,6 @@ use ramflux_protocol::{CallRow, VoiceCallFailureReason};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const MAX_RINGING: usize = 96;
 const MAX_LISTED: u32 = 128;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -21,7 +20,6 @@ struct Parties {
     #[serde(default)]
     caller_account_anchor: String,
     callee_principal_id: String,
-    ringing_device_ids: Vec<String>,
     answered_device_id: String,
 }
 
@@ -37,25 +35,9 @@ fn summary_key(call_id: &str) -> String {
     format!("voice/summary-id/{call_id}")
 }
 
-fn push_device(devices: &mut Vec<String>, device_id: &str) {
-    if device_id.is_empty()
-        || devices.iter().any(|old| old == device_id)
-        || devices.len() == MAX_RINGING
-    {
-        return;
-    }
-    devices.push(device_id.to_owned());
-}
-
 fn parties_from_live(call: &LiveCall) -> Parties {
-    let mut ringing = Vec::new();
-    for peer in &call.invited {
-        push_device(&mut ringing, &peer.device_id);
-    }
-    if call.local != call.caller {
-        push_device(&mut ringing, &call.local.device_id);
-    }
     // Callees omit the answering device so every device of the callee publishes one body.
+    // The caller records which device won. Ringing rosters are not part of the shared summary.
     let answered_device_id =
         if call.local == call.caller && call.row.end_reason.as_deref() == Some("completed") {
             call.callee.device_id.clone()
@@ -67,7 +49,6 @@ fn parties_from_live(call: &LiveCall) -> Parties {
         caller_device_id: call.caller.device_id.clone(),
         caller_account_anchor: String::new(),
         callee_principal_id: call.callee.principal_id.clone(),
-        ringing_device_ids: ringing,
         answered_device_id,
     }
 }
@@ -97,41 +78,16 @@ fn load_parties(client: &RamfluxClient, row: &CallRow) -> Result<Parties, SdkErr
     infer_parties(client, row)
 }
 
-/// Remember the devices invited for this call. Device ids only; no keys.
-/// # Errors
-/// Returns storage errors.
-fn account_device_ids(client: &RamfluxClient) -> Vec<String> {
-    let Some(account) = client.born_v3_account.as_ref() else {
-        return Vec::new();
-    };
-    account
-        .record()
-        .body
-        .devices
-        .iter()
-        .filter(|device| device.revoked_at.is_none() && !device.device_id.is_empty())
-        .map(|device| device.device_id.clone())
-        .collect()
-}
-
 fn caller_anchor(call: &LiveCall) -> String {
     crate::identity_root_public_key_commitment(&call.caller.root_public_key)
         .unwrap_or_else(|_| String::new())
 }
 
+/// Remember who placed the call. Device ids only; no keys and no ringing roster.
+/// # Errors
+/// Returns storage errors.
 pub(crate) fn remember(client: &RamfluxClient, call: &LiveCall) -> Result<(), SdkError> {
     let mut parties = parties_from_live(call);
-    if call.local != call.caller {
-        let roster = account_device_ids(client);
-        if !roster.is_empty() {
-            parties.ringing_device_ids.clear();
-            for id in roster {
-                push_device(&mut parties.ringing_device_ids, &id);
-            }
-        }
-    }
-    parties.ringing_device_ids.sort();
-    parties.ringing_device_ids.dedup();
     parties.caller_account_anchor = caller_anchor(call);
     client.account_db()?.persist_actor_state(&parties_key(&call.row.call_id), &parties)?;
     Ok(())
@@ -193,7 +149,7 @@ fn summary_from(row: &CallRow, parties: &Parties) -> Result<g::CallSummary, SdkE
         callee_principal_id: parties.callee_principal_id.clone(),
         answered_device_id: (completed && !parties.answered_device_id.is_empty())
             .then(|| parties.answered_device_id.clone()),
-        ringing_device_ids: parties.ringing_device_ids.clone(),
+        ringing_device_ids: Vec::new(),
         outcome,
         failure: if failed { failure_code(row.failure_reason) } else { 0 },
         duration_seconds: duration_seconds(answered_at, row.ended_at),
