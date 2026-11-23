@@ -704,7 +704,7 @@ pub(super) fn error_code(name: &str) -> i32 {
         "PermissionDenied" | "authorization_rejected" | "not_authorized" => {
             E::PermissionDenied as i32
         }
-        "RateLimited" | "rate_limited" => E::RateLimited as i32,
+        "RateLimited" | "rate_limited" | "Busy" => E::RateLimited as i32,
         "AccountBusy" | "DataRootInUse" | "account_busy" => E::AccountBusy as i32,
         "ObjectErased" => E::ObjectErased as i32,
         "ObjectIdentityConflict" => E::ObjectIdentityConflict as i32,

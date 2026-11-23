@@ -55,8 +55,15 @@ pub(crate) struct Budget {
 }
 impl Budget {
     pub(crate) fn new() -> Self {
+        Self::ending(Instant::now() + retry_budget())
+    }
+
+    /// Same counters as [`Self::new`], ending at `deadline` when that is sooner than the
+    /// ordinary 90-second budget. A Busy hint that does not fit returns immediately.
+    pub(crate) fn ending(deadline: Instant) -> Self {
+        let cap = Instant::now() + retry_budget();
         Self {
-            deadline: Instant::now() + retry_budget(),
+            deadline: deadline.min(cap),
             backoff: Duration::from_secs(1),
             busy_observed: false,
             last_busy_hint: None,
@@ -137,6 +144,7 @@ pub(crate) enum RetryReason {
 pub(crate) struct AdmissionRetry {
     not_before: Option<Instant>,
     reason: Option<RetryReason>,
+    limit: Option<Instant>,
 }
 impl AdmissionRetry {
     pub(crate) fn record(&mut self, error: &SdkError, now: Instant) {
@@ -189,11 +197,20 @@ impl AdmissionRetry {
     pub(crate) fn not_before(&self) -> Option<Instant> {
         self.not_before
     }
+
+    /// Stop this admission's Busy sleeps at `deadline`. Ordinary connects leave it unset.
+    pub(crate) fn limit(&mut self, deadline: Instant) {
+        self.limit = Some(deadline);
+    }
+
     pub(crate) async fn begin_attempt(&mut self) -> Budget {
-        if let (Some(deadline), Some(_)) = (self.not_before(), self.reason) {
-            tokio::time::sleep_until(deadline).await;
+        if let (Some(not_before), Some(_)) = (self.not_before(), self.reason) {
+            let wake = self.limit.map_or(not_before, |end| not_before.min(end));
+            if wake > Instant::now() {
+                tokio::time::sleep_until(wake).await;
+            }
         }
-        Budget::new()
+        self.limit.map_or_else(Budget::new, Budget::ending)
     }
 }
 
