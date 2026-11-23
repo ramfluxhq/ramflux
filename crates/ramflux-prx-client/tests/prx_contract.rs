@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at f1d430cedee6277829f4b3826c2e451ca6858cbc>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 238fa1706eb81dc43da11ea5d9607883f9ba7681>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "f1d430cedee6277829f4b3826c2e451ca6858cbc";
+const PIN: &str = "238fa1706eb81dc43da11ea5d9607883f9ba7681";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -546,9 +546,8 @@ async fn bounded<F: std::future::Future<Output = ()>>(body: F) {
         .expect("test: contract test exceeded its deadline");
 }
 
-/// The tokens K-AC2-1 accepts at the pin. `host_bootstrap_v1`, `stream_frames_v1` and
-/// `run_approvals_v1` are advertised and not called. `targeted_agents_v1` stays out
-/// unless the daemon enables it.
+/// The tokens K-AC2-1 accepts at the pin. `host_bootstrap_v1` is advertised and not
+/// called. `targeted_agents_v1` stays out unless the daemon enables it.
 const LANDED_AT_PIN: [&str; 19] = [
     CAPABILITIES_V1,
     AGENT_CATALOG_V1,

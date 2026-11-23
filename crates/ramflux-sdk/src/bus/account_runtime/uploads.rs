@@ -170,7 +170,12 @@ impl AccountRuntime {
                 let _ = reply.send(Err(error));
             }
             Ok(UploadDispatch::Complete(body)) => {
-                let _ = reply.send(Ok(ActorResponse { body, events: Vec::new(), nodes: None }));
+                let _ = reply.send(Ok(ActorResponse {
+                    body,
+                    events: Vec::new(),
+                    nodes: None,
+                    owner_copy: None,
+                }));
             }
             Ok(UploadDispatch::Queued(prepared)) => {
                 let PreparedUpload { context, record, permit } = *prepared;
@@ -386,8 +391,10 @@ impl AccountRuntime {
             Ok::<_, SdkError>(body)
         });
         let body = result?;
-        let outcome =
-            error.map_or_else(|| Ok(ActorResponse { body, events: Vec::new(), nodes: None }), Err);
+        let outcome = error.map_or_else(
+            || Ok(ActorResponse { body, events: Vec::new(), nodes: None, owner_copy: None }),
+            Err,
+        );
         self.transfers.jobs.get_mut(&job_id).ok_or_else(aborted)?.outcome = Some(outcome);
         Ok(())
     }

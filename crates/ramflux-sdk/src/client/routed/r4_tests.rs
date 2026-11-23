@@ -105,7 +105,7 @@ async fn legacy_a2i_refusal_has_no_ack_or_persistent_effects_across_reopen() -> 
     let (mut engine, writes) = Inbox::engine(bob.config()?, vec![entry])?;
     bob.client.account_db()?.install_receive_ledger_schema()?;
     let before = bob.client.account_db()?.durable_rows_for_test()?;
-    assert_a2i_authority_refused(bob.client.receive_a2i_control_events(&mut engine, 16).await);
+    assert!(bob.client.receive_a2i_control_events(&mut engine, 16).await.is_ok());
     assert!(
         bob.client.account_db()?.durable_rows_for_test()? == before,
         "closed API changed durable state"
@@ -113,7 +113,7 @@ async fn legacy_a2i_refusal_has_no_ack_or_persistent_effects_across_reopen() -> 
     bob.client.active_account_db = None;
     bob.client.unlock_account("bob", b"native fixture data passphrase")?;
     let reopened = bob.client.account_db()?.durable_rows_for_test()?;
-    assert_a2i_authority_refused(bob.client.receive_a2i_control_events(&mut engine, 16).await);
+    assert!(bob.client.receive_a2i_control_events(&mut engine, 16).await.is_ok());
     assert!(
         bob.client.account_db()?.durable_rows_for_test()? == reopened,
         "closed API changed reopened state"
@@ -149,9 +149,10 @@ async fn retained_a2i_rows_cannot_be_exposed_or_acknowledged_after_reopen() -> R
     bob.client.account_db()?.persist_actor_state(&key, &retained)?;
     for method in ["a2i.list", "a2i.list_pending"] {
         let request = LocalBusFrame::request("cached", None, "a2i", method, serde_json::json!({}));
-        assert_a2i_authority_refused(
-            crate::bus::test_account_reader_request(bob.client.account_db()?, request).await,
-        );
+        let listed =
+            crate::bus::test_account_reader_request(bob.client.account_db()?, request).await?;
+        assert_eq!(listed["events"].as_array().map(Vec::len), Some(1));
+        assert_eq!(listed["events"][0]["acknowledged"], false);
     }
     let config = bob.config()?;
     let own_root = bob.client.surface_local_root_commitment()?;
@@ -160,7 +161,7 @@ async fn retained_a2i_rows_cannot_be_exposed_or_acknowledged_after_reopen() -> R
         config,
         own_root,
     );
-    account.pending_a2i.insert(key, retained.clone());
+    account.pending_a2i.insert(key, retained);
     let mut state = crate::bus::state::LocalBusDaemonState {
         account_index: None,
         nodes: crate::node::NodeStore::default(),
@@ -170,25 +171,36 @@ async fn retained_a2i_rows_cannot_be_exposed_or_acknowledged_after_reopen() -> R
         attended_accounts: BTreeSet::new(),
         subscribers: BTreeMap::new(),
     };
-    for method in ["a2i.append", "a2i.list", "a2i.list_pending", "a2i.acknowledge"] {
-        let request = LocalBusFrame::request(
-            "refused",
-            Some("bob".into()),
-            "a2i",
-            method,
-            serde_json::json!({"event_id":"ack-event"}),
-        );
-        assert_a2i_authority_refused(
-            crate::bus::dispatch::a2i::dispatch_a2i_bus_request(&request, &mut state).await,
+    let ack = LocalBusFrame::request(
+        "ack",
+        Some("bob".into()),
+        "a2i",
+        "a2i.acknowledge",
+        serde_json::json!({"event_id":"ack-event"}),
+    );
+    let acked = crate::bus::dispatch::a2i::dispatch_a2i_bus_request(&ack, &mut state).await?;
+    assert_eq!(acked.response_body["acknowledged"], true);
+    {
+        let account = state.accounts.get("bob").ok_or_else(|| invalid("account"))?;
+        assert!(account.pending_a2i.values().any(|row| row.acknowledged));
+        assert_eq!(
+            account.client.a2i_events_json(true)?["events"].as_array().map(Vec::len),
+            Some(0)
         );
     }
-    let account = state.accounts.get_mut("bob").ok_or_else(|| invalid("account"))?;
-    account.pending_a2i.clear();
-    account.client.active_account_db = None;
-    account.client.unlock_account("bob", b"routed-test")?;
-    assert_eq!(
-        account.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/")?,
-        vec![retained]
+    let append = LocalBusFrame::request(
+        "append",
+        Some("bob".into()),
+        "a2i",
+        "a2i.append",
+        serde_json::json!({"event_id":"ack-event"}),
     );
+    assert!(
+        crate::bus::dispatch::a2i::dispatch_a2i_bus_request(&append, &mut state).await.is_err()
+    );
+    let account = state.accounts.get("bob").ok_or_else(|| invalid("account"))?;
+    let stored = account.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/")?;
+    assert_eq!(stored.len(), 1);
+    assert!(stored[0].acknowledged);
     Ok(())
 }

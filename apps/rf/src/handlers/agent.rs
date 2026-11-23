@@ -7,7 +7,8 @@
 //! public creation records only.
 use super::conversation_ops::commit_write;
 use super::{
-    AgentAccessArgs, AgentAction, AgentCommand, AgentPersonaArgs, LocalBusClient, PathBuf, RfError,
+    AgentAccessArgs, AgentAction, AgentCommand, AgentJobAction, AgentPersonaArgs, LocalBusClient,
+    PathBuf, RfError,
 };
 use ramflux_sdk::LocalBusFrame;
 use serde_json::{Value, json};
@@ -123,7 +124,24 @@ pub(crate) fn request_of(action: AgentAction) -> Result<(&'static str, Value), R
         }
         // An empty operation id asks the daemon for the next request that waits for this device.
         AgentAction::Pending => ("agent.operation.get", json!({"operation_id": ""})),
+        AgentAction::Job(command) => job_request(command.action),
     })
+}
+
+fn job_request(action: AgentJobAction) -> (&'static str, Value) {
+    match action {
+        AgentJobAction::List { agent } => ("agent.job.list", json!({"agent": agent})),
+        AgentJobAction::Pause { agent, kind, id } => {
+            ("agent.job.pause", json!({"agent": agent, "kind": kind, "id": id}))
+        }
+        AgentJobAction::Resume { agent, kind, id } => {
+            ("agent.job.resume", json!({"agent": agent, "kind": kind, "id": id}))
+        }
+        AgentJobAction::Remove { agent, kind, id } => {
+            ("agent.job.remove", json!({"agent": agent, "kind": kind, "id": id}))
+        }
+        AgentJobAction::Sessions { agent } => ("agent.job.sessions", json!({"agent": agent})),
+    }
 }
 
 fn persona_value(args: &AgentPersonaArgs) -> Value {

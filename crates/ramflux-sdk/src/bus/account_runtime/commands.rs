@@ -155,6 +155,11 @@ impl AccountRuntime {
                 let result = self.authorize_backup(generation);
                 let _ = reply.send(result);
             }
+            super::super::actor::PrivateCommand::ProjectActivity { activity, reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.store_owner_activity(*activity));
+                }
+            }
             super::super::actor::PrivateCommand::Agent(command) => self.apply_agent(*command),
             super::super::actor::PrivateCommand::Capture(reply) => {
                 if !reply.is_closed() {
@@ -330,6 +335,17 @@ impl AccountRuntime {
         }
         let result = match self.publish(&command.request).await {
             Ok(()) => result,
+            // The progress row is already committed. A later outbox wake can fail
+            // with the writer pause, which the bus reports as ValidationFailed.
+            // The host does not retry that code, so the owner copy must still go out.
+            Err(error) if result.is_ok() && command.request.method == "agent.progress" => {
+                tracing::warn!(
+                    account_id = %self.id,
+                    %error,
+                    "agent progress publication deferred; owner copy remains"
+                );
+                result
+            }
             Err(error) => Err(error),
         };
         let _ = reply.send(result);
@@ -339,6 +355,30 @@ impl AccountRuntime {
 }
 
 impl AccountRuntime {
+    fn store_owner_activity(
+        &self,
+        activity: super::super::actor::OwnerActivity,
+    ) -> Result<(), SdkError> {
+        if activity.owner_id != self.id {
+            tracing::warn!(
+                owner_id = %activity.owner_id,
+                account_id = %self.id,
+                reason_code = "owner_actor_mismatch",
+                "agent activity owner copy was not stored"
+            );
+            return Err(SdkError::AccountNotOpen(activity.owner_id));
+        }
+        // This thread's pause scope belongs to whichever account last armed it.
+        // The copy is one short command; a foreign scope must not refuse it.
+        let _guard = ramflux_storage::writer_budget::ServiceGuard::enter();
+        let client = &local_bus_account(&self.state, &self.id)?.client;
+        crate::client::agent_activity::store_owner_copy(
+            client,
+            &activity.state_kind,
+            activity.record,
+        )
+    }
+
     pub(super) async fn start_owned_command(
         &mut self,
         command: AccountCommand,

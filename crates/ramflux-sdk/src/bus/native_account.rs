@@ -228,6 +228,9 @@ pub(super) fn status_at(
         "active_transport_kind":account.engine.as_ref().map(|engine|engine.active_transport_kind().wire_name()),
         "pending_deliveries":account.pending_deliveries.len(),
     });
+    if let Some(custodian) = native.custodian_account_id() {
+        status["custodian_account_id"] = serde_json::Value::from(custodian);
+    }
     if let Some(AccountNetworkingReason::NodeBusy { capacity: Some(hint), .. }) =
         reason.as_ref().map(|view| &view.cause)
     {

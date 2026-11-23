@@ -165,7 +165,7 @@ async fn conversation_removal_cancels_the_job() -> TestResult {
         ),
         step(
             hyper::Method::POST,
-            "/api/jobs/job-1/cancel",
+            "/api/sessions/session-1/runs/run-job-1/cancel",
             StatusCode::OK,
             json!({"job_id":"job-1"}),
         ),
@@ -176,6 +176,44 @@ async fn conversation_removal_cancels_the_job() -> TestResult {
     engine.cancel("conversation").await?;
     assert_eq!(engine.active_conversations(), Vec::<String>::new());
     assert!(server.seen().await.iter().any(|line| line.contains("/cancel")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn ack_without_urls_polls_by_job_id_and_cancels_the_run() -> TestResult {
+    let server = FakePrx::start(vec![
+        step(
+            hyper::Method::POST,
+            "/api/sessions",
+            StatusCode::CREATED,
+            json!({"session_id":"session-1"}),
+        ),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/session-1/message?mode=async",
+            StatusCode::ACCEPTED,
+            json!({"job_id":"job-1","run_id":"run-job-1"}),
+        ),
+        step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({"status":"running"})),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/session-1/runs/run-job-1/cancel",
+            StatusCode::OK,
+            json!({}),
+        ),
+    ])
+    .await?;
+    let (_root, mut engine) = engine(&server, 2)?;
+    assert!(matches!(
+        submit(&mut engine).await?.as_slice(),
+        [EngineEvent::Intents { intents, .. }] if intents.is_empty()
+    ));
+    assert!(engine.poll(2).await?.is_empty());
+    engine.cancel("conversation").await?;
+    let seen = server.seen().await;
+    assert!(seen.iter().any(|line| line == "GET /api/jobs/job-1"));
+    assert!(seen.iter().any(|line| line == "POST /api/sessions/session-1/runs/run-job-1/cancel"));
+    assert!(seen.iter().all(|line| !(line.contains("/api/jobs/") && line.contains("/cancel"))));
     Ok(())
 }
 
@@ -251,7 +289,12 @@ async fn detached_job_deadline_cancels_and_frees_the_conversation() -> TestResul
         ),
         step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({"status":"running"})),
         step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({"status":"running"})),
-        step(hyper::Method::POST, "/api/jobs/job-1/cancel", StatusCode::OK, json!({})),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/session-1/runs/run-job-1/cancel",
+            StatusCode::OK,
+            json!({}),
+        ),
         step(
             hyper::Method::POST,
             "/api/sessions/session-1/message?mode=async",
@@ -287,7 +330,7 @@ async fn restart_restores_sessions_jobs_results_and_original_deadline() -> TestR
         step(hyper::Method::POST, "/api/sessions/session-1/message?mode=async", StatusCode::ACCEPTED, accepted("job-1")),
         step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({"status":"succeeded","http_status":200,"result":{"status":"ok","reply":"restored reply"}})),
         step(hyper::Method::POST, "/api/sessions/session-1/message?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
-        step(hyper::Method::POST, "/api/jobs/job-2/cancel", StatusCode::OK, json!({})),
+        step(hyper::Method::POST, "/api/sessions/session-1/runs/run-job-2/cancel", StatusCode::OK, json!({})),
     ]).await?;
     let (_root, mut original) = engine(&server, 1)?;
     submit(&mut original).await?;
@@ -415,7 +458,12 @@ async fn resumed_job_has_its_own_bounded_turn_deadline() -> TestResult {
             accepted("job-2"),
         ),
         step(hyper::Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({"status":"running"})),
-        step(hyper::Method::POST, "/api/jobs/job-2/cancel", StatusCode::OK, json!({})),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/session-1/runs/run-job-2/cancel",
+            StatusCode::OK,
+            json!({}),
+        ),
     ]);
     let server = FakePrx::start(steps).await?;
     let (_root, mut engine) = engine(&server, 1)?;
@@ -428,7 +476,7 @@ async fn resumed_job_has_its_own_bounded_turn_deadline() -> TestResult {
         engine.poll(120_100).await?.as_slice(),
         [EngineEvent::VisibleFailure { reason: EngineFailure::TurnTimeout, .. }]
     ));
-    assert!(server.seen().await.iter().any(|s| s.ends_with("job-2/cancel")));
+    assert!(server.seen().await.iter().any(|s| s.ends_with("runs/run-job-2/cancel")));
     Ok(())
 }
 
