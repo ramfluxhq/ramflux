@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! `CONTROL_A2I` (operation 11): a signed agent-to-inbox control event.
-//! The typed event converts to the native signed document, its signature is checked against the
-//! pinned key of the authenticated sending device. Execution is closed until native grants exist.
+//! `CONTROL_A2I` (operation 11): a signed control event between two participants.
+//! The typed event converts to the native signed document and its signature is checked against
+//! the pinned key of the authenticated sending device. `grant_id` is carried, not executed.
 use super::{authority, content, generated_signed, native_signed};
 use crate::client::identity_authority::HeadUse;
 use crate::client::routed::{Kind, Opened};
@@ -192,11 +192,16 @@ pub(in crate::client::routed) fn to_generated(
     Ok(generated)
 }
 
-/// OPEN-VALUE (A2I-INBOX-ROW): no document fixes how the signed document fills the native A2I
-/// inbox row. Recommended mapping, kept in this one function: `event_id` = `correlation_id`,
-/// `event_type` = "a2i.control", `control_domain` = native `snake_case` name, `subject_base64` =
-/// base64url of the canonical JSON subject, `created_at` = local receive time (seconds).
-#[cfg(test)]
+fn domain_name(domain: &ramflux_protocol::ControlDomain) -> Result<String, SdkError> {
+    serde_json::to_value(domain)?
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| content("a2i control domain is not a name"))
+}
+
+/// Inbox row for one signed document. `event_id` is `correlation_id`, `created_at` is the local
+/// receive time, and `subject_base64` is the canonical JSON subject.
 fn inbox_row(
     native: &ramflux_protocol::A2iControlEvent,
     received_at: i64,
@@ -208,10 +213,7 @@ fn inbox_row(
         source_principal_id: None,
         source_principal_commitment: None,
         target_device_id: native.target_device_id.clone(),
-        control_domain: serde_json::to_value(&native.control_domain)?
-            .as_str()
-            .unwrap_or_default()
-            .to_owned(),
+        control_domain: domain_name(&native.control_domain)?,
         action: native.action.clone(),
         subject_base64: ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(
             &native.subject,
@@ -221,7 +223,49 @@ fn inbox_row(
     })
 }
 
+fn same_a2i_document(
+    old: &ramflux_sync::A2iControlEvent,
+    row: &ramflux_sync::A2iControlEvent,
+) -> bool {
+    old.event_id == row.event_id
+        && old.event_type == row.event_type
+        && old.source_device_id == row.source_device_id
+        && old.source_principal_id == row.source_principal_id
+        && old.source_principal_commitment == row.source_principal_commitment
+        && old.target_device_id == row.target_device_id
+        && old.control_domain == row.control_domain
+        && old.action == row.action
+        && old.subject_base64 == row.subject_base64
+}
+
+fn store_a2i_row(
+    db: &ramflux_storage::AccountDb,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    native: &ramflux_protocol::A2iControlEvent,
+    received_at: i64,
+    principal: &str,
+    commitment: &str,
+) -> Result<(), SdkError> {
+    let key = crate::client::routed::control::a2i_key(source, &native.correlation_id)?;
+    let mut row = inbox_row(native, received_at)?;
+    row.source_principal_id = Some(principal.to_owned());
+    row.source_principal_commitment = Some(commitment.to_owned());
+    if let Some(old) = db.load_actor_state::<ramflux_sync::A2iControlEvent>(&key)? {
+        return if same_a2i_document(&old, &row) { Ok(()) } else { Err(SdkError::ReplayMismatch) };
+    }
+    db.persist_actor_state(&key, &row)?;
+    Ok(())
+}
+
 impl RamfluxClient {
+    /// Own devices, or an accepted contact. A group membership alone is not a contact link.
+    pub(crate) fn require_a2i_peer(&self, peer_root: &str) -> Result<(), SdkError> {
+        if peer_root == self.own_account_anchor()? {
+            return Ok(());
+        }
+        self.require_accepted_contact(peer_root)
+    }
+
     /// Sender rule: the authenticated pair peer names itself as source and this device as target,
     /// and its pinned device key signed the native document. An expired event is refused.
     pub(in crate::client::routed) fn authorize_generated_a2i(
@@ -230,7 +274,6 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         event: &g::A2iControlEvent,
     ) -> Result<ramflux_protocol::A2iControlEvent, SdkError> {
-        Self::require_a2i_binding_authority()?;
         if opened.routing.kind != Kind::Control || opened.routing.group_id.is_some() {
             return Err(authority("a2i control requires a direct control route"));
         }
@@ -243,11 +286,7 @@ impl RamfluxClient {
         {
             return Err(authority("a2i device binding differs from authenticated endpoints"));
         }
-        if source.root_commitment() != self.own_account_anchor()?
-            && self.friend_rejection_reason(source.root_commitment())?.is_some()
-        {
-            return Err(authority("blocked or removed peer cannot send a2i controls"));
-        }
+        self.require_a2i_peer(source.root_commitment())?;
         if native.correlation_id.is_empty() || native.action.is_empty() {
             return Err(content("a2i correlation id and action are required"));
         }
@@ -270,9 +309,15 @@ impl RamfluxClient {
         event: &g::A2iControlEvent,
         exact_inner: &[u8],
     ) -> Result<bool, SdkError> {
-        let _ = (identity, exact_inner);
-        self.authorize_generated_a2i(opened, entry, event)?;
-        Ok(false)
+        let native = self.authorize_generated_a2i(opened, entry, event)?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        let (principal, _) = self.pinned_peer(&source)?;
+        let commitment = source.root_commitment().to_owned();
+        let db = self.account_db()?;
+        let received_at = crate::time::now_unix_timestamp();
+        self.apply_generated_peer_control_once(entry, identity, exact_inner, 11, |source| {
+            store_a2i_row(db, source, &native, received_at, &principal, &commitment)
+        })
     }
 }
 
@@ -310,7 +355,8 @@ mod tests {
             mapped.subject_base64,
             ramflux_protocol::encode_base64url(br#"{"tool":"search"}"#)
         );
-        assert!(RamfluxClient::require_a2i_binding_authority().is_err());
+        assert_eq!(mapped.control_domain, "mcp_tool");
+        assert!(!mapped.acknowledged);
         Ok(())
     }
 

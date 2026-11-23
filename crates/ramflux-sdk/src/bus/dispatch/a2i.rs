@@ -5,12 +5,73 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
-pub(crate) fn dispatch_a2i_bus_request(
-    _request: &LocalBusFrame,
-    _state: &mut LocalBusDaemonState,
-) -> impl std::future::Future<Output = Result<LocalBusDispatchResult, SdkError>> {
-    // Retained legacy rows cannot supply the missing native binding/grant authority.
-    std::future::ready(RamfluxClient::refuse_a2i_binding_authority())
+pub(crate) async fn dispatch_a2i_bus_request(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    match request.method.as_str() {
+        "a2i.list" | "a2i.list_pending" => list_a2i(request, state),
+        "a2i.acknowledge" => acknowledge_a2i(request, state),
+        "a2i.append" => append_a2i(request, state).await,
+        other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
+    }
+}
+
+fn list_a2i(
+    request: &LocalBusFrame,
+    state: &LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?;
+    let account = super::local_bus_account(state, account_id)?;
+    let pending = request.method == "a2i.list_pending";
+    Ok(super::local_bus_ok(account.client.a2i_events_json(pending)?))
+}
+
+fn acknowledge_a2i(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusA2iAcknowledgeRequest = serde_json::from_value(request.body.clone())?;
+    let account_id = request_account_id(request)?;
+    let account = super::local_bus_account_mut(state, account_id)?;
+    let row = account.client.acknowledge_stored_a2i(&body.event_id)?;
+    for cached in account.pending_a2i.values_mut() {
+        if cached.event_id == row.event_id {
+            cached.acknowledged = true;
+        }
+    }
+    Ok(super::local_bus_ok(serde_json::to_value(row)?))
+}
+
+fn request_event(body: &LocalBusA2iAppendRequest) -> A2iControlEvent {
+    A2iControlEvent {
+        event_id: body.event_id.clone(),
+        event_type: body.event_type.clone(),
+        source_device_id: body.source_device_id.clone(),
+        source_principal_id: None,
+        source_principal_commitment: None,
+        target_device_id: body.target_device_id.clone(),
+        control_domain: body.control_domain.clone(),
+        action: body.action.clone(),
+        subject_base64: body.subject_base64.clone(),
+        created_at: body.created_at,
+        acknowledged: false,
+    }
+}
+
+async fn append_a2i(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusA2iAppendRequest = serde_json::from_value(request.body.clone())?;
+    let event = request_event(&body);
+    let account_id = request_account_id(request)?;
+    let account = super::local_bus_account_mut(state, account_id)?;
+    account.client.validate_a2i_sender(account.gateway_config.principal_id.as_str(), &event)?;
+    let mut engine = account.session_client().await?;
+    let entry = account.client.deliver_a2i(&mut engine, &event, body.target_delivery_id).await?;
+    account.apply_session_metadata(engine);
+    Ok(super::local_bus_ok(serde_json::to_value(entry)?))
 }
 
 #[cfg(test)]
@@ -59,13 +120,7 @@ mod tests {
                 method,
                 serde_json::json!({"event_id":"old-event"}),
             );
-            assert!(matches!(
-                dispatch_a2i_bus_request(&request, &mut state).await,
-                Err(SdkError::GeneratedRefused {
-                    code: crate::error::GeneratedRefusalCode::Authority,
-                    ..
-                })
-            ));
+            assert!(dispatch_a2i_bus_request(&request, &mut state).await.is_err());
             assert_eq!(
                 state.accounts.get("acct").expect("test: fixture account").pending_a2i.len(),
                 0
