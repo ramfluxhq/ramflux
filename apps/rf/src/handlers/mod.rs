@@ -45,9 +45,11 @@ pub(crate) mod object;
 pub(crate) mod surface;
 pub(crate) mod task;
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) use crate::DEFAULT_DATA_ROOT;
+pub(crate) use crate::RfError;
 pub(crate) use crate::cli::*;
 pub(crate) use crate::utils::*;
-pub(crate) use crate::{DEFAULT_DATA_ROOT, RfError};
 pub(crate) use ramflux_sdk::{
     GatewayQuicEndpointConfig, LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest,
     LocalBusAccountBackupExportRequest, LocalBusAccountBackupImportRequest,

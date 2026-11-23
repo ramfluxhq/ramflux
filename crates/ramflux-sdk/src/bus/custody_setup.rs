@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Connection-local secret ceremony, deliberately bypassing actors, retry journals and events.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, all(target_os = "linux", not(test)))))]
 use crate::custody::NativePrimaryVault;
 use crate::{
     LocalBusConfig, LocalBusFrame, SdkError,
@@ -160,7 +160,13 @@ pub(super) fn primary_provider(
     {
         std::sync::Arc::new(crate::custody::WindowsDpapiVault::for_data_root(&config.data_root))
     }
-    #[cfg(not(windows))]
+    #[cfg(all(target_os = "linux", not(test)))]
+    {
+        #[cfg(not(any(feature = "itest-memory-vault", feature = "c-abi")))]
+        let _ = config;
+        std::sync::Arc::new(crate::custody::LinuxDesktopVault)
+    }
+    #[cfg(not(any(windows, all(target_os = "linux", not(test)))))]
     {
         #[cfg(not(any(test, feature = "itest-memory-vault", feature = "c-abi")))]
         let _ = config;

@@ -37,6 +37,8 @@ pub(crate) use store::{
 pub(crate) use store::{finish_recovery, pending_restore};
 #[cfg(feature = "c-abi")]
 pub(crate) use vault::agent_key_unavailable;
+#[cfg(target_os = "linux")]
+pub use vault::linux::LinuxDesktopVault;
 pub(crate) use vault::require_vault_reference;
 pub use vault::{
     AgentDecisionSigning, BranchCredentials, CustodyVaultReason, DEVICE_UNLOCK_PREFIX,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Candidate Linux configuration. Production provider selection remains disabled.
+//! Linux vaults. The daemon selects Secret Service items. The file installation stays explicit.
 mod config;
 mod error;
 
@@ -40,3 +40,7 @@ mod primary;
 pub use data::LinuxDataCredentials;
 #[cfg(target_os = "linux")]
 pub use primary::LinuxPrimaryVault;
+#[cfg(target_os = "linux")]
+mod desktop;
+#[cfg(target_os = "linux")]
+pub use desktop::LinuxDesktopVault;
