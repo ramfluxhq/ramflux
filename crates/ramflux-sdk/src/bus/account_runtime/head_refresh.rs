@@ -202,8 +202,10 @@ impl AccountRuntime {
             if demand.is_none() {
                 demand = Some(super::head_demand::HeadDemand::arm(&self.command_waiting));
             }
-            // Leave once the fetch budget ends. Waiting here for a fetch that has
-            // not queued its Apply holds the only reader of `connection_work`.
+            // Leave once the fetch budget ends. This select keeps reading both queues.
+            // A root stays demanded after a fetch that began before `since`: that
+            // observation cannot authorize this command, and enqueue is idempotent
+            // while a pass is already in flight.
             if Instant::now() >= network_deadline {
                 return self.refuse_or_apply_queued(command, since).await;
             }

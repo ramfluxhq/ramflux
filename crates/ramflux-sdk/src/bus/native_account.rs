@@ -54,6 +54,8 @@ pub(super) fn unlock(
     let root = state.config.data_root.clone();
     let repair_vault = super::custody_setup::primary_provider(&state.config);
     let mut client = RamfluxClient::new();
+    // Share the supervisor index. A second connection keeps the inode lock, so park cannot close it.
+    client.account_index.clone_from(&state.account_index);
     client.open_account_index(&root)?;
     client.bind_device_unlock(
         &root,
@@ -109,6 +111,17 @@ pub(super) fn unlock(
             crate::custody::network_now()?,
         )?;
     }
+    admit_native_account(state, id, client, anchor, device, delivery)
+}
+
+fn admit_native_account(
+    state: &mut LocalBusDaemonState,
+    id: &str,
+    client: RamfluxClient,
+    anchor: String,
+    device: String,
+    delivery: String,
+) -> Result<LocalBusCreatedAccount, SdkError> {
     let endpoint = GatewayQuicEndpointConfig {
         bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
         gateway_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -134,7 +147,6 @@ pub(super) fn unlock(
     account.activation_pending = true;
     account.native_setup = Some(state.config.clone());
     // The owning runtime starts networking after installing its bounded writer channel.
-    // NativeUnlock pumps the first admission outcome after installing that channel.
     let result = response(&account)?;
     state.accounts.insert(id.into(), account);
     state.active_account_id = Some(id.into());

@@ -31,12 +31,29 @@ pub(crate) struct RefreshState {
     failures: BTreeMap<String, (tokio::time::Instant, u8)>,
     inbound: inbound::Inbound,
     wake: Arc<tokio::sync::Notify>,
+    /// Fires only when a root is inserted while a pass holds the lease. The in-flight
+    /// fetch then drops that lease so the new demand is not stuck behind it.
+    preempt: Arc<tokio::sync::Notify>,
     // A dropped/cancelled pass releases ownership without needing an actor message.
     active: Weak<()>,
 }
 impl RefreshState {
     fn retry_ready(&self, root: &str) -> bool {
         self.failures.get(root).is_none_or(|(until, _)| *until <= tokio::time::Instant::now())
+    }
+
+    /// The session suspend just stopped no longer owns the pass. A lease, backoff or
+    /// preempt permit from those sockets must not block the session resume starts.
+    #[cfg(feature = "c-abi")]
+    pub(crate) fn release_after_suspend(&mut self) {
+        if let Some(work) = super::directory::take_paused()
+            && !matches!(work, super::directory::DirectoryWork::HeadRefresh(_))
+        {
+            super::directory::stash_paused(work);
+        }
+        self.active = Weak::new();
+        self.failures.clear();
+        self.preempt = Arc::new(tokio::sync::Notify::new());
     }
 
     /// Returns false at capacity so activation can return a retryable result.
@@ -51,6 +68,9 @@ impl RefreshState {
             return false;
         }
         self.pending.insert(root);
+        if self.active.upgrade().is_some() {
+            self.preempt.notify_one();
+        }
         self.wake.notify_one();
         true
     }
@@ -79,6 +99,7 @@ pub(crate) struct Plan {
     remaining_passes: usize,
     retried_demands: usize,
     config: GatewaySessionConfig,
+    preempt: Arc<tokio::sync::Notify>,
 }
 pub(crate) enum Work {
     Subscribe {
@@ -212,6 +233,7 @@ fn prepare_due_limit(
         remaining_passes,
         retried_demands,
         config: account.gateway_config.clone(),
+        preempt: Arc::clone(&account.head_refresh.preempt),
     }))
 }
 
@@ -365,6 +387,21 @@ pub(crate) async fn pass(
         result = fetch => result.map(|_| ()),
     }
 }
+/// `None` when a root was inserted while this pass held the lease. The caller drops
+/// the plan so the next Prepare can fetch that root after the command began.
+async fn fetch_unless_preempted(
+    plan: &Plan,
+    root: &str,
+) -> Option<Result<SdkDeviceManifestResponse, SdkError>> {
+    let fetch = super::directory::fetch(&plan.config, root);
+    tokio::pin!(fetch);
+    tokio::select! {
+        biased;
+        () = plan.preempt.notified() => None,
+        outcome = &mut fetch => Some(outcome),
+    }
+}
+
 async fn fetch_pass(
     context: &SessionContext,
     writer: &mpsc::Sender<AccountWork>,
@@ -394,15 +431,21 @@ async fn fetch_pass(
         let plan = Arc::new(plan);
         remaining = plan.remaining_passes;
         *retry_budget = retry_budget.saturating_sub(plan.retried_demands);
+        let mut yielded = false;
         for root in &plan.roots {
             let fetched_after = Instant::now();
-            let outcome = super::directory::fetch(&plan.config, root).await;
+            let Some(outcome) = fetch_unless_preempted(&plan, root).await else {
+                // A root inserted while this lease was held is not this pass. Drop it
+                // and Prepare again so that fetch begins after the command did.
+                yielded = true;
+                break;
+            };
             attempted.insert(root.clone());
             let (reply, response) = oneshot::channel();
             send(
                 completion,
                 Work::Apply {
-                    plan: plan.clone(),
+                    plan: Arc::clone(&plan),
                     root: root.clone(),
                     fetched_after,
                     outcome: Box::new(outcome),
@@ -414,6 +457,9 @@ async fn fetch_pass(
         }
         // Release the pass lease and re-read demands before the next network fetch.
         drop(plan);
+        if yielded {
+            continue;
+        }
         if remaining == 0 {
             break;
         }
