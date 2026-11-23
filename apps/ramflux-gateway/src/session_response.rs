@@ -48,6 +48,7 @@ pub(crate) fn request_kind(frame: &ramflux_node_core::GatewayClientFrame) -> &'s
         Frame::Nack { .. } => "nack",
         Frame::Heartbeat { .. } => "heartbeat",
         Frame::Close { .. } => "close",
+        Frame::GrantRenew => "grant_renew",
     }
 }
 
