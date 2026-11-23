@@ -160,6 +160,8 @@ async fn create_case(phone: LocalBusAccountState, laptop: LocalBusAccountState) 
     drop(phone_bus);
     server.await??;
     phone_server.await??;
+    desk_sup.shutdown().await?;
+    phone_sup.shutdown().await?;
     Ok(())
 }
 
@@ -179,8 +181,10 @@ async fn get_case(pair: &mut Pair) -> TestResult {
     let created =
         pair.laptop.client.agent_create(vault.as_ref(), &create_body(Some(true)), now()?)?;
     OwnRouter::new()?.route(&mut pair.laptop, &mut pair.phone, 1).await?;
-    let desk_sup = serve_one(&super::root("agent-get-desk"), &pair.laptop, SIBLING_PASSPHRASE)?;
-    let phone_sup = serve_one(&super::root("agent-get-phone"), &pair.phone, PHONE_PASSPHRASE)?;
+    let desk_dir = super::root("agent-get-desk");
+    let phone_dir = super::root("agent-get-phone");
+    let desk_sup = serve_one(&desk_dir, &pair.laptop, SIBLING_PASSPHRASE)?;
+    let phone_sup = serve_one(&phone_dir, &pair.phone, PHONE_PASSPHRASE)?;
     let (bus, server) = client(Rc::clone(&desk_sup), 1).await?;
     let (phone_bus, phone_server) = client(Rc::clone(&phone_sup), 2).await?;
     let get = |id: &str| serde_json::to_value(g::AgentOperationGet { operation_id: id.into() });
@@ -212,6 +216,8 @@ async fn get_case(pair: &mut Pair) -> TestResult {
     drop(phone_bus);
     server.await??;
     phone_server.await??;
+    desk_sup.shutdown().await?;
+    phone_sup.shutdown().await?;
     Ok(())
 }
 
@@ -242,8 +248,10 @@ async fn decide_case(pair: &mut Pair) -> TestResult {
         .ok_or("the phone fixture vault")?
         .vault
         .arm_agent_decision(&hash)?;
-    let desk_sup = serve_one(&super::root("agent-decide-desk"), &pair.laptop, SIBLING_PASSPHRASE)?;
-    let phone_sup = serve_one(&super::root("agent-decide-phone"), &pair.phone, PHONE_PASSPHRASE)?;
+    let desk_dir = super::root("agent-decide-desk");
+    let phone_dir = super::root("agent-decide-phone");
+    let desk_sup = serve_one(&desk_dir, &pair.laptop, SIBLING_PASSPHRASE)?;
+    let phone_sup = serve_one(&phone_dir, &pair.phone, PHONE_PASSPHRASE)?;
     let (desk_bus, desk_server) = client(Rc::clone(&desk_sup), 1).await?;
     let (phone_bus, phone_server) = client(Rc::clone(&phone_sup), 2).await?;
     let decide = serde_json::to_value(decide_body(&created.request_id, &hash, Some(true)))?;
@@ -266,6 +274,8 @@ async fn decide_case(pair: &mut Pair) -> TestResult {
     drop(desk_bus);
     phone_server.await??;
     desk_server.await??;
+    phone_sup.shutdown().await?;
+    desk_sup.shutdown().await?;
     Ok(())
 }
 
@@ -295,7 +305,8 @@ async fn record_case(pair: &mut Pair) -> TestResult {
         &author,
         at,
     )?;
-    let desk_sup = serve_one(&super::root("agent-record-desk"), &pair.laptop, SIBLING_PASSPHRASE)?;
+    let desk_dir = super::root("agent-record-desk");
+    let desk_sup = serve_one(&desk_dir, &pair.laptop, SIBLING_PASSPHRASE)?;
     let (bus, server) = client(Rc::clone(&desk_sup), 1).await?;
 
     let listed = call(
@@ -371,6 +382,7 @@ async fn record_case(pair: &mut Pair) -> TestResult {
     assert_eq!(pair.laptop.client.agent_record_get(&agent)?.access.dm, "contacts");
     drop(bus);
     server.await??;
+    desk_sup.shutdown().await?;
     Ok(())
 }
 
@@ -394,7 +406,8 @@ async fn watch_case(pair: &mut Pair) -> TestResult {
         &author,
         at,
     )?;
-    let desk_sup = serve_one(&super::root("agent-watch-desk"), &pair.laptop, SIBLING_PASSPHRASE)?;
+    let desk_dir = super::root("agent-watch-desk");
+    let desk_sup = serve_one(&desk_dir, &pair.laptop, SIBLING_PASSPHRASE)?;
     let (bus, server) = client(Rc::clone(&desk_sup), 1).await?;
 
     let first = call(
@@ -470,5 +483,6 @@ async fn watch_case(pair: &mut Pair) -> TestResult {
     );
     drop(bus);
     server.await??;
+    desk_sup.shutdown().await?;
     Ok(())
 }
