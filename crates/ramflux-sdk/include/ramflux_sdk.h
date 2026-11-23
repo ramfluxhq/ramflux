@@ -405,6 +405,17 @@ int32_t ramflux_v2_receipt_present(const uint8_t *input_json,
 int32_t ramflux_v2_card_trust_package(struct RamfluxBuffer **out);
 
 /*
+ Install or clear the in-process account-code callback.
+ Host output capacities are 1024 bytes; SDK storage is zeroized on every path.
+ Setup requires the code twice and the copies must match. Unlock and phrase take one copy.
+ A null callback unregisters and drains. The host must not reenter this client from the
+ callback. Close and replacement wait until the callback returns.
+ */
+int32_t ramflux_v2_set_credential_provider(uint64_t handle,
+                                           CredentialProviderCallback callback,
+                                           void *user_data);
+
+/*
  Stop networking, flush databases, and close file descriptors.
  Unlocked account state, including the database key, stays in memory.
  Pending operations complete as `RAMFLUX_V2_STATUS_SUSPENDED` (30).

@@ -333,7 +333,8 @@ impl AccountRuntime {
             Err(error) => Err(error),
         };
         let _ = reply.send(result);
-        Ok(command.request.method == "account.lock" && self.state.accounts.is_empty())
+        Ok(matches!(command.request.method.as_str(), "account.lock" | "account.sign_out")
+            && self.state.accounts.is_empty())
     }
 }
 

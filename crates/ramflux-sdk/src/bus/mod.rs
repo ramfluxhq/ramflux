@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+mod account_local;
 pub(crate) mod account_runtime;
 mod background;
 #[cfg(test)]
@@ -27,6 +28,8 @@ pub(crate) mod credentials;
 pub(crate) mod native_actor;
 mod recovery;
 pub(crate) mod runtime_limits;
+#[cfg(unix)]
+mod socket_dir;
 mod transfer_slots;
 pub use creation_client::{
     LocalBusCreationClient, LocalBusPendingCreation, LocalBusPendingRecovery,

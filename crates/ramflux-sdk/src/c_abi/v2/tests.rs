@@ -225,12 +225,7 @@ fn preadmission_cancel_never_reaches_the_supervisor() {
     let bytes = crate::bus::inprocess::encode_request(frame).expect("test: encoded mutation");
     client
         .commands
-        .try_send(Command {
-            id: 1,
-            deadline_ms: None,
-            bytes: zeroize::Zeroizing::new(bytes),
-            operation: Arc::clone(&operation),
-        })
+        .try_send(Command::carrier(1, zeroize::Zeroizing::new(bytes), Arc::clone(&operation), None))
         .map_err(|_| "send failed")
         .expect("test: queue cancelled operation");
     let until = Instant::now() + Duration::from_secs(10);

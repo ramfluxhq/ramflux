@@ -35,6 +35,7 @@ pub(super) fn handles(method: &str) -> bool {
         "account.create"
             | "account.unlock"
             | "account.lock"
+            | "account.sign_out"
             | "account.switch"
             | "account.backup.import"
             | "account.backup.export"
@@ -95,7 +96,7 @@ pub(super) async fn fingerprint(
 }
 
 pub(super) fn takeover_eligible(method: &str) -> bool {
-    matches!(method, "account.unlock" | "account.lock" | "account.switch")
+    matches!(method, "account.unlock" | "account.lock" | "account.sign_out" | "account.switch")
 }
 
 pub(super) async fn reserve(

@@ -28,9 +28,11 @@ pub enum CustodyVaultReason {
     /// The provider holds no usable key for this agent custody operation (no presence, no
     /// entry, or an operation the provider does not implement).
     KeyUnavailable,
+    /// No Secret Service is reachable. There is no file fallback.
+    Unavailable,
 }
 impl CustodyVaultReason {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Missing,
         Self::InitPending,
         Self::ImportPending,
@@ -41,6 +43,7 @@ impl CustodyVaultReason {
         Self::PrimaryUnavailable,
         Self::ModeMismatch,
         Self::KeyUnavailable,
+        Self::Unavailable,
     ];
     /// Stable wire `reason_code`.
     #[must_use]
@@ -56,6 +59,7 @@ impl CustodyVaultReason {
             Self::PrimaryUnavailable => "vault_primary_unavailable",
             Self::ModeMismatch => "vault_mode_mismatch",
             Self::KeyUnavailable => "custody_key_unavailable",
+            Self::Unavailable => "vault_unavailable",
         }
     }
     /// The bus error `code` that carries this reason.
@@ -100,6 +104,10 @@ impl CustodyVaultReason {
 }
 impl std::fmt::Display for CustodyVaultReason {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
+        let text = match self {
+            Self::Unavailable => "vault_unavailable: no Secret Service",
+            other => other.as_str(),
+        };
+        formatter.write_str(text)
     }
 }

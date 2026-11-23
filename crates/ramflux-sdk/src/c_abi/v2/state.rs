@@ -69,6 +69,7 @@ pub(super) struct Shared {
     pub closed: std::sync::atomic::AtomicBool,
     pub suspended: std::sync::atomic::AtomicBool,
     pub subscription: Mutex<Option<u64>>,
+    pub credentials: super::credential::Bridge,
 }
 
 impl Shared {
@@ -81,6 +82,7 @@ impl Shared {
         );
         crate::bus::inprocess::erase_value(&mut value);
         let Ok(mut operations) = self.operations.lock() else { return };
+        self.credentials.forget(id);
         let Some(operation) = operations.get(&id) else { return };
         let Ok(mut subscription) = self.subscription.lock() else { return };
         let detached = if let Ok(mut state) = operation.state.lock() {
