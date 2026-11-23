@@ -47,8 +47,9 @@ pub const SYNC_SNAPSHOT_V1: &str = "sync_snapshot_v1";
 /// `GET /api/sync/ws`. Advertised together with `sync_snapshot_v1`.
 pub const SYNC_WS_V1: &str = "sync_ws_v1";
 /// Ephemeral per-run stream frames on the sync socket (`typing`, `tool_status`, `delta`).
+/// Advertised at the pin.
 pub const STREAM_FRAMES_V1: &str = "stream_frames_v1";
-/// `POST /api/sessions/{id}/approvals/{approval_id}`.
+/// `POST /api/sessions/{id}/approvals/{approval_id}`. Advertised at the pin.
 pub const RUN_APPROVALS_V1: &str = "run_approvals_v1";
 /// Non-interactive host install. The CLI runs `prx init`, `prx token issue`, and
 /// `prx service install`. There is no HTTP bootstrap route. Job routes are gated on this token.

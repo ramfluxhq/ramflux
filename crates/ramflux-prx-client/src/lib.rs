@@ -38,8 +38,8 @@ mod test_support;
 mod transport;
 
 pub use agent::{
-    AgentConfig, AgentLimits, AgentList, AgentReadback, AgentStatus, MainReadback,
-    PROMPT_MAX_BYTES, PutKind, PutOutcome, Retired, Tools,
+    AgentConfig, AgentLimits, AgentList, AgentReadback, AgentStatus, DEFAULT_APPROVAL_WAIT_SECS,
+    MainReadback, PROMPT_MAX_BYTES, PutKind, PutOutcome, Retired, Tools,
 };
 pub use apply::ApplyOutcome;
 pub use approvals::ApprovalReceipt;
