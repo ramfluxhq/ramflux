@@ -147,6 +147,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
 
 fn bus_reason_code(error: &SdkError) -> Option<String> {
     Some(match error {
+        SdkError::UsernameDirectoryRefused(code) => code.as_str().into(),
         SdkError::Storage(StorageError::AccountWriterBusy(_)) => "account_busy".into(),
         SdkError::ContactInput(reason) => reason.to_string(),
         SdkError::CustodyVault(reason) => reason.as_str().into(),
@@ -318,6 +319,7 @@ fn undelivered_contact_request_code(error: &SdkError) -> &'static str {
 
 fn custody_unit_code(error: &SdkError) -> Option<&'static str> {
     Some(match error {
+        SdkError::UsernameDirectoryRefused(_) => "UsernameDirectoryRefused",
         SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
         SdkError::AgentCustodyUnsupported => "AgentCustodyUnsupported",
         SdkError::AgentCreationRefused(token) => token,
