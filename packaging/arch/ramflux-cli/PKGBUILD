@@ -12,19 +12,17 @@ optdepends=('libsecret: Secret Service integration tools'
             'gnome-keyring: Secret Service provider for device custody'
             'kwallet: alternative Secret Service provider'
             'dbus: user session bus for Secret Service')
-source=("ramflux-v${pkgver}.tar.gz::https://api.github.com/repos/ramfluxhq/ramflux/tarball/refs/tags/v${pkgver}"
-        "ramflux-tui-v${pkgver}.tar.gz::https://api.github.com/repos/ramfluxhq/ramflux-tui/tarball/refs/tags/v${pkgver}")
-sha256sums=('d2e1ee4bd2470573a84c249413aec9ccf8d61399e680aa5555b81256fa498bb8'
-            '9cc574e4726f94b0430fa4d728ae79c06def314e3f62fd113f94c01e3431744a')
+source=("ramflux-v${pkgver}.tar.gz::https://github.com/ramfluxhq/ramflux/archive/refs/tags/v${pkgver}.tar.gz"
+        "ramflux-tui-v${pkgver}.tar.gz::https://github.com/ramfluxhq/ramflux-tui/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('b5ee171f352cbbcf570715590504b4c0941e8afe5062ed55722f851a52687d4e'
+            '3808aa604ea27e46fee12e95bf2a73a472b77f58b38795a22323eaadcdc30304')
 _product_commit=ee3d574ce3eb3cb833197fa8612d2135e6828f7e
 _tui_commit=02f2ca4402b7aae67f3b4dd089e3d18aca154a8d
 
 prepare() {
-  mv ramfluxhq-ramflux-[[:xdigit:]]* product
-  mv ramfluxhq-ramflux-tui-* tui
   # Isolate the TUI lockfile when makepkg runs inside the product checkout.
-  if ! grep -q '^\[workspace\]' tui/Cargo.toml; then
-    printf '\n[workspace]\n' >> tui/Cargo.toml
+  if ! grep -q '^\[workspace\]' "ramflux-tui-$pkgver/Cargo.toml"; then
+    printf '\n[workspace]\n' >> "ramflux-tui-$pkgver/Cargo.toml"
   fi
 }
 
@@ -32,16 +30,16 @@ build() {
   export RAMFLUX_PRODUCTION_BUILD=1
   unset RAMFLUX_ITEST_BUILD
   export CARGO_TARGET_DIR="$srcdir/target"
-  RAMFLUX_GIT_SHA="$_product_commit" cargo build --locked --release --manifest-path product/Cargo.toml -p ramflux-rf --bin rf
-  env -u RAMFLUX_GIT_SHA GIT_CEILING_DIRECTORIES="$srcdir" cargo build --locked --release --manifest-path tui/Cargo.toml --bin rf-tui
+  RAMFLUX_GIT_SHA="$_product_commit" cargo build --locked --release --manifest-path "ramflux-$pkgver/Cargo.toml" -p ramflux-rf --bin rf
+  env -u RAMFLUX_GIT_SHA GIT_CEILING_DIRECTORIES="$srcdir" cargo build --locked --release --manifest-path "ramflux-tui-$pkgver/Cargo.toml" --bin rf-tui
 }
 
 package() {
   install -Dm755 "$srcdir/target/release/rf" "$pkgdir/usr/bin/rf"
   install -Dm755 "$srcdir/target/release/rf-tui" "$pkgdir/usr/bin/rf-tui"
-  install -Dm644 product/LICENSE "$pkgdir/usr/share/licenses/$pkgname/ramflux-LICENSE"
-  install -Dm644 product/NOTICE "$pkgdir/usr/share/licenses/$pkgname/ramflux-NOTICE"
-  install -Dm644 tui/LICENSE "$pkgdir/usr/share/licenses/$pkgname/ramflux-tui-LICENSE"
+  install -Dm644 "ramflux-$pkgver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/ramflux-LICENSE"
+  install -Dm644 "ramflux-$pkgver/NOTICE" "$pkgdir/usr/share/licenses/$pkgname/ramflux-NOTICE"
+  install -Dm644 "ramflux-tui-$pkgver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/ramflux-tui-LICENSE"
   install -dm755 "$pkgdir/usr/share/doc/$pkgname"
   printf 'version=%s\nramflux=%s\nramflux-tui=%s\n' "$pkgver" "$_product_commit" "$_tui_commit" > "$pkgdir/usr/share/doc/$pkgname/BUILD-INFO.txt"
 }

@@ -17,9 +17,9 @@ pkgbase = ramflux-cli
 	optdepends = gnome-keyring: Secret Service provider for device custody
 	optdepends = kwallet: alternative Secret Service provider
 	optdepends = dbus: user session bus for Secret Service
-	source = ramflux-v0.2.5.tar.gz::https://api.github.com/repos/ramfluxhq/ramflux/tarball/refs/tags/v0.2.5
-	source = ramflux-tui-v0.2.5.tar.gz::https://api.github.com/repos/ramfluxhq/ramflux-tui/tarball/refs/tags/v0.2.5
-	sha256sums = d2e1ee4bd2470573a84c249413aec9ccf8d61399e680aa5555b81256fa498bb8
-	sha256sums = 9cc574e4726f94b0430fa4d728ae79c06def314e3f62fd113f94c01e3431744a
+	source = ramflux-v0.2.5.tar.gz::https://github.com/ramfluxhq/ramflux/archive/refs/tags/v0.2.5.tar.gz
+	source = ramflux-tui-v0.2.5.tar.gz::https://github.com/ramfluxhq/ramflux-tui/archive/refs/tags/v0.2.5.tar.gz
+	sha256sums = b5ee171f352cbbcf570715590504b4c0941e8afe5062ed55722f851a52687d4e
+	sha256sums = 3808aa604ea27e46fee12e95bf2a73a472b77f58b38795a22323eaadcdc30304
 
 pkgname = ramflux-cli
