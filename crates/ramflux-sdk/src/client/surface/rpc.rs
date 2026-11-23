@@ -94,41 +94,14 @@ impl RamfluxClient {
             if carrier.sender_principal_id != local.principal_id {
                 return Ok(dropped());
             }
-            if !author_call && !self.surface_author_is_own_agent(&carrier.author_principal_id)? {
-                return Ok(dropped());
-            }
-        } else if author_call {
-            if !self.surface_author_is_own_agent(&carrier.author_principal_id)? {
-                return Ok(dropped());
-            }
-        } else if local.principal_id != carrier.author_principal_id {
+        } else if !author_call && local.principal_id != carrier.author_principal_id {
             return Ok(dropped());
         }
-        if !outbound && kind != RpcKind::FunctionCall {
-            let expected = self
-                .born_v3_account
-                .as_ref()
-                .and_then(|a| a.record().body.profile.custodian.as_ref())
-                .map(|c| c.account_anchor.as_str());
-            let signer = self
-                .surface_signer_record(&carrier.sender_principal_id, &carrier.sender_device_id)?;
-            if expected.is_none()
-                || expected != signer.get("principal_commitment").and_then(Value::as_str)
-            {
-                return Ok(dropped());
-            }
-            if let Some(id) = &rpc.frame().function_call_id {
-                let Some(sent) =
-                    self.account_db()?.load_actor_state::<Sent>(&sent_key(carrier, id)?)?
-                else {
-                    return Ok(dropped());
-                };
-                if sent.expires_at <= crate::prelude::now_unix_timestamp()
-                    || kind == RpcKind::FunctionResponse && sent.surface != rpc.frame().surface_id
-                {
-                    return Ok(dropped());
-                }
-            }
+        if !outbound
+            && kind != RpcKind::FunctionCall
+            && !self.inbound_rpc_response_bound(carrier, kind, rpc)?
+        {
+            return Ok(dropped());
         }
         if rpc.frame().conversation_id != carrier.conversation_id
             || rpc.frame().surface_id != carrier.surface_id
@@ -420,9 +393,7 @@ impl RamfluxClient {
         outcome: &Outcome,
         epoch: Option<u64>,
     ) -> Result<(), SdkError> {
-        if !self.surface_author_is_own_agent(&carrier.author_principal_id)?
-            || carrier.sender_principal_id != carrier.author_principal_id
-        {
+        if carrier.sender_principal_id != carrier.author_principal_id {
             return Ok(());
         }
         let prefix = key("rpc-error-reported", &carrier.author_principal_id) + "/";
@@ -481,10 +452,17 @@ impl RamfluxClient {
             response_kind: RpcKind::Error,
             expires_at: crate::prelude::now_unix_timestamp().saturating_add(RETENTION_SECONDS),
         };
-        let thread = self
-            .account_db()?
-            .client_record("conversation", &carrier.conversation_id)?
-            .ok_or_else(|| invalid("error report conversation missing"))?;
+        let Some(thread) =
+            self.account_db()?.client_record("conversation", &carrier.conversation_id)?
+        else {
+            return Ok(());
+        };
+        if !self.surface_error_report_route_ready(
+            &carrier.sender_principal_id,
+            &carrier.sender_device_id,
+        )? {
+            return Ok(());
+        }
         self.queue_rpc_response(
             carrier,
             &entry,
@@ -495,5 +473,77 @@ impl RamfluxClient {
         // same attempted version twice, without retaining one row per hostile version.
         self.account_db()?.persist_actor_state(&marker, &event.version())?;
         Ok(())
+    }
+    fn inbound_rpc_response_bound(
+        &self,
+        carrier: &Carrier,
+        kind: RpcKind,
+        rpc: &SurfaceRpc,
+    ) -> Result<bool, SdkError> {
+        if !self.inbound_rpc_response_sender_allowed(carrier)? {
+            return Ok(false);
+        }
+        let Some(id) = rpc.frame().function_call_id.as_deref() else {
+            return Ok(true);
+        };
+        let Some(sent) = self.account_db()?.load_actor_state::<Sent>(&sent_key(carrier, id)?)?
+        else {
+            return Ok(false);
+        };
+        Ok(sent.expires_at > crate::prelude::now_unix_timestamp()
+            && (kind != RpcKind::FunctionResponse || sent.surface == rpc.frame().surface_id))
+    }
+    /// The card author accepts a reply from its custodian or from a conversation peer.
+    /// A matching sent-ledger row, checked by the caller, still binds the reply to one call.
+    fn inbound_rpc_response_sender_allowed(&self, carrier: &Carrier) -> Result<bool, SdkError> {
+        let signer =
+            self.surface_signer_record(&carrier.sender_principal_id, &carrier.sender_device_id)?;
+        let commitment = signer.get("principal_commitment").and_then(Value::as_str);
+        let custodian = self
+            .born_v3_account
+            .as_ref()
+            .and_then(|account| account.record().body.profile.custodian.as_ref())
+            .map(|custodian| custodian.account_anchor.as_str());
+        if custodian.is_some() && custodian == commitment {
+            return Ok(true);
+        }
+        let Some(thread) =
+            self.account_db()?.client_record("conversation", &carrier.conversation_id)?
+        else {
+            return Ok(false);
+        };
+        if let Some(group) =
+            thread.get("group_id").and_then(Value::as_str).filter(|id| !id.is_empty())
+        {
+            return self.surface_group_device_allowed(
+                group,
+                &self.peer_device_identity(
+                    &carrier.sender_principal_id,
+                    &carrier.sender_device_id,
+                )?,
+            );
+        }
+        let sender = carrier.sender_principal_id.as_str();
+        Ok(thread
+            .get("participants")
+            .and_then(Value::as_array)
+            .is_some_and(|ids| ids.iter().any(|peer| peer.as_str() == Some(sender))))
+    }
+    fn surface_error_report_route_ready(
+        &self,
+        principal: &str,
+        device: &str,
+    ) -> Result<bool, SdkError> {
+        let record = match self.surface_signer_record(principal, device) {
+            Ok(record) => record,
+            Err(
+                SdkError::LocalBus(_)
+                | SdkError::InboundPending(_)
+                | SdkError::FreshHeadRequired { .. },
+            ) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(record.get("principal_commitment").and_then(Value::as_str).is_some()
+            && record.get("target_delivery_id").and_then(Value::as_str).is_some())
     }
 }

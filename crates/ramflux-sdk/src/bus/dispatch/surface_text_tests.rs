@@ -207,10 +207,13 @@ pub(in crate::bus::dispatch) async fn deliver_to_peers(
         reached.insert(index);
     }
     for index in &reached {
-        assert!(
-            peers[*index].client.surface_get("surface", 0, None)?.is_null(),
-            "foreign human Surface authors remain fallback-only"
+        let view = peers[*index].client.surface_get("surface", 0, None)?;
+        assert_eq!(
+            view["render_allowed"],
+            json!(true),
+            "authenticated peer cards render for the recipient"
         );
+        assert!(view["snapshot"].is_object(), "peer snapshot is readable");
         assert!(
             !peers[*index].client.direct_messages("thread")?.is_empty(),
             "native receive must retain the fallback timeline entry"

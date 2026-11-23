@@ -36,12 +36,6 @@ impl RamfluxClient {
         {
             return Ok(reject("non_author_update"));
         }
-        if outbound
-            && matches!(payload, Payload::Action(_))
-            && !self.surface_author_is_own_agent(&carrier.author_principal_id)?
-        {
-            return Ok(reject("surface_author_not_owned"));
-        }
         if let Payload::Action(action) = payload {
             let view =
                 self.account_db()?.client_record("surface", &carrier.surface_reference()?)?;
