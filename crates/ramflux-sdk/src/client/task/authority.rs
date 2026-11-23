@@ -14,6 +14,16 @@ pub(super) const fn relation_role(event: &TaskEventBody) -> ActorType {
         _ => ActorType::Human,
     }
 }
+
+fn task_member_directory_pending(error: &SdkError) -> bool {
+    matches!(
+        error,
+        SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. }
+    )
+}
+
 impl RamfluxClient {
     pub(super) fn require_task_member(
         &self,
@@ -27,25 +37,29 @@ impl RamfluxClient {
             .ok_or_else(|| invalid("task requires a known conversation"))?;
         if let Some(group) = thread["group_id"].as_str() {
             let state = self.group_state(group)?;
-            for member in &self.task_current_roster(&state)? {
-                let reference = self.group_device_reference(group, member)?;
-                let record = db.client_record("device", &reference)?;
-                let owner = record.as_ref().and_then(|v| v["principal_id"].as_str());
-                let local = self.device_branch.as_ref().filter(|d| d.device_id == *member);
-                if (owner == Some(principal) || local.is_some_and(|d| d.principal_id == principal))
-                    && device.is_none_or(|id| id == member)
-                {
-                    if local.is_some_and(|d| d.principal_id == principal) {
-                        self.pin_local_group_member(group)?;
-                    } else {
-                        self.require_group_sender_pin(
-                            group,
-                            principal,
-                            &self.device_identity(&reference)?,
-                        )?;
-                    }
-                    return Ok(());
+            let roster = self.task_current_roster(&state)?;
+            // Group state stores the issuer directory, not every peer. A missing
+            // directory for some other member must not refuse or stall the actor.
+            let mut named = device.is_none();
+            let mut pending = None;
+            for member in &roster {
+                if device.is_some_and(|id| id != member.as_str()) {
+                    continue;
                 }
+                named = true;
+                match self.task_roster_member_matches(group, member, principal) {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(error) if task_member_directory_pending(&error) => {
+                        if pending.is_none() {
+                            pending = Some(error);
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if named && let Some(error) = pending {
+                return Err(error);
             }
             return Err(crate::task_refusal::refused(
                 crate::TaskRefusalCode::NotMember,
@@ -70,6 +84,29 @@ impl RamfluxClient {
         }
         Ok(())
     }
+
+    fn task_roster_member_matches(
+        &self,
+        group: &str,
+        member: &str,
+        principal: &str,
+    ) -> Result<bool, SdkError> {
+        let db = self.account_db()?;
+        let reference = self.group_device_reference(group, member)?;
+        let record = db.client_record("device", &reference)?;
+        let owner = record.as_ref().and_then(|value| value["principal_id"].as_str());
+        let local = self.device_branch.as_ref().filter(|row| row.device_id == member);
+        if owner != Some(principal) && local.is_none_or(|row| row.principal_id != principal) {
+            return Ok(false);
+        }
+        if local.is_some_and(|row| row.principal_id == principal) {
+            self.pin_local_group_member(group)?;
+        } else {
+            self.require_group_sender_pin(group, principal, &self.device_identity(&reference)?)?;
+        }
+        Ok(true)
+    }
+
     pub(super) fn authorize_task_relations(
         &self,
         carrier: &Carrier,
