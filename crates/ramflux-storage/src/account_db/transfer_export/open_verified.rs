@@ -341,14 +341,17 @@ impl Drop for VerifiedExport {
 }
 
 pub(crate) fn quick_check(db: &Connection) -> Result<(), StorageError> {
-    let mut statement =
-        db.prepare("PRAGMA quick_check").map_err(|error| refused_by("quick_check", &error))?;
-    let rows: Vec<String> = statement
-        .query_map([], |row| row.get(0))
-        .and_then(Iterator::collect)
-        .map_err(|error| refused_by("quick_check", &error))?;
-    if rows.as_slice() != ["ok"] {
-        return Err(refused("quick_check"));
+    match quick_check_ok(db) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(refused_by("quick_check", &"result was not ok")),
+        Err(error) => Err(refused_by("quick_check", &error)),
     }
-    Ok(())
+}
+
+/// `PRAGMA quick_check` without a refusal log. The limit search calls this for
+/// trials that are expected to miss.
+pub(crate) fn quick_check_ok(db: &Connection) -> Result<bool, rusqlite::Error> {
+    let mut statement = db.prepare("PRAGMA quick_check")?;
+    let rows = statement.query_map([], |row| row.get(0))?.collect::<Result<Vec<String>, _>>()?;
+    Ok(rows.as_slice() == ["ok"])
 }

@@ -3,10 +3,11 @@
 
 //! Hardened-open limits measured from the account catalog this binary installs.
 //! The reference is not a fresh empty file. It is a backup snapshot of two accounts
-//! after one contact row, one conversation, two messages, one journal row, a second
-//! open, and the mac-bundle migration (`schema_version` 14). Search tables are not
-//! part of that snapshot: `LOCAL_SEARCH_V1` is off, and the snapshot writer strips
-//! the `local_search_*` family when it is present.
+//! after one contact row, one conversation, two messages, one journal row, the receive
+//! ledger a live account installs on connect (`gateway_receive_*`; the backup keeps
+//! those tables), a second open, and the mac-bundle migration (`schema_version` 14).
+//! Search tables are not part of that snapshot: `LOCAL_SEARCH_V1` is off, and the
+//! snapshot writer strips the `local_search_*` family when it is present.
 //!
 //! Object names do not grow per message or per contact. They grow when an installer
 //! runs (runtime schema, migrations, the second open's domain triggers) or when
@@ -112,7 +113,8 @@ pub(crate) fn require_known(
     let catalog = budget()?;
     for (kind, name, _) in objects {
         if !known_kind(kind) || (!catalog.names.contains(name) && !sqlite_owned(name)) {
-            return Err(open_verified::refused("schema"));
+            let shown = name.chars().take(64).collect::<String>();
+            return Err(open_verified::refused_by("schema", &format!("{kind} {shown}")));
         }
     }
     Ok(())
@@ -147,6 +149,8 @@ fn first_session(dir: &CatalogDir) -> Result<(AccountDbKey, AccountDbKey), Stora
     let acct = AccountDb::open(&index, "acct", &acct_key)?;
     let _peer = AccountDb::open(&index, "peer", &peer_key)?;
     populate(&acct)?;
+    // A connected account installs this before export. The snapshot keeps the tables.
+    acct.install_receive_ledger_schema()?;
     age_mac_bundle(&acct)?;
     Ok((acct_key, peer_key))
 }
@@ -337,10 +341,10 @@ fn accepts(path: &Path, key: &AccountDbKey, limits: &EngineLimits) -> Result<boo
     if db.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get::<_, i64>(0)).is_err() {
         return Ok(false);
     }
-    match open_verified::quick_check(&db) {
-        Ok(()) => Ok(true),
-        Err(StorageError::TransferExportRefused(_)) => Ok(false),
-        Err(error) => Err(error),
+    // Trial misses are expected. They must not log as a received-export refusal.
+    match open_verified::quick_check_ok(&db) {
+        Ok(accepted) => Ok(accepted),
+        Err(_) => Ok(false),
     }
 }
 
@@ -368,11 +372,11 @@ fn widen(raw: &RawLimits) -> EngineLimits {
     }
 }
 
+/// One `growOpArray` step asks for twice the current opcode allocation and
+/// reports `SQLITE_NOMEM` when that request exceeds the limit. The measured
+/// minimum sits on that boundary, so +25% does not admit the next step.
 fn vdbe_limit(minimum: i32) -> i32 {
-    let quarter = minimum / 4;
-    let grown = minimum.saturating_add(quarter);
-    let at_least = minimum.saturating_add(64);
-    if grown > at_least { grown } else { at_least }
+    minimum.saturating_mul(2)
 }
 
 fn text_bounds(db: &Connection) -> Result<(i32, i32), StorageError> {
