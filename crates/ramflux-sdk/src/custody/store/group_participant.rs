@@ -114,7 +114,7 @@ fn publishing_plan(
     decode_register_plan(&record.plan_bytes()?).map_err(|_| SdkError::CustodySetupInvalid)
 }
 
-fn data_root(account: &BornAccount) -> Result<&Path, SdkError> {
+pub(super) fn data_root(account: &BornAccount) -> Result<&Path, SdkError> {
     account.networking_path.parent().and_then(Path::parent).ok_or(SdkError::CustodySetupInvalid)
 }
 

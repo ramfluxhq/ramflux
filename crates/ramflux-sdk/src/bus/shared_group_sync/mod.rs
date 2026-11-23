@@ -208,7 +208,7 @@ async fn native_group_primary(
         return Err(SdkError::AgentCreationRefused("agent_retired"));
     }
     let host =
-        super::couriers::primary::require_agent_operable(&native, &account.gateway_config).await?;
+        super::couriers::primary::custodian_directory(&native, &account.gateway_config).await?;
     let setup = account.native_setup.as_ref().ok_or(SdkError::CustodyVaultUnavailable)?;
     let vault = super::custody_setup::primary_provider(setup);
     tokio::task::spawn_blocking(move || {

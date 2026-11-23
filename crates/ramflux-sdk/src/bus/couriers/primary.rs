@@ -35,7 +35,7 @@ impl PrimarySnapshot {
         if self.retired {
             return Err(SdkError::AgentCreationRefused("agent_retired"));
         }
-        let host = require_agent_operable(&self.native, &self.gateway).await?;
+        let host = custodian_directory(&self.native, &self.gateway).await?;
         let Self { native, vault, .. } = self;
         tokio::task::spawn_blocking(move || {
             native.group_operation_signer(vault.as_ref(), host.as_ref())
@@ -47,19 +47,27 @@ impl PrimarySnapshot {
 
 /// Directory record of the custodian, for [`BornAccount::group_operation_signer`].
 ///
-/// A human returns `Ok(None)` and does not fetch. A hosted agent returns the current
-/// public device-manifest record so the signer can run the same active-device test as
-/// `RouterCore::require_agent_operable` before it signs. The desktop's stored human
-/// file is not consulted: a phone revoke is acknowledged on the node before that file
-/// changes.
+/// [`crate::custody::agent_creation::require_agent_operable`] runs first. Call invites
+/// use that same function: a retirement row or a stored host-branch marker refuses
+/// `agent_retired` before this fetch and before a lease exists. A human returns
+/// `Ok(None)` and does not fetch. A hosted agent then returns the current public
+/// device-manifest record so the signer can run the same active-device test as node
+/// `agent_fence::require_operable`. The desktop's stored human file is not that
+/// record. A phone revoke is acknowledged on the node before the file or the
+/// host-branch marker changes, so the fetch is what sees that revoke.
 ///
 /// # Errors
-/// A missing or mismatched directory record, or a fetch failure. The signer then
-/// refuses `agent_retired` when the fetched record's primary or host desktop is inactive.
-pub(crate) async fn require_agent_operable(
+/// `AgentCreationRefused("agent_retired")` from the shared local fence. A missing or
+/// mismatched directory record, or a fetch failure. The signer then refuses
+/// `agent_retired` when the fetched record's primary or host desktop is inactive.
+pub(crate) async fn custodian_directory(
     native: &BornAccount,
     gateway: &GatewaySessionConfig,
 ) -> Result<Option<VerifiedRecord>, SdkError> {
+    crate::custody::agent_creation::require_agent_operable(
+        native.data_root()?,
+        native.local_account_id(),
+    )?;
     let Some(anchor) = native.hosted_human_anchor()? else {
         return Ok(None);
     };

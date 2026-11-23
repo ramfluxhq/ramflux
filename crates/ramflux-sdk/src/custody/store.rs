@@ -448,6 +448,10 @@ impl BornAccount {
     pub(crate) fn hosted_human_anchor(&self) -> Result<Option<String>, SdkError> {
         group_participant::hosted_human_anchor(self)
     }
+    /// Data root that holds this account's custody directory.
+    pub(crate) fn data_root(&self) -> Result<&Path, SdkError> {
+        group_participant::data_root(self)
+    }
     /// The signer of this account's contact card and contact consent. A human signs on its
     /// primary device. An agent's record names its custodian's primary phone as primary, and that
     /// phone never holds agent keys: the agent signs with its own self-signing key on the device
