@@ -46,6 +46,14 @@ pub(crate) fn default_socket() -> PathBuf {
         .unwrap_or_default()
 }
 
+pub(crate) fn resolve_socket(explicit: Option<PathBuf>) -> Result<PathBuf, RfError> {
+    let socket = explicit.unwrap_or_else(default_socket);
+    require_resolved(&socket, "provide --socket or set an absolute XDG_RUNTIME_DIR").map_err(
+        |error| RfError::Refused { code: "socket_path_required", message: error.to_string() },
+    )?;
+    Ok(socket)
+}
+
 pub(crate) fn default_data_root() -> PathBuf {
     base("XDG_DATA_HOME", |home| home.join(".local").join("share"))
         .map(|dir| dir.join("ramflux"))

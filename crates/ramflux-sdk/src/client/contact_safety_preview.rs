@@ -105,22 +105,17 @@ impl RamfluxClient {
             return Err(ContactReason::RootConflict.into());
         }
         let own_root = self.own_account_anchor()?;
-        let fetch = |root: String| async move {
-            let started = std::time::Instant::now();
-            let manifest: Option<SdkDeviceManifestResponse> =
-                sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{root}"))
-                    .await
-                    .map_err(super::contact_resolution::lookup_failure)?;
-            let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?.fetched_from(started);
-            super::contact::verify_device_manifest(&manifest, &root)
-                .map_err(|_| SdkError::ContactInput(ContactReason::ManifestInvalid))?;
-            Ok::<_, SdkError>(manifest)
-        };
-        let peer = fetch(root.to_owned()).await?;
+        let peer = self.peer_device_manifest(gateway, root).await.map_err(|error| {
+            if peer_manifest_missing(&error) {
+                SdkError::from(ContactReason::UnknownPrincipal)
+            } else {
+                super::contact_resolution::lookup_failure(error)
+            }
+        })?;
         if peer.principal_id != principal {
             return Err(ContactReason::RootConflict.into());
         }
-        let own = fetch(own_root.clone()).await?;
+        let own = own_safety_manifest(gateway, &own_root).await?;
         let verify = |manifest: &SdkDeviceManifestResponse| -> Result<_, SdkError> {
             let native = manifest.custody.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
             ramflux_crypto::custody::verify_publication(
@@ -139,4 +134,27 @@ impl RamfluxClient {
         self.hold_compared_manifests([own, peer])?;
         super::contact_verification_cas::compared_safety_json(self, root)
     }
+}
+
+fn peer_manifest_missing(error: &SdkError) -> bool {
+    match error {
+        SdkError::LocalBus(message) => message.starts_with("missing device manifest for "),
+        SdkError::InboundRejected(message) => message == "device manifest unavailable",
+        _ => false,
+    }
+}
+
+async fn own_safety_manifest(
+    gateway: &GatewaySessionConfig,
+    root: &str,
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let started = std::time::Instant::now();
+    let manifest: Option<SdkDeviceManifestResponse> =
+        sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{root}"))
+            .await
+            .map_err(super::contact_resolution::lookup_failure)?;
+    let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?.fetched_from(started);
+    super::contact::verify_device_manifest(&manifest, root)
+        .map_err(|_| SdkError::ContactInput(ContactReason::ManifestInvalid))?;
+    Ok(manifest)
 }

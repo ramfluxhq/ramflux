@@ -136,8 +136,8 @@ pub use envelope_sender::{
     verify_envelope_sender_signature,
 };
 pub use sender_transcript::{
-    SENDER_TRANSCRIPT_PREFIX, SenderTranscript, SenderTranscriptMode, sender_origin_evidence,
-    sender_signed_transcript, verify_sender_signature,
+    SENDER_TRANSCRIPT_PREFIX, SenderTranscript, SenderTranscriptMode, VERIFIED_SOURCE_HOME,
+    sender_origin_evidence, sender_signed_transcript, verify_sender_signature,
 };
 
 mod call;

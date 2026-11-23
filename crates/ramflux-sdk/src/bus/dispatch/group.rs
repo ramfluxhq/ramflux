@@ -166,15 +166,15 @@ async fn resolve_federated_group_member_principal_commitment(
     member_id: &str,
     timeout: Duration,
 ) -> Result<String, SdkError> {
-    let manifest_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
-        SdkError::LocalBus(
-            "federated group member routes require --recipient-prekey-url to verify the remote device manifest"
-                .to_owned(),
-        )
-    })?;
+    let base = crate::client::recipient_home::required_public_base(
+        client,
+        member_principal_commitment.unwrap_or(""),
+        Some(federation.target_node_id.as_str()),
+    )
+    .await?;
     client
         .resolve_federated_target_principal_commitment_async(
-            crate::client::contact::RemoteManifest { url: manifest_url, timeout },
+            crate::client::contact::RemoteManifest { url: &base, timeout },
             member_principal_commitment,
             member_id,
         )
@@ -352,7 +352,7 @@ pub(crate) async fn dispatch_group_send_request(
                 ttl: account.client.content_ttl()?,
             };
             if let Some(federation) = body.federation.as_ref() {
-                let engine = account.session_client().await?;
+                let mut engine = account.session_client().await?;
                 let sealed = account
                     .client
                     .seal_federated_message_async(
@@ -369,7 +369,7 @@ pub(crate) async fn dispatch_group_send_request(
                 let forwarded = account
                     .client
                     .forward_federated_sealed_async(
-                        &engine,
+                        &mut engine,
                         &mut message,
                         sealed?,
                         federation,
@@ -462,11 +462,11 @@ pub(crate) async fn dispatch_group_send_request(
                         )
                         .await;
                     account.apply_session_metadata(engine);
-                    let engine = account.session_client().await?;
+                    let mut engine = account.session_client().await?;
                     let forwarded = account
                         .client
                         .forward_federated_sealed_async(
-                            &engine,
+                            &mut engine,
                             &mut message,
                             sealed?,
                             federation,
@@ -575,20 +575,15 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
                 "already_submitted": true,
             })));
         }
-        let qualified=account.client.root_qualified_device_lookup(recipient.storage_key())?;
-        let prekey = if let Some(federation) = route.federation.as_ref() {
-            let prekey_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
-                SdkError::LocalBus(
-                    "recipient_prekey_url is required for federated group sender-key recipients"
-                        .to_owned(),
-                )
-            })?;
-            crate::prekey::http_async::get::<crate::prekey::SdkPrekeyResponse>(
-                prekey_url, &format!("/mvp1/prekey/{qualified}"), account.timeouts.http,
-            ).await?
-        } else {
-            engine.fetch_prekey_bundle(&qualified).await?
-        };
+        let qualified = account.client.root_qualified_device_lookup(recipient.storage_key())?;
+        let prekey = group_sender_key_prekey(
+            account,
+            &mut engine,
+            &route,
+            &member_principal_commitment,
+            &qualified,
+        )
+        .await?;
         let target_delivery_id =
             route.target_delivery_id.clone().or(prekey.target_delivery_id).ok_or_else(|| {
                 SdkError::LocalBus(format!(
@@ -630,6 +625,30 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
     .await;
     account.apply_session_metadata(engine);
     result
+}
+
+async fn group_sender_key_prekey(
+    account: &LocalBusAccountState,
+    engine: &mut impl GatewaySessionAccess,
+    route: &LocalBusGroupMemberRoute,
+    commitment: &str,
+    qualified: &str,
+) -> Result<crate::prekey::SdkPrekeyResponse, SdkError> {
+    let caller = route.federation.as_ref().map(|federation| federation.target_node_id.as_str());
+    let foreign = crate::client::recipient_home::foreign_target(&account.client, commitment)?;
+    if (foreign.is_some() || caller.is_some())
+        && let Some(base) =
+            crate::client::recipient_home::directory_base(&account.client, commitment, caller, true)
+                .await?
+    {
+        return crate::prekey::http_async::get(
+            &base,
+            &format!("/mvp1/prekey/{qualified}"),
+            account.timeouts.http,
+        )
+        .await;
+    }
+    engine.fetch_prekey_bundle(qualified).await
 }
 
 fn stable_distribution_header(
@@ -966,14 +985,11 @@ mod tests {
         }
     }
 
-    fn federation_route(recipient_prekey_url: Option<String>) -> LocalBusFederationRoute {
+    fn federation_route() -> LocalBusFederationRoute {
         LocalBusFederationRoute {
-            federation_url: "http://node-a.test".to_owned(),
             source_node_id: "node-a".to_owned(),
             target_node_id: "node-b".to_owned(),
             required_capability: "opaque_delivery".to_owned(),
-            admin_token: None,
-            recipient_prekey_url,
         }
     }
 
@@ -1019,7 +1035,7 @@ mod tests {
         )?;
         let Err(error) = resolve_federated_group_member_principal_commitment(
             &account.client,
-            &federation_route(None),
+            &federation_route(),
             Some("bob_commitment"),
             "bob_device",
             Duration::from_secs(600),
@@ -1027,10 +1043,10 @@ mod tests {
         .await
         else {
             return Err(SdkError::LocalBus(
-                "missing recipient_prekey_url should fail before local gateway resolve".to_owned(),
+                "missing pinned home should fail before local gateway resolve".to_owned(),
             ));
         };
-        assert!(error.to_string().contains("recipient-prekey-url"));
+        assert!(error.to_string().contains("pinned home"));
         Ok(())
     }
 

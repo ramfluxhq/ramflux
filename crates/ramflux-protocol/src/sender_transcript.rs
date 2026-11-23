@@ -7,6 +7,8 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 pub const SENDER_TRANSCRIPT_PREFIX: &[u8] = b"ramflux.envelope.sig.v2\0";
+/// Node-appended home of a verified federated source. Not part of the sender signature.
+pub const VERIFIED_SOURCE_HOME: &str = "verified_source_home";
 /// Only the origin-evidence verifier may use `Evidence`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SenderTranscriptMode {
@@ -31,6 +33,7 @@ fn remove_node_fields(value: &mut Map<String, Value>) {
     if let Some(ext) = value.get_mut("ext").and_then(Value::as_object_mut) {
         ext.remove("source_device_authority");
         ext.remove("home_node_migration_forward_count");
+        ext.remove(VERIFIED_SOURCE_HOME);
         if let Some(franking) = ext.get_mut("franking").and_then(Value::as_object_mut) {
             for key in ["franking_tag", "node_id", "accepted_at"] {
                 franking.remove(key);

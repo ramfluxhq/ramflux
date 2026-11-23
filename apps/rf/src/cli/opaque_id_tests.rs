@@ -152,7 +152,7 @@ fn parse_both(command: &str) -> Result<(), clap::Error> {
 fn group_selectors_accept_hyphen_values_for_every_membership_operation() -> Result<(), clap::Error>
 {
     for command in [
-        "group create --account -abc --group -abc --creator -abc --creator-signing-public-key -abc --creator-target-delivery -abc --member -abc --member-target-delivery -abc --source-node -abc --target-node -abc",
+        "group create --account -abc --group -abc --creator -abc --creator-signing-public-key -abc --creator-target-delivery -abc --member -abc --member-target-delivery -abc",
         "group member add --account -abc --group -abc --member-device -abc --member-signing-public-key -abc --member-principal-commitment -abc --target-delivery -abc",
         "group role set --account -abc --group -abc --actor -abc --member-device -abc --role member",
         "group send --account -abc --group -abc --conversation -abc --message -abc --sender -abc --body hello --source-principal -abc --envelope -abc --target -abc",
@@ -172,7 +172,7 @@ fn group_selectors_accept_hyphen_values_for_every_membership_operation() -> Resu
 #[test]
 fn contact_selectors_accept_hyphen_values_for_links_and_federation() -> Result<(), clap::Error> {
     parse_both(
-        "contact request --account -abc --link -abc --requester -abc --target -abc --conversation -abc --message -abc --envelope -abc --source-principal -abc --sender -abc --recipient-device -abc --target-delivery -abc --federation-url https://node.example --source-node -abc --target-node -abc",
+        "contact request --account -abc --link -abc --requester -abc --target -abc --conversation -abc --message -abc --envelope -abc --source-principal -abc --sender -abc --recipient-device -abc --target-delivery -abc",
     )?;
     for selector in ["--principal -abc", "--request -abc", "--link -abc", "--root -abc"] {
         parse_both(&format!("contact accept --account -abc {selector}"))?;
@@ -204,7 +204,7 @@ selector_group_test!(
 );
 selector_group_test!(
     dm_ids_accept_hyphens,
-    "dm send --account -abc --conversation -abc --message -abc --envelope -abc --source-principal -abc --sender -abc --recipient-device -abc --recipient-principal-commitment -abc --target -abc --body hello --source-node -abc --target-node -abc"
+    "dm send --account -abc --conversation -abc --message -abc --envelope -abc --source-principal -abc --sender -abc --recipient-device -abc --recipient-principal-commitment -abc --target -abc --body hello"
 );
 selector_group_test!(
     account_ids_accept_hyphens,

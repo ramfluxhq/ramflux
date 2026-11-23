@@ -23,7 +23,7 @@ pub(crate) async fn dispatch_contact_bus_request(
                 serde_json::from_value::<LocalBusContactFederatedRequest>(request.body.clone())
             {
                 let account = local_bus_account_mut(state, account_id)?;
-                let engine = account.session_client().await?;
+                let mut engine = account.session_client().await?;
                 let link = account.client.establish_friend_link(
                     &body.link_id,
                     &body.requester_id,
@@ -32,7 +32,7 @@ pub(crate) async fn dispatch_contact_bus_request(
                 let response = account
                     .client
                     .send_plaintext_federated_contact_event_async(
-                        &engine,
+                        &mut engine,
                         "friend.accepted",
                         &body,
                         account.timeouts.http,
@@ -53,11 +53,11 @@ pub(crate) async fn dispatch_contact_bus_request(
             let body: LocalBusContactFederatedRequest =
                 serde_json::from_value(request.body.clone())?;
             let account = local_bus_account_mut(state, account_id)?;
-            let engine = account.session_client().await?;
+            let mut engine = account.session_client().await?;
             let response = account
                 .client
                 .send_plaintext_federated_contact_event_async(
-                    &engine,
+                    &mut engine,
                     "friend.requested",
                     &body,
                     account.timeouts.http,

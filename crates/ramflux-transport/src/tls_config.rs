@@ -60,8 +60,18 @@ pub(crate) fn mesh_server_config_with_dynamic_pem_roots(
     root_pems_provider: MeshRootPemProvider,
 ) -> Result<ServerConfig, TransportError> {
     ensure_ring_crypto_provider_installed();
-    let verifier =
-        Arc::new(DynamicMeshClientVerifier::new(tls.ca_cert.clone(), root_pems_provider)?);
+    mesh_server_config_with_optional_client_auth(tls, root_pems_provider, false)
+}
+
+pub(crate) fn mesh_server_config_with_optional_client_auth(
+    tls: &MeshTlsConfig,
+    root_pems_provider: MeshRootPemProvider,
+    optional: bool,
+) -> Result<ServerConfig, TransportError> {
+    ensure_ring_crypto_provider_installed();
+    let mut verifier = DynamicMeshClientVerifier::new(tls.ca_cert.clone(), root_pems_provider)?;
+    verifier.optional = optional;
+    let verifier = Arc::new(verifier);
     ServerConfig::builder()
         .with_client_cert_verifier(verifier)
         .with_single_cert(load_certs(&tls.service_cert)?, load_private_key(&tls.service_key)?)
@@ -79,6 +89,22 @@ fn mesh_server_config_from_root_store(
         .with_client_cert_verifier(verifier)
         .with_single_cert(load_certs(&tls.service_cert)?, load_private_key(&tls.service_key)?)
         .map_err(|error| TransportError::Tls(error.to_string()))
+}
+
+pub(crate) fn signed_mesh_client_config(roots: &[String]) -> Result<ClientConfig, TransportError> {
+    ensure_ring_crypto_provider_installed();
+    Ok(ClientConfig::builder()
+        .with_root_certificates(mesh_root_store_from_pems(roots)?)
+        .with_no_client_auth())
+}
+
+pub(crate) fn signed_mesh_quic_client_config(
+    roots: &[String],
+) -> Result<quinn::ClientConfig, TransportError> {
+    let crypto =
+        quinn::crypto::rustls::QuicClientConfig::try_from(signed_mesh_client_config(roots)?)
+            .map_err(|error| TransportError::Tls(error.to_string()))?;
+    Ok(quinn::ClientConfig::new(Arc::new(crypto)))
 }
 
 pub(crate) fn mesh_client_config(tls: &MeshTlsConfig) -> Result<ClientConfig, TransportError> {
@@ -128,7 +154,7 @@ pub(crate) fn mesh_quic_client_config_with_pem_roots(
     Ok(client_config)
 }
 
-fn mesh_quic_transport_config() -> Arc<quinn::TransportConfig> {
+pub(crate) fn mesh_quic_transport_config() -> Arc<quinn::TransportConfig> {
     let mut transport = quinn::TransportConfig::default();
     apply_quic_transport_limits(
         &mut transport,
@@ -180,6 +206,7 @@ pub(crate) fn compio_quic_gateway_server_config(
 }
 
 struct DynamicMeshClientVerifier {
+    optional: bool,
     local_ca_cert: std::path::PathBuf,
     root_pems_provider: MeshRootPemProvider,
     base_verifier: Arc<dyn ClientCertVerifier>,
@@ -205,6 +232,7 @@ impl DynamicMeshClientVerifier {
                 .build()
                 .map_err(|error| TransportError::Tls(error.to_string()))?;
         Ok(Self {
+            optional: false,
             local_ca_cert,
             root_pems_provider,
             base_verifier,
@@ -226,6 +254,10 @@ impl DynamicMeshClientVerifier {
 }
 
 impl ClientCertVerifier for DynamicMeshClientVerifier {
+    fn client_auth_mandatory(&self) -> bool {
+        !self.optional
+    }
+
     fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
         &self.root_hint_subjects
     }

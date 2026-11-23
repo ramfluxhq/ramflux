@@ -170,9 +170,9 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         "router.rs:complete_home_node_forward",
         Class::NonIngress("completes an already admitted forward reservation"),
     ),
-    ("router.rs:authenticated_envelope_source", Class::Sink),
-    ("router.rs:authenticated_envelope_source_durable", Class::Sink),
-    ("router.rs:authenticated_envelope_source_from", Class::Sink),
+    ("router/foreign_source.rs:authenticated_envelope_source", Class::Sink),
+    ("router/foreign_source.rs:authenticated_envelope_source_durable", Class::Sink),
+    ("router/foreign_source.rs:authenticated_envelope_source_from", Class::Sink),
     (
         "router.rs:refresh_registered_envelope_authority",
         Class::NonIngress("registered-source refresh; not an inbound delivery"),

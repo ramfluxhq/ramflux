@@ -360,25 +360,6 @@ where
     sdk_http_json_request_with_deadline(base_url, request.as_bytes(), None, deadline)
 }
 
-pub(crate) fn sdk_http_post_json_with_deadline<T, R>(
-    base_url: &str,
-    path: &str,
-    value: &T,
-    deadline: std::time::Instant,
-) -> Result<R, SdkError>
-where
-    T: serde::Serialize,
-    R: serde::de::DeserializeOwned,
-{
-    let body = serde_json::to_vec(value)?;
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        sdk_http_host_port(base_url)?,
-        body.len()
-    );
-    sdk_http_json_request_with_deadline(base_url, request.as_bytes(), Some(&body), deadline)
-}
-
 fn sdk_http_json_request_with_deadline<R>(
     base_url: &str,
     request_head: &[u8],
@@ -419,10 +400,7 @@ where
     stream.flush()?;
     let (status_line, body) = read_sdk_http_response(&mut stream)?;
     if !status_line.contains(" 200 ") {
-        return Err(SdkError::LocalBus(format!(
-            "SDK HTTP request failed: {status_line}: {}",
-            String::from_utf8_lossy(&body)
-        )));
+        return Err(SdkError::LocalBus(format!("SDK HTTP request failed: {status_line}")));
     }
     Ok(serde_json::from_slice(&body)?)
 }
@@ -481,10 +459,7 @@ where
     stream.flush()?;
     let (status_line, body) = read_sdk_http_response(&mut stream)?;
     if !status_line.contains(" 200 ") {
-        return Err(SdkError::LocalBus(format!(
-            "SDK HTTP request failed: {status_line}: {}",
-            String::from_utf8_lossy(&body)
-        )));
+        return Err(SdkError::LocalBus(format!("SDK HTTP request failed: {status_line}")));
     }
     Ok(serde_json::from_slice(&body)?)
 }
@@ -518,6 +493,9 @@ fn read_sdk_http_response(stream: &mut impl Read) -> Result<(String, Vec<u8>), S
     }
     let content_length = content_length
         .ok_or_else(|| SdkError::LocalBus("SDK HTTP response missing Content-Length".to_owned()))?;
+    if content_length > http_async::DIRECTORY_BODY_LIMIT {
+        return Err(SdkError::LocalBus("SDK HTTP response exceeds size limit".to_owned()));
+    }
     let mut body = vec![0_u8; content_length];
     reader.read_exact(&mut body)?;
     Ok((status_line, body))

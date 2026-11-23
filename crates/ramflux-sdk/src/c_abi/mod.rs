@@ -936,7 +936,6 @@ macro_rules! sdk_invalid_argument {
             | SdkError::TaskDeliveryTooLarge { .. }
             | SdkError::SurfaceDeliveryTooLarge { .. }
             | SdkError::ContactConfirmationRequired(_)
-            | SdkError::ContactHomeNodeUnsupported
             | SdkError::ContactInput(_)
             | SdkError::AccountNotOpen(_)
             | SdkError::AccountRestorePending(_)

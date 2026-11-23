@@ -56,18 +56,6 @@ pub(crate) struct GroupCreate {
     pub(crate) member: Vec<String>,
     #[arg(allow_hyphen_values = true, long)]
     pub(crate) member_target_delivery: Option<String>,
-    #[arg(long)]
-    pub(crate) federation_url: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) source_node: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) target_node: Option<String>,
-    #[arg(long)]
-    pub(crate) federation_admin_token: Option<String>,
-    #[arg(long)]
-    pub(crate) recipient_prekey_url: Option<String>,
-    #[arg(long, default_value = "opaque_delivery")]
-    pub(crate) federation_capability: String,
 }
 
 #[derive(Args)]
@@ -108,18 +96,6 @@ pub(crate) struct GroupMemberAdd {
     pub(crate) member_principal_commitment: Option<String>,
     #[arg(allow_hyphen_values = true, long)]
     pub(crate) target_delivery: Option<String>,
-    #[arg(long)]
-    pub(crate) federation_url: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) source_node: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) target_node: Option<String>,
-    #[arg(long)]
-    pub(crate) federation_admin_token: Option<String>,
-    #[arg(long)]
-    pub(crate) recipient_prekey_url: Option<String>,
-    #[arg(long, default_value = "opaque_delivery")]
-    pub(crate) federation_capability: String,
 }
 
 #[derive(Args)]
@@ -275,18 +251,6 @@ pub(crate) struct GroupSend {
     pub(crate) source_principal: Option<String>,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) target: Option<String>,
-    #[arg(long)]
-    pub(crate) federation_url: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) source_node: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) target_node: Option<String>,
-    #[arg(long)]
-    pub(crate) federation_admin_token: Option<String>,
-    #[arg(long)]
-    pub(crate) recipient_prekey_url: Option<String>,
-    #[arg(long, default_value = "opaque_delivery")]
-    pub(crate) federation_capability: String,
     #[arg(long, default_value_t = 3_600)]
     pub(crate) ttl: u32,
 }
