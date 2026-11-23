@@ -79,7 +79,8 @@ pub(crate) fn mesh_quic_post_raw_with_deadline_sync<T: serde::Serialize>(
 }
 
 /// Return the original mesh response frame, without decoding its JSON body.
-/// The request is written to the wire at most once: no cached-connection re-send.
+/// A cached connection that fails before the request is finished is replaced once.
+/// A request that was finished is not written again.
 /// Cancellation drops the actual request future.
 /// Admission stays with that work even if this caller is aborted. A timed-out caller
 /// waits for transport termination before returning.
@@ -144,7 +145,7 @@ pub(super) async fn run(
     pool_size: usize,
 ) {
     let result = {
-        let work = mesh_quic_cached_request(pools, breakers, request, pool_size, false);
+        let work = mesh_quic_cached_request(pools, breakers, request, pool_size, true);
         tokio::pin!(work);
         tokio::select! {
             biased;

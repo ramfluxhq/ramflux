@@ -492,6 +492,20 @@ impl MeshQuicConnectionPool {
         MeshQuicSelectedConnection { cached }
     }
 
+    async fn drop_remote(&self, remote: SocketAddr) {
+        let _guard = self.write_lock.lock().await;
+        let snapshot = self.connections.load();
+        let next: Vec<_> = snapshot
+            .iter()
+            .filter(|cached| cached.connection.remote_address() != remote)
+            .cloned()
+            .collect();
+        if next.len() != snapshot.len() {
+            self.connections.store(Arc::new(next));
+        }
+        self.notify.notify_waiters();
+    }
+
     async fn remove_connection(&self, target: &MeshQuicSelectedConnection) {
         let _guard = self.write_lock.lock().await;
         let snapshot = self.connections.load();
@@ -1581,7 +1595,7 @@ async fn mesh_quic_cached_request(
                 retry_peer_addr = %peer_addr,
                 "mesh QUIC cached request failed; dropping cached connection and retrying once"
             );
-            pool.remove_connection(&connection).await;
+            pool.drop_remote(connection.remote_address()).await;
             let retry_acquire_started = std::time::Instant::now();
             let (retry_connection, _reused_retry_connection) =
                 mesh_quic_acquire_connection(&pool, &breakers, peer_addr, &job, pool_size).await?;

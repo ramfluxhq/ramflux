@@ -111,7 +111,7 @@ pub(crate) async fn handle_gateway_submit(
     let mesh: serde_json::Value =
         crate::submit_target::post(&context.router, decision, &envelope).await?;
     let response: ramflux_node_core::EnvelopeSubmitResponse = serde_json::from_value(mesh.clone())?;
-    if !admit_or_defer_call_intent(
+    let mut deferred = match admit_or_defer_call_intent(
         send,
         context,
         runtime,
@@ -121,8 +121,9 @@ pub(crate) async fn handle_gateway_submit(
     )
     .await?
     {
-        return Ok(());
-    }
+        AdmitFollow::Stop => return Ok(()),
+        AdmitFollow::Continue(permit) => permit,
+    };
     let metadata = crate::session_push::metadata(
         &mesh,
         runtime.session_push.is_some()
@@ -134,13 +135,17 @@ pub(crate) async fn handle_gateway_submit(
         context.hub.retire_incarnation(&runtime.target_delivery_id, id, send).await;
         return Err(crate::session_push::Retired.into());
     }
-    finish_accepted_submit(
+    let owed = finish_accepted_submit(
         send,
         context,
         runtime,
         AcceptedSubmit { submit, response: &response, envelope, metadata: metadata.as_ref() },
     )
-    .await
+    .await?;
+    if let Some(permit) = deferred.as_mut() {
+        permit.owed = owed;
+    }
+    Ok(())
 }
 
 struct AcceptedSubmit<'a> {
@@ -155,17 +160,17 @@ async fn finish_accepted_submit(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     accepted: AcceptedSubmit<'_>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     if nack_refused_submit(send, &accepted.response.outcome).await? {
-        return Ok(());
+        return Ok(false);
     }
     if crate::submit_target::ack_home_forward(send, runtime, accepted.response, &accepted.envelope)
         .await?
     {
-        return Ok(());
+        return Ok(false);
     }
     if reply_if_home_migrated(send, runtime, accepted.response, &accepted.envelope).await? {
-        return Ok(());
+        return Ok(false);
     }
     if !commit_owner_resolution(
         send,
@@ -176,7 +181,7 @@ async fn finish_accepted_submit(
     )
     .await?
     {
-        return Ok(());
+        return Ok(true);
     }
     // The router response confirms the durable submit. A recipient can ACK and remove its
     // pending entry before this task resumes, so the inbox is not a submit receipt store.
@@ -197,7 +202,8 @@ async fn finish_accepted_submit(
         &frame,
         accepted.metadata,
     )
-    .await
+    .await?;
+    Ok(false)
 }
 
 enum CheckedSubmitIntent {
@@ -375,7 +381,7 @@ async fn admit_or_defer_call_intent(
     submit: &ramflux_node_core::GatewaySubmitFrame,
     verified: Option<&crate::call_intent::VerifiedIntent>,
     outcome: &str,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<AdmitFollow> {
     if let Err(error) = persist_accepted_intent(
         context,
         runtime,
@@ -386,14 +392,21 @@ async fn admit_or_defer_call_intent(
     )
     .await
     {
-        if schedule_call_wake_after_delay(context, runtime, submit, verified, &error, outcome) {
-            return Ok(true);
+        if let Some(permit) =
+            schedule_call_wake_after_delay(context, runtime, submit, verified, &error, outcome)
+        {
+            return Ok(AdmitFollow::Continue(Some(permit)));
         }
         tracing::warn!(%error, "call intent admission failed");
         nack_call_intent(send).await?;
-        return Ok(false);
+        return Ok(AdmitFollow::Stop);
     }
-    Ok(true)
+    Ok(AdmitFollow::Continue(None))
+}
+
+enum AdmitFollow {
+    Stop,
+    Continue(Option<WakePermit>),
 }
 
 async fn persist_accepted_intent(
@@ -492,16 +505,20 @@ fn schedule_call_wake_after_delay(
     verified: Option<&crate::call_intent::VerifiedIntent>,
     error: &anyhow::Error,
     outcome: &str,
-) -> bool {
+) -> Option<WakePermit> {
     if !call_admit_retryable(error) {
-        return false;
+        return None;
     }
     let (Some(intent), Some(verified)) = (submit.call_intent.as_deref(), verified) else {
-        return false;
+        return None;
     };
     let Ok(request_expires_at) = u64::try_from(submit.signed_request.expires_at) else {
-        return false;
+        return None;
     };
+    let gate = Arc::new(WakeGate {
+        ready: tokio::sync::Notify::new(),
+        owed: std::sync::atomic::AtomicBool::new(false),
+    });
     let delayed = DelayedCallWake {
         context: context.clone(),
         runtime: runtime.clone(),
@@ -510,11 +527,31 @@ fn schedule_call_wake_after_delay(
         envelope: submit.envelope.clone(),
         request_expires_at,
         outcome: outcome.to_owned(),
+        gate: Arc::clone(&gate),
     };
     let _join = tokio::spawn(async move {
         finish_delayed_call_wake(delayed).await;
     });
-    true
+    Some(WakePermit { gate, owed: false })
+}
+
+struct WakeGate {
+    ready: tokio::sync::Notify,
+    owed: std::sync::atomic::AtomicBool,
+}
+
+struct WakePermit {
+    gate: Arc<WakeGate>,
+    owed: bool,
+}
+
+impl Drop for WakePermit {
+    fn drop(&mut self) {
+        if self.owed {
+            self.gate.owed.store(true, std::sync::atomic::Ordering::Release);
+        }
+        self.gate.ready.notify_one();
+    }
 }
 
 struct DelayedCallWake {
@@ -525,6 +562,7 @@ struct DelayedCallWake {
     envelope: ramflux_protocol::Envelope,
     request_expires_at: u64,
     outcome: String,
+    gate: Arc<WakeGate>,
 }
 
 async fn dispatch_delayed_offline_wake(delayed: &DelayedCallWake) {
@@ -566,7 +604,10 @@ async fn finish_delayed_call_wake(delayed: DelayedCallWake) {
                 return;
             }
             Ok(_) => {
-                if delayed.outcome == "offline_queued" {
+                delayed.gate.ready.notified().await;
+                if delayed.gate.owed.load(std::sync::atomic::Ordering::Acquire)
+                    && matches!(delayed.outcome.as_str(), "online" | "offline_queued")
+                {
                     dispatch_delayed_offline_wake(&delayed).await;
                 }
                 return;
