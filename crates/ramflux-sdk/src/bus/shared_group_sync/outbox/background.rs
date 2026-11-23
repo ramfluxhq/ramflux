@@ -4,9 +4,9 @@
 //! One bounded group-delivery round split into network steps and local row-fenced commits.
 
 use super::{
-    DEVICES_PER_DRAIN, DRIVER_PROGRESS, Delivered, GatewayDirectMessage, GatewaySessionConfig,
-    Intent, LocalBusAccountState, LocalBusFederationRoute, MAX_DEVICES, ROOTS_PER_DRAIN,
-    RecipientCursor, SdkError, StagedEnvelope, VerifiedGroupState, defer_round, delivered_key, key,
+    DEVICES_PER_DRAIN, DRIVER_PROGRESS, Delivered, GatewayDirectMessage, Intent,
+    LocalBusAccountState, LocalBusFederationRoute, MAX_DEVICES, ROOTS_PER_DRAIN, RecipientCursor,
+    SdkError, StagedEnvelope, VerifiedGroupState, defer_round, delivered_key, key,
     now_unix_timestamp, persist_intent, prepare_intent, recipient_snapshot, recipients,
 };
 use crate::bus::{
@@ -22,7 +22,7 @@ struct Plan {
     intent: Intent,
     state: VerifiedGroupState,
     fingerprint: serde_json::Value,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
 }
 struct Target {
     plan: Plan,
@@ -258,7 +258,7 @@ fn prepare_target(
     } else {
         ramflux_crypto::resign_group_state_snapshot(
             client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &client.owned_group_actor(&plan.config.target_delivery_id)?,
+            &client.owned_group_actor(&plan.config.config().target_delivery_id)?,
             &ramflux_crypto::verify_group_state_snapshot(snapshot)?,
         )?
     };
@@ -283,8 +283,8 @@ fn prepare_target(
         conversation_id: state.state.conversation_id.clone(),
         message_id: crate::RamfluxClient::shared_group_packet_message_id(&bytes, &envelope)?,
         envelope_id: format!("group_state_{}", crate::new_surface_message_id()?),
-        source_principal_id: plan.config.principal_id.clone(),
-        sender_id: plan.config.device_id.clone(),
+        source_principal_id: plan.config.config().principal_id.clone(),
+        sender_id: plan.config.config().device_id.clone(),
         recipient_device_id: Some(device.device_id.clone()),
         recipient_principal_commitment: Some(root.into()),
         target_delivery_id: device.target_delivery_id,

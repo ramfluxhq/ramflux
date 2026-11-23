@@ -60,7 +60,7 @@ pub(super) enum PrivateCommand {
         reply: oneshot::Sender<Result<(), SdkError>>,
     },
     NativeUnlock {
-        passphrase: zeroize::Zeroizing<String>,
+        secret: super::native_account::NativeUnlockSecret,
         home_node_id: Option<String>,
         reply: oneshot::Sender<Result<crate::LocalBusCreatedAccount, SdkError>>,
     },
@@ -253,11 +253,11 @@ impl AccountActor {
 
     pub(super) async fn unlock_native(
         &self,
-        passphrase: zeroize::Zeroizing<String>,
+        secret: super::native_account::NativeUnlockSecret,
         home_node_id: Option<String>,
     ) -> Result<crate::LocalBusCreatedAccount, SdkError> {
         let (reply, response) = oneshot::channel();
-        self.send_private(PrivateCommand::NativeUnlock { passphrase, home_node_id, reply })?;
+        self.send_private(PrivateCommand::NativeUnlock { secret, home_node_id, reply })?;
         response.await.map_err(|_| stopped())?
     }
 

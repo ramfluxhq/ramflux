@@ -26,6 +26,12 @@ impl Fixture {
         let anchor = account.record().body.account_anchor.clone();
         let mut client = RamfluxClient::new();
         client.open_account_index(&root.0)?;
+        client.bind_device_unlock(
+            std::path::Path::new(&root.0),
+            vault.as_ref(),
+            id,
+            crate::client::device_unlock::DeviceSecret::Create,
+        )?;
         client.seal_new_account_data(id, &anchor, b"native fixture data passphrase")?;
         client.unlock_account(id, b"native fixture data passphrase")?;
         client.initialize_born_v3_branch("primary", vault.clone()).await?;

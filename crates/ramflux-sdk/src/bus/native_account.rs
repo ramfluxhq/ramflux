@@ -30,31 +30,48 @@ pub(crate) fn unlock_from_provider(
     let secret = acquire_unlock(&state.config.data_root, expected, provider, &stored)?;
     let passphrase = std::str::from_utf8(secret.as_bytes())
         .map_err(|_| SdkError::PairingField("credential_utf8"))?;
-    unlock(state, id, Zeroizing::new(passphrase.to_owned()), home_node_id)
+    unlock(state, id, NativeUnlockSecret::Code(Zeroizing::new(passphrase.to_owned())), home_node_id)
+}
+
+/// How a native account is opened: with its account code, or silently with the device wrap.
+pub(crate) enum NativeUnlockSecret {
+    Code(Zeroizing<String>),
+    Device,
 }
 
 pub(super) fn unlock(
     state: &mut LocalBusDaemonState,
     id: &str,
-    passphrase: Zeroizing<String>,
+    secret: NativeUnlockSecret,
     home_node_id: Option<String>,
 ) -> Result<LocalBusCreatedAccount, SdkError> {
     if let Some(account) = state.accounts.get(id) {
-        account.client.verify_active_account_secret(id, passphrase.as_bytes())?;
+        if let NativeUnlockSecret::Code(passphrase) = &secret {
+            account.client.verify_active_account_secret(id, passphrase.as_bytes())?;
+        }
         return response(account);
     }
     let root = state.config.data_root.clone();
+    let repair_vault = super::custody_setup::primary_provider(&state.config);
     let mut client = RamfluxClient::new();
     client.open_account_index(&root)?;
-    client.unlock_account(id, passphrase.as_bytes())?;
+    client.bind_device_unlock(
+        &root,
+        repair_vault.as_ref(),
+        id,
+        crate::client::device_unlock::DeviceSecret::Load,
+    )?;
+    match &secret {
+        NativeUnlockSecret::Code(passphrase) => client.unlock_account(id, passphrase.as_bytes())?,
+        NativeUnlockSecret::Device => client.unlock_account_with_device(id)?,
+    }
     if let Some(node_id) = home_node_id {
         client.account_db()?.persist_actor_state("account/node-id", &node_id)?;
         client.account_db()?.persist_actor_state("sync/node-id", &Some(&node_id))?;
     }
-    drop(passphrase);
+    drop(secret);
     // A crash inside a layer head's local installation is repaired before admission, so the
     // pending marker never leaves the account locked out.
-    let repair_vault = super::custody_setup::primary_provider(&state.config);
     crate::bus::couriers::layer_publish::repair_on_unlock(
         &mut client,
         &root,
@@ -221,7 +238,7 @@ pub(super) fn unlock_request(
         .and_then(|body| body.get("passphrase"))
         .and_then(serde_json::Value::as_str)
         .ok_or(SdkError::CustodySetupInvalid)?;
-    unlock(state, id, Zeroizing::new(passphrase.to_owned()), None)
+    unlock(state, id, NativeUnlockSecret::Code(Zeroizing::new(passphrase.to_owned())), None)
 }
 
 pub(super) async fn finish_connection(account: &mut LocalBusAccountState) -> Result<(), SdkError> {

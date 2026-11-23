@@ -1164,13 +1164,8 @@ pub(super) fn persist(
             }
         }
         if let Some(secret) = data_secret {
-            let mut data = crate::RamfluxClient::new();
-            data.open_account_index(root)?;
-            data.seal_new_account_data(
-                &input.local_account_id,
-                &record.body.account_anchor,
-                secret,
-            )?;
+            let anchor = &record.body.account_anchor;
+            seal_device_bound(root, vault, &input.local_account_id, anchor, secret)?;
         }
         let stored = networking_pending(
             input,
@@ -1202,6 +1197,9 @@ pub(super) fn persist(
         Ok(BornAccount { stored, verified, authority_blocked: false, networking_path: dir.clone() })
     })();
     if result.is_err() {
+        if data_secret.is_some() {
+            discard_device_secret(vault, &input.local_account_id);
+        }
         rollback_unpublished(
             root,
             &account_id,
@@ -1218,6 +1216,27 @@ pub(super) fn persist(
         )?;
     }
     result
+}
+
+/// Seal new account data under its code and a freshly created platform-held device secret.
+fn seal_device_bound(
+    root: &Path,
+    vault: &dyn PrimaryVault,
+    id: &str,
+    anchor: &str,
+    secret: &[u8],
+) -> Result<(), SdkError> {
+    let mut data = crate::RamfluxClient::new();
+    data.open_account_index(root)?;
+    data.bind_device_unlock(root, vault, id, crate::client::device_unlock::DeviceSecret::Create)?;
+    data.seal_new_account_data(id, anchor, secret)
+}
+
+/// Best-effort removal of the device secret of an unpublished account.
+fn discard_device_secret(vault: &dyn PrimaryVault, id: &str) {
+    if crate::client::device_unlock::delete_device_secret(vault, id).is_err() {
+        tracing::warn!(reason_code = "device_unlock_cleanup", "device secret not removed");
+    }
 }
 
 struct PendingRefs<'a> {

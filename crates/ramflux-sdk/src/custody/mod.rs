@@ -37,8 +37,8 @@ pub(crate) use store::{
 pub(crate) use store::{finish_recovery, pending_restore};
 pub(crate) use vault::require_vault_reference;
 pub use vault::{
-    AgentDecisionSigning, BranchCredentials, CustodyVaultReason, NativePrimaryVault, PrimaryVault,
-    VAULT_CLASS_LOGIN_KEYCHAIN, VAULT_CLASS_PROTECTED,
+    AgentDecisionSigning, BranchCredentials, CustodyVaultReason, DEVICE_UNLOCK_PREFIX,
+    NativePrimaryVault, PrimaryVault, VAULT_CLASS_LOGIN_KEYCHAIN, VAULT_CLASS_PROTECTED,
 };
 #[cfg(windows)]
 pub use vault::{VAULT_CLASS_WINDOWS_DPAPI, WindowsDpapiVault};

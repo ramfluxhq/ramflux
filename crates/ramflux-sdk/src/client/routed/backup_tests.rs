@@ -4,14 +4,14 @@
 //! Native restore starts fresh outbound chains and retains authenticated delayed receive state.
 use super::review::trust;
 use super::*;
-use ramflux_storage::{BackupDatabase, FileVaultSecretSource, VaultSecretSource};
+use ramflux_storage::BackupDatabase;
 
 fn archive_native(fixture: &Fixture) -> Result<(), SdkError> {
-    let vault = FileVaultSecretSource::new(&fixture.root).vault_secret(&fixture.id)?;
+    let vault = fixture.client.vault_secret_source()?.vault_secret(&fixture.id)?;
     let kek = crate::client::account::account_db_key_encryption_key(
         &vault,
         b"native fixture data passphrase",
-    );
+    )?;
     let key = ramflux_storage::unwrap_with_vault_secret(
         &kek,
         &fixture
@@ -234,11 +234,11 @@ async fn native_data_merge_rebootstraps_without_reusing_the_archived_outbound_ra
     db.remove_actor_state(&pair)?;
     db.remove_actor_state(&format!("dm-pair/session/{}", saved.session_id))?;
     db.remove_actor_state(&format!("dm-pair/bootstrap/{}", saved.session_id))?;
-    let vault = FileVaultSecretSource::new(&alice.root.0).vault_secret("native-restore-alice")?;
+    let vault = alice.client.vault_secret_source()?.vault_secret("native-restore-alice")?;
     let kek = crate::client::account::account_db_key_encryption_key(
         &vault,
         b"native fixture data passphrase",
-    );
+    )?;
     let key = ramflux_storage::unwrap_with_vault_secret(
         &kek,
         &alice

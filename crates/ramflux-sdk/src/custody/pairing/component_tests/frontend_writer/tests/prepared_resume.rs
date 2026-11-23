@@ -111,8 +111,7 @@ fn reopen_staged(
         operation_id: operation.into(),
         generation: 1,
     };
-    let provider =
-        crate::custody::pairing::recipient::tests::Phrase::setup(b"component-recipient-passphrase");
+    let provider = crate::custody::pairing::recipient::tests::Phrase::setup(b"752913");
     client.active_account_db = Some(crate::bus::unlock_for_test(
         &participant.root,
         &participant.account_id,

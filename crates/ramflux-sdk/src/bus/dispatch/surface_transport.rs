@@ -232,7 +232,12 @@ pub(super) async fn submit_pair_control(
     let sealed = client.seal_routed_as(engine, &message, &prepared.wire, route).await?;
     // Pair control has no Direct report payload; into_parts still carries committed_a0 (None).
     engine
-        .submit_envelope(gateway_envelope_from_sealed(engine.config(), &mut message, sealed, None)?)
+        .submit_envelope(gateway_envelope_from_sealed(
+            &engine.sealing_config()?,
+            &mut message,
+            sealed,
+            None,
+        )?)
         .await?;
     Ok(())
 }

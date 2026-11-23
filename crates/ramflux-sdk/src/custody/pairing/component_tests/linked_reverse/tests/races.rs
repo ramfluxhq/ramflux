@@ -96,9 +96,7 @@ async fn cold_vetoes() -> TestResult {
     fixture.rig.secondary.lock().await?;
     *fixture.target = crate::RamfluxClient::new();
     fixture.target.open_account_index(&fixture.rig.participant_b.root)?;
-    fixture
-        .target
-        .unlock_account(&fixture.rig.participant_b.account_id, b"component-recipient-passphrase")?;
+    fixture.target.unlock_account(&fixture.rig.participant_b.account_id, b"752913")?;
     let db = fixture.target.account_db()?;
     assert_eq!(db.path, path, "test: original B credential reopened a pre-union generation");
     for (wire, manifest) in [

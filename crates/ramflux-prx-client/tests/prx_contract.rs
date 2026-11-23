@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at c5aab92e51dfb17e3d47de09396643e466dd719b>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at d9b7946a4d6cdc5914f8e1fba6f94fe43e52fe15>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -21,8 +21,9 @@
 use ramflux_prx_client::{
     AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, AgentConfig, AgentName, AgentRuns,
     AgentStatus, ApiCode, ApplyOutcome, Autonomy, BatchItem, BuildCommit, CAPABILITIES_V1,
-    Capabilities, Chat, ChatKind, ClientConfig, ConfigRevision, HistoryRow, JobState, JobStatus,
-    MESSAGE_CONTEXT_DELIVERY_V1, MESSAGE_DELETE_V1, MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1,
+    Capabilities, Chat, ChatKind, ClientConfig, ConfigRevision, EraseNotice, ForgetCounts,
+    ForgetReport, ForgetWrites, HistoryRow, JobState, JobStatus, MESSAGE_CONTEXT_DELIVERY_V1,
+    MESSAGE_DELETE_V1, MESSAGE_FORGET_WRITES_V1, MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1,
     NotReadyReason, OWNER_ID_STABLE_V1, PROMPT_MAX_BYTES, PrxClient, PrxError, PutKind,
     ReloadStatus, RfMessage, RowBody, RunCode, RunState, SESSION_KEY_V1, Sender,
     TARGETED_AGENTS_V1, Target, Tools, TurnDisposition,
@@ -36,7 +37,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "c5aab92e51dfb17e3d47de09396643e466dd719b";
+const PIN: &str = "d9b7946a4d6cdc5914f8e1fba6f94fe43e52fe15";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -541,8 +542,9 @@ async fn bounded<F: std::future::Future<Output = ()>>(body: F) {
         .expect("test: contract test exceeded its deadline");
 }
 
-/// The tokens K-AC2-1 accepts at the pin: the AC-2 cards plus the B1, B2a, B2b and HOST-1a tokens.
-const LANDED_AT_PIN: [&str; 10] = [
+/// The tokens K-AC2-1 accepts at the pin: the AC-2 cards plus the B1, B2a, B2b, HOST-1a and
+/// forget-writes tokens.
+const LANDED_AT_PIN: [&str; 11] = [
     CAPABILITIES_V1,
     AGENT_CATALOG_V1,
     AGENT_CRUD_V1,
@@ -553,6 +555,7 @@ const LANDED_AT_PIN: [&str; 10] = [
     OWNER_ID_STABLE_V1,
     MESSAGE_IDEMPOTENCY_V1,
     MESSAGE_DELETE_V1,
+    MESSAGE_FORGET_WRITES_V1,
 ];
 
 #[tokio::test]
@@ -1398,6 +1401,7 @@ async fn k_b1_sessions_and_message_validation() {
             "capabilities_v1",
             "message_context_delivery_v1",
             "message_delete_v1",
+            "message_forget_writes_v1",
             "message_idempotency_v1",
             "message_target_v1",
             "owner_id_stable_v1",
@@ -2740,9 +2744,15 @@ async fn del_reply_and_batches(client: &PrxClient, caps: &Capabilities) {
     let two_job = wait_job_terminal(client, caps, &two.job_id).await;
     assert_eq!(two_job.status, JobState::Succeeded, "K-DEL-6 precondition: {:?}", two_job.error);
     assert!(assistant_replies(client, caps).await >= 1, "K-DEL-6 precondition: a reply");
-    let reply = client.delete_reply(caps, RF_SESSION, &two.run_id).await.expect("K-DEL-6");
+    let reply = client
+        .delete_reply(caps, RF_SESSION, &two.run_id, ForgetWrites::Plain)
+        .await
+        .expect("K-DEL-6");
     assert_eq!(reply.run_id, two.run_id, "K-DEL-6: names the run");
-    client.delete_reply(caps, RF_SESSION, &two.run_id).await.expect("K-DEL-6: repeat");
+    client
+        .delete_reply(caps, RF_SESSION, &two.run_id, ForgetWrites::Plain)
+        .await
+        .expect("K-DEL-6: repeat");
     assert_eq!(assistant_replies(client, caps).await, 0, "K-DEL-6: no reply left");
     let rows = client.session_messages(caps, RF_SESSION, None).await.expect("K-DEL-6 read");
     assert!(
@@ -2754,7 +2764,14 @@ async fn del_reply_and_batches(client: &PrxClient, caps: &Capabilities) {
     // K-DEL-7: an unknown run is 404 run_unknown.
     assert_api(
         "K-DEL-7",
-        client.delete_reply(caps, RF_SESSION, "0f3c2a1e-0000-4000-8000-0000000000ff").await,
+        client
+            .delete_reply(
+                caps,
+                RF_SESSION,
+                "0f3c2a1e-0000-4000-8000-0000000000ff",
+                ForgetWrites::Plain,
+            )
+            .await,
         404,
         ApiCode::RunUnknown,
     );
@@ -2767,6 +2784,7 @@ async fn del_reply_and_batches(client: &PrxClient, caps: &Capabilities) {
             RF_SESSION,
             &["rf-del-2".to_owned(), "rf-del-none-2".to_owned()],
             None,
+            ForgetWrites::Plain,
         )
         .await
         .expect("K-DEL-8");
@@ -2783,7 +2801,7 @@ async fn del_reply_and_batches(client: &PrxClient, caps: &Capabilities) {
     // K-DEL-9: an empty batch is refused 400 field_invalid.
     assert_api(
         "K-DEL-9",
-        client.delete_messages(caps, RF_SESSION, &[], None).await,
+        client.delete_messages(caps, RF_SESSION, &[], None, ForgetWrites::Plain).await,
         400,
         ApiCode::FieldInvalid,
     );
@@ -2794,9 +2812,11 @@ async fn del_reply_and_batches(client: &PrxClient, caps: &Capabilities) {
         .post_context(caps, RF_SESSION, &rf_message("rf-del-ctx-1", Target::Main, "del ctx"))
         .await
         .expect("test: context recorded");
-    let ctx =
-        client.delete_message(caps, RF_SESSION, "rf-del-ctx-1", None).await.expect("K-DEL-10");
-    assert_eq!(ctx.agents, vec![AgentRuns { agent: Target::Main, runs: Vec::new() }]);
+    let ctx = client
+        .delete_message(caps, RF_SESSION, "rf-del-ctx-1", None, ForgetWrites::Plain)
+        .await
+        .expect("K-DEL-10");
+    assert_eq!(ctx.agents, vec![AgentRuns { agent: Target::Main, runs: Vec::new(), forget: None }]);
     report("K-DEL-10");
 }
 
@@ -2828,12 +2848,12 @@ async fn k_del_message_reply_and_batch_deletes() {
 
         // K-DEL-1: the answer names Main and the run whose rows were deleted.
         let deleted = client
-            .delete_message(&caps, RF_SESSION, "rf-del-1", None)
+            .delete_message(&caps, RF_SESSION, "rf-del-1", None, ForgetWrites::Plain)
             .await
             .expect("K-DEL-1: delete answers");
         assert_eq!(
             deleted.agents,
-            vec![AgentRuns { agent: Target::Main, runs: vec![one.run_id.clone()] }],
+            vec![AgentRuns { agent: Target::Main, runs: vec![one.run_id.clone()], forget: None }],
             "K-DEL-1: agents"
         );
         eprintln!("ROW K-DEL-1 answer: {deleted:?}");
@@ -2866,7 +2886,7 @@ async fn k_del_message_reply_and_batch_deletes() {
 
         // K-DEL-3: a repeat answers the same 200.
         let again = client
-            .delete_message(&caps, RF_SESSION, "rf-del-1", None)
+            .delete_message(&caps, RF_SESSION, "rf-del-1", None, ForgetWrites::Plain)
             .await
             .expect("K-DEL-3: repeat answers");
         assert_eq!(again, deleted, "K-DEL-3");
@@ -2886,7 +2906,9 @@ async fn k_del_message_reply_and_batch_deletes() {
         // K-DEL-5: an id with no record in this session is 404 message_unknown.
         assert_api(
             "K-DEL-5",
-            client.delete_message(&caps, RF_SESSION, "rf-del-none-1", None).await,
+            client
+                .delete_message(&caps, RF_SESSION, "rf-del-none-1", None, ForgetWrites::Plain)
+                .await,
             404,
             ApiCode::MessageUnknown,
         );
@@ -2923,7 +2945,7 @@ async fn k_del_running_reply_is_run_active() {
         wait_model_requests(&daemon, &stub, 1).await;
         assert_api(
             "K-DEL-12",
-            client.delete_reply(&caps, RF_SESSION, &turn.run_id).await,
+            client.delete_reply(&caps, RF_SESSION, &turn.run_id, ForgetWrites::Plain).await,
             409,
             ApiCode::RunActive,
         );
@@ -2931,6 +2953,268 @@ async fn k_del_running_reply_is_run_active() {
         client.cancel_run(&caps, RF_SESSION, &turn.run_id).await.expect("test: cancel");
         wait_job_terminal(&client, &caps, &turn.job_id).await;
         daemon.stop();
+    })
+    .await;
+}
+
+fn zero_counts() -> ForgetCounts {
+    ForgetCounts { created: 0, touched: 0 }
+}
+
+/// The forget report of the one Main partition.
+fn main_forget(row: &str, deleted: &ramflux_prx_client::MessageDeleted) -> ForgetReport {
+    match deleted.agents.as_slice() {
+        [agent] if agent.agent == Target::Main => {
+            agent.forget.expect("test: a forget answer carries a report")
+        }
+        other => panic!("{row}: one Main partition, got {other:?}"),
+    }
+}
+
+/// K-FW-1..3: erase-for-everyone with the token returns counts and replays them; without the
+/// token the delete is plain and the caller is told tool-written memory was not forgotten.
+/// The stub turn writes no memory and no document, so both count pairs are zero and
+/// `writes_traceable` is true (the run starts after write provenance).
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_fw_erase_counts_replay_and_plain_without_the_token() {
+    bounded(async {
+        let stub = ModelStub::start_completing(Duration::ZERO).await;
+        let mut daemon =
+            Daemon::prepare_with_provider(&stub.provider(), "targeted_agents = true\n");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        assert!(caps.has(MESSAGE_FORGET_WRITES_V1), "K-FW-0: the token is advertised");
+        report("K-FW-0");
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+
+        let turn = client
+            .post_turn(&caps, RF_SESSION, &rf_message("rf-fw-1", Target::Main, "forget marker"))
+            .await
+            .expect("test: turn admitted");
+        let job = wait_job_terminal(&client, &caps, &turn.job_id).await;
+        assert_eq!(job.status, JobState::Succeeded, "K-FW-1 precondition: {:?}", job.error);
+        let erased = client.erase_for_everyone(&caps, RF_SESSION, "rf-fw-1").await.expect("K-FW-1");
+        assert_eq!(erased.notice, None, "K-FW-1: a forget that is accepted has no notice");
+        let counted = main_forget("K-FW-1", &erased.deleted);
+        assert!(
+            !counted.pending && counted.writes_traceable,
+            "K-FW-1: settled and traceable, got {counted:?}"
+        );
+        let forgotten = counted.forgotten.expect("K-FW-1: counts");
+        assert_eq!(forgotten.memories, zero_counts(), "K-FW-1: the stub writes no memory");
+        assert_eq!(forgotten.documents, zero_counts(), "K-FW-1: the stub writes no document");
+        assert_eq!(erased.deleted.agents[0].runs, vec![turn.run_id.clone()], "K-FW-1: the run");
+        report("K-FW-1");
+
+        let again = client.erase_for_everyone(&caps, RF_SESSION, "rf-fw-1").await.expect("K-FW-2");
+        assert_eq!(again.deleted, erased.deleted, "K-FW-2: replay returns the first counts");
+        assert_eq!(again.notice, None, "K-FW-2: replay adds no notice");
+        report("K-FW-2");
+
+        client
+            .post_turn(&caps, RF_SESSION, &rf_message("rf-fw-2", Target::Main, "plain marker"))
+            .await
+            .expect("test: second turn admitted");
+        let mut bare = caps.clone();
+        assert!(
+            bare.capabilities.remove(MESSAGE_FORGET_WRITES_V1),
+            "test: the token was advertised"
+        );
+        let plain = client.erase_for_everyone(&bare, RF_SESSION, "rf-fw-2").await.expect("K-FW-3");
+        assert_eq!(plain.notice, Some(EraseNotice::MemoryNotForgotten), "K-FW-3: notice");
+        assert_eq!(
+            plain.notice.expect("K-FW-3").user_text(),
+            "tool-written memory was not forgotten",
+            "K-FW-3: the sentence the caller shows"
+        );
+        assert!(
+            plain.deleted.agents.iter().all(|agent| agent.forget.is_none()),
+            "K-FW-3: a plain delete carries no forget fields: {:?}",
+            plain.deleted
+        );
+        report("K-FW-3");
+        daemon.stop();
+    })
+    .await;
+}
+
+/// K-FW-4: erasing the message of a run that is still in flight asks to forget and gets the
+/// pending marker (`forgotten: null`, `forget_pending: true`). A reply delete of that same run
+/// stays `409 run_active`; this row is the message route.
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_fw_running_erase_is_pending() {
+    bounded(async {
+        let stub = ModelStub::start(Duration::from_secs(20)).await;
+        let mut daemon = Daemon::prepare_with_provider(&stub.provider(), "");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        let turn = client
+            .post_turn(&caps, RF_SESSION, &rf_message("rf-fw-run", Target::Main, "held forget"))
+            .await
+            .expect("test: turn admitted");
+        wait_model_requests(&daemon, &stub, 1).await;
+        let erased =
+            client.erase_for_everyone(&caps, RF_SESSION, "rf-fw-run").await.expect("K-FW-4");
+        assert_eq!(erased.notice, None, "K-FW-4: forget was asked");
+        let counted = main_forget("K-FW-4", &erased.deleted);
+        assert!(counted.pending, "K-FW-4: a live run is pending, got {counted:?}");
+        assert!(counted.forgotten.is_none(), "K-FW-4: pending carries no counts");
+        report("K-FW-4");
+        client.cancel_run(&caps, RF_SESSION, &turn.run_id).await.expect("test: cancel");
+        wait_job_terminal(&client, &caps, &turn.job_id).await;
+        daemon.stop();
+    })
+    .await;
+}
+
+/// One loopback responder: the first delete is `422 forget_family_too_large`, the second is a
+/// plain `200`. It stands in for a run family larger than 20,000 logged writes.
+struct FamilyStub {
+    port: u16,
+    bodies: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FamilyStub {
+    async fn start() -> Self {
+        let listener =
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("test: bind family stub");
+        let port = listener.local_addr().expect("test: stub addr").port();
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = bodies.clone();
+        let task = tokio::spawn(async move {
+            let mut seen = 0_u8;
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let recorded = recorded.clone();
+                let which = seen;
+                seen = seen.saturating_add(1);
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let raw = read_capped(&mut stream).await;
+                    recorded.lock().expect("test: bodies").push(raw);
+                    let body = if which == 0 {
+                        r#"{"error":{"code":"forget_family_too_large","message":"the deleted run family wrote more than one delete can forget; nothing was deleted"}}"#
+                    } else {
+                        r#"{"message_id":"rf-fw-large","status":"deleted","agents":[{"agent":"main","runs":[]}]}"#
+                    };
+                    let status = if which == 0 { "422 Unprocessable Entity" } else { "200 OK" };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        Self { port, bodies, task }
+    }
+}
+
+impl Drop for FamilyStub {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn read_capped(stream: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while buf.len() < 8192 {
+        let n = stream.read(&mut chunk).await.expect("test: read the delete request");
+        assert!(n > 0, "test: the client sent a request");
+        buf.extend_from_slice(&chunk[..n]);
+        if http_request_complete(&buf) {
+            break;
+        }
+    }
+    assert!(buf.len() <= 8192, "test: the request stayed inside 8 KiB");
+    String::from_utf8(buf).expect("test: the request is UTF-8")
+}
+
+fn http_request_complete(buf: &[u8]) -> bool {
+    let Some(split) = buf.windows(4).position(|mark| mark == b"\r\n\r\n") else {
+        return false;
+    };
+    let header = String::from_utf8_lossy(&buf[..split]);
+    let Some(length) = content_length(&header) else {
+        return false;
+    };
+    buf.len() >= split.saturating_add(4).saturating_add(length)
+}
+
+fn content_length(header: &str) -> Option<usize> {
+    header.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case("content-length") { value.trim().parse().ok() } else { None }
+    })
+}
+
+/// K-FW-5: `422 forget_family_too_large` tells the caller and retries once as a plain delete.
+/// The real daemon refuses only after more than 20,000 logged writes, so this row speaks that
+/// coded answer and checks the retry body.
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_fw_family_too_large_retries_as_a_plain_delete() {
+    bounded(async {
+        use std::os::unix::fs::PermissionsExt;
+        let stub = FamilyStub::start().await;
+        let dir = tempfile::TempDir::new().expect("test: token dir");
+        let token = dir.path().join("token");
+        std::fs::write(&token, "contract-token").expect("test: token");
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))
+            .expect("test: token mode");
+        let client =
+            PrxClient::new(&ClientConfig::new(format!("http://127.0.0.1:{}", stub.port), &token))
+                .expect("test: client");
+        let caps = Capabilities {
+            prx_version: "0".to_owned(),
+            commit: BuildCommit::Unknown,
+            api: 1,
+            capabilities: [MESSAGE_DELETE_V1, MESSAGE_FORGET_WRITES_V1]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            available: std::collections::BTreeSet::new(),
+        };
+        let erased =
+            client.erase_for_everyone(&caps, "rf-fw", "rf-fw-large").await.expect("K-FW-5");
+        assert_eq!(erased.notice, Some(EraseNotice::FamilyTooLarge), "K-FW-5: the caller is told");
+        assert_eq!(
+            erased.notice.expect("K-FW-5").user_text(),
+            EraseNotice::FamilyTooLarge.user_text(),
+            "K-FW-5: user sentence"
+        );
+        assert!(
+            erased.deleted.agents.iter().all(|agent| agent.forget.is_none()),
+            "K-FW-5: the retry answer is a plain delete"
+        );
+        let bodies = stub.bodies.lock().expect("test: bodies").clone();
+        assert_eq!(bodies.len(), 2, "K-FW-5: one forget and one plain retry");
+        assert!(
+            bodies[0].contains("\"forget_writes\":true"),
+            "K-FW-5: the first body forgets: {}",
+            bodies[0]
+        );
+        assert!(
+            !bodies[1].contains("forget_writes"),
+            "K-FW-5: the retry does not send the field: {}",
+            bodies[1]
+        );
+        report("K-FW-5");
     })
     .await;
 }

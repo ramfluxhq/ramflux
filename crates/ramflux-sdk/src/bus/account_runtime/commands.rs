@@ -97,16 +97,12 @@ impl AccountRuntime {
                     .and_then(|hold| hold.release().map_err(SdkError::from));
                 let _ = reply.send(result);
             }
-            super::super::actor::PrivateCommand::NativeUnlock {
-                passphrase,
-                home_node_id,
-                reply,
-            } => {
+            super::super::actor::PrivateCommand::NativeUnlock { secret, home_node_id, reply } => {
                 if !reply.is_closed() {
                     let result = super::super::native_account::unlock(
                         &mut self.state,
                         &self.id,
-                        passphrase,
+                        secret,
                         home_node_id,
                     );
                     if reply.is_closed() {

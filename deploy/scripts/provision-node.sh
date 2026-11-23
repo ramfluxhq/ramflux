@@ -62,10 +62,24 @@ for service in gateway router notify federation relay signaling retention; do
   temporary=$(mktemp "${deploy_dir}/config/.${service}.toml.XXXXXX")
   trap 'rm -f -- "${temporary}"' EXIT HUP INT TERM
   capability_prefix=
+  authority_endpoint=
+  authority_origins=
   if [ "$service" = router ] || [ "$service" = federation ]; then
     capability_prefix="$capability_block
 "
   fi
+  case "$service" in
+    gateway|router) authority_endpoint='notify-authority = "ramflux-notify:18085"' ;;
+    notify)
+      authority_endpoint='router-async = "ramflux-router:17444"'
+      authority_origins='[send_authority]
+root_budget = 4096
+
+[send_authority.origins]
+"spiffe://localhost/ramflux-router" = "ramflux-router:17444"
+"spiffe://localhost/ramflux-gateway/ramflux-gateway" = "ramflux-gateway:7443"'
+      ;;
+  esac
   cat > "${temporary}" <<EOF
 node_id = "localhost"
 service_id = "ramflux-${service}"
@@ -94,6 +108,7 @@ federation = "$(endpoint_for federation)"
 relay = "$(endpoint_for relay)"
 signaling = "$(endpoint_for signaling)"
 retention = "$(endpoint_for retention)"
+${authority_endpoint}
 
 [gateway]
 public_listen_addr = "0.0.0.0:443"
@@ -101,6 +116,8 @@ public_listen_addr = "0.0.0.0:443"
 [signaling]
 turn_udp_addr = "0.0.0.0:3478"
 turn_tcp_addr = "0.0.0.0:3478"
+
+${authority_origins}
 EOF
   chmod 644 "${temporary}"
   python3 - "${temporary}" "${destination}" <<'PY'

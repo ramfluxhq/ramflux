@@ -312,6 +312,17 @@ fn delivery_error_code(error: &SdkError) -> &'static str {
         SdkError::CustodyNetwork(code) | SdkError::CustodyAdmission { code, .. } => {
             code.reason_code()
         }
+        _ => undelivered_contact_request_code(error),
+    }
+}
+
+fn undelivered_contact_request_code(error: &SdkError) -> &'static str {
+    match error {
+        SdkError::InboundPending(reason)
+            if reason == "contact request must be submitted before its first message" =>
+        {
+            "ContactRequestPending"
+        }
         _ => "ValidationFailed",
     }
 }

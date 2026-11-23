@@ -98,14 +98,14 @@ async fn send(writer: &Writer, mut plan: Plan) -> Result<(), SdkError> {
         } else {
             None
         };
-    let config = plan.session.config().clone();
+    let sealing = plan.session.sealing_config()?;
     let (remote, kind) = (plan.draft.remote().clone(), plan.draft.kind());
     let submitted = plan.submitted.clone();
     let draft = plan.draft;
     let envelope = writer
         .apply(move |account| {
             account.client.seal_pair_control_prepared(
-                &config,
+                &sealing,
                 draft,
                 SendMaterial { manifest, bundle },
             )

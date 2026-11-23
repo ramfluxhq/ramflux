@@ -8,7 +8,9 @@ mod budget;
 mod recovery_tests;
 #[cfg(test)]
 mod tests;
-pub(crate) use budget::{charge as charge_resource, uncharge as uncharge_resource};
+pub(crate) use budget::{
+    ChargeProbe, charge as charge_resource, charge_matches, uncharge as uncharge_resource,
+};
 pub(crate) use budget::{
     origin_rows as charge_origin_rows, retire_origin_rows as retire_origin_call_rows,
 };
