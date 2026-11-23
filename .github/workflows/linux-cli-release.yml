@@ -24,13 +24,16 @@ permissions:
 
 concurrency:
   group: linux-cli-release-${{ github.event_name }}-${{ inputs.tag || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   linux-cli:
     name: Linux CLI ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: product
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +47,7 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          path: product
           persist-credentials: false
       - name: Resolve matching version tag
         id: version
@@ -64,7 +68,7 @@ jobs:
         with:
           repository: ramfluxhq/ramflux-tui
           ref: refs/tags/${{ steps.version.outputs.tag }}
-          path: .release-tui
+          path: tui
           persist-credentials: false
       - name: Native build prerequisites
         run: |
@@ -75,15 +79,16 @@ jobs:
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
         with:
           key: linux-cli-${{ matrix.target }}
+          workspaces: product -> target
       - name: Build and package production binaries
-        run: bash scripts/release/build-linux-cli.sh .release-tui '${{ matrix.target }}' dist
+        run: bash scripts/release/build-linux-cli.sh ../tui '${{ matrix.target }}' dist
       - name: Keep dry-run archives
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: linux-cli-${{ matrix.target }}
           path: |
-            dist/*.tar.gz
-            dist/*.sha256
+            product/dist/*.tar.gz
+            product/dist/*.sha256
           if-no-files-found: error
 
   publish:

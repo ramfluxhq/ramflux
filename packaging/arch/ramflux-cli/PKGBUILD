@@ -22,6 +22,10 @@ _tui_commit=02f2ca4402b7aae67f3b4dd089e3d18aca154a8d
 prepare() {
   mv ramfluxhq-ramflux-[[:xdigit:]]* product
   mv ramfluxhq-ramflux-tui-* tui
+  # Isolate the TUI lockfile when makepkg runs inside the product checkout.
+  if ! grep -q '^\[workspace\]' tui/Cargo.toml; then
+    printf '\n[workspace]\n' >> tui/Cargo.toml
+  fi
 }
 
 build() {
