@@ -59,7 +59,7 @@ dependency suites run in PR CI. Invalidate affected source/config/layout
 certificates. Census line citations refer to immutable upstream source, before
 SPDX/extraction shifts. Missing runtime bounds continue to refuse activation.
 Maintainers publish upstream reproducers, benchmarks, issues and patches. Remove
-a local patch only after verifying that an upstream version reproduces all bounds.
+a local patch only after an independently audited upstream version reproduces all bounds.
 
 
 ## Dormant packet-control hooks

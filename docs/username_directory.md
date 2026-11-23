@@ -145,7 +145,7 @@ The local bus surface is `username.mutate`, `username.status`, `username.resolve
 manifest entries. They never enter executable C ABI discovery or native execution.
 The descriptor, executable native method set and CAS product pin remain unchanged.
 
-Deployment verification covers set/resolve/contact add through real daemons and
+Deployment verification must cover set/resolve/contact add through real daemons and
 services, original-request contact acceptance, default conversations, rename holds,
 exact matching, two-home lookup and the foreign contact barrier. It also covers
 visibility/release/delete, uncertain committed operations, protected-store restart,
