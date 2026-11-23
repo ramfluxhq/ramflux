@@ -899,9 +899,6 @@ impl RamfluxClient {
 
         let control = g::Control::decode(scanned.body)
             .map_err(|_| invalid("control authority fields missing"))?;
-        if control.operation == 11 {
-            Self::require_a2i_binding_authority()?;
-        }
         if (1..=17).contains(&control.operation)
             && crate::client::generated_control::validate_control_operation(&control).is_err()
         {

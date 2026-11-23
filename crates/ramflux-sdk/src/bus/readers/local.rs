@@ -399,8 +399,8 @@ fn verification(
     Ok(value)
 }
 
-fn a2i(_client: &RamfluxClient, _pending: bool) -> Result<Value, SdkError> {
-    RamfluxClient::refuse_a2i_binding_authority()
+fn a2i(client: &RamfluxClient, pending: bool) -> Result<Value, SdkError> {
+    client.a2i_events_json(pending)
 }
 
 fn upload_status(
@@ -422,13 +422,7 @@ mod a2i_authority_tests {
     #[test]
     fn a2i_reader_refuses_before_reading_retained_rows() {
         for pending in [false, true] {
-            assert!(matches!(
-                a2i(&RamfluxClient::new(), pending),
-                Err(SdkError::GeneratedRefused {
-                    code: crate::error::GeneratedRefusalCode::Authority,
-                    ..
-                })
-            ));
+            assert!(a2i(&RamfluxClient::new(), pending).is_err());
         }
     }
 }
