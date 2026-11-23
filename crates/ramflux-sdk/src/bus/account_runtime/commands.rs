@@ -311,6 +311,17 @@ impl AccountRuntime {
         }
         let result = match self.publish(&command.request).await {
             Ok(()) => result,
+            // The progress row is already committed. A later outbox wake can fail
+            // with the writer pause, which the bus reports as ValidationFailed.
+            // The host does not retry that code, so the owner copy must still go out.
+            Err(error) if result.is_ok() && command.request.method == "agent.progress" => {
+                tracing::warn!(
+                    account_id = %self.id,
+                    %error,
+                    "agent progress publication deferred; owner copy remains"
+                );
+                result
+            }
             Err(error) => Err(error),
         };
         let _ = reply.send(result);
@@ -332,6 +343,9 @@ impl AccountRuntime {
             );
             return Err(SdkError::AccountNotOpen(activity.owner_id));
         }
+        // This thread's pause scope belongs to whichever account last armed it.
+        // The copy is one short command; a foreign scope must not refuse it.
+        let _guard = ramflux_storage::writer_budget::ServiceGuard::enter();
         let client = &local_bus_account(&self.state, &self.id)?.client;
         crate::client::agent_activity::store_owner_copy(
             client,
