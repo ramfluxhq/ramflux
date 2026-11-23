@@ -561,8 +561,13 @@ async fn agent_delete_closes_the_running_session_before_removing_local_state() -
             assert!(directory.is_dir(), "nothing was removed so far");
 
             let mut confirmed = delete_frame(&anchor, true);
-            let reply = crate::bus::agent_methods::respond(&mut confirmed, &supervisor).await;
-            assert!(reply.is_err(), "the node retirement is not reachable from this fixture");
+            // `respond` reports a refusal as an error frame in `Ok`, never as an `Err`.
+            let reply = crate::bus::agent_methods::respond(&mut confirmed, &supervisor).await?;
+            let frame: serde_json::Value = serde_json::from_slice(&reply)?;
+            assert_eq!(
+                frame["kind"], "error",
+                "the node retirement is not reachable from this fixture: {frame}"
+            );
             assert!(!supervisor.account_is_open(&setup.account_id), "the session is closed");
             assert!(
                 directory.exists(),
