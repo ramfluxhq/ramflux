@@ -6,7 +6,7 @@ pkgdesc='Ramflux command-line client, daemon and terminal interface'
 arch=('x86_64' 'aarch64')
 url='https://github.com/ramfluxhq/ramflux'
 license=('BSD-3-Clause' 'AGPL-3.0-or-later')
-depends=('gcc-libs' 'glibc')
+depends=('gcc-libs' 'glibc' 'openssl' 'zlib' 'zstd')
 makedepends=('rust' 'git' 'pkgconf' 'perl')
 optdepends=('libsecret: Secret Service integration tools'
             'gnome-keyring: Secret Service provider for device custody'

@@ -73,7 +73,7 @@ jobs:
       - name: Native build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config perl
+          sudo apt-get install -y build-essential pkg-config perl libssl-dev zlib1g-dev libzstd-dev
           rustup target add '${{ matrix.target }}'
       - name: Cache native compilation
         uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb

@@ -4,8 +4,10 @@
 Linux release bundles contain `rf`, `rf-tui`, both license texts, and build
 metadata. Both programs have the same product version. They are built natively
 on Ubuntu 24.04 for x86_64 and aarch64, using GNU libc, not fully static musl.
-SQLite/SQLCipher, OpenSSL and D-Bus client libraries use the SDK's vendored
-builds where configured. `BUILD-INFO.txt` records the actual runtime libraries.
+SQLite/SQLCipher is bundled; the Linux build uses system OpenSSL. The D-Bus
+client library is vendored where configured by the SDK. On Arch, the recipe
+declares `glibc`, `gcc-libs`, `openssl`, `zlib` and `zstd` as runtime dependencies.
+`BUILD-INFO.txt` records the actual runtime libraries for each archive.
 
 ## Release archive
 
