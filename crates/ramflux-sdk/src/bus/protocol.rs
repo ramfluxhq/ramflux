@@ -44,6 +44,8 @@ pub struct LocalBusConfig {
     pub startup_restore_gate: Option<LocalBusStartupRestoreGate>,
     /// Loopback PRX client. Absent means agent limits, history erase and purge are skipped.
     pub(crate) prx: Option<std::sync::Arc<ramflux_prx_client::PrxClient>>,
+    /// Fixed when this config is constructed. Not a host-supplied JSON field.
+    media_ownership: MediaOwnership,
 }
 
 #[cfg(any(test, feature = "itest-restore-state"))]
@@ -1067,6 +1069,17 @@ const fn default_mcp_manifest_version() -> u32 {
     1
 }
 
+/// Process-fixed owner of call media keys. Chosen before the first account opens.
+/// Cloning a config copies the mode; nothing in the process can switch it later.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MediaOwnership {
+    /// Desktop and the rf daemon. `call.media.session` may export once.
+    External,
+    /// Trusted in-process build. Generic export is refused; keys move once
+    /// through the private typed handoff.
+    InProcess,
+}
+
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_false(value: &bool) -> bool {
     !*value
@@ -1110,7 +1123,22 @@ impl LocalBusConfig {
             #[cfg(any(test, feature = "itest-restore-state"))]
             startup_restore_gate: None,
             prx: None,
+            media_ownership: MediaOwnership::External,
         }
+    }
+
+    /// In-process media ownership for a trusted build that keeps the engine in this process.
+    /// Every account opened from this config refuses generic `call.media.session` export.
+    #[must_use]
+    pub fn in_process(socket_path: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
+        let mut config = Self::new(socket_path, data_root);
+        config.media_ownership = MediaOwnership::InProcess;
+        config
+    }
+
+    #[must_use]
+    pub(crate) fn media_ownership(&self) -> MediaOwnership {
+        self.media_ownership
     }
 
     /// Attach a loopback PRX client. Both the URL and the token file are required.

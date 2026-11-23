@@ -2,9 +2,12 @@
 // Copyright (c) 2026 Span Brain
 
 mod control;
+mod handoff;
 pub(crate) mod intent;
 mod lease;
 pub(crate) mod state;
+
+pub use handoff::InProcessMediaReceipt;
 
 pub(crate) use control::{bytes, is_call_body, resolution_terminal, signing_bytes};
 

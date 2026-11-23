@@ -136,6 +136,7 @@ pub(super) fn unlock(
     // The owning runtime starts networking after installing its bounded writer channel.
     // NativeUnlock pumps the first admission outcome after installing that channel.
     let result = response(&account)?;
+    account.client.bind_process_media_ownership(state.config.media_ownership())?;
     state.accounts.insert(id.into(), account);
     state.active_account_id = Some(id.into());
     Ok(result)

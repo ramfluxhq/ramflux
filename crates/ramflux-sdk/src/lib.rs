@@ -136,7 +136,7 @@ pub use bus::{
     LocalBusObjectRevokeRequest, LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
     LocalBusObjectTransferStatusRequest, LocalBusPendingCreation, LocalBusPendingRecovery,
     LocalBusRecoveryClient, LocalBusSubscriptionOpenRequest, LocalMcpGrantSigningBody,
-    LocalMcpStandingApprovalSigningBody, TaskApprovalBinding, serve_local_bus,
+    LocalMcpStandingApprovalSigningBody, MediaOwnership, TaskApprovalBinding, serve_local_bus,
     serve_local_bus_until,
 };
 #[cfg(feature = "itest-restore-state")]
@@ -144,6 +144,7 @@ pub use bus::{
 pub use bus::{LocalBusStartupRestoreGate, LocalBusStartupRestoreGateControl};
 pub use client::RamfluxClient;
 pub use client::account::account_db_key_encryption_key;
+pub use client::call::InProcessMediaReceipt;
 pub use client::contact::SdkContactSafetyNumber;
 pub use client::conversation::ConversationSummary;
 pub use client::device_unlock::DeviceSecret;

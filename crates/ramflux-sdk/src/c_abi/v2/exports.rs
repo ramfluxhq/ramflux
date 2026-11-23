@@ -291,8 +291,10 @@ fn open_inner(
         id
     };
     let _opening = Opening(candidate_root);
-    let mut bus =
-        LocalBusConfig::new(std::path::PathBuf::new(), std::mem::take(&mut config.data_root));
+    let mut bus = LocalBusConfig::in_process(
+        std::path::PathBuf::new(),
+        std::mem::take(&mut config.data_root),
+    );
     bus.builtin_nodes = std::mem::take(&mut config.builtin_nodes)
         .into_iter()
         .map(|mut profile| profile.take_node())

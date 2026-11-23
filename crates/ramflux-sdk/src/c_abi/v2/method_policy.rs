@@ -254,6 +254,9 @@ policies! {
 
 // Search stays unavailable to native hosts until its separate ABI integration is admitted.
 pub(super) const DENIED_METHODS: &[&str] = &[
+    // Generic media-key export is refused before admission, with or without
+    // `allow_secret_exports`. The in-process handoff is not a bus method.
+    "call.media.session",
     "username.mutate",
     "username.status",
     "username.resolve",

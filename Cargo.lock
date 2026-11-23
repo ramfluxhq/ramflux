@@ -3906,6 +3906,7 @@ dependencies = [
  "ramflux-card",
  "ramflux-client-model",
  "ramflux-crypto",
+ "ramflux-media",
  "ramflux-node-core",
  "ramflux-protocol",
  "ramflux-prx-client",

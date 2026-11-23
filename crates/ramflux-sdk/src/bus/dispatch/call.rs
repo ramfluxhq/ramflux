@@ -192,6 +192,12 @@ pub(crate) fn recover(account: &mut LocalBusAccountState) -> Result<(), SdkError
     Ok(())
 }
 fn media(account: &mut LocalBusAccountState, id: &str) -> Result<LocalBusDispatchResult, SdkError> {
+    // In-process ownership refuses generic export before admission work, key
+    // reads, JSON, or the one-shot cache. Direct and compatibility dispatch
+    // both reach this function, including a socket that skipped the C ABI.
+    if account.client.media_ownership == crate::bus::protocol::MediaOwnership::InProcess {
+        return Err(SdkError::LocalBusPermissionDenied);
+    }
     account.client.require_native_operation(
         &account.client.owned_device_identity()?,
         NativeOperation::Call,
