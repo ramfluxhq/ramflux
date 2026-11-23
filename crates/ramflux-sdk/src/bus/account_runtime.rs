@@ -370,7 +370,7 @@ impl AccountRuntime {
         ready: std::sync::mpsc::SyncSender<()>,
     ) -> Result<bool, SdkError> {
         self.initialize_readers()?;
-        self.start_connection()?;
+        self.start_connection_or_defer();
         self.start_courier();
         let _ = ready.send(());
         let restore = LocalBusFrame::request(
@@ -403,7 +403,7 @@ impl AccountRuntime {
             tracing::warn!(account_id = %self.id, "task preparation courier stopped; restarting");
             self.stop_courier().await;
             tokio::time::sleep(Duration::from_millis(100)).await;
-            self.start_connection()?;
+            self.start_connection_or_defer();
             self.start_courier();
         }
         Ok(())
@@ -490,7 +490,7 @@ impl AccountRuntime {
                     checkpoints += 1;
                     if let Some(work)=work {
                         let mut shutdown=self.shutdown.clone();let mut preempt=self.preempt.clone();
-                        tokio::select! {biased;_=shutdown.changed()=>break,_=preempt.changed()=>{},result=self.apply_connection_work(work)=>result?}
+                        tokio::select! {biased;_=shutdown.changed()=>break,_=preempt.changed()=>{},result=self.finish_connection_work(work)=>result?}
                     }
                     continue;
                 },

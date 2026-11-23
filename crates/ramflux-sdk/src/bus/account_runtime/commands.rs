@@ -114,7 +114,7 @@ impl AccountRuntime {
                         Ok(()) => result,
                         Err(error) => Err(error),
                     };
-                    self.start_connection()?;
+                    self.start_connection_or_defer();
                     self.start_courier();
                     let result = result.and_then(|_| {
                         super::super::native_account::response(local_bus_account(
@@ -294,7 +294,7 @@ impl AccountRuntime {
             Ok(()) => result,
             Err(error) => Err(error),
         };
-        self.start_connection()?;
+        self.start_connection_or_defer();
         self.start_courier();
         if let Some(courier) = &self.courier {
             courier.signal();
