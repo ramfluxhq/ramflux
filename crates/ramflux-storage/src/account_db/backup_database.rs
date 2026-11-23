@@ -7,6 +7,8 @@ use crate::{AccountDbKey, BackupCounts, StorageError};
 use rusqlite::params;
 use std::path::Path;
 
+pub(super) const INPUT_ORIGIN_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS main.backup_input_origin(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL);";
+
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct BackupAttachmentVerification {
     pub verified: u64,
@@ -287,7 +289,14 @@ impl BackupDatabase {
         key: &AccountDbKey,
         mode: BackupOpenMode,
     ) -> Result<Self, StorageError> {
-        let mut reopened = Self::open_restore_input(path, key, mode)?;
+        // The owner's live generation is not an archive. Opening it as one runs the
+        // snapshot allow-list and refuses runtime tables this installation keeps.
+        let source = if self.live_generation {
+            MarkerAuthoritySource::LiveAccountKey
+        } else {
+            MarkerAuthoritySource::ArchiveInput
+        };
+        let mut reopened = Self::open_with_source(path, key, mode, source)?;
         reopened.original_input = self.original_input.clone();
         if mode == BackupOpenMode::PreNormalization {
             observation::retain(&reopened.db, self.original_input.schema_version)?;

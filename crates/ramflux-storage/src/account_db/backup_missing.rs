@@ -55,9 +55,12 @@ impl AccountDb {
             .collect())
     }
 }
+
+pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS backup_missing_attachment(selector TEXT PRIMARY KEY,manifest_hash TEXT NOT NULL,plaintext_hash TEXT NOT NULL); CREATE INDEX IF NOT EXISTS backup_object_reference_hashes ON object_index(manifest_hash,plaintext_hash);";
+
 impl BackupDatabase {
     pub(super) fn ensure_missing_manifest(&self) -> Result<(), StorageError> {
-        self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_missing_attachment(selector TEXT PRIMARY KEY,manifest_hash TEXT NOT NULL,plaintext_hash TEXT NOT NULL); CREATE INDEX IF NOT EXISTS backup_object_reference_hashes ON object_index(manifest_hash,plaintext_hash);")?;
+        self.db.execute_batch(SCHEMA)?;
         Ok(())
     }
     /// Lists a bounded page of unavailable payload selectors in the private snapshot.

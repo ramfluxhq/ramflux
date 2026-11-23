@@ -66,7 +66,6 @@ pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFail
         | E::AccountNotFound(_)
         | E::AccountAlreadyExists(_)
         | E::Serde(_)
-        | E::AuthorizationRejected
         | E::FootprintMigrationIncomplete
         | E::GroupMemberLimitExceeded
         | E::InvalidGroupRole(_)
@@ -88,23 +87,21 @@ pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFail
         | E::InvalidRecoveryState { .. }
         | E::WriterPause
         | E::PairingField(_)
-        | E::TransferExportRefused(_)
         | E::MuteUntilOutOfRange => failure(BackupFailureCode::Unreadable),
+        E::AuthorizationRejected => failure(BackupFailureCode::AuthorizationRejected),
+        E::TransferExportRefused(step) => refused_step(step),
     }
 }
 
-// Restore admission failures retain their typed job code; export keeps its existing policy.
+fn refused_step(step: &str) -> BackupFailure {
+    let mut failure = failure(BackupFailureCode::Tampered);
+    failure.message = Some(step.into());
+    failure
+}
+
+// Export and restore report the same typed code for these storage variants.
 pub(super) fn restore_storage_error(error: &ramflux_storage::StorageError) -> BackupFailure {
-    if let ramflux_storage::StorageError::TransferExportRefused(step) = error {
-        let mut failure = failure(BackupFailureCode::Tampered);
-        failure.message = Some((*step).into());
-        return failure;
-    }
-    if matches!(error, ramflux_storage::StorageError::AuthorizationRejected) {
-        failure(BackupFailureCode::AuthorizationRejected)
-    } else {
-        storage_error(error)
-    }
+    storage_error(error)
 }
 
 fn stream_error(error: BackupStreamError, header: bool) -> BackupFailure {

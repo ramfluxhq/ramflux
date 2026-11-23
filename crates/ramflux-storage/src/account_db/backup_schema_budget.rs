@@ -137,7 +137,20 @@ fn write_reference(dir: &CatalogDir) -> Result<AccountDbKey, StorageError> {
     let index = AccountIndex::open(&dir.path)?;
     let acct = AccountDb::open(&index, "acct", &acct_key)?;
     let _peer = AccountDb::open(&index, "peer", &peer_key)?;
-    Ok(acct.write_backup_snapshot(&dir.path.join("snapshot.db"))?.key)
+    let path = dir.path.join("snapshot.db");
+    let snapshot = acct.write_backup_snapshot(&path)?;
+    // The first archive open creates these. Measure them with the rest of the catalog.
+    install_open_tables(&path, &snapshot.key)?;
+    Ok(snapshot.key)
+}
+
+fn install_open_tables(path: &Path, key: &AccountDbKey) -> Result<(), StorageError> {
+    let reference = crate::database::Connection::open(path)?;
+    crate::encryption::apply_key(&reference, key)?;
+    reference.execute_batch("PRAGMA journal_mode=DELETE;")?;
+    reference.execute_batch(super::backup_missing::SCHEMA)?;
+    reference.execute_batch(super::backup_database::INPUT_ORIGIN_SCHEMA)?;
+    Ok(())
 }
 
 fn first_session(dir: &CatalogDir) -> Result<(AccountDbKey, AccountDbKey), StorageError> {

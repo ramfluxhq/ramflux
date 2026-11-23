@@ -109,7 +109,7 @@ fn restore_preservation_refusal_keeps_ownership_failure_code() -> TestResult {
     assert!(!authorization.retryable);
     assert_eq!(
         super::workers::storage_error(&ramflux_storage::StorageError::AuthorizationRejected).code,
-        BackupFailureCode::Unreadable
+        BackupFailureCode::AuthorizationRejected
     );
     Ok(())
 }

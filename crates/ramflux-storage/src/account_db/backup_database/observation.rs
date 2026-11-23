@@ -6,7 +6,7 @@ use super::{BackupInputObservation, StorageError};
 use rusqlite::Connection;
 
 pub(super) fn retain(db: &Connection, version: i64) -> Result<(), StorageError> {
-    db.execute_batch("CREATE TABLE IF NOT EXISTS main.backup_input_origin(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL);")?;
+    db.execute_batch(super::INPUT_ORIGIN_SCHEMA)?;
     db.execute("INSERT INTO main.backup_input_origin VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET schema_version=excluded.schema_version", [version])?;
     Ok(())
 }

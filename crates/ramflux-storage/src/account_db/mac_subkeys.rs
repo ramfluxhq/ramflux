@@ -25,7 +25,7 @@ const LABELS: [&[u8]; 6] = [
 // bundles remain byte-compatible while keeping marker namespaces independent.
 pub(crate) const RAW_COPY_MARKER_LABEL: &[u8] = b"ramflux/deleted-raw-copy/v1";
 const BUNDLE_BYTES: usize = 192;
-const SCHEMA: &str = "CREATE TABLE account_mac_bundle (
+pub(super) const SCHEMA: &str = "CREATE TABLE account_mac_bundle (
     bundle_id TEXT PRIMARY KEY,
     subkeys BLOB NOT NULL CHECK(length(subkeys)=192),
     is_current INTEGER NOT NULL CHECK(is_current IN (0,1))

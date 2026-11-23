@@ -60,6 +60,7 @@ fn copy_into_clean(
     let mut dest = open_clean(clean, key)?;
     let reference = reference_tables(&dest)?;
     let source = open_source(path, key, pages, &reference)?;
+    drop_absent_origin(&dest, &source.copy)?;
     copy_tables(&source, &mut dest)?;
     drop(source);
     drop(dest);
@@ -89,9 +90,18 @@ fn migrate_clean(path: &Path, key: &AccountDbKey) -> Result<(), StorageError> {
     let connection = crate::database::Connection::open(path)?;
     crate::encryption::apply_key(&connection, key)?;
     crate::schema::migrate_account_db(&connection)?;
+    // Held-message fences reference contact_message_request. That table is not a
+    // migration; the live opener installs it before runtime triggers.
+    crate::schema_contact_requests::upgrade(&connection)?;
     // Runtime tables are not migrations. Install the product definitions before the
     // copy list is read so their rows, including runtime_actor_state, move into this file.
     super::runtime::install_backup_schema(&connection)?;
+    // initialize_archive rejects migration 14 without account_mac_bundle. The missing
+    // attachment manifest and the private origin table are created on the first open;
+    // this file must already name them so their rows copy and a later open is not new.
+    connection.execute_batch(super::mac_subkeys::SCHEMA)?;
+    connection.execute_batch(super::backup_missing::SCHEMA)?;
+    connection.execute_batch(super::backup_database::INPUT_ORIGIN_SCHEMA)?;
     // This file is a new database. The generation is the schema just installed.
     // The source header is not copied, so a clean export would otherwise stay at 0.
     connection.execute_batch(&format!(
@@ -99,6 +109,15 @@ fn migrate_clean(path: &Path, key: &AccountDbKey) -> Result<(), StorageError> {
         ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION,
     ))?;
     Ok(())
+}
+
+fn drop_absent_origin(dest: &Connection, copied: &[String]) -> Result<(), StorageError> {
+    if copied.iter().any(|table| table == "backup_input_origin") {
+        return Ok(());
+    }
+    // An empty origin table would change a snapshot that never had one.
+    dest.execute_batch("DROP TABLE backup_input_origin;")
+        .map_err(|error| open_verified::refused_by("rows", &error))
 }
 
 fn open_clean(path: &Path, key: &AccountDbKey) -> Result<Connection, StorageError> {
