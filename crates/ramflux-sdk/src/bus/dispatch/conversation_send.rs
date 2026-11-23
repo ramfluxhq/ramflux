@@ -51,8 +51,9 @@ pub(in crate::bus) async fn send_account(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let intent: Intent = serde_json::from_value(request.body.clone())?;
+    let mut intent: Intent = serde_json::from_value(request.body.clone())?;
     admit_prepares(&intent)?;
+    canonicalize_group_conversation(account, &mut intent)?;
     let account_id = request_account_id(request)?;
     let operation = request
         .operation_id
@@ -142,6 +143,27 @@ pub(in crate::bus) async fn send_account(
         body["progress"] = json!(progress);
     }
     Ok(local_bus_ok(body))
+}
+
+fn canonicalize_group_conversation(
+    account: &LocalBusAccountState,
+    intent: &mut Intent,
+) -> Result<(), SdkError> {
+    let group = if let Some(group) = intent.group_id.clone() {
+        group
+    } else if account.client.born_v3_account.is_some()
+        && account.client.account_db()?.shared_group_state(&intent.conversation_id)?.is_some()
+    {
+        intent.conversation_id.clone()
+    } else {
+        return Ok(());
+    };
+    intent.conversation_id =
+        crate::bus::group_conversation::resolve(&account.client, &group, &intent.conversation_id)?;
+    if intent.group_id.is_none() {
+        intent.group_id = Some(group);
+    }
+    Ok(())
 }
 
 /// A group that exists but has not sent yet has no conversation record. It is created from the

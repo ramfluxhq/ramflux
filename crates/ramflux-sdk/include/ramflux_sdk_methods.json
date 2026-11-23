@@ -716,6 +716,15 @@
       "bridge_allowed": true,
       "capability": "contact",
       "key_export": false,
+      "name": "contact.requests.decline",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "contact",
+      "key_export": false,
       "name": "contact.requests.list",
       "secret_input": false,
       "secret_output": true,
@@ -1137,6 +1146,15 @@
       "key_export": false,
       "name": "group.invitations.list",
       "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "group",
+      "key_export": false,
+      "name": "group.leave",
+      "secret_input": true,
       "secret_output": true,
       "show_once": false
     },

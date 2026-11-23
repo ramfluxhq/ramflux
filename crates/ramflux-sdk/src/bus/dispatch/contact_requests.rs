@@ -46,6 +46,7 @@ pub(super) async fn dispatch(
                 "authority_floors":account.client.contact_request_floor_status()?,
                 "cleared_authority_floors":removed}))));
         }
+        "contact.requests.decline" => return Ok(Some(decline_batch(account, request)?)),
         "contact.accept" | "contact.decline" | "contact.block" => {}
         _ => return Ok(None),
     }
@@ -95,4 +96,35 @@ pub(super) async fn dispatch(
         Ok::<_, SdkError>(response)
     })?;
     Ok(Some(local_bus_ok(response)))
+}
+
+fn decline_batch(
+    account: &mut LocalBusAccountState,
+    request: &LocalBusFrame,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let ids = request.body["request_ids"]
+        .as_array()
+        .ok_or_else(|| SdkError::LocalBus("request_ids is required".into()))?;
+    if ids.is_empty() || ids.len() > 32 {
+        return Err(SdkError::LocalBus("request_ids must contain 1..=32 ids".into()));
+    }
+    account.client.maintain_contact_requests()?;
+    let mut records = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(id) = id.as_str().filter(|id| !id.is_empty() && id.len() <= 256) else {
+            return Err(SdkError::LocalBus("request_ids entries must be short strings".into()));
+        };
+        let record = account
+            .client
+            .account_db()?
+            .select_inbound_contact_request("request_id", id)?
+            .ok_or(crate::ContactReason::RequestNotFound)?;
+        records.push(record);
+    }
+    let mut declined = Vec::with_capacity(records.len());
+    for record in &records {
+        account.client.decide_inbound_contact(record, "declined")?;
+        declined.push(json!({"request_id":record.request_id,"root_commitment":record.contact_identity_commitment,"state":"declined","principal_id":record.principal_id,"direction":"inbound"}));
+    }
+    Ok(local_bus_ok(json!({"declined": declined})))
 }

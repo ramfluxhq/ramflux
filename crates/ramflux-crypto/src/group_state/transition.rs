@@ -148,19 +148,32 @@ fn add(
     state.members.push(SharedGroupMember { identity: identity.clone(), role, joined_epoch: epoch });
     Ok(())
 }
+fn authorize_removal(
+    state: &SharedGroupState,
+    actor: SharedGroupRole,
+    root: &str,
+    device: &str,
+    self_removal: bool,
+) -> Result<(), CryptoError> {
+    let target = state
+        .effective_role(root, device)
+        .ok_or_else(|| invalid("removed device is not a member"))?;
+    // A member, admin or bot may remove its own device. The owner device stays until transfer.
+    let leaving = self_removal && target != SharedGroupRole::Owner;
+    if !leaving && !can_remove_group_member(actor.as_str(), target.as_str()) {
+        return Err(invalid("member removal not authorized"));
+    }
+    Ok(())
+}
 fn remove(
     state: &mut SharedGroupState,
-    actor: SharedGroupRole,
     root: &str,
     device: &str,
     epoch: u64,
     now: i64,
 ) -> Result<(), CryptoError> {
-    let target = state
-        .effective_role(root, device)
-        .ok_or_else(|| invalid("removed device is not a member"))?;
-    if !can_remove_group_member(actor.as_str(), target.as_str()) {
-        return Err(invalid("member removal not authorized"));
+    if state.effective_role(root, device).is_none() {
+        return Err(invalid("removed device is not a member"));
     }
     if root.is_empty()
         || device.trim().is_empty()
@@ -219,13 +232,21 @@ pub(super) fn apply(
     epoch: u64,
     now: i64,
 ) -> Result<(), CryptoError> {
+    let same_device = match change {
+        GroupStateChange::Remove { root_commitment, device_id } => {
+            actor.identity.root_commitment == *root_commitment
+                && actor.identity.device_id == *device_id
+        }
+        _ => false,
+    };
     let actor = actor_role(state, actor)?;
     match change {
         GroupStateChange::Add { member, role: joined_role } => {
             add(state, actor, member, *joined_role, epoch)?;
         }
         GroupStateChange::Remove { root_commitment, device_id } => {
-            remove(state, actor, root_commitment, device_id, epoch, now)?;
+            authorize_removal(state, actor, root_commitment, device_id, same_device)?;
+            remove(state, root_commitment, device_id, epoch, now)?;
         }
         GroupStateChange::SetRole { root_commitment, device_id, role: new_role } => {
             role(state, actor, root_commitment, device_id, *new_role)?;

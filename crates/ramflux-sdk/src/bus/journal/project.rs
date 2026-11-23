@@ -138,6 +138,10 @@ fn enrich_message_origin(
 }
 
 fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Result<(), SdkError> {
+    if let Some(encoded) = key.strip_prefix("group-invitation/") {
+        events.push(("group.invitation".to_owned(), invitation_body(encoded), None));
+        return Ok(());
+    }
     let db = client.account_db()?;
     if key == "account/networking"
         && let Some(value) = db.load_actor_state::<Value>(key)?
@@ -220,6 +224,18 @@ fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Res
         events.push((value.event_type.clone(),json!({"event_id":value.event_id,"source_device_id":value.source_device_id,"target_device_id":value.target_device_id,"action":value.action,"acknowledged":value.acknowledged}),None));
     }
     Ok(())
+}
+
+fn invitation_body(encoded: &str) -> Value {
+    let Ok(bytes) = ramflux_protocol::decode_base64url(encoded) else {
+        return json!({"changed": true});
+    };
+    match String::from_utf8(bytes) {
+        Ok(group_id) if !group_id.is_empty() && group_id.len() <= 256 => {
+            json!({"group_id": group_id})
+        }
+        _ => json!({"changed": true}),
+    }
 }
 
 fn project_object(

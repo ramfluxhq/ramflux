@@ -28,10 +28,7 @@ pub(crate) async fn dispatch_account_bus_request(
     match request.method.as_str() {
         // Creation is owned by the exclusive secret ceremony on the connection.
         "account.create" => Err(SdkError::CustodySetupInvalid),
-        "account.list" => Ok(local_bus_ok(serde_json::json!({
-            "active_account_id": state.active_account_id,
-            "accounts": state.accounts.keys().cloned().collect::<Vec<_>>(),
-        }))),
+        "account.list" => Ok(local_bus_ok(account_list(state))),
         "account.switch" => {
             let account_id = request_account_id(request)?.to_owned();
             if !state.accounts.contains_key(&account_id) {
@@ -102,6 +99,58 @@ pub(crate) async fn dispatch_account_bus_request(
             })))
         }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
+    }
+}
+
+fn account_list(state: &LocalBusDaemonState) -> serde_json::Value {
+    let mut details = Vec::with_capacity(state.accounts.len());
+    for (id, account) in &state.accounts {
+        details.push(open_account_detail(id, account));
+    }
+    serde_json::json!({
+        "active_account_id": state.active_account_id,
+        "accounts": state.accounts.keys().cloned().collect::<Vec<_>>(),
+        "account_details": details,
+    })
+}
+
+fn open_account_detail(id: &str, account: &LocalBusAccountState) -> serde_json::Value {
+    if let Some(native) = account.client.born_v3_account.as_ref() {
+        let body = &native.record().body;
+        return serde_json::json!({
+            "id": id,
+            "display_name": body.profile.display_name,
+            "kind": principal_kind_name(body.principal_kind),
+        });
+    }
+    let principal = account
+        .client
+        .account_db()
+        .ok()
+        .and_then(|db| db.client_record("self", "account").ok().flatten())
+        .and_then(|row| {
+            row.get("principal_id").and_then(serde_json::Value::as_str).map(str::to_owned)
+        });
+    let display_name = principal.as_deref().and_then(|principal| {
+        account
+            .client
+            .read_profile_facts(principal)
+            .map(|facts| facts.profile.display_name.clone())
+            .filter(|name| !name.is_empty())
+    });
+    serde_json::json!({
+        "id": id,
+        "display_name": display_name,
+        "kind": serde_json::Value::Null,
+    })
+}
+
+fn principal_kind_name(kind: ramflux_protocol::PrincipalKind) -> &'static str {
+    match kind {
+        ramflux_protocol::PrincipalKind::Human => "human",
+        ramflux_protocol::PrincipalKind::HeadlessAi => "headless_ai",
+        ramflux_protocol::PrincipalKind::Bot => "bot",
+        ramflux_protocol::PrincipalKind::Workflow => "workflow",
     }
 }
 
