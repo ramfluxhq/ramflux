@@ -111,18 +111,16 @@ pub(crate) async fn handle_gateway_submit(
     let mesh: serde_json::Value =
         crate::submit_target::post(&context.router, decision, &envelope).await?;
     let response: ramflux_node_core::EnvelopeSubmitResponse = serde_json::from_value(mesh.clone())?;
-    if let Err(error) = persist_accepted_intent(
+    if !admit_or_defer_call_intent(
+        send,
         context,
         runtime,
         submit,
-        &envelope.envelope_id,
         verified_intent.as_ref(),
         response.outcome.as_str(),
     )
-    .await
+    .await?
     {
-        tracing::warn!(%error, "call intent admission failed");
-        nack_call_intent(send).await?;
         return Ok(());
     }
     let metadata = crate::session_push::metadata(
@@ -370,6 +368,34 @@ async fn nack_call_intent(send: &GatewaySendHandle) -> anyhow::Result<()> {
     .await
 }
 
+async fn admit_or_defer_call_intent(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    submit: &ramflux_node_core::GatewaySubmitFrame,
+    verified: Option<&crate::call_intent::VerifiedIntent>,
+    outcome: &str,
+) -> anyhow::Result<bool> {
+    if let Err(error) = persist_accepted_intent(
+        context,
+        runtime,
+        submit,
+        &submit.envelope.envelope_id,
+        verified,
+        outcome,
+    )
+    .await
+    {
+        if schedule_call_wake_after_delay(context, runtime, submit, verified, &error, outcome) {
+            return Ok(true);
+        }
+        tracing::warn!(%error, "call intent admission failed");
+        nack_call_intent(send).await?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 async fn persist_accepted_intent(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
@@ -384,33 +410,20 @@ async fn persist_accepted_intent(
     let (Some(intent), Some(verified)) = (submit.call_intent.as_deref(), verified) else {
         return Ok(());
     };
-    let (owned_intent, owned_digest, owned_envelope, source, epoch, ciphertext) = (
-        intent.clone(),
-        verified.start_digest.clone(),
-        envelope_id.to_owned(),
-        runtime.source_identity.clone(),
-        runtime.device_epoch,
-        submit.envelope.encrypted_payload.as_bytes().to_vec(),
-    );
     let request_expires_at = u64::try_from(submit.signed_request.expires_at)
         .map_err(|_| anyhow::anyhow!("call request expiry rejected"))?;
-    let admitted =
-        crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
-            Ok(context.store.admit_verified_call_intent_with_expiry(
-                &ramflux_node_core::CallIntentAdmission {
-                    signed: &owned_intent,
-                    start_digest: &owned_digest,
-                    envelope_id: &owned_envelope,
-                    source_identity: source.storage_key(),
-                    source_epoch: epoch,
-                    encrypted_invite: &ciphertext,
-                },
-                request_expires_at,
-            )?)
-        })
-        .await;
-    match admitted {
-        Ok(ramflux_node_core::CallIntentEffect::Cancelled { wake_id: Some(wake_id) }) => {
+    match admit_signed_call(CallIntentRetry {
+        context,
+        runtime,
+        intent,
+        start_digest: &verified.start_digest,
+        envelope_id,
+        encrypted_payload: &submit.envelope.encrypted_payload,
+        request_expires_at,
+    })
+    .await?
+    {
+        ramflux_node_core::CallIntentEffect::Cancelled { wake_id: Some(wake_id) } => {
             dispatch_cancel_wake(
                 context,
                 intent,
@@ -421,8 +434,150 @@ async fn persist_accepted_intent(
             .await;
             Ok(())
         }
-        Ok(_) => Ok(()),
-        Err(error) => Err(anyhow::anyhow!(error)),
+        ramflux_node_core::CallIntentEffect::Authorized
+        | ramflux_node_core::CallIntentEffect::Cancelled { wake_id: None } => Ok(()),
+    }
+}
+
+struct CallIntentRetry<'a> {
+    context: &'a GatewayQuicContext,
+    runtime: &'a GatewaySessionRuntime,
+    intent: &'a ramflux_protocol::SignedCallIntentV1,
+    start_digest: &'a str,
+    envelope_id: &'a str,
+    encrypted_payload: &'a str,
+    request_expires_at: u64,
+}
+
+async fn admit_signed_call(
+    retry: CallIntentRetry<'_>,
+) -> anyhow::Result<ramflux_node_core::CallIntentEffect> {
+    let (owned_intent, owned_digest, owned_envelope, source, epoch, ciphertext) = (
+        retry.intent.clone(),
+        retry.start_digest.to_owned(),
+        retry.envelope_id.to_owned(),
+        retry.runtime.source_identity.clone(),
+        retry.runtime.device_epoch,
+        retry.encrypted_payload.as_bytes().to_vec(),
+    );
+    let request_expires_at = retry.request_expires_at;
+    crate::durable_work::run(retry.context, Some(&retry.runtime.source_identity), move |context| {
+        Ok(context.store.admit_verified_call_intent_with_expiry(
+            &ramflux_node_core::CallIntentAdmission {
+                signed: &owned_intent,
+                start_digest: &owned_digest,
+                envelope_id: &owned_envelope,
+                source_identity: source.storage_key(),
+                source_epoch: epoch,
+                encrypted_invite: &ciphertext,
+            },
+            request_expires_at,
+        )?)
+    })
+    .await
+}
+
+fn call_authority_slow(error: &anyhow::Error) -> bool {
+    let text = error.to_string();
+    text.contains("mesh request deadline exceeded")
+        || text.contains("send_authority_closed")
+        || text.contains("call_authority_busy")
+}
+
+fn schedule_call_wake_after_delay(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    submit: &ramflux_node_core::GatewaySubmitFrame,
+    verified: Option<&crate::call_intent::VerifiedIntent>,
+    error: &anyhow::Error,
+    outcome: &str,
+) -> bool {
+    if !call_authority_slow(error) {
+        return false;
+    }
+    let (Some(intent), Some(verified)) = (submit.call_intent.as_deref(), verified) else {
+        return false;
+    };
+    let Ok(request_expires_at) = u64::try_from(submit.signed_request.expires_at) else {
+        return false;
+    };
+    let delayed = DelayedCallWake {
+        context: context.clone(),
+        runtime: runtime.clone(),
+        intent: intent.clone(),
+        start_digest: verified.start_digest.clone(),
+        envelope: submit.envelope.clone(),
+        request_expires_at,
+        outcome: outcome.to_owned(),
+    };
+    let _join = tokio::spawn(async move {
+        finish_delayed_call_wake(delayed).await;
+    });
+    true
+}
+
+struct DelayedCallWake {
+    context: GatewayQuicContext,
+    runtime: GatewaySessionRuntime,
+    intent: ramflux_protocol::SignedCallIntentV1,
+    start_digest: String,
+    envelope: ramflux_protocol::Envelope,
+    request_expires_at: u64,
+    outcome: String,
+}
+
+async fn dispatch_delayed_offline_wake(delayed: &DelayedCallWake) {
+    if let Err(error) = dispatch_authenticated_offline_wake(
+        &delayed.context,
+        &delayed.runtime,
+        &delayed.envelope.target_delivery_id,
+        &delayed.envelope,
+    )
+    .await
+    {
+        tracing::warn!(%error, "delayed call wake dispatch failed");
+    }
+}
+
+async fn finish_delayed_call_wake(delayed: DelayedCallWake) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    loop {
+        let admitted = admit_signed_call(CallIntentRetry {
+            context: &delayed.context,
+            runtime: &delayed.runtime,
+            intent: &delayed.intent,
+            start_digest: &delayed.start_digest,
+            envelope_id: &delayed.envelope.envelope_id,
+            encrypted_payload: &delayed.envelope.encrypted_payload,
+            request_expires_at: delayed.request_expires_at,
+        })
+        .await;
+        match admitted {
+            Ok(ramflux_node_core::CallIntentEffect::Cancelled { wake_id: Some(wake_id) }) => {
+                dispatch_cancel_wake(
+                    &delayed.context,
+                    &delayed.intent,
+                    &delayed.start_digest,
+                    &wake_id,
+                    delayed.intent.body.target_epoch,
+                )
+                .await;
+                return;
+            }
+            Ok(_) => {
+                if delayed.outcome == "offline_queued" {
+                    dispatch_delayed_offline_wake(&delayed).await;
+                }
+                return;
+            }
+            Err(error) if call_authority_slow(&error) && std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "call intent admission failed");
+                return;
+            }
+        }
     }
 }
 
