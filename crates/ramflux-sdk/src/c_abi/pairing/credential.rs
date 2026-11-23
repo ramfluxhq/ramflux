@@ -31,7 +31,7 @@ pub type CredentialCallback = extern "C" fn(
     *mut usize,
     *mut c_void,
 ) -> i32;
-pub(super) struct CallbackProvider {
+pub(crate) struct CallbackProvider {
     root: PathBuf,
     callback: CredentialCallback,
     // The host's opaque pointer is never dereferenced by Rust. Its exposed provenance
@@ -54,7 +54,7 @@ fn invalid() -> SdkError {
     SdkError::PairingField("credential_callback")
 }
 impl CallbackProvider {
-    pub(super) fn new(root: PathBuf, callback: CredentialCallback, user_data: *mut c_void) -> Self {
+    pub(crate) fn new(root: PathBuf, callback: CredentialCallback, user_data: *mut c_void) -> Self {
         Self {
             root,
             callback,
@@ -65,7 +65,7 @@ impl CallbackProvider {
             serial: Mutex::new(()),
         }
     }
-    pub(super) fn stop_and_drain(&self) {
+    pub(crate) fn stop_and_drain(&self) {
         self.cancel();
         let mut active = self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         while *active != 0 {

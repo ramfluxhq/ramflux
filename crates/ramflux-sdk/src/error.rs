@@ -259,6 +259,12 @@ pub enum SdkError {
     /// (for example `desktop_required` or `creation_pairing_required`), never prose.
     #[error("agent creation refused: {0}")]
     AgentCreationRefused(&'static str),
+    /// `agent.delete` ran before PRX had retired the agent. Nothing was purged.
+    #[error("agent purge order: agent_not_retired")]
+    AgentNotRetired,
+    /// A PRX management call failed. The token is a closed code, never a response body.
+    #[error("PRX call failed: {0}")]
+    PrxCall(&'static str),
     #[error("invalid custody setup")]
     CustodySetupInvalid,
     /// A confirm check failed. The reason token names the check and never a secret.

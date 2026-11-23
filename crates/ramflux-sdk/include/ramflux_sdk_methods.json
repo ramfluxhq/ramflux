@@ -266,6 +266,15 @@
       "bridge_allowed": true,
       "capability": "account",
       "key_export": false,
+      "name": "account.remove_local",
+      "secret_input": true,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
       "name": "account.restore.install",
       "secret_input": true,
       "secret_output": false,
@@ -278,6 +287,15 @@
       "name": "account.restore.verify",
       "secret_input": true,
       "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "account.sign_out",
+      "secret_input": true,
+      "secret_output": true,
       "show_once": false
     },
     {
@@ -615,6 +633,87 @@
     },
     {
       "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.dispose",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.event",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.open",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.present",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.resume",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.slot",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.submit",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.suspend",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.update",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
       "capability": "contact",
       "key_export": false,
       "name": "contact.accept",
@@ -780,9 +879,9 @@
       "capability": "contact.verify.cas",
       "contract": "CONTACT-VERIFY-CAS-01",
       "key_export": false,
-      "message_descriptor_blake3": "d18147ce9e60d3ed594f27edcd4322b0c12dea72914d72eb912005c94cc146d5",
+      "message_descriptor_blake3": "88d7da63263e2132e048ee86d833bd12c95088c80e112cce03456bf00fd6dab9",
       "name": "contact.verify",
-      "product_pin": "5d9281898913f2104e2a077865979059bc3e3c51",
+      "product_pin": "679c753bdaa6bd31c8b5b493cfc4cbe8088a3537",
       "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
       "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,

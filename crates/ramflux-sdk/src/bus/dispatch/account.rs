@@ -28,7 +28,7 @@ pub(crate) async fn dispatch_account_bus_request(
     match request.method.as_str() {
         // Creation is owned by the exclusive secret ceremony on the connection.
         "account.create" => Err(SdkError::CustodySetupInvalid),
-        "account.list" => Ok(local_bus_ok(account_list(state))),
+        "account.list" => Ok(local_bus_ok(account_list(state)?)),
         "account.switch" => {
             let account_id = request_account_id(request)?.to_owned();
             if !state.accounts.contains_key(&account_id) {
@@ -47,13 +47,19 @@ pub(crate) async fn dispatch_account_bus_request(
             }
             Ok(local_bus_ok(serde_json::to_value(account.client.account_config()?)?))
         }
-        "account.lock" => {
+        "account.lock" | "account.sign_out" => {
             let account_id = request_account_id(request)?.to_owned();
             local_bus_account_lock(state, &account_id).await?;
-            Ok(local_bus_ok(serde_json::json!({
+            let mut body = serde_json::json!({
                 "local_account_id": account_id,
                 "locked": true,
-            })))
+            });
+            if request.method == "account.sign_out"
+                && let Some(map) = body.as_object_mut()
+            {
+                map.insert("signed_out".to_owned(), serde_json::Value::Bool(true));
+            }
+            Ok(local_bus_ok(body))
         }
         "account.unlock" => {
             let account_id = request_account_id(request)?.to_owned();
@@ -102,16 +108,39 @@ pub(crate) async fn dispatch_account_bus_request(
     }
 }
 
-fn account_list(state: &LocalBusDaemonState) -> serde_json::Value {
-    let mut details = Vec::with_capacity(state.accounts.len());
-    for (id, account) in &state.accounts {
-        details.push(open_account_detail(id, account));
+fn account_list(state: &LocalBusDaemonState) -> Result<serde_json::Value, SdkError> {
+    // On-disk and locked rows stay. An open session still publishes its live name and kind.
+    let mut body = super::super::account_local::daemon_list(state)?;
+    if let Some(details) = body.get_mut("account_details").and_then(|value| value.as_array_mut()) {
+        for detail in details {
+            let Some(id) = detail.get("id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let id = id.to_owned();
+            let Some(account) = state.accounts.get(&id) else {
+                continue;
+            };
+            let open = open_account_detail(&id, account);
+            let Some(map) = detail.as_object_mut() else {
+                continue;
+            };
+            if let Some(name) = open.get("display_name").and_then(serde_json::Value::as_str)
+                && !name.is_empty()
+            {
+                map.insert("display_name".to_owned(), serde_json::Value::String(name.to_owned()));
+            }
+            if let Some(kind) = open.get("kind") {
+                map.insert("kind".to_owned(), kind.clone());
+            }
+        }
     }
-    serde_json::json!({
-        "active_account_id": state.active_account_id,
-        "accounts": state.accounts.keys().cloned().collect::<Vec<_>>(),
-        "account_details": details,
-    })
+    if let Some(details) = body.get("account_details").and_then(serde_json::Value::as_array) {
+        let accounts = super::super::account_local::picker(details);
+        if let Some(map) = body.as_object_mut() {
+            map.insert("accounts".to_owned(), serde_json::Value::Array(accounts));
+        }
+    }
+    Ok(body)
 }
 
 fn open_account_detail(id: &str, account: &LocalBusAccountState) -> serde_json::Value {

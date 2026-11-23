@@ -79,10 +79,12 @@ impl<E: EngineProvider> AgentHost<E> {
     /// Rejects revoked/human accounts, unavailable snapshots, stream gaps and state I/O failures.
     pub async fn start(&mut self, bus: &mut impl AgentBus) -> Result<()> {
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
+        self.engine.publish_limits().await?;
         self.normalize_deferred()?;
         let topics = json!([
             "message.received",
             "group.message.received",
+            "message.updated",
             "conversation.changed",
             "group.changed",
             "device.changed",
@@ -169,6 +171,10 @@ impl<E: EngineProvider> AgentHost<E> {
         if matches!(event.method.as_str(), "device.changed" | "identity.device_branch.revoked") {
             participant::identity(bus, &mut self.state, &self.config.account_id).await?;
         }
+        if event.method == "message.updated" {
+            // An edit is not a new turn. Only a deleted row erases the PRX session.
+            self.erase_deleted_message(event).await?;
+        }
         if matches!(event.method.as_str(), "message.received" | "group.message.received") {
             self.message(bus, event, seq, now_ms).await?;
         }
@@ -192,6 +198,8 @@ impl<E: EngineProvider> AgentHost<E> {
         let conversation_id = participant::field(metadata, "conversation_id")?;
         let message_id = participant::field(metadata, "message_id")?;
         if metadata["deleted"] == true {
+            // One everyone-delete clears the whole PRX session, every agent included.
+            self.engine.erase_history(conversation_id).await?;
             return Ok(());
         }
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
@@ -237,6 +245,15 @@ impl<E: EngineProvider> AgentHost<E> {
             .await?;
         self.save_state()?;
         self.handle_engine_events(bus, events, seq, now_ms).await
+    }
+
+    async fn erase_deleted_message(&mut self, event: &LocalBusFrame) -> Result<()> {
+        let metadata = &event.body["message"];
+        if metadata["deleted"] != true {
+            return Ok(());
+        }
+        let conversation_id = participant::field(metadata, "conversation_id")?;
+        self.engine.erase_history(conversation_id).await
     }
 
     pub(crate) async fn handle_engine_events(
@@ -386,6 +403,7 @@ impl<E: EngineProvider> AgentHost<E> {
             .await?
             .is_none()
             {
+                self.engine.erase_history(&conversation_id).await?;
                 self.engine.cancel(&conversation_id).await?;
                 self.state.approvals.remove(&conversation_id);
             }
