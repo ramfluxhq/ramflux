@@ -33,7 +33,7 @@ pub(crate) use store::{
     export_agent_credentials, failed_setup, failed_setup_error, list_accounts,
     load_account_with_cache, load_data_account, pending_head_fence_blocks,
     reconcile_incomplete_markers, remove_custody_tree, reserve_pairing_account,
-    retarget_agent_custodian, with_anchor_ceremony,
+    retarget_agent_custodian, stored_custodian_id, with_anchor_ceremony,
 };
 pub(crate) use store::{finish_recovery, pending_restore};
 #[cfg(feature = "c-abi")]

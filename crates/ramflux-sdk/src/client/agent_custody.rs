@@ -102,7 +102,9 @@ fn roster_epoch(devices: &[ramflux_protocol::custody::Device], device_id: &str) 
 fn packet_broadcast(packet: &g::AgentHostPacket) -> bool {
     match packet.body.as_ref() {
         Some(g::agent_host_packet::Body::Metadata(_)) => true,
-        Some(g::agent_host_packet::Body::Custody(custody)) => activity_names_sender(packet, custody),
+        Some(g::agent_host_packet::Body::Custody(custody)) => {
+            activity_names_sender(packet, custody)
+        }
         _ => false,
     }
 }

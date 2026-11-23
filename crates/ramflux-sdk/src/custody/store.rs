@@ -1114,6 +1114,26 @@ pub(crate) fn retarget_agent_custodian(
     genesis::replace_public(&path, &ramflux_protocol::canonical_json_bytes(&stored)?)
 }
 
+/// Human id named by an agent account's stored authority.
+///
+/// A missing authority is `Ok(None)`. This read does not create a directory.
+///
+/// # Errors
+/// `CustodySetupInvalid` for an invalid id or a corrupt authority. I/O failures pass through.
+pub(crate) fn stored_custodian_id(
+    root: &Path,
+    account_id: &str,
+) -> Result<Option<String>, SdkError> {
+    valid_id(account_id)?;
+    let path = directory(root, account_id)?.join("authority.json");
+    match fs::File::open(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+        Ok(file) => drop(file),
+    }
+    Ok(read_stored(root, account_id)?.custodian_account_id)
+}
+
 fn read_stored(root: &Path, account_id: &str) -> Result<StoredAuthority, SdkError> {
     let path = directory(root, account_id)?.join("authority.json");
     let mut bytes = Vec::new();
