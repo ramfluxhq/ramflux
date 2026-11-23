@@ -534,6 +534,9 @@ impl AccountRuntime {
             }
         };
         super::sync_status::record_with_reason(account, state, now_unix_timestamp(), reason)?;
+        // The local pass may have adopted the new primary. A rebind staged before that
+        // adoption stays unqueued; this tick sends it, and later ticks retry until it is.
+        self.maintain_pending_rebinds();
         // Native admission may have completed on this sync pass after a local-only unlock.
         self.start_courier();
         let request = LocalBusFrame::request(

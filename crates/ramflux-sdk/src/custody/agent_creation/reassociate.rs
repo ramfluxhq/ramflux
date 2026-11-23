@@ -120,8 +120,10 @@ pub(crate) fn plan_reassociation(
 /// means there is no open journal for this account.
 ///
 /// # Errors
-/// A ceremony that no longer matches the installed marker, or a destination file that differs
-/// from the source, is `reassociation_conflict`. Nothing already copied is deleted on that path.
+/// A ceremony that no longer matches the installed marker, or a destination file that is
+/// missing, is `reassociation_conflict`. A destination file that exists but no longer matches
+/// the source is the repair plan written after the copy: the source stays, and the advance
+/// continues. Nothing already copied is deleted on the conflict path.
 pub(crate) fn advance_reassociation(root: &Path, human: &str, now: u64) -> Result<bool, SdkError> {
     release_completed_sources(root, human)?;
     let Some(mut journal) = open_journal_for(root, human)? else {
@@ -177,9 +179,10 @@ pub(crate) fn store_is_fenced(store: &AgentCreationStore) -> Result<bool, SdkErr
 ///
 /// An open journal is left untouched. A crash after the journal is marked complete resumes here:
 /// the finished journal is not an open one, and the copy is removed only when the bytes match.
+/// Bytes that diverged after the copy (the frozen repair plan) are left on the source.
 ///
 /// # Errors
-/// `reassociation_conflict` when a source file differs from the destination. I/O failures pass
+/// `reassociation_conflict` when a journaled destination file is missing. I/O failures pass
 /// through.
 pub(crate) fn release_completed_sources(root: &Path, human: &str) -> Result<(), SdkError> {
     custody::valid_id(human)?;
@@ -580,10 +583,12 @@ fn remove_source_files(root: &Path, journal: &Journal) -> Result<(), SdkError> {
         let source = read_file(&from)?;
         let destination = read_file(&to)?;
         match (&source, &destination) {
-            (None, Some(_)) => {}
             (Some(left), Some(right)) if left == right => {
                 fs::remove_file(&from).map_err(|_| SdkError::CustodyVaultUnavailable)?;
             }
+            // Source already gone, or `freeze_plans` rewrote the destination after the copy.
+            // That rewrite is the repair request. Failing here returns before `SendRebind`.
+            (None | Some(_), Some(_)) => {}
             _ => return Err(SdkError::AgentCreationRefused("reassociation_conflict")),
         }
     }

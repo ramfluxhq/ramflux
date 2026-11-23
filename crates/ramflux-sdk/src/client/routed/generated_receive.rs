@@ -224,11 +224,10 @@ impl RamfluxClient {
             return Ok(false);
         };
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-        let source_epoch = self
-            .account_db()?
-            .client_device_record(&source)?
-            .and_then(|record| record["device_epoch"].as_u64())
-            .ok_or_else(|| invalid("source epoch missing"))?;
+        // Missing directory metadata is the new device not landing in the local roster yet.
+        // `device_epoch_of` reads the born roster and, when that is also empty, stays pending
+        // instead of a permanent routing refusal.
+        let source_epoch = self.device_epoch_of(&source)?;
         if identity.conversation_id != routing.conversation_id
             || identity.author.as_ref().is_none_or(|author| {
                 author.account_anchor != source.root_commitment()
@@ -1116,11 +1115,7 @@ impl RamfluxClient {
             payload_hash: entry.envelope.payload_hash.clone(),
             expires_at: entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
             original_mode: entry.envelope.delivery_mode.clone().unwrap_or_else(|| "durable".into()),
-            source_epoch: self
-                .account_db()?
-                .client_device_record(source)?
-                .and_then(|record| record["device_epoch"].as_u64())
-                .ok_or_else(|| invalid("source epoch missing"))?,
+            source_epoch: self.device_epoch_of(source)?,
             original_route: serde_json::to_string(&opened.routing)?,
             outer_receipt_key: copy_id.to_owned(),
             source_evidence_copy: origin_copy,

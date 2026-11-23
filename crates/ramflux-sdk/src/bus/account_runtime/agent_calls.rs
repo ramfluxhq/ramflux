@@ -6,7 +6,8 @@
 use super::AccountRuntime;
 use crate::SdkError;
 use crate::custody::agent_creation::{
-    AgentCreationRecord, AgentCreationStore, AgentStep, commit_approved,
+    AgentCreationRecord, AgentCreationStore, AgentStep, commit_approved, fresh_plan_ready,
+    rebind_awaits_owner,
 };
 
 /// `AgentRecord.cleanup` after this call's node retirement succeeded.
@@ -30,6 +31,41 @@ impl AccountRuntime {
         let Ok(now) = super::super::custody_setup::now() else { return };
         if let Err(error) = account.client.broadcast_own_agent_records(dir, now) {
             tracing::debug!(%error, "agent record broadcast deferred");
+        }
+    }
+
+    /// Send a frozen rebind again. Unlock runs the advance once; a directory that does not yet
+    /// name the new primary leaves the copy unqueued. Later ticks retry until `stage_to` keeps
+    /// the row. The own-device attempt cap then bounds delivery. A request that is already
+    /// staged, decided, or not waiting on the owner is left alone.
+    pub(super) fn maintain_pending_rebinds(&self) {
+        let root = self.state.config.data_root.clone();
+        let directory = root.join("custody_accounts").join(&self.id).join("agent_creation");
+        if !directory.is_dir() {
+            return;
+        }
+        let Ok(now) = super::super::custody_setup::now() else {
+            return;
+        };
+        let Ok(store) = AgentCreationStore::open(root.clone(), &self.id) else {
+            return;
+        };
+        let Ok(entries) = store.rebind_entries() else {
+            return;
+        };
+        for entry in entries.into_iter().take(256) {
+            if entry.request_id.is_none() {
+                continue;
+            }
+            let ready = fresh_plan_ready(&root, &store, &entry.agent_account_id);
+            let waiting = rebind_awaits_owner(&store, &entry);
+            if ready.ok() != Some(true) || waiting.ok() != Some(true) {
+                continue;
+            }
+            let _ = self.agent_creation_step(AgentStep::SendRebind {
+                agent_account_id: entry.agent_account_id,
+                now,
+            });
         }
     }
     pub(super) fn agent_creation_step(
