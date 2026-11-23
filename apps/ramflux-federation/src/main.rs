@@ -33,6 +33,8 @@ mod state;
 mod test_certificates;
 #[cfg(test)]
 mod test_directories;
+#[cfg(unix)]
+mod username_directory;
 
 use std::sync::Arc;
 
@@ -77,6 +79,10 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
     if let Some(config) =
         ramflux_node_core::load_config_from_args_reporting(std::env::args().skip(1), service)?
     {
+        #[cfg(unix)]
+        if username_directory::start(&config)? {
+            return shutdown.wait_and_finalize(|| Ok(()));
+        }
         validate_migration_config(&config)?;
         let redb_path = ramflux_node_core::effective_redb_path(&config);
         let mut store = ramflux_node_core::FederationRedbStore::open(&redb_path)?;
@@ -93,30 +99,21 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             key_migration::export(&state, &path)?;
             return Ok(());
         }
-        let secret_path =
-            ramflux_node_core::environment::var_os("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE")
-                .ok_or_else(|| {
-                    ramflux_node_core::NodeCoreError::Unauthorized(
-                        "mounted federation secret required".into(),
-                    )
-                })?;
-        ramflux_node_core::NodeSecret::require_external_path(
-            std::path::Path::new(&secret_path),
-            std::path::Path::new(&redb_path),
-        )?;
-        let had_legacy_seed = state.node_signing_seed().is_some();
-        let node_signing_seed = federation_node_signing_seed(&mut state)?;
-        store.verify_mounted_signing_identity(node_signing_seed)?;
-        store.save_state(&state)?;
-        if had_legacy_seed {
-            store.compact_migrated_secrets()?;
-        }
+        let node_signing_seed = load_mounted_identity(&mut store, &mut state, &redb_path)?;
         tracing::info!(service, node_id = config.node_id, "federation trust store initialized");
         let state = Arc::new(SharedFederationTrustState::new(state));
         let store = Arc::new(store);
         let router = Arc::new(router_mesh_client(&config)?);
         let mesh_observability = Arc::new(FederationMeshObservability::default());
         let discovery = federation_discovery_surface(&config, node_signing_seed);
+        #[cfg(unix)]
+        username_directory::start_home(&config, Arc::clone(&router), &discovery).map_err(
+            |error| {
+                ramflux_node_core::NodeCoreError::InvalidConfiguration(format!(
+                    "username home: {error}"
+                ))
+            },
+        )?;
         start_outbound_spool_retry_loop(
             Arc::clone(&store),
             Arc::clone(&state),
@@ -215,6 +212,32 @@ fn start_itest_http(
             tracing::error!(%error, "federation itest HTTP listener stopped");
         }
     })
+}
+
+fn load_mounted_identity(
+    store: &mut ramflux_node_core::FederationRedbStore,
+    state: &mut ramflux_node_core::FederationTrustState,
+    redb_path: &std::path::Path,
+) -> Result<[u8; 32], ramflux_node_core::NodeCoreError> {
+    let secret_path =
+        ramflux_node_core::environment::var_os("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE")
+            .ok_or_else(|| {
+                ramflux_node_core::NodeCoreError::Unauthorized(
+                    "mounted federation secret required".into(),
+                )
+            })?;
+    ramflux_node_core::NodeSecret::require_external_path(
+        std::path::Path::new(&secret_path),
+        redb_path,
+    )?;
+    let had_legacy_seed = state.node_signing_seed().is_some();
+    let node_signing_seed = federation_node_signing_seed(state)?;
+    store.verify_mounted_signing_identity(node_signing_seed)?;
+    store.save_state(state)?;
+    if had_legacy_seed {
+        store.compact_migrated_secrets()?;
+    }
+    Ok(node_signing_seed)
 }
 
 fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {

@@ -353,7 +353,7 @@ mod tests {
             ));
         }
         assert!(negative_count == 224, "every signed field has a negative vector");
-        assert!(!wire::enabled());
+        assert!(wire::enabled(), "complete username CLI/service path is activated");
         Ok(())
     }
     #[test]
