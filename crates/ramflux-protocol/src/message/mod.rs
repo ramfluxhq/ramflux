@@ -30,6 +30,7 @@ mod scanner;
 pub mod self_sync;
 pub mod unsupported;
 pub mod validation;
+pub mod wake_eligibility;
 mod wire;
 pub use protojson::from_protojson;
 

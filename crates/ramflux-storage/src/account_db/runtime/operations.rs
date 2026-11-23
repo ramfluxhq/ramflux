@@ -118,6 +118,24 @@ impl AccountDb {
         transaction.commit()?;
         Ok(())
     }
+
+    /// Drops a reservation that has no stored response.
+    ///
+    /// A completed receipt is left in place. The caller uses this only after an
+    /// attempt returned before `complete_operation`, so the same key can be reserved
+    /// again inside that attempt.
+    ///
+    /// # Errors
+    /// Returns a storage error if the delete cannot be committed.
+    pub fn release_pending_operation(&self, id: &str) -> Result<(), StorageError> {
+        let transaction = self.connection.immediate_transaction()?;
+        let _removed = self.connection.execute(
+            "DELETE FROM runtime_operation WHERE operation_id=?1 AND response_json IS NULL",
+            params![id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

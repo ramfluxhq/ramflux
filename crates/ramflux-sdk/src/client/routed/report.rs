@@ -32,6 +32,8 @@ pub(crate) struct SealedRouted {
     pub packet: SdkDmEncryptedEnvelope,
     pub committed_a0: Option<Vec<u8>>,
     pub metadata_commitment: Option<String>,
+    /// Receipts, typing, presence, and call invites must not mint a message wake.
+    pub suppress_wake: bool,
 }
 
 impl SealedRouted {
