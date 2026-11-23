@@ -187,6 +187,22 @@ impl super::RouterCore {
     ) -> Result<Option<crate::DeviceManifestResponse>, NodeCoreError> {
         let agent_lifecycle = store.agent_lifecycle_label(anchor)?;
         let hosted_agents = hosted_directory(store, anchor)?;
+        if agent_lifecycle.as_deref() == Some("retired") {
+            // Retirement keeps the custody record. Its custodian primary no longer matches the
+            // recovered human, and that verification failure must not become an HTTP 500.
+            let (principal_id, principal_commitment, root_public_key) =
+                retired_identity(self, anchor);
+            return Ok(Some(crate::DeviceManifestResponse {
+                signed_device_set: None,
+                principal_id,
+                principal_commitment,
+                root_public_key,
+                devices: Vec::new(),
+                custody: None,
+                agent_lifecycle,
+                hosted_agents,
+            }));
+        }
         if let Some(native) = self.custody_manifest(anchor, now, store)? {
             return Ok(Some(crate::DeviceManifestResponse {
                 signed_device_set: None,
@@ -361,6 +377,23 @@ impl super::RouterCore {
             target_delivery_id: Some(identity.storage_key().into()),
             bundle: Some(request.bundle.clone()),
         }))
+    }
+}
+
+/// Identity fields of a retired agent, copied from the stored record without custodian checks.
+/// A retirement row whose record is already gone still returns the anchor and empty key fields.
+fn retired_identity(core: &super::RouterCore, anchor: &str) -> (String, String, String) {
+    let control = core.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match control.mvp1_identities.custody.records.get(anchor) {
+        Some(publication) => {
+            let body = &publication.record.body;
+            (
+                body.principal_id.clone(),
+                body.account_anchor.clone(),
+                body.master_certificate.body.master_public_key.clone(),
+            )
+        }
+        None => (String::new(), anchor.to_owned(), String::new()),
     }
 }
 

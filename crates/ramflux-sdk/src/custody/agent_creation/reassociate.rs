@@ -413,15 +413,38 @@ fn fresh_enroll(root: &Path, account_id: &str, anchor: &str) -> Result<Option<In
 }
 
 fn require_same_ceremony(root: &Path, journal: &Journal) -> Result<(), SdkError> {
-    let Some(install) =
-        fresh_enroll(root, &journal.destination_account_id, &journal.destination_anchor)?
+    let Some(install) = install_store::read_installed(root, &journal.destination_account_id)?
     else {
         return Err(SdkError::AgentCreationRefused("reassociation_conflict"));
     };
-    if install.operation_id != journal.operation_id || install.recipient_ref != journal.desktop {
-        return Err(SdkError::AgentCreationRefused("reassociation_conflict"));
+    if ceremony_continues(&install, journal) {
+        Ok(())
+    } else {
+        Err(SdkError::AgentCreationRefused("reassociation_conflict"))
     }
-    Ok(())
+}
+
+/// The enroll that opened the journal, or a later authority refresh of that same device.
+/// A directory refresh replaces the enroll marker; it must not strand a journal already in
+/// progress. A different device, anchor, or enroll operation still conflicts.
+fn ceremony_continues(install: &Install, journal: &Journal) -> bool {
+    let same_device = install.state == "installed"
+        && install.account_anchor == journal.destination_anchor
+        && install.recipient_ref.account_anchor == journal.desktop.account_anchor
+        && install.recipient_ref.device_id == journal.desktop.device_id
+        && install.full_transfer.is_none();
+    if !same_device {
+        return false;
+    }
+    match install.install_purpose.as_str() {
+        "enroll" => {
+            install.recipient_mode == "new"
+                && install.operation_id == journal.operation_id
+                && install.recipient_ref == journal.desktop
+        }
+        "authority_refresh" => install.recipient_mode == "existing",
+        _ => false,
+    }
 }
 
 fn human_rows(root: &Path) -> Result<Vec<HumanRow>, SdkError> {
@@ -667,10 +690,16 @@ fn newest_publishing(
 }
 
 fn freeze_plans(root: &Path, journal: &Journal, now: u64) -> Result<(), SdkError> {
-    let account = load_account(root, &journal.destination_account_id, now)?;
-    if local_desktop(&account)? != journal.desktop {
-        return Err(SdkError::AgentCreationRefused("reassociation_conflict"));
-    }
+    // A fresh enroll fences admission while a pending refresh exists. The signed record is
+    // already the authority the new plan must name, so the fence must not block the freeze.
+    let account = match load_account(root, &journal.destination_account_id, now) {
+        Ok(account) => account,
+        Err(SdkError::PairingCode("PublicationPending")) => {
+            load_data_account(root, &journal.destination_account_id, now)?
+        }
+        Err(error) => return Err(error),
+    };
+    let desktop = plan_desktop(&account, &journal.desktop)?;
     let human = account.record().clone();
     let store = AgentCreationStore::open(root, &journal.destination_account_id)?;
     for agent in &journal.agents {
@@ -683,7 +712,7 @@ fn freeze_plans(root: &Path, journal: &Journal, now: u64) -> Result<(), SdkError
         if entry.as_ref().is_some_and(|entry| entry.request_id.is_some()) {
             continue;
         }
-        if let Err(error) = prepare_rebind_request(&store, &human, &journal.desktop, agent, now)
+        if let Err(error) = prepare_rebind_request(&store, &human, &desktop, agent, now)
             && !matches!(
                 error,
                 SdkError::AgentCreationRefused(
@@ -695,6 +724,58 @@ fn freeze_plans(root: &Path, journal: &Journal, now: u64) -> Result<(), SdkError
         }
     }
     Ok(())
+}
+
+/// This installation's device when it is the desktop the journal was opened for.
+/// The epoch may move when the directory is refreshed; the plan names the record's current ref.
+fn plan_desktop(
+    account: &crate::custody::BornAccount,
+    journal_desktop: &DeviceRef,
+) -> Result<DeviceRef, SdkError> {
+    let current = local_desktop(account)?;
+    if current.device_id == journal_desktop.device_id
+        && current.account_anchor == journal_desktop.account_anchor
+    {
+        Ok(current)
+    } else {
+        Err(SdkError::AgentCreationRefused("reassociation_conflict"))
+    }
+}
+
+/// Primary named by the admitted record, or by the verified record when a finished repair
+/// still has an unsent plan and admission is fenced. Other accounts keep the fence.
+pub(crate) fn advance_primary(root: &Path, human: &str, now: u64) -> Result<DeviceRef, SdkError> {
+    match load_account(root, human, now) {
+        Ok(account) => Ok(account.record().body.master_certificate.body.primary_device_ref.clone()),
+        Err(SdkError::PairingCode("PublicationPending")) => {
+            if repair_plans_unsent(root, human)? {
+                let account = load_data_account(root, human, now)?;
+                Ok(account.record().body.master_certificate.body.primary_device_ref.clone())
+            } else {
+                Err(SdkError::PairingCode("PublicationPending"))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn repair_plans_unsent(root: &Path, human: &str) -> Result<bool, SdkError> {
+    let Some(journal) = load_journal(root, human)? else {
+        return Ok(false);
+    };
+    if journal.phase != Phase::Complete || journal.destination_account_id != human {
+        return Ok(false);
+    }
+    let store = AgentCreationStore::open(root, human)?;
+    for agent in &journal.agents {
+        let Some(entry) = store.load_rebind(agent)? else {
+            continue;
+        };
+        if rebind_awaits_owner(&store, &entry)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn newest_complete(

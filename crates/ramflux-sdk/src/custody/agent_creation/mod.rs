@@ -52,8 +52,8 @@ pub use machine::{
 pub(crate) use publish::complete_with_receipt;
 pub(crate) use publish::{AgentPublishing, first_action, load_publishing};
 pub(crate) use reassociate::{
-    advance_reassociation, fresh_plan_ready, plan_reassociation, rebind_awaits_owner,
-    release_completed_sources,
+    advance_primary, advance_reassociation, fresh_plan_ready, plan_reassociation,
+    rebind_awaits_owner, release_completed_sources,
 };
 pub use rebind::{RebindBinding, RebindEntry, paused_agent_binding};
 pub use rebind_commit::commit_rebind;

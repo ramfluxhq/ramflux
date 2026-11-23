@@ -8,9 +8,9 @@ use super::supervisor::Supervisor;
 use crate::SdkError;
 use crate::custody::agent_creation::{
     AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentStep, AgentSteps,
-    RebindBinding, advance_all, advance_reassociation, agent_account_id, fresh_plan_ready,
-    is_retired_agent_account, observe_primary, paused_agent_binding, plan_reassociation,
-    rebind_awaits_owner, release_completed_sources,
+    RebindBinding, advance_all, advance_primary, advance_reassociation, agent_account_id,
+    fresh_plan_ready, is_retired_agent_account, observe_primary, paused_agent_binding,
+    plan_reassociation, rebind_awaits_owner, release_completed_sources,
 };
 use crate::custody::{CustodyConnection, CustodyNetworkConfig};
 use crate::gateway::GatewayQuicEndpointConfig;
@@ -295,13 +295,7 @@ impl Supervisor {
         // Stage D2: observe the human's current primary first, so the rebind inventory is current
         // before any step runs. Complete agents are not advanced (advance only handles pending
         // requests), so the pause is recorded in the inventory and read by stage D3.
-        let primary = crate::custody::load_account(&root, human, now)?
-            .record()
-            .body
-            .master_certificate
-            .body
-            .primary_device_ref
-            .clone();
+        let primary = advance_primary(&root, human, now)?;
         // Stage D3: an agent whose binding moved to a new primary is paused. Its open session is
         // closed through the account.lock path, and the advance below never activates it.
         for entry in observe_primary(&store, &primary)? {
