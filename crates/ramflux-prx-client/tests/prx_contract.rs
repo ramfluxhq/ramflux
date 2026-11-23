@@ -1020,10 +1020,17 @@ async fn k_ac1a_agent_rows() {
             .put(&caps, &name, &config("ollama", "codellama", None, Tools::List(vec!["no_such_tool_zz".to_owned()]), true), &rev, false)
             .await;
         assert!(matches!(unknown_tool, Err(PrxError::Api { status: 400, code: ApiCode::AgentToolsInvalid, .. })), "K-AC1a-8: unknown tool: {unknown_tool:?}");
+        assert!(caps.has(AGENT_LIMITS_V1), "K-AC1a-8: agent_limits_v1 is advertised");
         let (status, text) = daemon
             .raw_authorized(reqwest::Method::PUT, &format!("/api/agents/{}", name.as_str()), Some(rev.as_str()), Some(serde_json::json!({"provider":"ollama","model":"m","autonomy":"full","tools":["*"],"enabled":true,"limits":{}})))
             .await;
-        assert_eq!((status, error_code(&text).as_deref()), (400, Some("field_invalid")), "K-AC1a-8: empty limits object");
+        assert_eq!((status, error_code(&text).as_deref()), (200, None), "K-AC1a-8: empty limits object");
+        let body: Value = serde_json::from_str(&text).expect("K-AC1a-8: readback is JSON");
+        assert!(
+            body.pointer("/config/limits/max_concurrent_turns").is_some_and(Value::is_null)
+                && body.pointer("/config/limits/max_cost_per_day_cents").is_some_and(Value::is_null),
+            "K-AC1a-8: empty limits stores no bound"
+        );
         report("K-AC1a-8");
 
         // K-AC1a-11 (with a second agent, which also covers the list shape and retirement later)
