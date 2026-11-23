@@ -119,6 +119,7 @@ fn conversation(
         // unattributed instead of interpreting them through today's directory aliases.
         value["participants"] = json!(participants);
     }
+    super::list_facts::attach_conversation(client, id, &mut value)?;
     Ok(value)
 }
 
@@ -134,6 +135,7 @@ fn group_row(client: &RamfluxClient, id: &str, saved: &Value) -> Result<Value, S
     group["member_routes"] = json!(super::super::group_delivery::directory(client, id)?);
     group["conversation_id"] = saved.get("conversation_id").cloned().unwrap_or(Value::Null);
     group["conversation_ids"] = saved.get("conversation_ids").cloned().unwrap_or_else(|| json!([]));
+    super::list_facts::attach_group(client, &mut group)?;
     Ok(group)
 }
 

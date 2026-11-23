@@ -182,7 +182,7 @@ async fn assert_discard(
     actor
         .request(command(
             "conversation.mute",
-            json!({"conversation_id":"discard-barrier","mute_until":i64::MAX}),
+            json!({"conversation_id":"discard-barrier","mute_until":1_700_000_000}),
         ))
         .await?;
     assert!(

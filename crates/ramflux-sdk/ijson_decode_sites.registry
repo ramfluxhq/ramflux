@@ -382,3 +382,7 @@ crates/ramflux-sdk/src/client/surface/generated.rs | rpc | 1 | D | admitted-befo
 crates/ramflux-sdk/src/client/surface/history_generated.rs | to_generated | 1 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
 crates/ramflux-sdk/src/client/surface/history_generated.rs | to_generated | 2 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
 crates/ramflux-sdk/src/prekey.rs | sdk_policy_gateway_request | 1 | C | admission=crates/ramflux-sdk/src/prekey.rs#sdk_policy_gateway_request#1
+crates/ramflux-sdk/src/bus/username_directory.rs | prepare | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/username_directory.rs | prepare | 2 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/username_directory/retry.rs | delivery_retry | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/username_directory/submission.rs | prepare | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure

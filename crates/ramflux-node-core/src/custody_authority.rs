@@ -10,6 +10,7 @@ use ramflux_protocol::custody::{DeviceSet, Envelope};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 
+pub(crate) mod agent_fence;
 pub(crate) mod agent_publish;
 pub(crate) use agent_publish::AgentPublishInput;
 mod directory;
@@ -71,6 +72,29 @@ fn reject(message: &str) -> NodeCoreError {
 }
 fn crypto(error: &ramflux_crypto::CryptoError) -> NodeCoreError {
     reject(&error.to_string())
+}
+
+/// A headless first birth or a changed custodian primary needs `AgentPublish`.
+/// An unchanged republish extends the lease only while the stored host pair is active.
+fn refuse_inoperable_headless(
+    registry: &IdentityRegistry,
+    store: &RouterRedbStore,
+    publication: &CustodyPublication,
+    now: u64,
+) -> Result<(), NodeCoreError> {
+    let body = &publication.record.body;
+    if body.principal_kind != ramflux_protocol::PrincipalKind::HeadlessAi {
+        return Ok(());
+    }
+    let anchor = &body.account_anchor;
+    let changed = registry.custody.records.get(anchor).is_none_or(|old| {
+        old.record.body.master_certificate.body.primary_device_ref
+            != body.master_certificate.body.primary_device_ref
+    });
+    if changed {
+        return Err(NodeCoreError::AgentAuthorizationRequired);
+    }
+    agent_fence::require_operable(registry, store, anchor, now)
 }
 impl IdentityRegistry {
     fn verify_custody(
@@ -213,16 +237,7 @@ impl RouterCore {
             &body.principal_id,
             &body.master_certificate.body.master_public_key,
         )?;
-        // A headless first birth or a changed custodian primary needs `AgentPublish`.
-        if body.principal_kind == ramflux_protocol::PrincipalKind::HeadlessAi {
-            let changed = registry.custody.records.get(anchor).is_none_or(|old| {
-                old.record.body.master_certificate.body.primary_device_ref
-                    != body.master_certificate.body.primary_device_ref
-            });
-            if changed {
-                return Err(NodeCoreError::AgentAuthorizationRequired);
-            }
-        }
+        refuse_inoperable_headless(registry, store, publication, now)?;
         let expected =
             registry.custody.records.get(anchor).map(|publication| CustodyAccountState {
                 publication: publication.clone(),

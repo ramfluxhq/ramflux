@@ -38,6 +38,29 @@ impl NativeGateway {
     ) -> Result<CustodyServerFrame> {
         dispatch(self, stream, connection, frame)
     }
+    /// Answers a live-session `GrantRenew` the way the gateway does: the router re-admits the
+    /// lease through `RenewNativeSession`; any refusal is `None` (the gateway then closes).
+    pub(super) fn renew(&self, connection: &str, session_id: &str) -> Result<Option<u64>> {
+        let now = crate::custody::network_now()?;
+        let frame = self.service.mesh(
+            &self.router,
+            &self.store,
+            CustodyMeshRequest::RenewNativeSession {
+                session_id: session_id.into(),
+                connection_id: connection.into(),
+            },
+            "ramflux-gateway",
+            now,
+        );
+        Ok(match frame {
+            CustodyServerFrame::SessionEstablished { session }
+                if session.session_id == session_id =>
+            {
+                Some(session.expires_at)
+            }
+            _ => None,
+        })
+    }
     pub(super) fn disconnect(&self, connection: &str) {
         self.service.disconnect("ramflux-gateway", connection);
     }

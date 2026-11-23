@@ -302,6 +302,7 @@ pub(super) fn runtime(
         ledger: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
         pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
+        username: crate::bus::account_runtime::username_calls::Calls::default(),
         transfers: super::uploads::Transfers::start(),
         readers: Arc::new(Mutex::new(None)),
         events,

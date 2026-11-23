@@ -194,6 +194,28 @@ impl CustodyConnection<GatewayTcpTlsStream> {
         complete_publication(connection.publishing.clone()).await?;
         Ok(connection)
     }
+
+    /// One proof of `AgentRetire`. The connection is not registered and opens no session.
+    /// # Errors
+    /// Connection and proof refusals. A frame other than `AgentRetired` for this anchor refuses.
+    pub(crate) async fn prove_agent_retirement(
+        config: CustodyNetworkConfig,
+        vault: Arc<dyn PrimaryVault>,
+        agent_anchor: String,
+    ) -> Result<(), SdkError> {
+        let mut connection = Box::pin(Self::connect_for_proof(config, vault)).await?;
+        let frame = connection
+            .prove(CustodyProofAction::AgentRetire { agent_anchor: agent_anchor.clone() })
+            .await?;
+        match frame {
+            CustodyServerFrame::AgentRetired { agent_anchor: retired }
+                if retired == agent_anchor =>
+            {
+                Ok(())
+            }
+            _ => Err(invalid()),
+        }
+    }
     async fn connect_inner(
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
@@ -763,6 +785,7 @@ fn proof_action_name(action: &CustodyProofAction) -> &'static str {
         CustodyProofAction::PrekeyStatus { .. } => "prekey_status",
         CustodyProofAction::RegisterUpdate { .. } => "register_update",
         CustodyProofAction::AgentPublish { .. } => "agent_publish",
+        CustodyProofAction::AgentRetire { .. } => "agent_retire",
     }
 }
 

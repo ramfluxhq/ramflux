@@ -170,6 +170,10 @@ pub struct DeviceManifestResponse {
     pub principal_commitment: String,
     pub root_public_key: String,
     pub devices: Vec<DeviceManifestEntry>,
+    /// `Some("retired")` when the anchor has an agent retirement row. Absent for every
+    /// other account, including a legacy manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_lifecycle: Option<String>,
 }
 
 /// Path prefix for `GET /mvp1/delivery-owner-epoch/{delivery_id}`.
@@ -199,6 +203,29 @@ pub struct DeviceAuthKeyResponse {
     pub branch_public_key: String,
     pub target_delivery_id: String,
     pub revoked: bool,
+}
+
+/// Same-node device-key read. Revocation carries no fabricated key material.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum DeviceAuthKeyLookup {
+    Refused { reason: DeviceAuthKeyRefusal },
+    Key(Option<Box<DeviceAuthKeyResponse>>),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceAuthKeyRefusal {
+    Revoked,
+}
+
+impl DeviceAuthKeyLookup {
+    pub(crate) fn into_key(self) -> Option<DeviceAuthKeyResponse> {
+        match self {
+            Self::Key(key) => key.map(|key| *key),
+            Self::Refused { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -865,7 +892,18 @@ impl IdentityRegistry {
             principal_commitment: principal_commitment.to_owned(),
             root_public_key: root_public_key.clone(),
             devices,
+            agent_lifecycle: None,
         })
+    }
+
+    pub(crate) fn device_auth_key_lookup(
+        &self,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<DeviceAuthKeyLookup, NodeCoreError> {
+        if self.custody_anchor_known(identity.root_commitment()) {
+            return self.custody_device_auth_key_lookup(identity, crate::now_unix_seconds());
+        }
+        Ok(DeviceAuthKeyLookup::Key(self.device_auth_key(identity).map(Box::new)))
     }
 
     /// A literal name cannot select device authority.

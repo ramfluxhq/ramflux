@@ -35,6 +35,7 @@ pub(crate) enum FrameKind {
     /// A capable `resync` event (negotiated sessions only).
     Resync,
     CallResolved,
+    GrantRenewed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +78,7 @@ impl FrameKind {
             GatewayServerFrame::EphemeralResult { .. } => Self::EphemeralResult,
             GatewayServerFrame::Close { .. } => Self::Close,
             GatewayServerFrame::CallResolved { .. } => Self::CallResolved,
+            GatewayServerFrame::GrantRenewed { .. } => Self::GrantRenewed,
         }
     }
 
@@ -115,7 +117,8 @@ impl FrameKind {
             | Self::Resume
             | Self::Nack
             | Self::Heartbeat
-            | Self::EphemeralResult => FrameClass::Reply,
+            | Self::EphemeralResult
+            | Self::GrantRenewed => FrameClass::Reply,
         }
     }
 }
@@ -138,6 +141,7 @@ pub(crate) enum ExpectedReply {
     VoiceLease,
     Attachment,
     PushRoute,
+    GrantRenew,
 }
 
 impl ExpectedReply {
@@ -170,6 +174,7 @@ impl ExpectedReply {
                     | FrameKind::PushRouteRefused
                     | FrameKind::PushRouteDeregistered
             ),
+            Self::GrantRenew => matches!(kind, FrameKind::GrantRenewed),
         }
     }
 }

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Renderer authority comes from the local creator registry, never a peer actor-kind claim.
+//! Renderer authority is a pinned current publication bound to the local record.
+//! A cached identity supplies the author's anchor and is not authority by itself.
 use crate::{RamfluxClient, SdkError};
 impl RamfluxClient {
-    /// Whether the local user's verified creator registry owns this agent principal.
+    /// Whether this owner currently publishes `author` as its own headless agent.
+    ///
     /// # Errors
-    /// Returns storage or custody verification errors. Missing authority fails closed.
+    /// Returns storage or clock errors. Missing or stale authority fails closed.
     pub fn surface_author_is_own_agent(&self, author: &str) -> Result<bool, SdkError> {
         let Some(owner) = &self.born_v3_account else {
             return Ok(false);
@@ -19,6 +21,8 @@ impl RamfluxClient {
         else {
             return Ok(false);
         };
-        owner.owns_surface_agent(author, anchor, crate::custody::network_now()?)
+        let now = crate::custody::network_now()?;
+        let publication_bound = self.verified_own_agent(anchor, author, now)?;
+        owner.owns_surface_agent(author, anchor, now, publication_bound)
     }
 }
