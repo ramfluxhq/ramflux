@@ -192,19 +192,23 @@ impl NotifyWakeVerifyBatcher {
         let mut senders = Vec::with_capacity(shard_count);
         for shard_id in 0..shard_count {
             let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
+            let runtime =
+                tokio::runtime::Builder::new_current_thread().enable_time().build().map_err(
+                    |source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()),
+                )?;
             let thread_auth = wake_auth.clone();
             let thread_store = Arc::clone(store);
             ramflux_node_core::spawn_service_worker(
                 format!("ramflux-notify-wake-verify-batcher-{shard_id}"),
                 move |_| {
-                    wake_verify_batcher_loop(
+                    runtime.block_on(wake_verify_batcher_loop(
                         &thread_auth,
                         &thread_store,
                         shard_id,
                         receiver,
                         batch_max,
                         window,
-                    );
+                    ));
                 },
             )
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
@@ -258,7 +262,7 @@ struct WakeVerifyRequest {
     reply: tokio::sync::oneshot::Sender<Result<(), ramflux_node_core::NodeCoreError>>,
 }
 
-fn wake_verify_batcher_loop(
+async fn wake_verify_batcher_loop(
     wake_auth: &NotifyWakeAuth,
     store: &ramflux_node_core::NotifyRedbStore,
     shard_id: usize,
@@ -267,28 +271,27 @@ fn wake_verify_batcher_loop(
     window: Duration,
 ) {
     let shutdown = ramflux_node_core::service_shutdown_token();
-    while !shutdown.is_cancelled() {
-        let first = match receiver.try_recv() {
-            Ok(request) => request,
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                std::thread::sleep(Duration::from_millis(10));
-                continue;
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+    loop {
+        let first = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            request = receiver.recv() => match request {
+                Some(request) => request,
+                None => break,
+            },
         };
         let mut batch = Vec::with_capacity(batch_max);
         batch.push(first);
-        let deadline = std::time::Instant::now() + window;
+        let deadline = tokio::time::Instant::now() + window;
         while batch.len() < batch_max {
-            match receiver.try_recv() {
-                Ok(request) => batch.push(request),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                    if std::time::Instant::now() >= deadline {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_micros(50));
-                }
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => break,
+                () = tokio::time::sleep_until(deadline) => break,
+                request = receiver.recv() => match request {
+                    Some(request) => batch.push(request),
+                    None => break,
+                },
             }
         }
         verify_and_enqueue_wake_batch(wake_auth, store, shard_id, batch);
