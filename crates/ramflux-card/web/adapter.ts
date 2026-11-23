@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 import type {HostPresentation,Strings} from "./settings";
-import {format} from "../library/format";
 // A fixed DOM mutation adapter. Rust in the dedicated worker owns card validation.
-export type HostSlot={component:string;request_ref:string;task_binding:string|null};
-type Node={key:string;kind:string;text:string;value:string;action:string|null;children:Node[];attrs?:{
-  required?:boolean;disabled?:boolean;error?:string;options?:{id:string;label:string}[];minimum?:number;maximum?:number;
-  progress?:number;status?:string;columns?:string[];rows?:string[][];
-  plot?:{kind:"line"|"bar";unit:string;scale:number;series:{label:string;points:{label:string;value:number}[]}[]};
-  style?:{color?:string;background?:string;border?:string;gap?:number;padding?:number}}};
+export type Token={session:number;signedVersion:number;editSeq:number;treeVersion:number;key:string};
+export type HostSlot={id:string;kind:"approval"|"modal"|"link_open"|"image";key:string;token:Token;[field:string]:unknown};
+type Node={key:string;kind:string;component_id:string;source_instance:string[];scope:string;parent_key:string|null;slot:{slot:string;position?:number};children:string[];attrs:Record<string,unknown>};
 type Mutation={op:"remove";key:string}|{op:"upsert";parent:string|null;index:number;node:Node};
-type Batch={previous_version:number;version:number;mutations:Mutation[];host_slots?:HostSlot[]};
-type Reply={session:number;version:number;value:Batch|{result:string;batch?:Batch;action?:string;fields?:unknown}|null};
+type Batch={schema:string;session:number;previous_version:number;version:number;signed_version:number;signed_hash:string;edit_seq:number;mutations:Mutation[];host_slots:HostSlot[]};
+type Reply={session:number;version:number;value:Batch|{result:string;batch?:Batch;action?:unknown}|null};
 type Edit={key:string;version:number};
 type Pending={edit?:Edit;presentation?:HostPresentation;resolve:(value:Reply|null)=>void;reject:(reason:Error)=>void};
 // Each WASM instance has its own Rust resident counter. Bound worker instances
@@ -38,12 +34,16 @@ export class CardView {
   private readonly view=++nextView;
   private session=0;
   private version=0;
+  private mountedSession=0;
+  private signedVersion=0;
+  private editSeq=0;
+  private readonly selected=new Map<string,number>();
   private disposed=false;
   private released=false;
   private readonly ready:Promise<void>;
   private rejectReady:(reason:Error)=>void=()=>{};
   constructor(private readonly root:HTMLElement, workerURL:URL,
-    private readonly intent:(action:string,fields:unknown)=>void,
+    private readonly intent:(action:unknown,fields?:unknown)=>void,
     private readonly hostSlots:(slots:readonly HostSlot[])=>void,
     private readonly failure:(message:string)=>void,private presentation:HostPresentation) {
     if(this.root.childElementCount)throw Error(this.ui("root_not_empty"));
@@ -82,7 +82,7 @@ export class CardView {
   }
   private async request(op:string,json?:string,edit?:Edit,presentation?:HostPresentation):Promise<Reply|null> {
     if(this.disposed||this.released)throw Error(this.ui("disposed"));
-    if(json!==undefined && (typeof json!=="string" || json.length>16384))throw Error(this.ui("input_bound"));
+    if(json!==undefined && (typeof json!=="string" || new TextEncoder().encode(json).length>32768))throw Error(this.ui("input_bound"));
     if(this.pending.size>=32)throw Error(this.ui("busy"));
     // Reserve before awaiting readiness so the pre-init queue is bounded too.
     const seq=++this.sequence;
@@ -97,7 +97,7 @@ export class CardView {
     if(message.error){const failure=Error(this.ui(message.error==="runtime_unavailable"?"runtime_unavailable":"content_unavailable"));pending.reject(failure);if(message.terminal)this.abort(failure);this.refreshButtons();return}
     try {
       if(message.disposed){pending.resolve(null);return}
-      if(typeof message.json!=="string"||message.json.length>131072)throw Error(this.ui("output_unavailable"));
+      if(typeof message.json!=="string"||new TextEncoder().encode(message.json).length>263168)throw Error(this.ui("output_unavailable"));
       const reply=JSON.parse(message.json) as Reply;
       if(pending.presentation)this.presentation=pending.presentation;
       this.session=reply.session;
@@ -105,7 +105,7 @@ export class CardView {
       if(value && "mutations" in value)this.apply(value);
       else if(value && "batch" in value && value.batch){
         this.apply(value.batch);
-        if(value.result==="submit" && value.action)this.intent(value.action,value.fields);
+        if(value.result==="submit" && value.action)this.intent(value.action);
       }
       if(value && "result" in value && value.result==="stale_dropped" && pending.edit){
         this.reconcile(pending.edit.key);this.localError(pending.edit.key,this.ui("stale_edit"));this.failure(this.ui("stale_edit"));
@@ -115,8 +115,8 @@ export class CardView {
   }
   private editsPending():boolean{return [...this.pending.values()].some(pending=>pending.edit!==undefined)}
   private refreshButtons():void{
-    for(const [key,node] of this.displayed)if(node.kind==="submit"){
-      const button=this.nodes.get(key)?.querySelector("button");if(button)button.disabled=!!node.attrs?.disabled||this.editsPending()||this.invalidDraft.size>0;
+    for(const [key,node] of this.displayed)if(node.kind==="Button"){
+      const button=this.nodes.get(key)?.querySelector("button");if(button)button.disabled=!!node.attrs.disabled||this.editsPending()||this.invalidDraft.size>0;
     }
   }
   private reconcile(key:string):void{const element=this.nodes.get(key),shown=this.displayed.get(key);if(element&&shown)this.draw(element,shown)}
@@ -125,10 +125,10 @@ export class CardView {
     content.querySelector("[role=alert]")?.remove();const alert=document.createElement("p");alert.textContent=message;alert.setAttribute("role","alert");
     alert.id="card-error-"+this.view+"-"+key;content.append(alert);control.setAttribute("aria-invalid","true");control.setAttribute("aria-describedby",alert.id);
   }
-  private event(key:string,event:{kind:string;value?:unknown}):void {
-    if(event.kind==="submit"&&(this.editsPending()||this.invalidDraft.size)){this.failure(this.ui("busy"));return}
-    const edit=event.kind==="submit"?undefined:{key,version:this.version};
-    void this.request("event",JSON.stringify({token:{session:this.session,version:this.version,key},event}),edit)
+  private event(key:string,event:{kind:string;value?:unknown;index?:number}):void {
+    if(event.kind==="activate"&&(this.editsPending()||this.invalidDraft.size)){this.failure(this.ui("busy"));return}
+    const edit=event.kind==="activate"?undefined:{key,version:this.version};
+    void this.request("event",JSON.stringify({token:{session:this.session,signedVersion:this.signedVersion,editSeq:this.editSeq,treeVersion:this.version,key},event}),edit)
       .catch(error=>{this.reconcile(key);this.failure(error instanceof Error?error.message:this.ui("content_unavailable"))}).finally(()=>this.refreshButtons());
     this.refreshButtons();
   }
@@ -137,107 +137,83 @@ export class CardView {
     for(const [other,child] of this.nodes)if(element.contains(child)){this.nodes.delete(other);this.displayed.delete(other);this.invalidDraft.delete(other)}
     element.remove();
   }
+
   private apply(batch:Batch):void {
-    if(batch.previous_version!==this.version)throw Error(this.ui("resync"));
+    const reset=batch.previous_version===0&&batch.session!==this.mountedSession;
+    if(batch.schema!=="ramflux.card.mutations.v1"||(!reset&&(batch.session!==this.mountedSession||batch.previous_version!==this.version)))throw Error(this.ui("resync"));
+    const next=new Map<string,Node>();if(!reset)for(const [key,node]of this.displayed)next.set(key,{...node,children:[...node.children]});
+    // Stage the complete batch and edges before modifying mounted DOM or callbacks.
     for(const mutation of batch.mutations){
-      if(mutation.op==="remove"){this.drop(mutation.key);continue}
-      const {node,index,parent}=mutation;
-      let element=this.nodes.get(node.key);
-      if(element?.dataset.kind!==node.kind){this.drop(node.key);element=undefined}
-      if(!element){element=document.createElement("div");element.dataset.kind=node.kind;element.dataset.cardKey=node.key;this.nodes.set(node.key,element)}
-      this.draw(element,node);
-      const target=parent===null?this.root:this.nodes.get(parent);
-      if(!target)throw Error(this.ui("parent_unavailable"));
-      const siblings=Array.from(target.children).filter(child=>(child as HTMLElement).dataset.cardKey!==undefined);
-      const before=siblings[index]??null;if(before!==element)target.insertBefore(element,before);
+      const key=mutation.op==="remove"?mutation.key:mutation.node.key;
+      for(const node of next.values())node.children=node.children.filter(child=>child!==key);
+      if(mutation.op==="remove"){next.delete(key);continue}
+      const existing=next.get(key),node={...mutation.node,children:existing?.children??[]};next.set(key,node);
+      if(mutation.parent!==null){const parent=next.get(mutation.parent);if(!parent||mutation.index>parent.children.length)throw Error(this.ui("parent_unavailable"));parent.children.splice(mutation.index,0,key)}
     }
-    this.version=batch.version;this.hostSlots(batch.host_slots??[]);
-  }
-  private draw(element:HTMLElement,node:Node):void {
-    this.displayed.set(node.key,node);
-    this.invalidDraft.delete(node.key);
+    for(const node of next.values())if(node.children.some(key=>!next.has(key)))throw Error(this.ui("parent_unavailable"));
+    const active=document.activeElement as HTMLInputElement|null,focused=active?.dataset.controlKey;
+    const start=active?.selectionStart,end=active?.selectionEnd;
+    for(const key of this.selected.keys())if(!next.has(key))this.selected.delete(key);
+    const prior=new Map(this.displayed);this.displayed.clear();for(const [key,node]of next)this.displayed.set(key,node);
+    const fragment=document.createDocumentFragment();this.nodes.clear();
+    try{for(const node of next.values())if(node.parent_key===null)fragment.append(this.element(node))}
+    catch(error){this.displayed.clear();for(const [key,node]of prior)this.displayed.set(key,node);throw error}
+    this.root.replaceChildren(fragment);this.version=batch.version;this.mountedSession=batch.session;
+    this.signedVersion=batch.signed_version;this.editSeq=batch.edit_seq;
     this.root.lang=this.presentation.locale;this.root.dir=this.presentation.direction;
-    this.root.style.color=this.presentation.tokens.text;this.root.style.backgroundColor=this.presentation.tokens.surface_white;
-    this.root.style.fontFamily=this.presentation.tokens.font;this.root.style.fontSize=this.presentation.tokens.size_body+"px";
-    // Content and native child mounts live in separate containers; no HTML parsing.
-    let content=element.querySelector<HTMLElement>(":scope > [data-content]");
-    if(!content){content=document.createElement("div");content.dataset.content="";element.prepend(content)}
-    const a=node.attrs??{};
-    element.style.color=a.style?.color??"";element.style.backgroundColor=a.style?.background??"";
-    element.style.borderColor=a.style?.border??"";element.style.padding=(a.style?.padding??0)+"px";
-    element.style.display="flex";element.style.flexDirection="column";element.style.gap=(a.style?.gap??this.presentation.tokens.gap)+"px";
-    element.style.minWidth="0";element.style.overflowWrap="anywhere";
-    const text=(tag:string,value:string)=>{const child=document.createElement(tag);child.textContent=value;content?.append(child);return child};
-    if(["text_field","number","select","toggle"].includes(node.kind)){
-      this.control(content,node);return;
-    }
-    content.replaceChildren();
-    if(node.kind==="submit"){const button=document.createElement("button");button.type="button";button.textContent=node.text;button.disabled=a.disabled??false;button.style.color=this.presentation.tokens.on_primary;button.style.backgroundColor=this.presentation.tokens.primary;button.style.borderRadius=this.presentation.tokens.radius_button+"px";button.style.padding=this.presentation.tokens.gap/2+"px";button.onclick=()=>this.event(node.key,{kind:"submit"});content.append(button);return}
-    if(node.text)text(node.kind==="text"?"p":"h3",node.text);
-    if(node.kind==="progress"&&a.progress!==undefined){const progress=document.createElement("progress");progress.max=100;progress.value=a.progress;progress.setAttribute("aria-label",node.text);content.append(progress)}
-    if(node.kind==="table"){
-      const table=document.createElement("table");const caption=document.createElement("caption");caption.textContent=node.text;table.append(caption);
-      const head=document.createElement("thead");const header=document.createElement("tr");for(const value of a.columns??[]){const cell=document.createElement("th");cell.scope="col";cell.textContent=value;header.append(cell)}head.append(header);table.append(head);
-      const body=document.createElement("tbody");for(const row of a.rows??[]){const tr=document.createElement("tr");for(const value of row){const td=document.createElement("td");td.textContent=value;tr.append(td)}body.append(tr)}table.append(body);content.append(table);
-    }
-    if(node.kind==="chart"&&a.plot)this.plot(content,a.plot);
-    if(a.status){element.setAttribute("role","group");element.setAttribute("aria-label",format(this.ui("status_accessibility"),[["text",node.text],["status",a.status]]));}else element.removeAttribute("aria-label");
-    if(node.kind==="approval_info")element.setAttribute("role","group");
-    if(node.kind==="approval_info")element.setAttribute("aria-label",this.ui("approval_untrusted"));
+    const t=this.presentation.tokens;this.root.style.color=t.text;this.root.style.backgroundColor=t.surface_white;this.root.style.fontFamily=t.font;this.root.style.fontSize=t.size_body+"px";
+    if(focused){const input=Array.from(this.root.querySelectorAll<HTMLInputElement>("[data-control-key]")).find(input=>input.dataset.controlKey===focused);input?.focus();if(input?.type==="text"&&start!==null&&end!==null)input.setSelectionRange(start??0,end??0)}
+    this.hostSlots(batch.host_slots);
   }
-  private control(content:HTMLElement,node:Node):void {
-    const a=node.attrs??{};
-    let label=content.querySelector("label");
-    let control=content.querySelector<HTMLInputElement|HTMLSelectElement>("input,select");
-    if(!label||!control){
-      content.replaceChildren();label=document.createElement("label");label.append(document.createElement("span"));
-      control=node.kind==="select"?document.createElement("select"):document.createElement("input");
-      if(control instanceof HTMLInputElement)control.type=node.kind==="toggle"?"checkbox":node.kind==="number"?"number":"text";
-      const native=control;
-      native.addEventListener("change",()=>{
-        if(node.kind==="number"){
-          const value=Number(native.value);
-          if(native.value.trim()===""||!Number.isSafeInteger(value)){this.invalidDraft.add(node.key);this.localError(node.key,this.ui("form_number"));this.refreshButtons();return}
-          this.invalidDraft.delete(node.key);this.event(node.key,{kind:"number",value});return;
-        }
-        this.invalidDraft.delete(node.key);
-        this.event(node.key,native instanceof HTMLInputElement&&node.kind==="toggle"?{kind:"toggle",value:native.checked}:{kind:node.kind==="select"?"select":"text",value:native.value});
-      });
-      label.append(native);content.append(label);
+  private element(node:Node):HTMLElement{const e=document.createElement("div");e.dataset.cardKey=node.key;e.dataset.kind=node.kind;this.nodes.set(node.key,e);this.draw(e,node);return e}
+  private label(node:Node):string{const a=node.attrs;return typeof a.text==="string"?a.text:typeof a.label==="string"?a.label:typeof a.title==="string"?a.title:""}
+  private draw(element:HTMLElement,node:Node):void {
+    const a=node.attrs,t=this.presentation.tokens;element.replaceChildren();
+    element.style.display="flex";element.style.flexDirection=node.kind==="Row"?"row":"column";element.style.gap=t.gap+"px";
+    const text=(value:string)=>{const e=document.createElement("span");e.textContent=value;element.append(e)};
+    const label=this.label(node);if(label)text(label);
+    if(["TextField","CheckBox","ChoicePicker","Slider","DateTimeInput"].includes(node.kind))this.control(element,node);
+    if(node.kind==="Tabs"){
+      const tabs=a.tabs as {title:string}[],prior=this.selected.get(node.key)??0,selected=prior<tabs.length?prior:0;this.selected.set(node.key,selected);
+      const list=document.createElement("div");list.setAttribute("role","tablist");
+      tabs.forEach((tab,index)=>{const button=document.createElement("button");button.type="button";button.textContent=tab.title;button.setAttribute("role","tab");button.setAttribute("aria-selected",(index===selected).toString());button.onclick=()=>{if(this.pending.size){this.failure(this.ui("busy"));return}this.selected.set(node.key,index);this.event(node.key,{kind:"select_tab",index})};list.append(button)});element.append(list);
+      const child=this.displayed.get(node.children[selected]??"");if(child)element.append(this.element(child));return;
     }
-    const caption=label.querySelector("span");if(caption)caption.textContent=node.text;
-    if(control instanceof HTMLInputElement){
-      if(control.value!==node.value)control.value=node.value;
-      control.checked=node.value==="true";control.min=a.minimum?.toString()??"";control.max=a.maximum?.toString()??"";
+    if(node.kind==="Modal")return; // Host slot owns its trigger, sheet and content mounting.
+    if(node.kind==="Image")text(typeof a.description==="string"?a.description:this.ui("content_unavailable"));
+    if(node.kind==="Approval")text(typeof a.explanation==="string"?a.explanation:"");
+    if(node.kind==="Icon")text(typeof a.name==="string"?a.name:"");
+    if(node.kind==="Divider")element.append(document.createElement("hr"));
+    if(node.kind==="Table")this.table(element,a.columns as {label:string}[],(a.rows as {cells:unknown[]}[]).map(row=>row.cells));
+    if(node.kind==="Chart"){
+      const rows:unknown[][]=[];for(const series of a.series as {label:string;points:{label:string;value:number}[]}[])for(const point of series.points)rows.push([series.label,point.label,point.value+"/"+a.scale+" "+a.unit]);
+      this.table(element,[{label:this.ui("chart_label")},{label:this.ui("chart_label")},{label:typeof a.unit==="string"?a.unit:""}],rows);
+    }
+    if(node.kind==="Task"){
+      text(typeof a.status==="string"?a.status:"");for(const step of a.steps as {text:string;status:string}[])text(step.text+" "+step.status);
+      if(typeof a.progress==="number"){const progress=document.createElement("progress");progress.max=100;progress.value=a.progress;element.append(progress)}
+    }
+    let target=element;if(node.kind==="Button"){const button=document.createElement("button");button.type="button";button.disabled=a.disabled===true;button.onclick=()=>this.event(node.key,{kind:"activate"});button.style.color=t.on_primary;button.style.backgroundColor=t.primary;element.append(button);target=button}
+    for(const key of node.children){const child=this.displayed.get(key);if(child)target.append(this.element(child))}
+    const accessibility=a.accessibility as {label?:string;hidden?:boolean;live?:string}|undefined;
+    if(accessibility?.label)element.setAttribute("aria-label",accessibility.label);if(accessibility?.hidden)element.setAttribute("aria-hidden","true");if(accessibility?.live)element.setAttribute("aria-live",accessibility.live);
+  }
+  private control(element:HTMLElement,node:Node):void {
+    const a=node.attrs,value=a.value;let control:HTMLInputElement|HTMLSelectElement;
+    if(node.kind==="ChoicePicker"){
+      const select=document.createElement("select");select.multiple=true;
+      for(const choice of a.options as {label:string;value:string}[]){const option=document.createElement("option");option.textContent=choice.label;option.value=choice.value;option.selected=Array.isArray(value)&&value.includes(choice.value);select.append(option)}control=select;
     }else{
-      const choices=a.options??[];
-      if(control.options.length!==choices.length||choices.some((option,index)=>control.options[index]?.value!==option.id||control.options[index]?.textContent!==option.label)){
-        control.replaceChildren();for(const option of choices){const child=document.createElement("option");child.value=option.id;child.textContent=option.label;control.append(child)}
-      }
-      control.value=node.value;
+      const input=document.createElement("input");input.type=node.kind==="CheckBox"?"checkbox":node.kind==="Slider"?"range":node.kind==="DateTimeInput"?(a.enableTime===true?"datetime-local":"date"):"text";
+      if(node.kind==="CheckBox")input.checked=value===true;else input.value=typeof value==="string"||typeof value==="number"?value.toString():"";
+      if(typeof a.min==="number"||typeof a.min==="string")input.min=a.min.toString();if(typeof a.max==="number"||typeof a.max==="string")input.max=a.max.toString();control=input;
     }
-    control.style.color=this.presentation.tokens.text;control.style.backgroundColor=this.presentation.tokens.surface_white;
-    control.style.borderColor=this.presentation.tokens.secondary;control.style.borderRadius=this.presentation.tokens.radius_input+"px";
-    control.style.fontFamily=this.presentation.tokens.font;control.style.fontSize=this.presentation.tokens.size_body+"px";
-    control.style.accentColor=this.presentation.tokens.primary;
-    control.disabled=a.disabled??false;control.required=a.required??false;control.setAttribute("aria-invalid",a.error?"true":"false");
-    content.querySelector("[role=alert]")?.remove();
-    if(a.error){const error=document.createElement("p");error.textContent=a.error;error.id="card-error-"+this.view+"-"+this.session+"-"+node.key;error.setAttribute("role","alert");content.append(error);control.setAttribute("aria-describedby",error.id)}
-    else control.removeAttribute("aria-describedby");
+    control.dataset.controlKey=node.key;control.disabled=a.disabled===true;control.setAttribute("aria-label",this.label(node));
+    control.onchange=()=>{const value=control instanceof HTMLSelectElement?Array.from(control.selectedOptions).map(option=>option.value):control.type==="checkbox"?control.checked:control.type==="range"?Number(control.value):control.value;this.event(node.key,{kind:"input",value})};element.append(control);
+    for(const message of a.errors as string[]??[]){const e=document.createElement("p");e.setAttribute("role","alert");e.textContent=message;element.append(e)}
   }
-  private plot(content:HTMLElement,plot:NonNullable<NonNullable<Node["attrs"]>["plot"]>):void {
-    const canvas=document.createElement("canvas");const width=this.presentation.tokens.column_max,height=this.presentation.tokens.gap*10,pad=this.presentation.tokens.gap;canvas.width=width;canvas.height=height;canvas.style.width="100%";canvas.style.maxWidth=width+"px";
-    canvas.setAttribute("role","img");canvas.setAttribute("aria-label",this.ui(plot.kind==="line"?"chart_line":"chart_bar"));
-    const ctx=canvas.getContext("2d");if(!ctx)return;
-    const values=plot.series.flatMap(series=>series.points.map(point=>point.value));
-    const low=Math.min(0,...values),high=Math.max(0,...values),range=high-low||1;
-    const y=(v:number)=>height-pad-(v-low)/range*(height-pad*2);
-    plot.series.forEach((series,seriesIndex)=>{
-      ctx.strokeStyle=seriesIndex===0?this.presentation.tokens.chart_1:this.presentation.tokens.chart_2;ctx.fillStyle=ctx.strokeStyle;ctx.globalAlpha=seriesIndex===0?1:0.6;ctx.setLineDash(seriesIndex===0?[]:[pad/2,pad/4]);ctx.lineWidth=Math.max(1,this.presentation.tokens.gap/8);ctx.beginPath();
-      series.points.forEach((point,index)=>{const x=pad+index*(width-pad*2)/Math.max(1,series.points.length-1);
-        if(plot.kind==="bar")ctx.fillRect(pad+index*(width-pad*2)/series.points.length+seriesIndex*pad,Math.min(y(0),y(point.value)),pad/2,Math.max(1,Math.abs(y(0)-y(point.value))));
-        else if(index===0)ctx.moveTo(x,y(point.value));else ctx.lineTo(x,y(point.value));
-      });if(plot.kind==="line")ctx.stroke();
-    });content.append(canvas);
+  private table(element:HTMLElement,columns:{label:string}[],rows:unknown[][]):void{
+    const table=document.createElement("table"),head=document.createElement("tr");for(const column of columns){const cell=document.createElement("th");cell.scope="col";cell.textContent=column.label;head.append(cell)}table.append(head);
+    for(const row of rows){const tr=document.createElement("tr");for(const value of row){const cell=document.createElement("td");cell.textContent=typeof value==="string"?value:JSON.stringify(value);tr.append(cell)}table.append(tr)}element.append(table);
   }
 }

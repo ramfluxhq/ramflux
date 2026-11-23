@@ -27,6 +27,9 @@ pub(crate) enum SurfaceAction {
         author: Option<String>,
         #[arg(long, allow_hyphen_values = true)]
         action_id: Option<String>,
+        /// Print the shared card resolver's view of the authorized snapshot (read-only).
+        #[arg(long)]
+        resolved: bool,
     },
     List {
         #[arg(allow_hyphen_values = true, long)]

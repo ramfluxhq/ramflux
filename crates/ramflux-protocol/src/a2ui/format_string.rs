@@ -4,7 +4,7 @@
 //! Parse formatString programs so indirect reads and nested functions obey the check closure.
 use super::{MAX_DELTA_BYTES, Reject};
 use serde_json::{Map, Value};
-use std::{iter::Peekable, str::CharIndices};
+use std::{cell::RefCell, collections::BTreeMap, iter::Peekable, rc::Rc, str::CharIndices};
 struct Parser<'a> {
     source: &'a str,
     chars: Peekable<CharIndices<'a>>,
@@ -147,6 +147,52 @@ impl<'a> Parser<'a> {
         }
     }
 }
+// Cache syntax only: model reads, locale, depth and step accounting still run
+// on every evaluation. Ownership is one Steps/resolver operation, so drafts and
+// snapshots never retain results from an earlier model or authorization state.
+#[derive(Default)]
+pub(super) struct Programs {
+    cache: RefCell<ProgramCache>,
+}
+#[derive(Default)]
+struct ProgramCache {
+    bytes: usize,
+    scanned: usize,
+    entries: BTreeMap<String, Rc<Vec<Part>>>,
+}
+impl Programs {
+    fn parse(&self, program: &str) -> Result<Rc<Vec<Part>>, Reject> {
+        {
+            let mut cache = self.cache.borrow_mut();
+            if let Some(parts) = cache.entries.get(program) {
+                return Ok(Rc::clone(parts));
+            }
+            // Each source byte may be parsed at 17 expression levels. Bound
+            // cache misses too, so distinct computed programs cannot turn the
+            // expression-step allowance into repeated large source scans.
+            let scanned = cache.scanned.saturating_add(program.len());
+            let limit = 17 * (super::graph::MAX_EXPANDED_BYTES + super::MAX_MODEL_BYTES);
+            if scanned > limit {
+                return Err(Reject::Limit);
+            }
+            cache.scanned = scanned;
+        }
+        let parts = Rc::new(parse(program)?);
+        let mut cache = self.cache.borrow_mut();
+        // Retain at most 256 programs / 64 KiB of source and its parsed syntax.
+        // Reclaim cold entries rather than letting them exclude later hot ones.
+        // The cumulative scan allowance survives every cache reset.
+        if cache.entries.len() == super::graph::MAX_INSTANCES
+            || cache.bytes.saturating_add(program.len()) > super::graph::MAX_EXPANDED_BYTES
+        {
+            cache.entries.clear();
+            cache.bytes = 0;
+        }
+        cache.bytes += program.len();
+        cache.entries.insert(program.to_owned(), Rc::clone(&parts));
+        Ok(parts)
+    }
+}
 enum Part {
     Text(String),
     Expression(Value),
@@ -195,18 +241,30 @@ pub(super) fn expressions(program: &str) -> Result<Vec<Value>, Reject> {
         .filter_map(|part| if let Part::Expression(value) = part { Some(value) } else { None })
         .collect())
 }
-pub(super) fn render(
+pub(super) fn render_display(
     program: &str,
     model: &Value,
     prefix: &str,
     depth: usize,
+    locale: Option<super::DisplayLocale>,
+    steps: &super::resource::Steps,
 ) -> Result<String, Reject> {
+    steps.take()?;
     let mut out = String::new();
-    for part in parse(program)? {
+    let parts = steps.programs.parse(program)?;
+    for part in parts.iter() {
+        steps.take()?;
         let text = match part {
-            Part::Text(text) => text,
+            Part::Text(text) => text.clone(),
             Part::Expression(expression) => {
-                let value = super::expression::evaluate(&expression, model, prefix, depth + 1)?;
+                let value = super::expression::evaluate_display(
+                    expression,
+                    model,
+                    prefix,
+                    depth + 1,
+                    locale,
+                    steps,
+                )?;
                 match value {
                     Value::Null => String::new(),
                     Value::String(text) => text,

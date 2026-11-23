@@ -2,14 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 //! Action frames and the author-literal/raw-owned-input egress grammar.
+use super::graph::validate_input;
+use super::resolve::Resolution;
 use super::wire::{canonical, decode_canonical, validate_identifier, validate_metadata};
 use super::{
     ACTION_SCHEMA, JsonPointer, MAX_CONTEXT_ENTRIES, MAX_DELTA_BYTES, MAX_STATE_BYTES, Metadata,
-    Reject, SurfaceSnapshot, SurfaceState,
+    Reject, ResolvedActionKind, ResolvedContextSource, SurfaceSnapshot, SurfaceState,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -186,590 +187,12 @@ impl ActionFrame {
         Ok(bytes)
     }
 }
-#[derive(Clone)]
-struct Instance<'a> {
-    component: &'a Value,
-    source: Vec<String>,
-    prefix: String,
-    scope: String,
-}
-struct Graph<'a> {
-    instances: Vec<Instance<'a>>,
-    reached: BTreeSet<String>,
-}
-#[derive(Clone, Copy)]
-struct WalkFrame<'a> {
-    name: &'a str,
-    source: &'a [String],
-    prefix: &'a str,
-    scope: &'a str,
-    depth: usize,
-    in_modal: bool,
-}
-struct WalkContext<'a, 'b> {
-    definitions: &'b BTreeMap<&'a str, &'a Value>,
-    snapshot: &'a SurfaceSnapshot,
-}
-struct Input<'a> {
-    instance: Instance<'a>,
-    pointer: JsonPointer,
-}
-fn kind(component: &Value) -> Result<&str, Reject> {
-    component.get("component").and_then(Value::as_str).ok_or(Reject::Encoding)
-}
-fn id(component: &Value) -> Result<&str, Reject> {
-    component.get("id").and_then(Value::as_str).ok_or(Reject::Encoding)
-}
-fn input(kind: &str) -> bool {
-    matches!(kind, "TextField" | "CheckBox" | "Slider" | "ChoicePicker" | "DateTimeInput")
-}
-fn resolve_pointer(path: &str, prefix: &str) -> Result<JsonPointer, Reject> {
-    JsonPointer::parse(&if path.starts_with('/') {
-        path.to_owned()
-    } else {
-        format!("{prefix}/{path}")
-    })
-}
-fn binding(value: &Value, prefix: &str) -> Result<JsonPointer, Reject> {
-    let object = value.as_object().ok_or(Reject::Expression)?;
-    if object.len() != 1 {
-        return Err(Reject::Expression);
-    }
-    resolve_pointer(object.get("@path").and_then(Value::as_str).ok_or(Reject::Expression)?, prefix)
-}
-fn literal(value: &Value) -> bool {
-    match value {
-        Value::Object(map) => {
-            map.iter().all(|(key, _)| !key.starts_with('@') || key.starts_with("@@"))
-                && map.values().all(literal)
-        }
-        Value::Array(values) => values.iter().all(literal),
-        _ => true,
-    }
-}
-impl<'a> Graph<'a> {
-    fn new(snapshot: &'a SurfaceSnapshot) -> Result<Self, Reject> {
-        let mut definitions = BTreeMap::new();
-        for component in &snapshot.components {
-            let name = id(component)?;
-            validate_identifier(name)?;
-            validate_identifier(kind(component)?)?;
-            if definitions.insert(name, component).is_some() {
-                return Err(Reject::Integrity);
-            }
-        }
-        let mut graph = Self { instances: Vec::new(), reached: BTreeSet::new() };
-        let context = WalkContext { definitions: &definitions, snapshot };
-        for name in definitions.keys() {
-            // Pruning does not excuse dangling references or cycles in supplied definitions.
-            static_references(name, &definitions, &mut BTreeSet::new(), 0, 0, false)?;
-        }
-        graph.reached = static_references("root", &definitions, &mut BTreeSet::new(), 0, 0, false)?;
-        graph.walk(
-            WalkFrame {
-                name: "root",
-                source: &[],
-                prefix: "",
-                scope: "Surface",
-                depth: 0,
-                in_modal: false,
-            },
-            &context,
-            &mut BTreeSet::new(),
-        )?;
-        let mut expanded_bytes = 0usize;
-        for instance in &graph.instances {
-            expanded_bytes = expanded_bytes
-                .checked_add(
-                    canonical(&expanded_value(
-                        instance.component,
-                        &snapshot.data_model,
-                        &instance.prefix,
-                        0,
-                    )?)?
-                    .len(),
-                )
-                .ok_or(Reject::Limit)?;
-            if expanded_bytes > 64 * 1024 {
-                return Err(Reject::Limit);
-            }
-        }
-        let mut controls = BTreeSet::new();
-        for instance in &graph.instances {
-            if (input(kind(instance.component)?) || kind(instance.component)? == "Button")
-                && !controls.insert((id(instance.component)?, instance.source.clone()))
-            {
-                return Err(Reject::Validation("ambiguous control instance".into()));
-            }
-        }
-        Ok(graph)
-    }
-    fn walk(
-        &mut self,
-        cursor: WalkFrame<'_>,
-        context: &WalkContext<'a, '_>,
-        stack: &mut BTreeSet<String>,
-    ) -> Result<(), Reject> {
-        let WalkFrame { name, source, prefix, scope, depth, in_modal } = cursor;
-        let definitions = context.definitions;
-        let snapshot = context.snapshot;
-        if depth >= 16 || self.instances.len() >= 256 || source.len() > 2 {
-            return Err(Reject::Limit);
-        }
-        if !stack.insert(name.to_owned()) {
-            return Err(Reject::Integrity);
-        }
-        let component = *definitions.get(name).ok_or(Reject::Integrity)?;
-        let component_kind = kind(component)?;
-        validate_composition(component_kind, depth, in_modal)?;
-        let next_scope =
-            if component_kind == "Card" { format!("{name}:{source:?}") } else { scope.to_owned() };
-        self.instances.push(Instance {
-            component,
-            source: source.to_vec(),
-            prefix: prefix.into(),
-            scope: next_scope.clone(),
-        });
-        self.reached.insert(name.to_owned());
-        let mut children: Vec<(String, Vec<String>, String, String)> = Vec::new();
-        for property in ["child", "trigger", "content"] {
-            if let Some(value) = component.get(property) {
-                let child = value.as_str().ok_or(Reject::Encoding)?;
-                let child_scope = if component_kind == "Modal" && property == "content" {
-                    format!("{name}.content:{source:?}")
-                } else {
-                    next_scope.clone()
-                };
-                children.push((child.into(), source.to_vec(), prefix.into(), child_scope));
-            }
-        }
-        if let Some(tabs) = component.get("tabs") {
-            for tab in tabs.as_array().ok_or(Reject::Encoding)? {
-                children.push((
-                    tab.get("child").and_then(Value::as_str).ok_or(Reject::Encoding)?.into(),
-                    source.to_vec(),
-                    prefix.into(),
-                    next_scope.clone(),
-                ));
-            }
-        }
-        if let Some(list) = component.get("children") {
-            if let Some(array) = list.as_array() {
-                for value in array {
-                    children.push((
-                        value.as_str().ok_or(Reject::Encoding)?.into(),
-                        source.to_vec(),
-                        prefix.into(),
-                        next_scope.clone(),
-                    ));
-                }
-            } else {
-                let map = list.as_object().ok_or(Reject::Encoding)?;
-                if map.len() != 2 {
-                    return Err(Reject::Encoding);
-                }
-                let template =
-                    map.get("componentId").and_then(Value::as_str).ok_or(Reject::Encoding)?;
-                // Even an empty list must resolve its template and may not conceal a dangling reference.
-                if !definitions.contains_key(template) {
-                    return Err(Reject::Integrity);
-                }
-                self.reached.insert(template.into());
-                let pointer = resolve_pointer(
-                    map.get("path").and_then(Value::as_str).ok_or(Reject::Encoding)?,
-                    prefix,
-                )?;
-                let values = pointer
-                    .get(&snapshot.data_model)
-                    .and_then(Value::as_array)
-                    .ok_or(Reject::Expression)?;
-                if values.len() > 16 || source.len() >= 2 {
-                    return Err(Reject::Limit);
-                }
-                for index in 0..values.len() {
-                    let item = format!("{}/{index}", pointer.canonical());
-                    let mut source = source.to_vec();
-                    source.push(item.clone());
-                    children.push((template.into(), source, item, next_scope.clone()));
-                }
-            }
-        }
-        for (child, source, prefix, scope) in children {
-            self.walk(
-                WalkFrame {
-                    name: &child,
-                    source: &source,
-                    prefix: &prefix,
-                    scope: &scope,
-                    depth: depth + 1,
-                    in_modal: in_modal || component_kind == "Modal",
-                },
-                context,
-                stack,
-            )?;
-        }
-        stack.remove(name);
-        Ok(())
-    }
-    fn inputs(&self, snapshot: &SurfaceSnapshot) -> Result<Vec<Input<'a>>, Reject> {
-        let mut inputs: Vec<Input<'a>> = Vec::new();
-        for instance in &self.instances {
-            if input(kind(instance.component)?) {
-                let pointer = binding(
-                    instance.component.get("value").ok_or(Reject::Expression)?,
-                    &instance.prefix,
-                )?;
-                if inputs.iter().any(|old| pointer.overlaps(&old.pointer)) {
-                    return Err(Reject::Validation("input binding alias".into()));
-                }
-                inputs.push(Input { instance: instance.clone(), pointer });
-            }
-        }
-        for owner in &inputs {
-            for property in ["min", "max"] {
-                if let Some(value) = owner.instance.component.get(property)
-                    && value.is_object()
-                {
-                    let bound = binding(value, &owner.instance.prefix)?;
-                    if inputs.iter().any(|input| input.pointer.overlaps(&bound)) {
-                        return Err(Reject::Validation("input limit depends on an input".into()));
-                    }
-                }
-            }
-            validate_input(
-                owner.instance.component,
-                owner.pointer.get(&snapshot.data_model).ok_or(Reject::Expression)?,
-                &snapshot.data_model,
-                &owner.instance.prefix,
-            )?;
-        }
-        Ok(inputs)
-    }
-}
-
-fn expanded_value(
-    value: &Value,
-    model: &Value,
-    prefix: &str,
-    depth: usize,
-) -> Result<Value, Reject> {
-    if depth > 16 {
-        return Err(Reject::Limit);
-    }
-    match value {
-        Value::Object(map) => {
-            if let Some(name) = map.get("@call").and_then(Value::as_str) {
-                if name == "@index" && prefix.is_empty() {
-                    return Err(Reject::Expression);
-                }
-                if name == "formatString"
-                    && matches!(
-                        super::expression::evaluate(value, model, prefix, 0),
-                        Err(Reject::Limit)
-                    )
-                {
-                    return Err(Reject::Limit);
-                }
-                if name == "formatString"
-                    && let Some(source) = value.pointer("/args/value")
-                    && source.get("@path").is_some()
-                {
-                    let pointer = binding(source, prefix)?;
-                    if let Some(program) = pointer.get(model).and_then(Value::as_str) {
-                        super::schema::validate_program(program, depth + 1)?;
-                    }
-                }
-            }
-            if let Some(path) = map.get("@path") {
-                return Ok(resolve_pointer(path.as_str().ok_or(Reject::Expression)?, prefix)?
-                    .get(model)
-                    .cloned()
-                    .unwrap_or(Value::Null));
-            }
-            let mut expanded = Map::new();
-            for (key, value) in map {
-                expanded.insert(key.clone(), expanded_value(value, model, prefix, depth + 1)?);
-            }
-            Ok(Value::Object(expanded))
-        }
-        Value::Array(array) => array
-            .iter()
-            .map(|v| expanded_value(v, model, prefix, depth + 1))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array),
-        _ => Ok(value.clone()),
-    }
-}
-
-fn validate_composition(kind: &str, depth: usize, in_modal: bool) -> Result<(), Reject> {
-    if kind == "Approval" && depth != 0 || kind == "Modal" && in_modal {
-        return Err(Reject::Validation("composition".into()));
-    }
-    Ok(())
-}
-
-fn static_references(
-    name: &str,
-    definitions: &BTreeMap<&str, &Value>,
-    stack: &mut BTreeSet<String>,
-    depth: usize,
-    templates: usize,
-    in_modal: bool,
-) -> Result<BTreeSet<String>, Reject> {
-    if templates > 2 {
-        return Err(Reject::Limit);
-    }
-    if depth >= 16 || !stack.insert(name.into()) {
-        return Err(Reject::Integrity);
-    }
-    let component = definitions.get(name).ok_or(Reject::Integrity)?;
-    let component_kind = kind(component)?;
-    validate_composition(component_kind, depth, in_modal)?;
-    let mut reached = BTreeSet::from([name.into()]);
-    let mut children = Vec::new();
-    for property in ["child", "trigger", "content"] {
-        if let Some(child) = component.get(property) {
-            children.push((child.as_str().ok_or(Reject::Encoding)?, false));
-        }
-    }
-    if let Some(tabs) = component.get("tabs") {
-        for tab in tabs.as_array().ok_or(Reject::Encoding)? {
-            children
-                .push((tab.get("child").and_then(Value::as_str).ok_or(Reject::Encoding)?, false));
-        }
-    }
-    if let Some(list) = component.get("children") {
-        if let Some(array) = list.as_array() {
-            for child in array {
-                children.push((child.as_str().ok_or(Reject::Encoding)?, false));
-            }
-        } else {
-            children.push((
-                list.get("componentId").and_then(Value::as_str).ok_or(Reject::Encoding)?,
-                true,
-            ));
-        }
-    }
-    for (child, template) in children {
-        reached.extend(static_references(
-            child,
-            definitions,
-            stack,
-            depth + 1,
-            templates + usize::from(template),
-            in_modal || component_kind == "Modal",
-        )?);
-    }
-    stack.remove(name);
-    Ok(reached)
-}
-
 pub(super) fn validate_components(snapshot: &mut SurfaceSnapshot) -> Result<(), Reject> {
-    for component in &snapshot.components {
-        validate_component_shape(component)?;
-    }
-    let graph = Graph::new(snapshot)?;
-    let inputs = graph.inputs(snapshot)?;
-    for instance in &graph.instances {
-        if kind(instance.component)? == "Button" {
-            validate_declaration(instance, &inputs, snapshot)?;
-        }
-    }
-    let reached = graph.reached.clone();
+    let reached = Resolution::new(snapshot)?.graph.reached;
     snapshot.components.retain(|component| {
         component.get("id").and_then(Value::as_str).is_some_and(|id| reached.contains(id))
     });
     Ok(())
-}
-fn validate_declaration(
-    instance: &Instance<'_>,
-    inputs: &[Input<'_>],
-    snapshot: &SurfaceSnapshot,
-) -> Result<(), Reject> {
-    let action =
-        instance.component.get("action").and_then(Value::as_object).ok_or(Reject::Encoding)?;
-    if action.len() != 1 {
-        return Err(Reject::Encoding);
-    }
-    if let Some(event) = action.get("event") {
-        let event = event.as_object().ok_or(Reject::Encoding)?;
-        if event.keys().any(|k| !["name", "context", "userMessage"].contains(&k.as_str())) {
-            return Err(Reject::Encoding);
-        }
-        validate_identifier(event.get("name").and_then(Value::as_str).ok_or(Reject::Encoding)?)?;
-        if event.get("userMessage").is_some_and(|v| !v.is_string()) {
-            return Err(Reject::Expression);
-        }
-        let empty = Map::new();
-        let context = event
-            .get("context")
-            .map(|v| v.as_object().ok_or(Reject::Encoding))
-            .transpose()?
-            .unwrap_or(&empty);
-        if context.len() > MAX_CONTEXT_ENTRIES {
-            return Err(Reject::Limit);
-        }
-        let mut sent = BTreeSet::new();
-        for (key, value) in context {
-            validate_identifier(key)?;
-            if literal(value) {
-                continue;
-            }
-            let pointer = binding(value, &instance.prefix)?;
-            if !inputs
-                .iter()
-                .any(|input| input.pointer == pointer && input.instance.scope == instance.scope)
-                || !sent.insert(pointer.canonical())
-            {
-                return Err(Reject::Validation("context input scope".into()));
-            }
-        }
-        if let Some(checks) = instance.component.get("@checks") {
-            let mut reads = Vec::new();
-            let owned: Vec<_> = inputs.iter().map(|input| input.pointer.clone()).collect();
-            let context = CheckContext {
-                prefix: &instance.prefix,
-                model: &snapshot.data_model,
-                owned: &owned,
-            };
-            collect_reads(checks, &context, &mut reads, 0)?;
-            for pointer in reads {
-                for input in inputs {
-                    if pointer.overlaps(&input.pointer)
-                        && (pointer != input.pointer || !sent.contains(&input.pointer.canonical()))
-                    {
-                        return Err(Reject::Validation("check reads unsent input".into()));
-                    }
-                }
-            }
-        }
-    } else if let Some(call) = action.get("functionCall") {
-        if call.get("@call").and_then(Value::as_str) != Some("openUrl") {
-            return Err(Reject::Expression);
-        }
-        let url = call.pointer("/args/url").ok_or(Reject::Expression)?;
-        let url = if let Some(s) = url.as_str() {
-            s
-        } else {
-            let pointer = binding(url, &instance.prefix)?;
-            if inputs.iter().any(|i| pointer.overlaps(&i.pointer)) {
-                return Err(Reject::Expression);
-            }
-            pointer.get(&snapshot.data_model).and_then(Value::as_str).ok_or(Reject::Expression)?
-        };
-        super::link::validate_url(url)?;
-    } else {
-        return Err(Reject::Encoding);
-    }
-    Ok(())
-}
-struct CheckContext<'a> {
-    prefix: &'a str,
-    model: &'a Value,
-    owned: &'a [JsonPointer],
-}
-fn collect_reads(
-    value: &Value,
-    context: &CheckContext<'_>,
-    reads: &mut Vec<JsonPointer>,
-    depth: usize,
-) -> Result<(), Reject> {
-    if depth > 16 {
-        return Err(Reject::Limit);
-    }
-    match value {
-        Value::Object(map) => {
-            if let Some(path) = map.get("@path") {
-                reads.push(resolve_pointer(
-                    path.as_str().ok_or(Reject::Expression)?,
-                    context.prefix,
-                )?);
-            }
-            if let Some(name) = map.get("@call").and_then(Value::as_str) {
-                if super::expression::locale_sensitive(name) {
-                    return Err(Reject::LocaleDependentCheck);
-                }
-                if name == "openUrl" || name == "@index" && context.prefix.is_empty() {
-                    return Err(Reject::Expression);
-                }
-                if name == "formatString" {
-                    let source = value.pointer("/args/value").ok_or(Reject::Expression)?;
-                    let mut source_reads = Vec::new();
-                    collect_reads(source, context, &mut source_reads, depth + 1)?;
-                    if source_reads
-                        .iter()
-                        .any(|read| context.owned.iter().any(|owner| read.overlaps(owner)))
-                    {
-                        // A draft cannot supply a new check program that reads arbitrary hidden inputs.
-                        return Err(Reject::Validation("input-controlled check program".into()));
-                    }
-                    let program = super::expression::evaluate(
-                        source,
-                        context.model,
-                        context.prefix,
-                        depth + 1,
-                    )?;
-                    for expression in super::format_string::expressions(
-                        program.as_str().ok_or(Reject::Expression)?,
-                    )? {
-                        collect_reads(&expression, context, reads, depth + 1)?;
-                    }
-                    reads.extend(source_reads);
-                    return Ok(());
-                }
-            }
-            for value in map.values() {
-                collect_reads(value, context, reads, depth + 1)?;
-            }
-        }
-        Value::Array(array) => {
-            for value in array {
-                collect_reads(value, context, reads, depth + 1)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-fn validate_component_shape(component: &Value) -> Result<(), Reject> {
-    super::schema::component(component)
-}
-fn validate_input(
-    component: &Value,
-    value: &Value,
-    model: &Value,
-    prefix: &str,
-) -> Result<(), Reject> {
-    let good = match kind(component)? {
-        "TextField" => {
-            value.as_str().is_some_and(|s| s.len() <= MAX_DELTA_BYTES)
-                && component.get("variant").and_then(Value::as_str) != Some("obscured")
-        }
-        "CheckBox" => value.is_boolean(),
-        "Slider" => {
-            value.as_i64().is_some()
-                && value.as_f64().is_some_and(|v| {
-                    v >= component.get("min").and_then(Value::as_f64).unwrap_or(0.0)
-                        && component.get("max").and_then(Value::as_f64).is_some_and(|max| v <= max)
-                })
-        }
-        "ChoicePicker" => value.as_array().is_some_and(|a| {
-            let options = component.get("options").and_then(Value::as_array);
-            let unique: BTreeSet<_> = a.iter().filter_map(Value::as_str).collect();
-            unique.len() == a.len()
-                && a.len() <= options.map_or(0, Vec::len)
-                && (component.get("variant").and_then(Value::as_str) == Some("multipleSelection")
-                    || a.len() <= 1)
-                && a.iter().all(|v| {
-                    options.is_some_and(|options| {
-                        options.iter().any(|option| option.get("value") == Some(v))
-                    })
-                })
-        }),
-        "DateTimeInput" => super::schema::date_time_input(component, value, model, prefix)?,
-        _ => false,
-    };
-    if good { Ok(()) } else { Err(Reject::Validation("input type/range".into())) }
 }
 impl SurfaceState {
     /// Author-side validation reconstructs only explicit raw context inputs before checking.
@@ -788,31 +211,20 @@ impl SurfaceState {
         {
             return Err(Reject::Conflict);
         }
-        let graph = Graph::new(snapshot)?;
-        let inputs = graph.inputs(snapshot)?;
-        let source = graph
-            .instances
-            .iter()
-            .find(|instance| {
-                id(instance.component).ok() == Some(frame.a2ui.action.source_component_id.as_str())
-                    && instance.source == frame.source_instance
-            })
-            .ok_or(Reject::Expression)?;
-        if kind(source.component)? != "Button" {
-            return Err(Reject::Expression);
-        }
-        let event = source.component.pointer("/action/event").ok_or(Reject::Expression)?;
-        let declared_name = event.get("name").and_then(Value::as_str).ok_or(Reject::Encoding)?;
-        let declared_message = event.get("userMessage").and_then(Value::as_str);
-        let empty = Map::new();
-        let context = event.get("context").and_then(Value::as_object).unwrap_or(&empty);
+        let resolution = Resolution::new(snapshot)?;
         let submitted = &frame.a2ui.action;
+        let (source, declared) =
+            resolution.action(&submitted.source_component_id, &frame.source_instance)?;
+        let ResolvedActionKind::Event { name, user_message, context, .. } = declared else {
+            return Err(Reject::Expression);
+        };
         if submitted.metadata.is_some() {
             return Err(Reject::Validation("action metadata has no declared egress source".into()));
         }
-        if declared_name != submitted.name
-            || declared_message != submitted.user_message.as_deref()
-            || context.keys().ne(submitted.context.keys())
+        if *name != submitted.name
+            || user_message.as_deref() != submitted.user_message.as_deref()
+            || context.len() != submitted.context.len()
+            || context.keys().any(|key| !submitted.context.contains_key(key))
         {
             return Err(Reject::Integrity);
         }
@@ -820,30 +232,35 @@ impl SurfaceState {
         let mut witness = Map::new();
         for (key, declared) in context {
             let value = submitted.context.get(key).ok_or(Reject::Integrity)?;
-            if literal(declared) {
-                if canonical(declared)? != canonical(value)? {
-                    return Err(Reject::Integrity);
+            match declared {
+                ResolvedContextSource::Literal { value: literal } => {
+                    if canonical(literal)? != canonical(value)? {
+                        return Err(Reject::Integrity);
+                    }
                 }
-            } else {
-                let pointer = binding(declared, &source.prefix)?;
-                let input = inputs
-                    .iter()
-                    .find(|i| i.pointer == pointer && i.instance.scope == source.scope)
-                    .ok_or(Reject::Expression)?;
-                validate_input(
-                    input.instance.component,
-                    value,
-                    &snapshot.data_model,
-                    &input.instance.prefix,
-                )?;
-                pointer.update(&mut overlay, value.clone())?;
-                witness.insert(key.clone(), value.clone());
+                ResolvedContextSource::Input { pointer } => {
+                    let input =
+                        resolution.input(pointer, &source.scope).ok_or(Reject::Expression)?;
+                    validate_input(
+                        input.instance.component,
+                        value,
+                        &snapshot.data_model,
+                        &input.instance.prefix,
+                    )?;
+                    input.pointer.update(&mut overlay, value.clone())?;
+                    witness.insert(key.clone(), value.clone());
+                }
             }
         }
         if canonical(&witness)?.len() > MAX_DELTA_BYTES {
             return Err(Reject::Limit);
         }
-        super::expression::checks(source.component.get("@checks"), &overlay, &source.prefix)?;
+        super::expression::checks(
+            source.component.get("@checks"),
+            &overlay,
+            &source.prefix,
+            &resolution.steps,
+        )?;
         if frame.arguments_hash()? != frame.args_hash {
             return Err(Reject::Integrity);
         }
@@ -858,51 +275,5 @@ impl std::fmt::Debug for SurfaceAction {
             .field("version", &self.version())
             .field("context", &"[redacted]")
             .finish_non_exhaustive()
-    }
-}
-
-#[cfg(test)]
-mod input_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn slider_integer_witness_uses_fractional_literal_bounds_without_rounding() {
-        let slider = json!({"component":"Slider","min":0.5,"max":2.5});
-        assert!(
-            validate_input(&slider, &json!(1), &json!({}), "").is_ok(),
-            "an integer inside basic-catalog numeric bounds is valid"
-        );
-        assert!(
-            validate_input(&slider, &json!(0), &json!({}), "").is_err(),
-            "a fractional minimum must not silently become zero"
-        );
-        assert!(
-            validate_input(&slider, &json!(3), &json!({}), "").is_err(),
-            "an integer above a fractional maximum is rejected"
-        );
-        assert!(
-            validate_input(&slider, &json!(1.5), &json!({}), "").is_err(),
-            "the profile requires the submitted Slider value to be an integer"
-        );
-    }
-
-    #[test]
-    fn empty_date_input_still_validates_author_bound_types_and_order() {
-        let input =
-            json!({"component":"DateTimeInput","enableDate":true,"min":{"@path":"/minimum"}});
-        assert!(
-            validate_input(&input, &json!(""), &json!({"minimum":"2026-06-22"}), "").is_ok(),
-            "an unset date may have a valid author bound"
-        );
-        assert!(
-            validate_input(&input, &json!(""), &json!({"minimum":"invalid"}), "").is_err(),
-            "unset input cannot hide an invalid author bound"
-        );
-        let inverted = json!({"component":"DateTimeInput","enableDate":true,"min":"2026-06-23","max":"2026-06-22"});
-        assert!(
-            validate_input(&inverted, &json!(""), &json!({}), "").is_err(),
-            "inverted limits cannot enter a signed card"
-        );
     }
 }

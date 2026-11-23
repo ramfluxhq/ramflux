@@ -85,6 +85,8 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) engine: Option<GatewaySessionEngine>,
     pub(crate) connection: Option<ConnectionHandle>,
     pub(crate) connection_work: Option<mpsc::Sender<super::connection_manager::AccountWork>>,
+    /// Demanded head-refresh Apply. `None` until the account writer installs it.
+    pub(crate) head_completion: Option<mpsc::Sender<super::connection_manager::AccountWork>>,
     pub(crate) transfer_slots: Option<super::transfer_slots::TransferSlots>,
     #[cfg(test)]
     pub(crate) test_connector:
@@ -170,6 +172,7 @@ impl LocalBusAccountState {
             engine: Some(engine),
             connection: None,
             connection_work: None,
+            head_completion: None,
             transfer_slots: None,
             #[cfg(test)]
             test_connector: None,
@@ -231,6 +234,7 @@ impl LocalBusAccountState {
             engine: None,
             connection: None,
             connection_work: None,
+            head_completion: None,
             transfer_slots: None,
             #[cfg(test)]
             test_connector: None,
@@ -428,6 +432,7 @@ impl LocalBusAccountState {
                 self.timeouts.clone(),
                 connector,
                 self.connection_work.clone(),
+                self.head_completion.clone(),
             ));
             if self.client.born_v3_account.is_some()
                 && let Some(handle) = &self.connection

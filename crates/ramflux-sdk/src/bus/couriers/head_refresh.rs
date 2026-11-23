@@ -100,7 +100,7 @@ pub(crate) enum Work {
     },
 }
 
-fn eligible_roots(account: &LocalBusAccountState) -> Result<BTreeSet<String>, SdkError> {
+pub(crate) fn eligible_roots(account: &LocalBusAccountState) -> Result<BTreeSet<String>, SdkError> {
     let mut roots = BTreeSet::from([account.principal_commitment.clone()]);
     for link in account.client.friend_links()? {
         if link.state == "accepted" {
@@ -223,6 +223,10 @@ fn apply(
     outcome: Result<SdkDeviceManifestResponse, SdkError>,
 ) -> Result<bool, SdkError> {
     let result = apply_verified(account, plan, root, fetched_after, outcome);
+    // A pause is not a failed fetch. Counting it would back off a root that was not applied.
+    if matches!(&result, Err(SdkError::WriterPause)) {
+        return result;
+    }
     if plan.fence.current(account)
         && account.head_refresh.active.ptr_eq(&Arc::downgrade(&plan.lease))
         && plan.roots.iter().any(|candidate| candidate == root)
@@ -287,29 +291,57 @@ fn apply_verified(
 }
 
 /// Invoked only on the account writer. All network inputs are owned values.
-pub(crate) fn apply_work(account: &mut LocalBusAccountState, work: Work) {
+/// `WriterPause` is returned with the same work stashed, and the reply is not sent.
+pub(crate) fn apply_work(account: &mut LocalBusAccountState, work: Work) -> Result<(), SdkError> {
     match work {
         Work::Subscribe { reply } => {
             // Client-side demand and the queue's own enqueues wake the same refresh task.
             account.head_refresh.wake = account.client.manifest_demand.wake.clone();
             let _ = reply.send(account.head_refresh.wake.clone());
+            Ok(())
         }
         Work::Prepare { fence, periodic, retry_budget, attempted, reply } => {
-            if !reply.is_closed() {
-                let _ = reply.send(prepare_due_limit(
-                    account,
-                    fence,
-                    periodic,
-                    &attempted,
-                    1,
-                    retry_budget,
-                ));
+            if reply.is_closed() {
+                return Ok(());
             }
+            let result =
+                prepare_due_limit(account, fence.clone(), periodic, &attempted, 1, retry_budget);
+            if matches!(&result, Err(SdkError::WriterPause)) {
+                super::directory::stash_paused(super::directory::DirectoryWork::HeadRefresh(
+                    Work::Prepare { fence, periodic, retry_budget, attempted, reply },
+                ));
+                return Err(SdkError::WriterPause);
+            }
+            let _ = reply.send(result);
+            Ok(())
         }
         Work::Apply { plan, root, fetched_after, outcome, reply } => {
-            if !reply.is_closed() {
-                let _ = reply.send(apply(account, &plan, &root, fetched_after, *outcome));
+            if reply.is_closed() {
+                return Ok(());
             }
+            let manifest = match *outcome {
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return Ok(());
+                }
+                Ok(manifest) => manifest,
+            };
+            // The clone is this attempt. The original stays so a pause retries the same apply.
+            let result = apply(account, &plan, &root, fetched_after, Ok(manifest.clone()));
+            if matches!(&result, Err(SdkError::WriterPause)) {
+                super::directory::stash_paused(super::directory::DirectoryWork::HeadRefresh(
+                    Work::Apply {
+                        plan,
+                        root,
+                        fetched_after,
+                        outcome: Box::new(Ok(manifest)),
+                        reply,
+                    },
+                ));
+                return Err(SdkError::WriterPause);
+            }
+            let _ = reply.send(result);
+            Ok(())
         }
     }
 }
@@ -326,7 +358,7 @@ pub(crate) async fn pass(
     let mut cancel = context.cancel.clone();
     let mut attempted = BTreeSet::new();
     let mut retry_budget = RETRY_DEMAND_SHARE;
-    let fetch = fetch_pass(&context, &writer, false, &mut attempted, &mut retry_budget);
+    let fetch = fetch_pass(&context, &writer, &writer, false, &mut attempted, &mut retry_budget);
     tokio::select! {
         biased;
         _ = cancel.changed() => Ok(()),
@@ -336,6 +368,7 @@ pub(crate) async fn pass(
 async fn fetch_pass(
     context: &SessionContext,
     writer: &mpsc::Sender<AccountWork>,
+    completion: &mpsc::Sender<AccountWork>,
     periodic: bool,
     attempted: &mut BTreeSet<String>,
     retry_budget: &mut usize,
@@ -367,7 +400,7 @@ async fn fetch_pass(
             attempted.insert(root.clone());
             let (reply, response) = oneshot::channel();
             send(
-                writer,
+                completion,
                 Work::Apply {
                     plan: plan.clone(),
                     root: root.clone(),
@@ -399,13 +432,18 @@ fn stopped() -> SdkError {
 }
 
 /// The registered session child refreshes on connect, demand and the half-bound timer.
-pub(crate) async fn run(context: SessionContext, writer: mpsc::Sender<AccountWork>) {
-    run_with_triggers(context, writer, true, true).await;
+pub(crate) async fn run(
+    context: SessionContext,
+    writer: mpsc::Sender<AccountWork>,
+    completion: mpsc::Sender<AccountWork>,
+) {
+    run_with_triggers(context, writer, completion, true, true).await;
 }
 
 async fn cycle(
     context: &SessionContext,
     writer: &mpsc::Sender<AccountWork>,
+    completion: &mpsc::Sender<AccountWork>,
     periodic: bool,
 ) -> Result<(), SdkError> {
     let mut attempted = BTreeSet::new();
@@ -414,7 +452,10 @@ async fn cycle(
         if pass > 0 {
             tokio::time::sleep(PASS_PAUSE).await;
         }
-        if fetch_pass(context, writer, periodic, &mut attempted, &mut retry_budget).await? == 0 {
+        if fetch_pass(context, writer, completion, periodic, &mut attempted, &mut retry_budget)
+            .await?
+            == 0
+        {
             break;
         }
     }
@@ -436,6 +477,7 @@ fn advance_sweep(next: &mut tokio::time::Instant, now: tokio::time::Instant) -> 
 async fn run_with_triggers(
     context: SessionContext,
     writer: mpsc::Sender<AccountWork>,
+    completion: mpsc::Sender<AccountWork>,
     connect: bool,
     periodic: bool,
 ) {
@@ -450,7 +492,7 @@ async fn run_with_triggers(
         let mut next_sweep = tokio::time::Instant::now() + REFRESH_INTERVAL;
         let mut timer = tokio::time::interval_at(next_sweep, REFRESH_INTERVAL);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        if connect && let Err(error) = cycle(&context, &writer, true).await {
+        if connect && let Err(error) = cycle(&context, &writer, &completion, true).await {
             tracing::debug!(%error, "connect head refresh deferred");
         }
         loop {
@@ -460,7 +502,7 @@ async fn run_with_triggers(
                 () = wake.notified() => {},
             }
             let periodic = periodic && advance_sweep(&mut next_sweep, tokio::time::Instant::now());
-            if let Err(error) = cycle(&context, &writer, periodic).await {
+            if let Err(error) = cycle(&context, &writer, &completion, periodic).await {
                 tracing::debug!(%error, "head refresh cycle deferred");
             }
         }
@@ -479,8 +521,12 @@ async fn run_with_triggers(
 }
 
 #[cfg(test)]
-pub(crate) async fn run_without_timer(context: SessionContext, writer: mpsc::Sender<AccountWork>) {
-    run_with_triggers(context, writer, true, false).await;
+pub(crate) async fn run_without_timer(
+    context: SessionContext,
+    writer: mpsc::Sender<AccountWork>,
+    completion: mpsc::Sender<AccountWork>,
+) {
+    run_with_triggers(context, writer, completion, true, false).await;
 }
 
 #[cfg(test)]

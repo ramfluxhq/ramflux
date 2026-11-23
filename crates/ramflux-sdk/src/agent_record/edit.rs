@@ -41,6 +41,10 @@ pub(crate) fn create_from_plan(
         lifecycle: LIFECYCLE_ACTIVE.into(),
         identity: mint(None, &plan.agent_anchor, &plan.desktop, plan.issued_at)?,
         change_seq: 0,
+        provider: intent.provider.clone(),
+        model: intent.model.clone(),
+        max_concurrent_turns: intent.max_concurrent_turns,
+        max_cost_per_day_cents: intent.max_cost_per_day_cents,
     };
     store.save(&mut record)?;
     Ok(record)
@@ -72,6 +76,10 @@ pub(crate) fn seed_for_test(
         lifecycle: LIFECYCLE_ACTIVE.into(),
         identity: mint(None, agent, author, now)?,
         change_seq: 0,
+        provider: None,
+        model: None,
+        max_concurrent_turns: None,
+        max_cost_per_day_cents: None,
     };
     store.save(&mut record)?;
     Ok(record)

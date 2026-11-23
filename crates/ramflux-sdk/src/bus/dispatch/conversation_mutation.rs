@@ -62,10 +62,37 @@ pub(super) async fn dispatch(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    let erase = everyone_conversation(request);
     let account = local_bus_account_mut(state, request_account_id(request)?)?;
-    Box::pin(execute(request, account))
+    let result = Box::pin(execute(request, account))
         .await
-        .map_err(|error| SdkError::from(AdapterError::from_sdk(&error)))
+        .map_err(|error| SdkError::from(AdapterError::from_sdk(&error)))?;
+    if let Some(conversation_id) = erase {
+        // The local delete is already committed. A PRX miss does not undo it.
+        // This session id is the conversation id, not the host's server-assigned id.
+        crate::prx_owner::erase_if_configured(
+            state.config.prx.as_deref(),
+            &state.config.data_root,
+            &conversation_id,
+        )
+        .await;
+    }
+    Ok(result)
+}
+
+fn everyone_conversation(request: &LocalBusFrame) -> Option<String> {
+    if request.method != "conversation.delete" {
+        return None;
+    }
+    if request.body.get("scope").and_then(serde_json::Value::as_str) == Some("local") {
+        return None;
+    }
+    request
+        .body
+        .get("conversation_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 256)
+        .map(str::to_owned)
 }
 
 pub(crate) async fn execute(

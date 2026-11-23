@@ -111,7 +111,7 @@ async fn serve<T>(
         tokio::select! {
             biased;
             outcome = &mut task => return Ok(outcome?),
-            work = runtime.connection_work.recv() => {
+            work = runtime.recv_connection_work() => {
                 let work = work.ok_or("test: connection work closed")?;
                 runtime.apply_connection_work(work).await?;
             }
@@ -124,7 +124,7 @@ async fn serve_until(runtime: &mut AccountRuntime, ready: &Notify) -> TestResult
         tokio::select! {
             biased;
             () = ready.notified() => return Ok(()),
-            work = runtime.connection_work.recv() => {
+            work = runtime.recv_connection_work() => {
                 let work = work.ok_or("test: connection work closed")?;
                 runtime.apply_connection_work(work).await?;
             }

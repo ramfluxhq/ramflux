@@ -71,7 +71,7 @@ async fn expire_after_connect(runtime: &mut AccountRuntime) -> TestResult {
     // Drain the connect fetch before expiring the clock. With the timer
     // disabled, only this command's new demand can refresh it a second time.
     for _ in 0..3 {
-        let work = tokio::time::timeout(Duration::from_secs(1), runtime.connection_work.recv())
+        let work = tokio::time::timeout(Duration::from_secs(1), runtime.recv_connection_work())
             .await?
             .ok_or("connect work")?;
         runtime.apply_connection_work(work).await?;
@@ -90,9 +90,13 @@ fn spawn_refresh(
     writer: mpsc::Sender<crate::bus::connection_manager::AccountWork>,
 ) -> tokio::task::JoinHandle<()> {
     if mode == "success" {
-        tokio::spawn(crate::bus::couriers::head_refresh::run_without_timer(context, writer))
+        tokio::spawn(crate::bus::couriers::head_refresh::run_without_timer(
+            context,
+            writer.clone(),
+            writer,
+        ))
     } else {
-        tokio::spawn(crate::bus::couriers::head_refresh::run(context, writer))
+        tokio::spawn(crate::bus::couriers::head_refresh::run(context, writer.clone(), writer))
     }
 }
 

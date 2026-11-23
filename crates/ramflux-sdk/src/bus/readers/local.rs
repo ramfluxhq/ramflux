@@ -28,8 +28,6 @@ pub(super) struct AccountView {
     pub native: Option<Box<crate::custody::BornAccount>>,
     pub account_root: Option<std::path::PathBuf>,
     pub connection: Option<super::super::connection_manager::ConnectionHandle>,
-    pub account_has_relay: bool,
-    pub upload_relays: BTreeMap<String, bool>,
     principal: String,
     anchor: String,
     status: Value,
@@ -107,8 +105,6 @@ impl AccountView {
             account_root: native.as_ref().map(|_| client.account_index().map(|index| index.root().to_path_buf())).transpose()?,
             native,
             connection: account.connection.clone(),
-            account_has_relay:account.client.node_relay_options.is_some(),
-            upload_relays:account.object_put_spools.iter().map(|(id,spool)|(id.clone(),spool.relay_endpoint.is_some())).collect(),
             principal: account.gateway_config.principal_id.clone(),
             anchor: account.principal_commitment.clone(),
             status,
@@ -260,6 +256,13 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
         }
         if status["networking"] != json!(snapshot.state) {
             status["networking"] = json!(snapshot.state);
+            status["networking_reason"] = json!(snapshot.cause);
+            status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
+        }
+        // A retired agent stays listed in the local custody record. The node's
+        // refusal is the fact the local surfaces follow; it wins over that record.
+        if snapshot.cause.as_ref().is_some_and(crate::AccountNetworkingReason::agent_retired) {
+            status["local_device_authorized"] = json!(false);
             status["networking_reason"] = json!(snapshot.cause);
             status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
         }

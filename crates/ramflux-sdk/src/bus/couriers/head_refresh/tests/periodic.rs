@@ -34,7 +34,7 @@ async fn drain(
             }
             Work::Subscribe { .. } => {}
         }
-        apply_work(account, work);
+        let _ = apply_work(account, work);
         assert!(account.head_refresh.pending.len() <= MAX_PENDING);
     }
     Ok(fetched)
@@ -72,7 +72,8 @@ async fn refresh_runs_at_connect_and_half_bound() -> TestResult {
     account.gateway_config.ca_cert = native.root.0.join("ca.pem");
     let handle = account.connection.as_ref().ok_or("connection")?.clone();
     let (writer, mut receiver) = mpsc::channel(2);
-    let child = tokio::spawn(run_with_triggers(handle.test_context(), writer, true, false));
+    let child =
+        tokio::spawn(run_with_triggers(handle.test_context(), writer.clone(), writer, true, false));
     assert_eq!(drain(&mut account, &mut receiver, expected.len()).await?, expected);
     assert!(fresh(&account, &native)?, "connect alone must fetch own head");
     assert!(account.head_refresh.pending.is_empty(), "no demand manufactured");
@@ -87,10 +88,11 @@ async fn refresh_runs_at_connect_and_half_bound() -> TestResult {
     account.client.persist_fetched_identity_directory_at(&native.manifest, old)?;
     let (writer, mut receiver) = mpsc::channel(2);
     // Separate child: connect disabled, no demand. Only its timer may run.
-    let child = tokio::spawn(run_with_triggers(handle.test_context(), writer, false, true));
+    let child =
+        tokio::spawn(run_with_triggers(handle.test_context(), writer.clone(), writer, false, true));
     let subscribe = next_work(&mut receiver).await?;
     assert!(matches!(subscribe, Work::Subscribe { .. }));
-    apply_work(&mut account, subscribe);
+    let _ = apply_work(&mut account, subscribe);
     tokio::task::yield_now().await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(149)).await;

@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 pub const ENGINE_ID: &str =
     "rquickjs=0.14.0;rquickjs-core=0.14.0;rquickjs-sys=0.14.0;quickjs-ng=0.16.2;bytecode=le";
-pub const HOST_ABI: u32 = 4;
+pub const HOST_ABI: u32 = 5;
 pub(crate) const MAX_PACKAGE: usize = 64 * 1024;
 pub(crate) const MAX_DESCRIPTOR: usize = 4096;
 const DOMAIN: &[u8] = b"ramflux-card-signed-descriptor-v2\0";
@@ -87,7 +87,7 @@ impl SignedPackage {
         }
         if parsed.app_id != policy.app_id
             || parsed.package_id != policy.package_id
-            || parsed.catalog != "rf-card/v1"
+            || parsed.catalog != ramflux_protocol::a2ui::CATALOG_ID
             || parsed.catalog_sha256 != catalog_digest()
             || parsed.engine != ENGINE_ID
             || parsed.host_abi != HOST_ABI
@@ -117,7 +117,7 @@ pub(crate) fn signing_message(descriptor: &[u8]) -> Vec<u8> {
 }
 #[must_use]
 pub fn catalog_digest() -> String {
-    sha256(include_bytes!("../catalog.json"))
+    sha256(include_bytes!("../../ramflux-protocol/catalogs/rf-card-v1.json"))
 }
 pub(crate) fn sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))

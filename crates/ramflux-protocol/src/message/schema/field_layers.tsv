@@ -197,6 +197,7 @@ AgentCustodyStatus	expires_at	4	1
 AgentCustodyStatus	request_json	5	1
 AgentCustodyStatus	receipt_json	6	1
 AgentCustodyStatus	error	7	1
+AgentCustodyStatus	request_hash	8	1
 AgentConfigResult	custody	9	1
 PairReset	rejected_bootstrap_floor	1	1
 PairResetAck	rejected_bootstrap_floor	1	1
@@ -882,6 +883,7 @@ AgentRecord	observation	8	1
 AgentRecord	cleanup	9	1
 AgentRecord	access	10	1
 AgentRecord	role	11	1
+AgentRecord	base	12	1
 AgentMetadata	agent_anchor	1	1
 AgentMetadata	custodian_anchor	2	1
 AgentMetadata	persona	3	1
