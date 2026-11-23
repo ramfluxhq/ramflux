@@ -28,10 +28,7 @@ pub(crate) async fn dispatch_account_bus_request(
     match request.method.as_str() {
         // Creation is owned by the exclusive secret ceremony on the connection.
         "account.create" => Err(SdkError::CustodySetupInvalid),
-        "account.list" => Ok(local_bus_ok(serde_json::json!({
-            "active_account_id": state.active_account_id,
-            "accounts": state.accounts.keys().cloned().collect::<Vec<_>>(),
-        }))),
+        "account.list" => Ok(local_bus_ok(super::super::account_local::daemon_list(state)?)),
         "account.switch" => {
             let account_id = request_account_id(request)?.to_owned();
             if !state.accounts.contains_key(&account_id) {
@@ -50,13 +47,19 @@ pub(crate) async fn dispatch_account_bus_request(
             }
             Ok(local_bus_ok(serde_json::to_value(account.client.account_config()?)?))
         }
-        "account.lock" => {
+        "account.lock" | "account.sign_out" => {
             let account_id = request_account_id(request)?.to_owned();
             local_bus_account_lock(state, &account_id).await?;
-            Ok(local_bus_ok(serde_json::json!({
+            let mut body = serde_json::json!({
                 "local_account_id": account_id,
                 "locked": true,
-            })))
+            });
+            if request.method == "account.sign_out"
+                && let Some(map) = body.as_object_mut()
+            {
+                map.insert("signed_out".to_owned(), serde_json::Value::Bool(true));
+            }
+            Ok(local_bus_ok(body))
         }
         "account.unlock" => {
             let account_id = request_account_id(request)?.to_owned();

@@ -133,14 +133,10 @@ pub(super) async fn add(
     {
         return Err(ContactReason::AlreadyContact.into());
     }
-    if let Some(card) = &card
-        && !account.client.contact_request_retryable(&selector)?
-        && let Some(old) = account.client.account_db()?.client_record("identity", &selector)?
-        && old["contact_identity_commitment"].as_str() == Some(&card.root_commitment)
-        && account.client.contact_root_source(&old)? != crate::ContactRootSource::Lookup
-        && account.client.friend_link_peer_is_accepted(&card.root_commitment)?
+    if let Some(card) = card.as_ref()
+        && let Some(done) = pin_accepted_card(state, account_id, card, &selector).await?
     {
-        return Err(ContactReason::AlreadyContact.into());
+        return Ok(done);
     }
     let mut verified_home = None;
     let mut directory_base = None;
@@ -200,6 +196,42 @@ pub(super) async fn add(
         tracing::warn!(%error, "accepted contact copy deferred to account sync");
     }
     Ok(local_bus_ok(contact_response(account, &contact, legacy.as_ref())?))
+}
+
+/// An accepted non-lookup contact keeps its card refusal, except when no home is pinned.
+/// The verified card's home is then recorded so attachment send can name the grantee.
+async fn pin_accepted_card(
+    state: &mut LocalBusDaemonState,
+    account_id: &str,
+    card: &ContactCardBody,
+    selector: &str,
+) -> Result<Option<LocalBusDispatchResult>, SdkError> {
+    let account = local_bus_account(state, account_id)?;
+    if account.client.contact_request_retryable(selector)? {
+        return Ok(None);
+    }
+    let Some(old) = account.client.account_db()?.client_record("identity", selector)? else {
+        return Ok(None);
+    };
+    if old["contact_identity_commitment"].as_str() != Some(card.root_commitment.as_str())
+        || account.client.contact_root_source(&old)? == crate::ContactRootSource::Lookup
+        || !account.client.friend_link_peer_is_accepted(&card.root_commitment)?
+    {
+        return Ok(None);
+    }
+    if old.get("home_node_id").and_then(Value::as_str).is_some_and(|home| !home.is_empty())
+        || account.client.born_v3_account.is_none()
+    {
+        return Err(ContactReason::AlreadyContact.into());
+    }
+    let home = account_home(state, account_id)?;
+    let own = local_bus_account(state, account_id)?.gateway_config.clone();
+    let root = state.config.data_root.clone();
+    card_gateway(card, &own, &root, &home).await?;
+    let account = local_bus_account_mut(state, account_id)?;
+    account.client.pin_contact_home(selector, &home.node_id)?;
+    let contact = account.client.contact_entry(selector)?;
+    Ok(Some(local_bus_ok(contact_response(account, &contact, None)?)))
 }
 
 fn contact_response(

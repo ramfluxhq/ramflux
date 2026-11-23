@@ -75,10 +75,24 @@ fn details(value: &Value, code: &Code) -> Details {
         }
         _ => {}
     }
+    if let Some(pairing) = value.get("pairing").and_then(token) {
+        return Details::Generated(ErrorDetails::Pairing { pairing });
+    }
+    if let Some(reason) = value.get("reason").and_then(token) {
+        return Details::Generated(ErrorDetails::Reason { reason });
+    }
     if let Some(retryable) = value.get("retryable").and_then(Value::as_bool) {
         return Details::Retryable { retryable };
     }
     Details::Generated(ErrorDetails::Empty {})
+}
+fn retry_ms(value: &Value) -> Option<u64> {
+    value.get("retry_after_ms").and_then(Value::as_u64).or_else(|| {
+        value
+            .get("retry_after_secs")
+            .and_then(Value::as_i64)
+            .map(|secs| u64::try_from(secs).map_or(0, |wait| wait.saturating_mul(1_000)))
+    })
 }
 fn project(value: &mut Value) {
     let code = value
@@ -92,7 +106,7 @@ fn project(value: &mut Value) {
         code,
         name: value.get("name").and_then(token),
         reason_code: value.get("reason_code").and_then(token),
-        retry_after_ms: value.get("retry_after_ms").and_then(Value::as_u64),
+        retry_after_ms: retry_ms(value),
         state: (value.get("state").and_then(Value::as_str) == Some("error")).then_some("error"),
     };
     let replacement =

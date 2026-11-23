@@ -6,6 +6,7 @@ pub mod account;
 pub(in crate::bus) mod attachment_prepare;
 pub(crate) mod call;
 pub mod call_bot;
+pub(crate) mod card_session;
 pub mod contact;
 pub(in crate::bus) mod contact_resolution;
 pub(crate) mod conversation_delivery;

@@ -165,7 +165,6 @@ impl AccountRuntime {
         let network_deadline = admitted_at + self.timeouts.network_wait;
         // Every NEW send authorization needs an authority fetched after this command began.
         let since = std::time::Instant::now();
-        let mut enqueued = BTreeSet::new();
         let mut receive_prepared = false;
         let mut demand = None;
         if command.request.method == "group.read"
@@ -215,7 +214,7 @@ impl AccountRuntime {
                 return Ok(());
             };
             for root in &roots {
-                if enqueued.insert(root.clone()) && !account.head_refresh.enqueue(root.clone()) {
+                if !account.head_refresh.enqueue(root.clone()) {
                     return Err(pending(account));
                 }
             }
