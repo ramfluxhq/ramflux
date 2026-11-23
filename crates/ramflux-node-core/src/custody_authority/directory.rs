@@ -214,6 +214,23 @@ impl super::RouterCore {
         store: &super::RouterRedbStore,
     ) -> Result<Option<crate::DeviceManifestResponse>, NodeCoreError> {
         let agent_lifecycle = store.agent_lifecycle_label(anchor)?;
+        let hosted_agents = hosted_directory(store, anchor)?;
+        if agent_lifecycle.as_deref() == Some("retired") {
+            // Retirement keeps the custody record. Its custodian primary no longer matches the
+            // recovered human, and that verification failure must not become an HTTP 500.
+            let (principal_id, principal_commitment, root_public_key) =
+                retired_identity(self, anchor);
+            return Ok(Some(crate::DeviceManifestResponse {
+                signed_device_set: None,
+                principal_id,
+                principal_commitment,
+                root_public_key,
+                devices: Vec::new(),
+                custody: None,
+                agent_lifecycle,
+                hosted_agents,
+            }));
+        }
         if let Some(native) = self.custody_manifest(anchor, now, store)? {
             return Ok(Some(crate::DeviceManifestResponse {
                 signed_device_set: None,
@@ -230,6 +247,7 @@ impl super::RouterCore {
                 devices: Vec::new(),
                 custody: Some(Box::new(native)),
                 agent_lifecycle,
+                hosted_agents,
             }));
         }
         let native = self
@@ -243,6 +261,7 @@ impl super::RouterCore {
         }
         Ok(self.mvp1_device_manifest(anchor).map(|mut manifest| {
             manifest.agent_lifecycle = agent_lifecycle;
+            manifest.hosted_agents = hosted_agents;
             manifest
         }))
     }
@@ -387,4 +406,45 @@ impl super::RouterCore {
             bundle: Some(request.bundle.clone()),
         }))
     }
+}
+
+/// Identity fields of a retired agent, copied from the stored record without custodian checks.
+/// A retirement row whose record is already gone still returns the anchor and empty key fields.
+fn retired_identity(core: &super::RouterCore, anchor: &str) -> (String, String, String) {
+    let control = core.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match control.mvp1_identities.custody.records.get(anchor) {
+        Some(publication) => {
+            let body = &publication.record.body;
+            (
+                body.principal_id.clone(),
+                body.account_anchor.clone(),
+                body.master_certificate.body.master_public_key.clone(),
+            )
+        }
+        None => (String::new(), anchor.to_owned(), String::new()),
+    }
+}
+
+/// Host rows for one owner. More than 256 refuses rather than returning a partial list.
+fn hosted_directory(
+    store: &super::RouterRedbStore,
+    owner: &str,
+) -> Result<Vec<crate::HostedAgentDirectoryEntry>, NodeCoreError> {
+    const LIMIT: usize = 256;
+    let rows = store.agent_hosts_of(owner)?;
+    if rows.len() > LIMIT {
+        return Err(NodeCoreError::Capacity { resource: "hosted agents" });
+    }
+    let mut listed = Vec::with_capacity(rows.len());
+    for (anchor, binding) in rows {
+        let retired = store.agent_retirement(&anchor)?.is_some();
+        listed.push(crate::HostedAgentDirectoryEntry {
+            agent_anchor: anchor,
+            desktop_device_id: binding.desktop.device_id,
+            primary_device_id: binding.primary.device_id,
+            retired,
+        });
+    }
+    listed.sort_by_key(|entry| entry.agent_anchor.clone());
+    Ok(listed)
 }

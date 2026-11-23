@@ -44,6 +44,31 @@ impl AccountRuntime {
         }
         Ok(())
     }
+
+    /// Keeps the account open when the connection cannot start. The next command retries.
+    pub(super) fn start_connection_or_defer(&mut self) {
+        if let Err(error) = self.start_connection() {
+            tracing::warn!(
+                %error,
+                "account connection manager startup deferred; account remains open"
+            );
+        }
+    }
+
+    /// Background work must not drop the command mailbox. An unusable account still stops.
+    pub(super) async fn finish_connection_work(
+        &mut self,
+        work: AccountWork,
+    ) -> Result<(), SdkError> {
+        match self.apply_connection_work(work).await {
+            Ok(()) => Ok(()),
+            Err(error) if crate::bus::task_courier_queue::stop_class(&error) => Err(error),
+            Err(error) => {
+                tracing::warn!(%error, "account connection work deferred; account remains open");
+                Ok(())
+            }
+        }
+    }
     pub(super) async fn stop_connection(&mut self) {
         self.clear_transient_host();
         self.transient = super::transient::TransientHost::default();
@@ -242,6 +267,9 @@ impl AccountRuntime {
                 if generation == handle.generation() && account.client.born_v3_account.is_some() {
                     super::super::native_account::record_networking(account, Some(&error))?;
                     publish_networking = true;
+                    if super::super::host_branch::stop_if_revoked(account, &error).await {
+                        handle.signal_stop();
+                    }
                 }
             }
         }
@@ -454,30 +482,40 @@ impl AccountRuntime {
         };
         let current = handle.clone();
         #[cfg(test)]
-        let started = {
-            if let Some(connection) =
-                self.state.accounts.get(&self.id).and_then(|account| account.connection.as_ref())
-            {
-                connection.test_record_receive("apply-start", std::time::Duration::ZERO);
-            }
-            std::time::Instant::now()
-        };
+        if let Some(connection) =
+            self.state.accounts.get(&self.id).and_then(|account| account.connection.as_ref())
+        {
+            connection.test_record_receive("apply-start", std::time::Duration::ZERO);
+        }
+        let started = std::time::Instant::now();
         let Some((result, reply)) =
             self.apply_page_pausing(&turn, &current, (entry, source, backpressure), reply).await?
         else {
             return Ok(false);
         };
+        self.publish_applied_page(handle, &turn, result, reply, started).await
+    }
+
+    async fn publish_applied_page(
+        &mut self,
+        handle: &crate::bus::connection_manager::ConnectionHandle,
+        turn: &super::super::connection_manager::ReceiveTurn,
+        result: Result<super::super::connection_manager::ReceiveApplied, SdkError>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<super::super::connection_manager::ReceiveApplied, SdkError>,
+        >,
+        started: std::time::Instant,
+    ) -> Result<bool, SdkError> {
+        // The cursor note is test-and-vault only. Production still receives the handles.
+        #[cfg(not(any(test, feature = "itest-memory-vault")))]
+        let _ = (handle, turn);
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             let _ = reply.send(result);
             return Ok(false);
         };
         #[cfg(any(test, feature = "itest-memory-vault"))]
         if result.is_ok() {
-            let cursor = super::super::push_receiver::apply_w1::read_cursor(
-                account.client.account_db()?,
-                &target,
-            )?;
-            handle.receive_observations().committed(turn.cursor, cursor);
+            note_committed_cursor(account, handle, turn.cursor, &turn.target);
         }
         let result = match result {
             Ok(applied) => {
@@ -487,13 +525,15 @@ impl AccountRuntime {
         };
         #[cfg(test)]
         if result.is_ok()
-            && let Some(handle) = &account.connection
+            && let Some(connection) = &account.connection
         {
-            handle.test_record_receive("apply", started.elapsed());
-            handle.test_record_receive("projection", started.elapsed());
+            connection.test_record_receive("apply", started.elapsed());
+            connection.test_record_receive("projection", started.elapsed());
         }
-        if let Some(handle) = &account.connection {
-            handle.wake_couriers();
+        #[cfg(not(test))]
+        let _ = started;
+        if let Some(connection) = &account.connection {
+            connection.wake_couriers();
         }
         let request = crate::LocalBusFrame::request(
             "receive",
@@ -506,10 +546,10 @@ impl AccountRuntime {
         let published = std::time::Instant::now();
         self.publish(&request).await?;
         #[cfg(test)]
-        if let Some(handle) =
+        if let Some(connection) =
             self.state.accounts.get(&self.id).and_then(|account| account.connection.as_ref())
         {
-            handle.test_record_receive("publish", published.elapsed());
+            connection.test_record_receive("publish", published.elapsed());
         }
         let _ = reply.send(result);
         Ok(false)
@@ -741,6 +781,26 @@ fn page_turn(
     };
     super::super::push_receiver::apply_w1::refresh_cursor(db, &mut turn)?;
     Ok(turn)
+}
+
+/// The itest cursor probe is an observation. A storage miss must not stop the actor.
+#[cfg(any(test, feature = "itest-memory-vault"))]
+fn note_committed_cursor(
+    account: &LocalBusAccountState,
+    handle: &crate::bus::connection_manager::ConnectionHandle,
+    before: u64,
+    target: &str,
+) {
+    match account
+        .client
+        .account_db()
+        .and_then(|db| super::super::push_receiver::apply_w1::read_cursor(db, target))
+    {
+        Ok(cursor) => handle.receive_observations().committed(before, cursor),
+        Err(error) => {
+            tracing::warn!(%error, "receive cursor observation deferred");
+        }
+    }
 }
 
 async fn short_step<T>(

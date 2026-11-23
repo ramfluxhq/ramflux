@@ -25,6 +25,7 @@ mod dm;
 mod grant;
 mod group;
 mod keychain;
+mod prx;
 mod vault;
 pub(crate) use vault::*;
 mod mcp;
@@ -47,6 +48,7 @@ pub(crate) use conversation_ops::*;
 pub(crate) use daemon::*;
 pub(crate) use device::*;
 pub(crate) use diag::*;
+pub(crate) use prx::*;
 mod pairing;
 mod transfer;
 pub(crate) use dm::*;
@@ -66,11 +68,11 @@ pub(crate) use transfer::*;
     about = "Ramflux reference CLI over the local SDK bus"
 )]
 pub(crate) struct Cli {
-    #[cfg_attr(not(target_os = "linux"), arg(long, global = true, default_value = DEFAULT_SOCKET))]
-    #[cfg_attr(
-        target_os = "linux",
-        arg(long, global = true, default_value_os_t = crate::linux_paths::default_socket())
-    )]
+    #[cfg(target_os = "linux")]
+    #[arg(long, global = true)]
+    pub(crate) socket: Option<PathBuf>,
+    #[cfg(not(target_os = "linux"))]
+    #[arg(long, global = true, default_value = DEFAULT_SOCKET)]
     pub(crate) socket: PathBuf,
     #[command(subcommand)]
     pub(crate) command: Command,
@@ -88,6 +90,8 @@ pub(crate) enum Command {
     Pairing(PairingCommand),
     /// Agent accounts: create, decide, list, show, edit, access, delete, status (desktop bus).
     Agent(AgentCommand),
+    /// Find or start the local PRX daemon.
+    Prx(PrxCommand),
     /// Full-account primary transfer preview (default-off).
     Transfer(TransferCommand),
     Dm(DmCommand),

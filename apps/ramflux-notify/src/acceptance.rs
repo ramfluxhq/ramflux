@@ -256,10 +256,17 @@ fn all_provider_payloads_and_headers_exclude_message_identifiers() -> Result<(),
         &[
             "aps",
             "aps.alert",
-            "aps.alert.body",
-            "aps.alert.title",
+            "aps.alert.loc-args",
+            "aps.alert.loc-key",
+            "aps.mutable-content",
+            "aps.sound",
             "class",
             "collapse_key",
+            "rf",
+            "rf.c",
+            "rf.t",
+            "rf.v",
+            "rf.w",
             "wake_id",
         ],
     );
@@ -290,6 +297,7 @@ fn all_provider_payloads_and_headers_exclude_message_identifiers() -> Result<(),
             "message.android.ttl",
             "message.data",
             "message.data.class",
+            "message.data.rf",
             "message.data.wake_id",
             "message.token",
         ],
@@ -380,12 +388,13 @@ fn apns_route_topic_and_body_follow_push_mode() -> Result<(), Box<dyn std::error
     ))
     .map_err(build_box)?;
     let alert_json = parse(&alert).map_err(|_| "alert json")?;
-    assert_eq!(alert_json.pointer("/aps/alert/title").and_then(Value::as_str), Some("Ramflux"));
     assert_eq!(
-        alert_json.pointer("/aps/alert/body").and_then(Value::as_str),
-        Some("You have a new Ramflux update.")
+        alert_json.pointer("/aps/alert/loc-key").and_then(Value::as_str),
+        Some("RF_PUSH_MESSAGE")
     );
-    assert!(alert_json.pointer("/aps/mutable-content").is_none());
+    assert!(alert_json.pointer("/aps/alert/title").is_none());
+    assert!(alert_json.pointer("/aps/alert/body").is_none());
+    assert_eq!(alert_json.pointer("/aps/mutable-content").and_then(Value::as_u64), Some(1));
     assert_eq!(header(&alert.headers, "apns-topic"), Some("app.example"));
     assert_eq!(header(&alert.headers, "apns-push-type"), Some("alert"));
     let voip = build_provider_parts(&input(

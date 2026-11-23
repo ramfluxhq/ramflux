@@ -6,9 +6,7 @@
 use crate::prekey::SdkDeviceManifestEntry;
 use crate::prelude::*;
 mod federation;
-pub(crate) use federation::{
-    RemoteManifest, fetch as fetch_verified_device_manifest_from_url_async,
-};
+pub(crate) use federation::RemoteManifest;
 
 impl RamfluxClient {
     pub(crate) fn persist_identity_directory(
@@ -100,15 +98,7 @@ impl RamfluxClient {
         principal_commitment: &str,
         source: &str,
     ) -> Result<SdkDeviceManifestResponse, SdkError> {
-        let started = std::time::Instant::now();
-        let manifest: SdkDeviceManifestResponse =
-            sdk_gateway_get_json::<Option<SdkDeviceManifestResponse>>(
-                gateway,
-                &format!("/mvp1/device-manifest/{principal_commitment}"),
-            )
-            .await?
-            .ok_or_else(|| SdkError::InboundRejected("device manifest unavailable".into()))?
-            .fetched_from(started);
+        let manifest = self.peer_device_manifest(gateway, principal_commitment).await?;
         self.accept_fetched_device_manifest(manifest, principal_commitment, source)
     }
 
@@ -711,26 +701,6 @@ pub(crate) async fn fetch_verified_device_manifest(
     let manifest: Option<SdkDeviceManifestResponse> =
         sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{identity_commitment}"))
             .await?;
-    let mut manifest = manifest.ok_or_else(|| {
-        SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
-    })?;
-    manifest.fetched_after = crate::prekey::FetchStamp(Some(started));
-    verify_device_manifest(&manifest, identity_commitment)?;
-    Ok(super::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
-}
-
-/// Fetch and verify a device manifest from an absolute federation HTTP base URL (the recipient's
-/// home node), rather than the sender's gateway session. Used for cross-node federated sends where
-/// the recipient is not served by the local gateway. Verification is identical to the gateway path
-/// (`verify_device_manifest`), so the manifest remains self-authenticating against the expected
-/// commitment regardless of which node served it.
-pub(crate) fn fetch_verified_device_manifest_from_url(
-    manifest_url: &str,
-    identity_commitment: &str,
-) -> Result<SdkDeviceManifestResponse, SdkError> {
-    let started = std::time::Instant::now();
-    let manifest: Option<SdkDeviceManifestResponse> =
-        sdk_http_get_json(manifest_url, &format!("/mvp1/device-manifest/{identity_commitment}"))?;
     let mut manifest = manifest.ok_or_else(|| {
         SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
     })?;

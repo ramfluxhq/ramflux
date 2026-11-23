@@ -443,6 +443,9 @@ pub struct GatewayAuthFrame {
 pub struct GatewaySubmitFrame {
     pub signed_request: ramflux_protocol::SignedRequest,
     pub envelope: ramflux_protocol::Envelope,
+    /// Recipient home. Omitted when this node delivers the envelope itself.
+    /// Boxed so `GatewayClientFrame::Submit` stays within the enum size budget.
+    pub target_node: Option<Box<str>>,
     /// Caller-signed call intent. Absent on every submit that is not a one-to-one call.
     /// Boxed so `GatewayClientFrame::Submit` stays within the enum size budget.
     pub call_intent: Option<Box<ramflux_protocol::SignedCallIntentV1>>,
@@ -461,6 +464,7 @@ impl From<ramflux_protocol::CallSubmitCarrier> for GatewaySubmitFrame {
         Self {
             signed_request: value.signed_request,
             envelope: value.envelope,
+            target_node: value.target_node.map(String::into_boxed_str),
             call_intent: value.call_intent,
             wake_id: value.wake_id,
             call_ref: value.call_ref,
@@ -475,6 +479,7 @@ impl serde::Serialize for GatewaySubmitFrame {
             &ramflux_protocol::CallSubmitCarrierRef {
                 signed_request: &self.signed_request,
                 envelope: &self.envelope,
+                target_node: self.target_node.as_deref(),
                 call_intent: self.call_intent.as_deref(),
                 wake_id: self.wake_id.as_deref(),
                 call_ref: self.call_ref.as_deref(),

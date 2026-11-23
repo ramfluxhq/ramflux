@@ -278,15 +278,16 @@ async fn send(context: &SessionContext, writer: &Writer, mut plan: Plan) -> Resu
             crate::client::routed::SendMaterialRequest { root: None, prekey: None },
         );
         let route = draft.target.federation.clone();
+        let commitment = draft.target.identity.root_commitment().to_owned();
         let started = tokio::time::Instant::now();
         let material = tokio::time::timeout(
             preparation_remaining,
-            federation::material(
+            federation::material_for_route(
                 context,
                 &plan.config,
                 request,
                 crate::bus::connection_manager::CallClass::Bulk,
-                route.as_ref(),
+                federation::HomeLookup { writer, commitment: &commitment, route: route.as_ref() },
             ),
         )
         .await
@@ -304,10 +305,11 @@ async fn send(context: &SessionContext, writer: &Writer, mut plan: Plan) -> Resu
             })
             .await?;
         let Some(envelope) = envelope else { return Ok(Sent::Done) };
-        sealed.push((envelope, route));
+        sealed.push((envelope, route, commitment));
     }
     let deadline = context.task_deadline(plan.approval);
-    for (envelope, route) in sealed {
+    for (envelope, route, commitment) in sealed {
+        let route = federation::pinned_submit_route(writer, &commitment, route).await?;
         match federation::submit_classified_until(context, envelope, route, deadline, false).await?
         {
             Ok(()) => {}

@@ -257,6 +257,9 @@ fn reject_private(private: PrivateCommand) {
             let _ = reply.send(Err(error));
         }
         PrivateCommand::Agent(command) => reject_agent(*command, error),
+        PrivateCommand::ProjectActivity { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
         #[cfg(feature = "c-abi")]
         PrivateCommand::ReleaseFiles { reply } | PrivateCommand::ReopenFiles { reply } => {
             let _ = reply.send(Ok(()));
@@ -285,6 +288,12 @@ fn reject_agent(command: AgentPrivate, error: SdkError) {
             let _ = reply.send(Err(error));
         }
         AgentPrivate::Call { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        AgentPrivate::Gateway { reply } => {
+            let _ = reply.send(Err(error));
+        }
+        AgentPrivate::SettleAdmission { reply } => {
             let _ = reply.send(Err(error));
         }
     }

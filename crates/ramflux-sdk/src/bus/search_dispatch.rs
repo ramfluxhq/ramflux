@@ -88,7 +88,7 @@ impl Supervisor {
             }
             _ => return Err(SearchError::InvalidQuery.into()),
         };
-        Ok(ActorResponse { body, events: Vec::new(), nodes: None })
+        Ok(ActorResponse { body, events: Vec::new(), nodes: None, owner_copy: None })
     }
     pub(super) fn resolve_search_completion(
         &self,

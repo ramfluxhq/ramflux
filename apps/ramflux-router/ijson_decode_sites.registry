@@ -16,9 +16,6 @@ apps/ramflux-router/src/handlers.rs | handle_mesh_retention_value | 1 | E | excl
 apps/ramflux-router/src/handlers.rs | handle_mvp0_ack | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/handlers.rs | handle_mvp0_ack_bound | 1 | A | strict=parse_i_json; admission=A ingress boundary
 apps/ramflux-router/src/handlers.rs | handle_mvp0_envelope | 1 | A | strict=decode_signed_envelope_ijson; admission=A ingress boundary
-apps/ramflux-router/src/handlers.rs | handle_mvp0_envelope_async_from | 1 | A | strict=decode_signed_envelope_ijson; admission=A ingress boundary
-apps/ramflux-router/src/handlers.rs | handle_mvp0_envelope_from | 1 | A | strict=decode_signed_envelope_ijson; admission=A ingress boundary
-apps/ramflux-router/src/handlers.rs | handle_mvp0_envelope_mesh_from | 1 | A | strict=decode_signed_envelope_ijson; admission=A ingress boundary
 apps/ramflux-router/src/handlers.rs | handle_mvp0_nack | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/handlers.rs | handle_mvp0_nack_bound | 1 | A | strict=parse_i_json; admission=A ingress boundary
 apps/ramflux-router/src/handlers.rs | handle_mvp10_own_devices_fanout | 1 | A | strict=parse_i_json; admission=A ingress boundary
@@ -51,3 +48,9 @@ apps/ramflux-router/src/lifecycle.rs | handle_mvp7_lifecycle_finalize | 1 | E | 
 apps/ramflux-router/src/pairing_mesh.rs | route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/send_authority.rs | read | 1 | E | excluded=typed authenticated notification authority metadata; original bytes validated by mesh ingress
 apps/ramflux-router/src/serve.rs | submit_raw_envelope | 1 | A | strict=decode_signed_envelope_ijson; admission=A ingress boundary
+apps/ramflux-router/src/cross_node_forward.rs | forward | 1 | B | strict=parse_i_json; admission=bounded authenticated federation forward response
+apps/ramflux-router/src/ingress_decode.rs | malformed_target | 1 | E | excluded=bounded identifier extraction for permanent refusal; no envelope admission
+apps/ramflux-router/src/ingress_decode.rs | open_submitted | 1 | A | strict=decode_signed_envelope_ijson; admission=ordinary mesh envelope submission
+apps/ramflux-router/src/ingress_decode.rs | open_verified_source | 1 | B | strict=parse_i_json; admission=authenticated forwarded envelope wrapper
+apps/ramflux-router/src/ingress_decode.rs | open_verified_source | 2 | C | admission=apps/ramflux-router/src/ingress_decode.rs#open_verified_source#1
+apps/ramflux-router/src/cross_node_submit.rs | respond | 1 | A | strict=parse_i_json; admission=authenticated gateway cross-node envelope submit

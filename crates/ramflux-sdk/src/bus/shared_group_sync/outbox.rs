@@ -462,8 +462,12 @@ async fn submit_staged(
 ) -> Result<(), SdkError> {
     if let Some(staged) = &intent.active {
         if let Some(federation) = &staged.federation {
-            let response =
-                RamfluxClient::forward_federated_envelope(federation, staged.envelope.clone())?;
+            let response = RamfluxClient::forward_federated_envelope(
+                engine,
+                federation,
+                staged.envelope.clone(),
+            )
+            .await?;
             if !response.accepted {
                 return Err(SdkError::InboundPending(
                     "group state federation submission refused".into(),

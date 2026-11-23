@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 pub struct CallSubmitCarrier {
     pub signed_request: SignedRequest,
     pub envelope: Envelope,
+    /// Home of the recipient. Absent on a submit this node delivers itself.
+    pub target_node: Option<String>,
     pub call_intent: Option<Box<SignedCallIntentV1>>,
     pub wake_id: Option<String>,
     pub call_ref: Option<String>,
@@ -19,6 +21,7 @@ pub struct CallSubmitCarrier {
 pub struct CallSubmitCarrierRef<'a> {
     pub signed_request: &'a SignedRequest,
     pub envelope: &'a Envelope,
+    pub target_node: Option<&'a str>,
     pub call_intent: Option<&'a SignedCallIntentV1>,
     pub wake_id: Option<&'a str>,
     pub call_ref: Option<&'a str>,
@@ -32,9 +35,16 @@ impl Serialize for CallSubmitCarrierRef<'_> {
             || self.call_ref.is_some()
             || self.call_terminal.is_some()
             || self.call_context.is_some();
-        let mut map = serializer.serialize_map(Some(if call { 7 } else { 2 }))?;
+        let mut len = if call { 7 } else { 2 };
+        if self.target_node.is_some() {
+            len += 1;
+        }
+        let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("signed_request", self.signed_request)?;
         map.serialize_entry("envelope", self.envelope)?;
+        if let Some(target_node) = self.target_node {
+            map.serialize_entry("target_node", target_node)?;
+        }
         if call {
             map.serialize_entry("call_intent", &self.call_intent)?;
             map.serialize_entry("wake_id", &self.wake_id)?;
@@ -77,6 +87,8 @@ struct RawCarrier {
     signed_request: SignedRequest,
     envelope: Envelope,
     #[serde(default)]
+    target_node: Option<String>,
+    #[serde(default)]
     call_intent: Nullable<Box<SignedCallIntentV1>>,
     #[serde(default)]
     wake_id: Nullable<String>,
@@ -107,6 +119,7 @@ impl<'de> Deserialize<'de> for CallSubmitCarrier {
         let value = Self {
             signed_request: raw.signed_request,
             envelope: raw.envelope,
+            target_node: raw.target_node,
             call_intent: raw.call_intent.value(),
             wake_id: raw.wake_id.value(),
             call_ref: raw.call_ref.value(),

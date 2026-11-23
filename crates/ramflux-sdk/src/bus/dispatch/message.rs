@@ -246,7 +246,7 @@ async fn submit_federated(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let recipient_principal_commitment = body.recipient_principal_commitment.clone();
     let message = body.into_gateway_message_with_body(Vec::new());
-    let engine = account.session_client().await?;
+    let mut engine = account.session_client().await?;
     let recipient = resolve_federated_message_recipient_principal_commitment(
         &account.client,
         federation,
@@ -259,7 +259,7 @@ async fn submit_federated(
     let response = account
         .client
         .send_plaintext_federated_message_async(
-            &engine,
+            &mut engine,
             crate::client::federation::PlaintextForward {
                 content,
                 message,
@@ -320,11 +320,9 @@ fn require_message_submit_friend_link_accepted(
 
 /// Cross-node manifest gate for federated direct messages (C2 §5).
 ///
-/// The recipient lives on a remote home node, so the sender's local gateway/device directory cannot
-/// serve the manifest. Resolve and verify it directly from the recipient home node's federation HTTP
-/// surface — the same base the federated send already uses for the recipient prekey fetch. The
-/// manifest is self-authenticating against the expected commitment, so a lying remote node can only
-/// fail closed. The gate runs before send, fail-closed.
+/// The recipient directory is the pinned home's signed public prekey endpoint.
+/// A caller URL is not an origin. The manifest is self-checked against the
+/// expected commitment. The gate runs before send and fails closed.
 async fn federated_manifest_gate(
     client: &RamfluxClient,
     federation: &LocalBusFederationRoute,
@@ -332,22 +330,23 @@ async fn federated_manifest_gate(
     device_id: &str,
     timeout: Duration,
 ) -> Result<ResolvedMessageRecipient, SdkError> {
-    let manifest_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
-        SdkError::LocalBus(
-            "federated direct messages require a recipient home-node url (--recipient-prekey-url) to verify the remote device manifest"
-                .to_owned(),
-        )
-    })?;
+    let base = crate::client::recipient_home::required_public_base(
+        client,
+        recipient_principal_commitment.unwrap_or(""),
+        Some(federation.target_node_id.as_str()),
+    )
+    .await?;
+    let remote = crate::client::contact::RemoteManifest { url: &base, timeout };
     let principal_commitment = client
         .resolve_federated_target_principal_commitment_async(
-            crate::client::contact::RemoteManifest { url: manifest_url, timeout },
+            remote,
             recipient_principal_commitment,
             device_id,
         )
         .await?;
     let device = client
         .assert_manifest_active_device_from_url_async(
-            crate::client::contact::RemoteManifest { url: manifest_url, timeout },
+            remote,
             &principal_commitment,
             device_id,
             "message_submit_friend_gate",
@@ -834,7 +833,7 @@ pub(crate) async fn dispatch_message_receive_request(
         "durable_reader": "message.read",
         "snapshot_sequence": account.client.account_db()?.journal_bounds()?.head_seq,
     });
-    Ok(LocalBusDispatchResult { response_body, event })
+    Ok(LocalBusDispatchResult { response_body, event, owner_copy: None })
 }
 
 #[cfg(test)]

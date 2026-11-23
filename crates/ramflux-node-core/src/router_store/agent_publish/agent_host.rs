@@ -9,7 +9,8 @@ use ramflux_protocol::custody::{CustodyRefusal, DeviceRef};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-const HOSTS: TableDefinition<&str, &[u8]> = TableDefinition::new("agent_host_bindings_v1");
+pub(crate) const HOSTS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("agent_host_bindings_v1");
 const RETIREMENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("agent_retirements_v1");
 const ANCHOR_LIMIT: usize = 128;
 const DEVICE_ID_LIMIT: usize = 128;

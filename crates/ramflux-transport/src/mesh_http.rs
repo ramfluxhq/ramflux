@@ -160,13 +160,17 @@ fn bounded_io_timeout(timeouts: MeshHttpTimeouts, per_io: Duration) -> std::io::
 /// TCP socket that re-arms its timeouts from the absolute request deadline before every read
 /// and write. rustls drives handshakes and reads through several socket calls, so a deadline
 /// checked only between those calls would let a trickling peer hold them open indefinitely.
-struct DeadlineSocket {
+pub(crate) struct DeadlineSocket {
     tcp: TcpStream,
     deadline: Option<Instant>,
     io_timeout: Duration,
 }
 
 impl DeadlineSocket {
+    pub(crate) fn until(tcp: TcpStream, deadline: Instant) -> Self {
+        Self::new(tcp, MeshHttpTimeouts::DEFAULT.with_deadline(deadline))
+    }
+
     fn new(tcp: TcpStream, timeouts: MeshHttpTimeouts) -> Self {
         Self { tcp, deadline: timeouts.deadline, io_timeout: timeouts.total }
     }
@@ -246,6 +250,7 @@ pub(crate) const fn mesh_http_post_worst_case_timeout() -> Duration {
 
 #[derive(Clone, Copy)]
 struct MeshHttpClientRequest<'a> {
+    signed_envelope: bool,
     method: &'a str,
     endpoint: &'a str,
     path: &'a str,
@@ -326,6 +331,7 @@ impl MeshHttpClient {
     {
         let body = serde_json::to_vec(value)?;
         let response = self.json_request(MeshHttpClientRequest {
+            signed_envelope: false,
             method: "POST",
             endpoint,
             path,
@@ -353,6 +359,7 @@ impl MeshHttpClient {
         R: serde::de::DeserializeOwned,
     {
         let response = self.json_request(MeshHttpClientRequest {
+            signed_envelope: false,
             method: "GET",
             endpoint,
             path,
@@ -386,11 +393,40 @@ impl MeshHttpClient {
     {
         let body = serde_json::to_vec(value)?;
         let response = self.json_request(MeshHttpClientRequest {
+            signed_envelope: false,
             method: "POST",
             endpoint,
             path,
             tls,
             server_name,
+            peer_ca_pems: Some(peer_ca_pems),
+            body: Some(&body),
+            timeouts: MeshHttpTimeouts::DEFAULT,
+            resolver: None,
+            resolver_pool: None,
+        })?;
+        Ok(ramflux_protocol::parse_i_json(&response)?)
+    }
+
+    /// Deliver a node-signed envelope with server TLS authentication and no client certificate.
+    /// The pinned server roots and the server service name are still verified.
+    /// # Errors
+    /// Serialization, pinned server authentication, transport or response decoding failure.
+    pub fn post_signed_federation_envelope<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        endpoint: &str,
+        tls: &MeshTlsConfig,
+        peer_ca_pems: &[String],
+        value: &T,
+    ) -> Result<R, TransportError> {
+        let body = serde_json::to_vec(value)?;
+        let response = self.json_request(MeshHttpClientRequest {
+            signed_envelope: true,
+            method: "POST",
+            endpoint,
+            path: "/s8/federation/envelope",
+            tls,
+            server_name: "ramflux-federation",
             peer_ca_pems: Some(peer_ca_pems),
             body: Some(&body),
             timeouts: MeshHttpTimeouts::DEFAULT,
@@ -422,6 +458,7 @@ impl MeshHttpClient {
     {
         let body = serde_json::to_vec(value)?;
         let response = self.json_request(MeshHttpClientRequest {
+            signed_envelope: false,
             method: "POST",
             endpoint,
             path,
@@ -444,8 +481,11 @@ impl MeshHttpClient {
         };
         let endpoint = normalized_endpoint(request.endpoint);
         record_mesh_client_request();
-        let key =
+        let mut key =
             mesh_http_pool_key(endpoint, request.server_name, request.tls, request.peer_ca_pems);
+        if signed_envelope_request(&request) {
+            key.root_mode.push_str("|signed-envelope");
+        }
         let request_bytes =
             mesh_http_request_bytes(request.method, endpoint, request.path, request.body, true)?;
         let (mut connection, reused) = match self.checkout(&key) {
@@ -547,6 +587,7 @@ fn mesh_http_json_request(
     body: Option<&[u8]>,
 ) -> Result<Vec<u8>, TransportError> {
     mesh_http_json_request_with_timeouts(MeshHttpClientRequest {
+        signed_envelope: false,
         method,
         endpoint,
         path,
@@ -602,9 +643,15 @@ fn new_mesh_http_connection(
     record_mesh_client_connect(connect_started.elapsed());
     let tls_server_name = rustls::pki_types::ServerName::try_from(request.server_name.to_owned())
         .map_err(|error| TransportError::InvalidDnsName(error.to_string()))?;
-    let client_config = match request.peer_ca_pems {
-        Some(root_pems) => mesh_client_config_with_pem_roots(request.tls, root_pems)?,
-        None => mesh_client_config(request.tls)?,
+    let client_config = if signed_envelope_request(request) {
+        crate::tls_config::signed_mesh_client_config(
+            request.peer_ca_pems.ok_or(TransportError::NotAuthenticated)?,
+        )?
+    } else {
+        match request.peer_ca_pems {
+            Some(root_pems) => mesh_client_config_with_pem_roots(request.tls, root_pems)?,
+            None => mesh_client_config(request.tls)?,
+        }
     };
     let connection = rustls::ClientConnection::new(Arc::new(client_config), tls_server_name)
         .map_err(|error| TransportError::Tls(error.to_string()))?;
@@ -622,6 +669,10 @@ fn new_mesh_http_connection(
 fn close_mesh_client_connection(mut connection: MeshHttpPooledConnection) {
     connection.stream.conn.send_close_notify();
     let _result = connection.stream.flush();
+}
+
+fn signed_envelope_request(request: &MeshHttpClientRequest<'_>) -> bool {
+    request.signed_envelope
 }
 
 fn mesh_http_pool_key(
@@ -713,6 +764,7 @@ where
 {
     let body = serde_json::to_vec(value)?;
     mesh_http_json_request_status_body(MeshHttpClientRequest {
+        signed_envelope: false,
         method: "POST",
         endpoint,
         path,
@@ -743,6 +795,7 @@ where
 {
     let body = serde_json::to_vec(value)?;
     let response = mesh_http_json_request_with_timeouts(MeshHttpClientRequest {
+        signed_envelope: false,
         method: "POST",
         endpoint,
         path,
@@ -1850,6 +1903,7 @@ mod tests {
         let tls = test_mesh_tls_config(ca.path(), "gateway")?;
         let endpoint = addr.to_string();
         let rejected = mesh_http_json_request_with_timeouts(MeshHttpClientRequest {
+            signed_envelope: false,
             method: "GET",
             endpoint: &endpoint,
             path: "/healthz",

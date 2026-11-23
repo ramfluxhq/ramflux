@@ -69,6 +69,8 @@ const KNOWN_CODES: &[&str] = &[
     "SessionExpired",
     "Capacity",
     "PersistenceUnavailable",
+    "storage_unavailable",
+    "storage_unavailable_principal",
     "HomeMigration",
     "AbortedRetrySafe",
     "CapacityRetryAfter",

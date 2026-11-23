@@ -32,7 +32,11 @@ fn invalid() -> SdkError {
     SdkError::PairingField("credential_frame")
 }
 fn action(value: &str) -> Result<(), SdkError> {
-    if matches!(value, "setup" | "unlock" | "phrase") { Ok(()) } else { Err(invalid()) }
+    if matches!(value, "setup" | "unlock" | "phrase" | "provider") {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
 }
 fn identifier(id: &str) -> Result<(), SdkError> {
     if id.len() != 43 {
@@ -162,6 +166,31 @@ fn finish_reply(
         }
     };
     Ok(PrivateCredentialReply { generation, action: requested.into(), outcome })
+}
+impl PrivateCredentialReply {
+    /// Take a provider-key reply. Setup confirmation is refused here.
+    ///
+    /// # Errors
+    /// Returns [`SdkError::PairingCode`]`("Refused")` when the user declined, and a frame error
+    /// for any other action or a blank secret.
+    pub(crate) fn into_provider_key(self) -> Result<Zeroizing<String>, SdkError> {
+        if self.action != "provider" {
+            return Err(invalid());
+        }
+        match self.outcome {
+            CredentialOutcome::Refused => Err(SdkError::PairingCode("Refused")),
+            CredentialOutcome::Provided { passphrase, confirmation } => {
+                if confirmation.is_some() {
+                    return Err(invalid());
+                }
+                let text = std::str::from_utf8(passphrase.as_bytes()).map_err(|_| invalid())?;
+                if text.trim().is_empty() {
+                    return Err(invalid());
+                }
+                Ok(Zeroizing::new(text.to_owned()))
+            }
+        }
+    }
 }
 /// Public metadata bound by the daemon to the actual local call. It grants no approval.
 #[derive(Clone, PartialEq, Eq)]

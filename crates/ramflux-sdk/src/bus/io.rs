@@ -165,7 +165,6 @@ fn bus_reason_code(error: &SdkError) -> Option<String> {
         SdkError::CustodyConfirmRejected(reason) => reason.token().to_owned(),
         SdkError::CustodyExpired => "deadline".into(),
         SdkError::ContactConfirmationRequired(_) => "root_replacement_confirmation_required".into(),
-        SdkError::ContactHomeNodeUnsupported => "invalid_card".into(),
         SdkError::PairingCode(code) => {
             let token = pairing_https_token(code)?;
             token.to_owned()
@@ -391,7 +390,8 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         E::ObjectOwnershipUnverified { .. } => "ObjectOwnershipUnverified",
         E::SchemaResetRequired { .. } | E::RawWireResetRequired => "SchemaResetRequired",
         E::AccountSchemaTooNew { .. } => "AccountSchemaTooNew",
-        E::Io(_) | E::Sqlite(_) => "storage_unavailable",
+        E::Io(_) => "storage_unavailable",
+        E::Sqlite(error) => sqlite_unavailable_code(error),
         E::Integrity(_)
         | E::Protocol(_)
         | E::AmbiguousDeviceId(_)
@@ -428,6 +428,17 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         | E::WriterPause
         | E::PairingField(_)
         | E::MuteUntilOutOfRange => "ValidationFailed",
+    }
+}
+
+fn sqlite_unavailable_code(error: &impl std::fmt::Display) -> &'static str {
+    let rendered = error.to_string();
+    if rendered.contains("idx_local_account_principal")
+        || rendered.contains("local_account.principal_commitment")
+    {
+        "storage_unavailable_principal"
+    } else {
+        "storage_unavailable"
     }
 }
 

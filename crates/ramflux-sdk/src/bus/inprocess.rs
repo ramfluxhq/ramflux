@@ -170,6 +170,7 @@ pub(crate) fn method_names() -> Vec<&'static str> {
         "agent.operation.get",
         "agent.list",
         "agent.get",
+        "agent.host.manage",
         "agent.persona.edit",
         "agent.access.set",
         "agent.watch",

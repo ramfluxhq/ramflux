@@ -9,8 +9,8 @@ use super::agent_custody::AgentCustodySend;
 use crate::custody::PrimaryVault;
 use crate::custody::agent_creation::check_decision_context;
 use crate::custody::agent_creation::{
-    AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentFailure, BeginInput,
-    PrimarySigning, begin, desktop_is_enrolled, primary_branch_public_key, primary_sign_decision,
+    AgentCreationRecord, AgentCreationState, AgentFailure, BeginInput, PrimarySigning, begin,
+    desktop_is_enrolled, primary_branch_public_key, primary_sign_decision,
 };
 use crate::{RamfluxClient, SdkError};
 use ramflux_crypto::RootQualifiedDeviceRef;
@@ -298,7 +298,7 @@ impl RamfluxClient {
         if record.state != AgentCreationState::AuthorizationPending {
             return Err(refuse("creation_already_decided"));
         }
-        let decision_bytes = self.sign_primary_decision(vault, &store, &plan_bytes, wanted, now)?;
+        let decision_bytes = self.sign_primary_decision(vault, &plan_bytes, wanted, now)?;
         record.decision_b64 = Some(encode_base64url(&decision_bytes));
         if approved {
             record.state = AgentCreationState::Authorized;
@@ -315,28 +315,24 @@ impl RamfluxClient {
     fn sign_primary_decision(
         &self,
         vault: &dyn PrimaryVault,
-        store: &AgentCreationStore,
         plan_bytes: &[u8],
         outcome: RegisterOutcome,
         now: u64,
     ) -> Result<Vec<u8>, SdkError> {
         let human = self.human_authority()?;
-        let account_id = self.account_db()?.local_account_id.clone();
+        let account = self.born_v3_account.as_deref().ok_or(SdkError::AccountDbNotUnlocked)?;
         // The current branch must exist; the vault compares the primary's self-signing key.
         primary_branch_public_key(human.record, &human.primary, now)?;
         let primary_public =
             human.record.body.master_certificate.body.self_signing_public_key.clone();
-        let reference = crate::custody::custody_vault_reference(
-            store.root(),
-            &account_id,
-            &human.record.body.account_anchor,
-        )?;
-        let branch_reference = format!("branch:{reference}");
+        // Recovery replaces both vault references; the installed authority owns their names.
+        let reference = account.primary_vault_ref();
+        let branch_reference = account.branch_vault_ref();
         let signing = PrimarySigning {
             primary_device: &human.primary,
-            primary_reference: &reference,
+            primary_reference: reference,
             expected_primary_public_key: &primary_public,
-            branch_reference: &branch_reference,
+            branch_reference,
             principal_id: &human.record.body.principal_id,
         };
         primary_sign_decision(vault, &signing, plan_bytes, outcome, now)

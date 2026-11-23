@@ -175,21 +175,16 @@ impl RamfluxClient {
             verification,
             send_request,
             request_note,
+            directory_base,
         } = input;
         if !crate::contact_card::valid_principal(selector) {
             return Err(ContactReason::UnknownPrincipal.into());
         }
         let cached = self.account_db()?.client_record("identity", selector)?;
         let root_hint = resolution_root(selector, expected_root, cached.as_ref(), allow_commitment);
-        let started = std::time::Instant::now();
-        let manifest: Option<SdkDeviceManifestResponse> = if let Some(root) = root_hint {
-            sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{root}"))
-                .await
-                .map_err(lookup_failure)?
-        } else {
-            engine.fetch_principal_manifest(selector).await.map_err(lookup_failure)?
-        };
-        let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?.fetched_from(started);
+        let manifest =
+            resolve_directory_manifest(gateway, engine, root_hint, selector, directory_base)
+                .await?;
         verify_native_card_head(card, &manifest)?;
         let principal = &manifest.principal_id;
         if principal != selector && !(allow_commitment && manifest.principal_commitment == selector)
@@ -360,6 +355,35 @@ pub(crate) struct ContactResolution<'a> {
     pub requester_is_peer: bool,
     pub replace_provisional_root: Option<&'a str>,
     pub verification: Option<&'a SdkContactSafetyNumber>,
+    /// Public prekey base for a card whose home is not this node.
+    pub directory_base: Option<&'a str>,
+}
+
+async fn resolve_directory_manifest(
+    gateway: &GatewaySessionConfig,
+    engine: &mut impl GatewaySessionAccess,
+    root_hint: Option<&str>,
+    selector: &str,
+    directory_base: Option<&str>,
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let started = std::time::Instant::now();
+    let manifest = if let Some(base) = directory_base {
+        let root = root_hint.ok_or(ContactReason::UnknownPrincipal)?;
+        crate::prekey::http_async::get::<Option<SdkDeviceManifestResponse>>(
+            base,
+            &format!("/mvp1/device-manifest/{root}"),
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .map_err(lookup_failure)?
+    } else if let Some(root) = root_hint {
+        sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{root}"))
+            .await
+            .map_err(lookup_failure)?
+    } else {
+        engine.fetch_principal_manifest(selector).await.map_err(lookup_failure)?
+    };
+    Ok(manifest.ok_or(ContactReason::UnknownPrincipal)?.fetched_from(started))
 }
 
 #[cfg(test)]

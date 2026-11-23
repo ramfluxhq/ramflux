@@ -115,6 +115,7 @@ pub struct FederationDiscoveryResult {
 pub enum FederationPinSource {
     Invitation,
     Tofu,
+    InboundSigned,
     Operator,
     DirectoryCacheConfirmed,
 }
@@ -231,4 +232,20 @@ pub struct FederatedEnvelopeForwardResponse {
     pub source_node_id: String,
     pub target_node_id: String,
     pub delivery: EnvelopeSubmitResponse,
+}
+
+/// Same-node router-to-federation mTLS handoff; never served by an admin listener.
+pub const HOME_SUBMIT_FORWARD_PATH: &str = "/internal/cross-node/forward";
+
+/// Maximum compact handoff: one complete envelope, a 63-byte ASCII node id and JSON framing.
+pub const HOME_SUBMIT_FORWARD_MAX_BYTES: usize =
+    ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES
+        + 63
+        + br#"{"target_node":"","envelope":}"#.len();
+
+/// Gateway submit that this node's federation must forward. Not an inter-node envelope field.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HomeSubmitForward {
+    pub target_node: String,
+    pub envelope: ramflux_protocol::Envelope,
 }

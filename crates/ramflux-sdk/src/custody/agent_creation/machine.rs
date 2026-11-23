@@ -443,6 +443,9 @@ pub(super) fn finish(
     target: AgentCreationState,
     failure: Option<AgentFailure>,
 ) -> Result<AgentCreationRecord, SdkError> {
+    if super::reassociate::store_is_fenced(store)? {
+        return Err(SdkError::AgentCreationRefused("reassociation_pending"));
+    }
     if record.state != AgentCreationState::CleanupPending {
         record.intended = Some(target);
         record.failure = failure.or(record.failure);
