@@ -84,6 +84,7 @@ impl<E: EngineProvider> AgentHost<E> {
         let topics = json!([
             "message.received",
             "group.message.received",
+            "message.updated",
             "conversation.changed",
             "group.changed",
             "device.changed",
@@ -170,6 +171,10 @@ impl<E: EngineProvider> AgentHost<E> {
         if matches!(event.method.as_str(), "device.changed" | "identity.device_branch.revoked") {
             participant::identity(bus, &mut self.state, &self.config.account_id).await?;
         }
+        if event.method == "message.updated" {
+            // An edit is not a new turn. Only a deleted row erases the PRX session.
+            self.erase_deleted_message(event).await?;
+        }
         if matches!(event.method.as_str(), "message.received" | "group.message.received") {
             self.message(bus, event, seq, now_ms).await?;
         }
@@ -240,6 +245,15 @@ impl<E: EngineProvider> AgentHost<E> {
             .await?;
         self.save_state()?;
         self.handle_engine_events(bus, events, seq, now_ms).await
+    }
+
+    async fn erase_deleted_message(&mut self, event: &LocalBusFrame) -> Result<()> {
+        let metadata = &event.body["message"];
+        if metadata["deleted"] != true {
+            return Ok(());
+        }
+        let conversation_id = participant::field(metadata, "conversation_id")?;
+        self.engine.erase_history(conversation_id).await
     }
 
     pub(crate) async fn handle_engine_events(

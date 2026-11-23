@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Bounded HTTP adapter for detached PRX console jobs.
+//! Bounded HTTP adapter for detached PRX jobs.
+//! A configured agent name opens a caller-keyed session and posts a targeted turn.
+//! Without one, the host keeps the console session and posts only `message`.
 use crate::{
     EngineApproval, EngineEvent, EngineFailure, EngineInput, EngineProvider, Error, Intent,
     PrxAuthorization, PrxConfig, PrxSessionScope, Result,
@@ -231,6 +233,17 @@ impl PrxEngine {
         {
             return Err(HttpFailure::Rejected);
         }
+        if self.prx_agent.is_some() {
+            self.create_keyed_session(conversation_id).await
+        } else {
+            self.create_console_session(conversation_id).await
+        }
+    }
+
+    async fn create_console_session(
+        &mut self,
+        conversation_id: &str,
+    ) -> std::result::Result<String, HttpFailure> {
         let response = self.request(Method::POST, "api/sessions", Some(json!({}))).await?;
         if response.status != StatusCode::CREATED {
             return Err(HttpFailure::Rejected);
@@ -240,6 +253,31 @@ impl PrxEngine {
             .filter(|value| value.len() <= 256 && valid_segment(value))
             .ok_or(HttpFailure::Invalid)?
             .to_owned();
+        self.state.sessions.insert(conversation_id.to_owned(), session.clone());
+        Ok(session)
+    }
+
+    async fn create_keyed_session(
+        &mut self,
+        conversation_id: &str,
+    ) -> std::result::Result<String, HttpFailure> {
+        let Some(agent) = self.prx_agent.as_deref() else {
+            return Err(HttpFailure::Rejected);
+        };
+        if ramflux_prx_client::AgentName::parse(agent).is_err() {
+            return Err(HttpFailure::Rejected);
+        }
+        let key = caller_session_key(conversation_id);
+        let response =
+            self.request(Method::POST, "api/sessions", Some(json!({ "session_key": key }))).await?;
+        if response.status != StatusCode::CREATED && response.status != StatusCode::OK {
+            return Err(HttpFailure::Rejected);
+        }
+        let session = response.body["session_id"].as_str().ok_or(HttpFailure::Invalid)?;
+        if session != key || !valid_segment(session) {
+            return Err(HttpFailure::Invalid);
+        }
+        let session = session.to_owned();
         self.state.sessions.insert(conversation_id.to_owned(), session.clone());
         Ok(session)
     }
@@ -261,25 +299,13 @@ impl PrxEngine {
         {
             return Err(HttpFailure::Rejected);
         }
-        let visible = context_message(input);
+        let body = turn_body(input, self.prx_agent.as_deref())?;
         let mut session = self.session(input.conversation.conversation_id).await?;
-        let mut response = self
-            .request(
-                Method::POST,
-                &format!("api/sessions/{session}/message?mode=async"),
-                Some(json!({"message":visible})),
-            )
-            .await?;
+        let mut response = post_async(self, &session, &body).await?;
         if response.status == StatusCode::NOT_FOUND {
             self.state.sessions.remove(input.conversation.conversation_id);
             session = self.create_session(input.conversation.conversation_id).await?;
-            response = self
-                .request(
-                    Method::POST,
-                    &format!("api/sessions/{session}/message?mode=async"),
-                    Some(json!({"message":visible})),
-                )
-                .await?;
+            response = post_async(self, &session, &body).await?;
         }
         if response.status != StatusCode::ACCEPTED {
             return Err(HttpFailure::Rejected);
@@ -900,6 +926,75 @@ fn parse_job_result(
         }
         _ => Err(HttpFailure::Invalid),
     }
+}
+
+async fn post_async(
+    engine: &PrxEngine,
+    session: &str,
+    body: &Value,
+) -> std::result::Result<HttpResponse, HttpFailure> {
+    engine
+        .request(
+            Method::POST,
+            &format!("api/sessions/{session}/message?mode=async"),
+            Some(body.clone()),
+        )
+        .await
+}
+
+fn turn_body(
+    input: &EngineInput<'_>,
+    agent: Option<&str>,
+) -> std::result::Result<Value, HttpFailure> {
+    let visible = context_message(input);
+    let Some(agent) = agent else {
+        return Ok(json!({ "message": visible }));
+    };
+    let Ok(name) = ramflux_prx_client::AgentName::parse(agent) else {
+        return Err(HttpFailure::Rejected);
+    };
+    if visible.trim().is_empty() || visible.len() > 65_536 {
+        return Err(HttpFailure::Rejected);
+    }
+    let kind = if input.chat_kind == "group" { "group" } else { "dm" };
+    Ok(json!({
+        "client_message_id": wire_message_id(input.conversation.message_id),
+        "agent": name.as_str(),
+        "deliver": "turn",
+        "message": visible,
+        "chat": {
+            "id": input.conversation.conversation_id,
+            "kind": kind,
+            "member_count": 1,
+        },
+        "sender": {
+            "principal_id": "rf",
+            "display": bounded_label(input.sender_display_name, 128),
+        },
+        "mentions": [],
+    }))
+}
+
+fn caller_session_key(conversation_id: &str) -> String {
+    if is_caller_session_key(conversation_id) {
+        conversation_id.to_owned()
+    } else {
+        flows::stable_key("rf-", conversation_id)
+    }
+}
+
+fn is_caller_session_key(key: &str) -> bool {
+    (8..=128).contains(&key.len())
+        && key.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && !key.starts_with("console-")
+}
+
+fn wire_message_id(message_id: &str) -> String {
+    let legal = (1..=128).contains(&message_id.len())
+        && message_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-'));
+    if legal { message_id.to_owned() } else { flows::stable_key("m", message_id) }
 }
 
 fn context_message(input: &EngineInput<'_>) -> String {
