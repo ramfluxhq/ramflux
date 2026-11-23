@@ -115,6 +115,9 @@ pub(crate) fn project(
         root_key: keys.first().cloned().ok_or(CardError::Invalid("root"))?,
         nodes,
         host_slots,
+        locale: resolved.locale.clone(),
+        format_locale: resolved.format_locale.clone(),
+        direction: resolved.direction.clone(),
     };
     tree.check_limits()?;
     Ok(tree)
