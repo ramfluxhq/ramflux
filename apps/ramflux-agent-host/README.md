@@ -59,9 +59,8 @@ rf account export-agent-credentials --account "$AGENT_ACCOUNT" --out /private/pa
 The owner account must remain the active unlocked account for export. Record the service
 phrase shown once by the first command. Export is one-shot: if the bundle is lost, recover
 the agent with that phrase rather than trying to export the credential again. Add the two
-native principals as contacts, and then start the host with the bundle. Linux production
-is not supported until `ID-02-VAULT-LINUX-01`; do not copy the
-bundle to the Linux service host. Integration tests compile the explicit
+native principals as contacts, and then start the host with the bundle. Linux production provisioning requires a supported credential-vault provider;
+do not copy the bundle to a Linux service host without that support. Integration tests compile the explicit
 `--itest-memory-vault` alternative, which is volatile and unavailable in production.
 
 ## PRX engine
@@ -119,7 +118,8 @@ Do not put the bearer in the agent configuration. Select PRX instead of `rules` 
 }
 ```
 
-For native headless account provisioning and the one-shot bundle flow, see AGENT-V3-01.
+For native headless account provisioning and the one-shot bundle flow, see
+[local-bus account creation](../../docs/local_bus_account_creation.md).
 After the account is provisioned and unlocked, launch with the PRX configuration above.
 The bundle and the PRX bearer are separate credentials and neither belongs in the checkpoint.
 
@@ -153,7 +153,7 @@ For full authorization, set `authorization: "full"` here and `[autonomy] level =
 PRX must execute within its own configured scopes without asking the bridge for human approval.
 An unexpected `awaiting_approval` is declined with `authorization_mismatch` and a fixed diagnostic
 logged once per host process. This configuration setting is the interim authorization control;
-the per-account bus switch/standing grant is deferred to PRX-BRIDGE-02.
+a per-account bus switch and standing grant are not available.
 
 Every detached job, including a resumed job, has a persisted wall-clock deadline set by
 `turn_timeout_s` (default 120 seconds). At expiry the host cancels the job, returns
@@ -164,7 +164,7 @@ PRX decisions, and removes local session mappings. PRX's console API exposes no 
 endpoint, so remote console history remains under PRX's retention policy.
 
 PRX `[IMAGE:path]` markers are removed from text replies and no attachment is sent in this release.
-Attachment transfer and externally streamed turns are deferred to PRX-BRIDGE-02. PRX network
+Attachment transfer and externally streamed turns are not available. PRX network
 failures are silent with one log per 60-second window. A message whose submission fails while PRX
 is unavailable is dropped after the host advances its cursor; it is not retried automatically.
 Other terminal failures produce one short typed reply. The owner-only token file is read at

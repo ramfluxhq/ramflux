@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Describe connection policy, gateway reset, dependency patches, username directory, custody, task limits and agent provisioning without internal process records; correct the client repository list in licensing guidance.
+- Consolidate message identity, transient delivery, Unsupported diagnostics, revision entropy and native group snapshot rules in one protocol specification; repair the storage-profile link.
+- Remove historical session-push and revocation design-round records and their README links; keep the current node interface manual.
 - Remove unused manual acceptance fixtures and the superseded C ABI header helper; retain the process-level refusal test and current header checker.
 - Remove deployment-specific host references from agent setup and pairing documentation; retain forward-secrecy fixture integrity metadata without internal design-history dumps.
 ## [0.2.6] - 2026-11-23
