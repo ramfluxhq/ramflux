@@ -50,6 +50,8 @@ pub const SYNC_WS_V1: &str = "sync_ws_v1";
 pub const STREAM_FRAMES_V1: &str = "stream_frames_v1";
 /// `POST /api/sessions/{id}/approvals/{approval_id}`.
 pub const RUN_APPROVALS_V1: &str = "run_approvals_v1";
+/// Non-interactive host install. Advertised at the pin. This client does not call those routes.
+pub const HOST_BOOTSTRAP_V1: &str = "host_bootstrap_v1";
 
 /// The build identity PRX reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +60,17 @@ pub enum BuildCommit {
     Sha(String),
     /// Built outside a git checkout without `PRX_BUILD_COMMIT`: not a release build.
     Unknown,
+}
+
+/// Spawn and live-child caps from `GET /api/capabilities`. `None` means the daemon sets no cap.
+/// This client records the caps and does not enforce them.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct LimitsFacts {
+    /// Maximum children one spawn batch may start.
+    pub spawn_batch_max: Option<u64>,
+    /// Maximum live children of one agent.
+    pub live_children_per_agent_max: Option<u64>,
 }
 
 /// What the running daemon supports. Unknown tokens are kept and ignored by the gate.
@@ -70,6 +83,8 @@ pub struct Capabilities {
     pub capabilities: BTreeSet<String>,
     /// Tokens present in this build but switched off or pending a restart.
     pub available: BTreeSet<String>,
+    /// Spawn caps reported beside the token list.
+    pub limits_facts: LimitsFacts,
 }
 
 impl Capabilities {
@@ -93,6 +108,7 @@ impl Capabilities {
             api: wire.api,
             capabilities: wire.capabilities,
             available: wire.available,
+            limits_facts: wire.limits_facts,
         })
     }
 }
@@ -120,6 +136,8 @@ struct WireCapabilities {
     api: u32,
     capabilities: BTreeSet<String>,
     available: BTreeSet<String>,
+    #[serde(default)]
+    limits_facts: LimitsFacts,
 }
 
 fn parse_commit(raw: &str) -> Result<BuildCommit, PrxError> {
