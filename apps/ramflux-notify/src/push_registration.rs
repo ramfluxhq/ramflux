@@ -82,39 +82,28 @@ pub(crate) fn register(
         serde_json::from_value(value).map_err(|_| rejected())?;
     let now = ramflux_node_core::now_unix_seconds();
     control.verify(&ingress.wake_auth.key, now)?;
-    let registration = &control.body.registration;
     let configured = credentials()?;
-    let Some(credential) =
-        configured.iter().find(|credential| credential.provider_kind() == registration.provider)
-    else {
-        return Ok(Answer::Refused { code: PushRouteRefusal::ProviderUnavailable });
-    };
-    let Ok(endpoint) = endpoint(credential, registration) else {
-        return Ok(Answer::Refused { code: PushRouteRefusal::Rejected });
-    };
-    // Lifetimes start from this node's clock, so a skewed gateway cannot shorten or extend them.
-    let registered_at = now;
-    let expires_at = now.saturating_add(ramflux_node_core::PUSH_ROUTE_TTL_SECONDS);
-    let stored = ingress.store.register_authenticated_push_route_at(
+    let route = match ramflux_node_core::admit_push_registration(
+        &configured,
         &control.body.authority,
-        &ramflux_node_core::DevicePushRoute {
-            device_delivery_id: control.body.authority.target_delivery_id.clone(),
-            provider: registration.provider.clone(),
-            credential_id: Some(credential.credential_id().into()),
-            token: registration.token.clone(),
-            endpoint,
-            webpush_p256dh: registration.webpush_p256dh.clone(),
-            webpush_auth: registration.webpush_auth.clone(),
-            registered_at,
-            expires_at,
-            route_generation: 0,
-        },
+        &control.body.registration,
+        now,
+    ) {
+        Ok(route) => route,
+        Err(code) => return Ok(Answer::Refused { code }),
+    };
+    let expires_at = route.expires_at;
+    match ingress.store.register_authenticated_push_route_at(
+        &control.body.authority,
+        &route,
         control.body.client_seq,
-    );
-    match stored {
+    ) {
         Ok(true) => Ok(Answer::Registered { expires_at }),
         // A newer deregistration, or a persisted registration sequence, already won.
         Ok(false) => Ok(Answer::Refused { code: PushRouteRefusal::Superseded }),
+        Err(NodeCoreError::PushRouteOwnerMismatch) => {
+            Ok(Answer::Refused { code: PushRouteRefusal::RejectedOwner })
+        }
         Err(NodeCoreError::Unauthorized(_)) => {
             Ok(Answer::Refused { code: PushRouteRefusal::Rejected })
         }
@@ -137,78 +126,14 @@ pub(crate) fn deregister(
     )?;
     Ok(u64::try_from(removed).unwrap_or(u64::MAX))
 }
-fn endpoint(
-    credential: &ramflux_node_core::ProviderCredential,
-    registration: &ramflux_node_core::PushRouteRegistration,
-) -> Result<String, NodeCoreError> {
-    use ramflux_node_core::ProviderCredential;
-    match credential {
-        ProviderCredential::Apns(credential) => {
-            // Apple does not promise a fixed token length: accept bounded even-length hex.
-            if !registration.token.bytes().all(|byte| byte.is_ascii_hexdigit())
-                || !(64..=400).contains(&registration.token.len())
-                || !registration.token.len().is_multiple_of(2)
-                || registration.endpoint.is_some()
-            {
-                return Err(rejected());
-            }
-            Ok(format!(
-                "https://{}:443/",
-                if credential.sandbox {
-                    "api.sandbox.push.apple.com"
-                } else {
-                    "api.push.apple.com"
-                }
-            ))
-        }
-        ProviderCredential::Fcm(credential) => {
-            if registration.endpoint.is_some()
-                || !credential
-                    .project_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            {
-                return Err(rejected());
-            }
-            Ok(format!(
-                "https://fcm.googleapis.com:443/v1/projects/{}/messages:send",
-                credential.project_id
-            ))
-        }
-        ProviderCredential::WebPush(_) => webpush_endpoint(registration),
-    }
-}
-fn webpush_endpoint(
-    registration: &ramflux_node_core::PushRouteRegistration,
-) -> Result<String, NodeCoreError> {
-    let endpoint = registration.endpoint.as_ref().ok_or_else(rejected)?;
-    let rest = endpoint.strip_prefix("https://").ok_or_else(rejected)?;
-    let (authority, path) = rest.split_once('/').ok_or_else(rejected)?;
-    if authority.is_empty()
-        || !authority.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-:".contains(&byte))
-        || path.contains('#')
-        || registration.webpush_p256dh.as_ref().is_none_or(String::is_empty)
-        || registration.webpush_auth.as_ref().is_none_or(String::is_empty)
-    {
-        return Err(rejected());
-    }
-    let allowed =
-        ramflux_node_core::environment::var("RAMFLUX_NOTIFY_WEBPUSH_ORIGINS").unwrap_or_default();
-    if !allowed.split(',').any(|origin| origin == format!("https://{authority}")) {
-        return Err(rejected());
-    }
-    let authority =
-        if authority.contains(':') { authority.to_owned() } else { format!("{authority}:443") };
-    Ok(format!("https://{authority}/{path}"))
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn provider_endpoints_are_node_owned_and_cannot_be_substituted()
     -> Result<(), Box<dyn std::error::Error>> {
         use ramflux_node_core::{
-            FcmProviderCredential, ProviderCredential, PushProviderKind, PushRouteRegistration,
+            FcmProviderCredential, ProviderCredential, PushProviderKind, PushRouteCapability,
+            PushRouteEnvironment, PushRouteRegistration, WebPushProviderCredential,
         };
         let credential = ProviderCredential::Fcm(FcmProviderCredential {
             credential_id: "node-fcm".into(),
@@ -221,18 +146,29 @@ mod tests {
         let mut registration = PushRouteRegistration {
             provider: PushProviderKind::Fcm,
             token: "token".into(),
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: PushRouteEnvironment::Production,
+            capability: PushRouteCapability::Alert,
             endpoint: None,
             webpush_auth: None,
             webpush_p256dh: None,
         };
         assert_eq!(
-            super::endpoint(&credential, &registration)?,
+            ramflux_node_core::push_provider_endpoint(&credential, &registration)?,
             "https://fcm.googleapis.com:443/v1/projects/project-123/messages:send"
         );
         registration.endpoint = Some("https://127.0.0.1:443/internal".into());
-        assert!(super::endpoint(&credential, &registration).is_err());
+        assert!(ramflux_node_core::push_provider_endpoint(&credential, &registration).is_err());
+        let web = ProviderCredential::WebPush(WebPushProviderCredential {
+            credential_id: "node-web".into(),
+            vapid_public_key_ref: "file:/run/secrets/vapid.pub".into(),
+            vapid_private_key_ref: "file:/run/secrets/vapid.key".into(),
+            subject: "mailto:ops@example.test".into(),
+            provider_ca_pem_ref: None,
+        });
         registration.provider = PushProviderKind::WebPush;
-        assert!(super::webpush_endpoint(&registration).is_err());
+        registration.capability = PushRouteCapability::Alert;
+        assert!(ramflux_node_core::push_provider_endpoint(&web, &registration).is_err());
         Ok(())
     }
 }

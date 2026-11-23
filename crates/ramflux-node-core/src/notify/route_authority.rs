@@ -40,6 +40,14 @@ pub(super) fn initialize(tx: &redb::WriteTransaction) -> Result<(), NodeCoreErro
 fn context(target: &str) -> Vec<u8> {
     format!("ramflux.notify.route_owner.v1\0{target}").into_bytes()
 }
+
+/// Owner binding for one delivery id. A first registration is `Absent`.
+enum RegisteredOwner {
+    Absent,
+    Same,
+    Foreign,
+}
+
 impl NotifyRedbStore {
     /// Only feature-gated synthetic provider fixtures may omit a real device owner.
     #[cfg(feature = "itest-http")]
@@ -160,7 +168,14 @@ impl NotifyRedbStore {
                 .insert(route.device_delivery_id.as_str(), marks_bytes.as_slice())
                 .map_err(error)?;
         }
-        let same_owner = self.same_registered_owner(&txn, authority)?;
+        let same_owner = match self.registered_owner(&txn, authority)? {
+            RegisteredOwner::Same => true,
+            RegisteredOwner::Absent => false,
+            RegisteredOwner::Foreign => {
+                txn.abort().map_err(error)?;
+                return Err(NodeCoreError::PushRouteOwnerMismatch);
+            }
+        };
         {
             let mut table = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
             let prior = table
@@ -319,11 +334,11 @@ impl NotifyRedbStore {
         Ok(true)
     }
 
-    fn same_registered_owner(
+    fn registered_owner(
         &self,
         txn: &redb::WriteTransaction,
         current: &DeviceAuthKeyResponse,
-    ) -> Result<bool, NodeCoreError> {
+    ) -> Result<RegisteredOwner, NodeCoreError> {
         let bytes = txn
             .open_table(OWNERS)
             .map_err(error)?
@@ -331,15 +346,17 @@ impl NotifyRedbStore {
             .map_err(error)?
             .map(|value| value.value().to_vec());
         let Some(bytes) = bytes else {
-            return Ok(false);
+            return Ok(RegisteredOwner::Absent);
         };
         let previous: DeviceAuthKeyResponse = serde_json::from_slice(
             &self.route_key.open(&context(&current.target_delivery_id), &bytes)?,
         )
         .map_err(error)?;
-        Ok(previous.authenticated_device_identity()? == current.authenticated_device_identity()?
+        let same = previous.authenticated_device_identity()?
+            == current.authenticated_device_identity()?
             && previous.device_epoch == current.device_epoch
-            && previous.branch_public_key == current.branch_public_key)
+            && previous.branch_public_key == current.branch_public_key;
+        Ok(if same { RegisteredOwner::Same } else { RegisteredOwner::Foreign })
     }
     pub(super) fn prune_route_owners(&self) -> Result<(), NodeCoreError> {
         let _writer = self

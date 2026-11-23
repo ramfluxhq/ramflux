@@ -19,11 +19,24 @@ fn signed(id: &str) -> ramflux_protocol::SignedRequest {
 }
 
 fn register_as(id: &str, provider: ramflux_node_core::PushProviderKind) -> RouteIntent {
+    let capability = match provider {
+        ramflux_node_core::PushProviderKind::ApnsVoip => {
+            ramflux_node_core::PushRouteCapability::Voip
+        }
+        ramflux_node_core::PushProviderKind::Apns
+        | ramflux_node_core::PushProviderKind::Fcm
+        | ramflux_node_core::PushProviderKind::WebPush => {
+            ramflux_node_core::PushRouteCapability::Alert
+        }
+    };
     RouteIntent::Register(ramflux_node_core::PushRouteRegistrationFrame {
         signed_request: signed(id),
         body: ramflux_node_core::PushRouteRegistration {
             provider,
             token: "t".into(),
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: ramflux_node_core::PushRouteEnvironment::Production,
+            capability,
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
