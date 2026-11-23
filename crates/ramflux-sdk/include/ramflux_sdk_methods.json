@@ -437,6 +437,15 @@
       "bridge_allowed": true,
       "capability": "agent",
       "key_export": false,
+      "name": "agent.host.manage",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
       "name": "agent.list",
       "secret_input": false,
       "secret_output": false,

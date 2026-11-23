@@ -77,6 +77,7 @@ policies! {
     "agent.create" => ("agent", false, false, false, true),
     "agent.creation.decide" => ("agent", false, false, false, true),
     "agent.get" => ("agent", false, false, false, false),
+    "agent.host.manage" => ("agent", false, false, false, false),
     "agent.list" => ("agent", false, false, false, false),
     "agent.operation.get" => ("agent", false, false, false, false),
     "agent.persona.edit" => ("agent", false, false, false, false),

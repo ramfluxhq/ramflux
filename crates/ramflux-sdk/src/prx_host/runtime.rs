@@ -5,7 +5,7 @@
 //! that wrote `started_at` and a loopback capabilities read still advertises `host_bootstrap_v1`.
 
 use super::refused;
-use crate::RfError;
+use crate::SdkError;
 use ramflux_prx_client::{ClientConfig, HOST_BOOTSTRAP_V1, PrxClient};
 use serde::Deserialize;
 use std::io::Read;
@@ -21,6 +21,7 @@ pub(crate) struct RuntimeView {
     pub owner_id: String,
     pub started_at: String,
     pub fresh: bool,
+    pub alive: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,29 +35,28 @@ struct Wire {
     capabilities_url: String,
 }
 
-pub(crate) fn check_dir(path: &Path, memory: bool) -> Result<(), RfError> {
+pub(crate) fn check_dir(path: &Path, memory: bool) -> Result<(), SdkError> {
     let chain = chain(path)?;
     let uid = rustix::process::getuid().as_raw();
     for (index, dir) in chain.iter().enumerate() {
         let meta = std::fs::metadata(dir)?;
-        if !meta.is_dir() {
-            return Err(rejected(dir, meta.mode()));
-        }
-        if !allows(&meta, uid, index == 0 && memory) {
+        if !meta.is_dir() || !allows(&meta, uid, index == 0 && memory) {
             return Err(rejected(dir, meta.mode()));
         }
     }
     Ok(())
 }
 
-pub(crate) async fn inspect(dir: &Path) -> Result<Option<RuntimeView>, RfError> {
+pub(crate) async fn inspect(dir: &Path) -> Result<Option<RuntimeView>, SdkError> {
     let path = dir.join("runtime.json");
     if !path.is_file() {
         return Ok(None);
     }
     let wire = read_runtime(&path)?;
     let started = parse_rfc3339(&wire.started_at);
-    let same = match (process_start(wire.pid), started) {
+    let start = process_start(wire.pid);
+    let alive = start.is_some();
+    let same = match (start, started) {
         (Some(start), Some(at)) => start <= at.saturating_add(2),
         _ => false,
     };
@@ -69,6 +69,7 @@ pub(crate) async fn inspect(dir: &Path) -> Result<Option<RuntimeView>, RfError> 
         owner_id: wire.owner_id,
         started_at: wire.started_at,
         fresh,
+        alive,
     }))
 }
 
@@ -83,11 +84,11 @@ fn allows(meta: &std::fs::Metadata, uid: u32, memory: bool) -> bool {
     (owner == uid || owner == 0) && (!writable || sticky_root)
 }
 
-fn rejected(path: &Path, mode: u32) -> RfError {
+fn rejected(path: &Path, mode: u32) -> SdkError {
     refused("ancestor_rejected", format!("{} mode {:04o}", path.display(), mode & 0o7777))
 }
 
-fn chain(start: &Path) -> Result<Vec<PathBuf>, RfError> {
+fn chain(start: &Path) -> Result<Vec<PathBuf>, SdkError> {
     let mut out = Vec::new();
     let mut cur = std::fs::canonicalize(start)?;
     loop {
@@ -100,7 +101,7 @@ fn chain(start: &Path) -> Result<Vec<PathBuf>, RfError> {
     Ok(out)
 }
 
-fn read_runtime(path: &Path) -> Result<Wire, RfError> {
+fn read_runtime(path: &Path) -> Result<Wire, SdkError> {
     let meta = std::fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() || meta.mode() & 0o777 != 0o600 {
         return Err(refused("runtime_mode", "runtime.json must be mode 0600"));

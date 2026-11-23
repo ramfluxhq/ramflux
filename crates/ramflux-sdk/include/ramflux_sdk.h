@@ -400,6 +400,20 @@ int32_t ramflux_v2_receipt_present(const uint8_t *input_json,
 int32_t ramflux_v2_card_trust_package(struct RamfluxBuffer **out);
 
 /*
+ Install or clear the provider-key callback for `agent.host.credential`.
+ The callback receives the provider id and writes the key into `out`. Return 0 when provided
+ and 1 when refused. A null callback clears the slot. The key is never placed in JSON.
+ */
+int32_t ramflux_v2_set_host_credential_provider(uint64_t handle,
+                                                int32_t (*callback)(const uint8_t*,
+                                                                    size_t,
+                                                                    uint8_t*,
+                                                                    size_t,
+                                                                    size_t*,
+                                                                    void*),
+                                                void *user);
+
+/*
  Decode and re-encode a generated message request through the shared adapter core.
  */
 int32_t ramflux_message_request_adapt(const unsigned char *request_json,

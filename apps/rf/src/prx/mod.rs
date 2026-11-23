@@ -1,19 +1,17 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Desktop bootstrap of the local PRX daemon. A fresh `runtime.json` is reused. Otherwise this
-//! runs `prx init --from-stdin`, `prx token issue`, and `prx service install --user --yes`.
+//! `rf prx` is a thin wrapper over the SDK host controller. The keychain and stdin stay here.
 
-mod runtime;
-mod spawn;
+mod keys;
 
 use crate::RfError;
-use runtime::RuntimeView;
+use keys::provider_key;
+use ramflux_sdk::SdkError;
+use ramflux_sdk::prx_host::{self, Action, Request};
 use serde_json::json;
-use spawn::{CommandSpec, model_arg, provider_key, run};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use zeroize::Zeroizing;
 
 pub(crate) struct Options {
     pub state_dir: Option<PathBuf>,
@@ -24,172 +22,112 @@ pub(crate) struct Options {
     pub binary: PathBuf,
 }
 
-pub(crate) fn refused(code: &'static str, message: impl Into<String>) -> RfError {
-    RfError::Refused { code, message: message.into() }
+pub(crate) fn refused(code: &str, message: impl Into<String>) -> RfError {
+    RfError::Refused { code: static_code(code), message: message.into() }
 }
 
 pub(crate) async fn bootstrap(opts: Options) -> Result<(), RfError> {
-    let dir = prepare(opts.state_dir.as_deref())?;
-    runtime::check_dir(&dir, false)?;
-    if let Some(view) = fresh(&dir).await? {
-        print_view(&view);
-        return Ok(());
-    }
-    ensure_config(&opts, &dir)?;
-    check_workspace(&dir)?;
-    issue(&opts, &dir, false)?;
-    run(&spec(&opts, &dir, &["service", "install", "--user", "--yes"], None))?;
-    run(&spec(&opts, &dir, &["service", "start"], None))?;
-    if let Some(view) = wait_fresh(&dir).await? {
-        check_memory(&dir)?;
-        print_view(&view);
-        return Ok(());
-    }
-    issue(&opts, &dir, true)?;
-    run(&spec(&opts, &dir, &["service", "restart"], None))?;
-    let view = wait_fresh(&dir)
-        .await?
-        .ok_or_else(|| refused("runtime_missing", "runtime.json did not become fresh"))?;
-    check_memory(&dir)?;
-    print_view(&view);
+    let status =
+        prx_host::manage(request(Action::Install, opts, true), sdk_key).await.map_err(from_sdk)?;
+    print_status(&status);
     Ok(())
 }
 
 pub(crate) async fn status(state_dir: Option<PathBuf>) -> Result<(), RfError> {
-    let dir = resolve(state_dir.as_deref())?;
-    let view =
-        runtime::inspect(&dir).await?.ok_or_else(|| refused("runtime_missing", "runtime.json"))?;
-    print_view(&view);
+    let status = prx_host::manage(
+        Request {
+            action: Action::Status,
+            provider: None,
+            model: None,
+            native_tools: false,
+            no_native_tools: false,
+            target_version: None,
+            binary: PathBuf::from("prx"),
+            state_dir,
+            confirmed: false,
+        },
+        sdk_key,
+    )
+    .await
+    .map_err(from_sdk)?;
+    if status.state == "absent" {
+        return Err(refused("runtime_missing", "runtime.json"));
+    }
+    print_status(&status);
     Ok(())
 }
 
 pub(crate) async fn adopt(dir: &Path) -> Result<(String, PathBuf), RfError> {
-    runtime::check_dir(dir, false)?;
-    let view = runtime::inspect(dir)
-        .await?
-        .filter(|view| view.fresh)
-        .ok_or_else(|| refused("runtime_stale", "run rf prx bootstrap"))?;
-    let memory = dir.join("workspace/memory");
-    if memory.is_dir() {
-        runtime::check_dir(&memory, true)?;
-    }
-    Ok((view.api_base, dir.join("owner.token")))
+    prx_host::adopt(dir).await.map_err(from_sdk)
 }
 
-fn ensure_config(opts: &Options, dir: &Path) -> Result<(), RfError> {
-    if dir.join("config.toml").is_file() {
-        return Ok(());
-    }
-    let provider =
-        opts.provider.as_deref().ok_or_else(|| refused("provider_missing", "pass --provider"))?;
-    let key = provider_key(provider)?;
-    let model = model_arg(opts.model.as_deref())?;
-    let tools = tool_flag(opts.native_tools, opts.no_native_tools, model.is_some())?;
-    let mut args = vec!["init", "--provider", provider, "--from-stdin"];
-    if let Some(model) = model {
-        args.extend_from_slice(&["--model", model]);
-    }
-    if let Some(flag) = tools {
-        args.push(flag);
-    }
-    run(&spec(opts, dir, &args, Some(key.as_str())))
-}
-
-/// Exactly one catalog declaration, and only beside a real `--model`.
-fn tool_flag(native: bool, none: bool, has_model: bool) -> Result<Option<&'static str>, RfError> {
-    match (native, none, has_model) {
-        (false, false, _) => Ok(None),
-        (true, false, true) => Ok(Some("--native-tools")),
-        (false, true, true) => Ok(Some("--no-native-tools")),
-        _ => Err(refused(
-            "field_invalid",
-            "pass exactly one of --native-tools or --no-native-tools with --model",
-        )),
+fn request(action: Action, opts: Options, confirmed: bool) -> Request {
+    Request {
+        action,
+        provider: opts.provider,
+        model: opts.model,
+        native_tools: opts.native_tools,
+        no_native_tools: opts.no_native_tools,
+        target_version: None,
+        binary: opts.binary,
+        state_dir: opts.state_dir,
+        confirmed,
     }
 }
 
-fn issue(opts: &Options, dir: &Path, force: bool) -> Result<(), RfError> {
-    let token = dir.join("owner.token");
-    if token.is_file() && !force {
-        return Ok(());
-    }
-    let path = token.to_str().ok_or_else(|| refused("field_invalid", "state dir"))?;
-    let mut args = vec!["token", "issue", "--out", path];
-    if force {
-        args.push("--force");
-    }
-    run(&spec(opts, dir, &args, None))
-}
-
-fn check_workspace(dir: &Path) -> Result<(), RfError> {
-    let memory = dir.join("workspace/memory");
-    if memory.is_dir() {
-        return runtime::check_dir(&memory, true);
-    }
-    let workspace = dir.join("workspace");
-    if workspace.is_dir() {
-        runtime::check_dir(&workspace, false)
-    } else {
-        runtime::check_dir(dir, false)
+fn sdk_key(provider: &str) -> Result<Zeroizing<String>, SdkError> {
+    match provider_key(provider) {
+        Ok(key) => Ok(key),
+        Err(RfError::Refused { code, message }) => Err(prx_host::refused(code, message)),
+        Err(RfError::Io(error)) => Err(SdkError::Io(error)),
+        Err(error) => Err(SdkError::LocalBus(error.to_string())),
     }
 }
 
-fn check_memory(dir: &Path) -> Result<(), RfError> {
-    let memory = dir.join("workspace/memory");
-    if !memory.is_dir() {
-        return Err(refused("memory_missing", "workspace/memory"));
+fn from_sdk(error: SdkError) -> RfError {
+    match error {
+        SdkError::LocalBusRefused { code, message, .. } => refused(&code, message),
+        SdkError::Io(error) => RfError::Io(error),
+        SdkError::Json(error) => RfError::Json(error),
+        other => RfError::Sdk(other),
     }
-    runtime::check_dir(&memory, true)
 }
 
-async fn fresh(dir: &Path) -> Result<Option<RuntimeView>, RfError> {
-    Ok(runtime::inspect(dir).await?.filter(|view| view.fresh))
-}
-
-async fn wait_fresh(dir: &Path) -> Result<Option<RuntimeView>, RfError> {
-    for _ in 0..150 {
-        if let Some(view) = fresh(dir).await? {
-            return Ok(Some(view));
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    Ok(None)
-}
-
-fn spec<'a>(
-    opts: &'a Options,
-    dir: &'a Path,
-    args: &'a [&'a str],
-    key: Option<&'a str>,
-) -> CommandSpec<'a> {
-    CommandSpec { bin: &opts.binary, state: dir, args, key }
-}
-
-fn prepare(flag: Option<&Path>) -> Result<PathBuf, RfError> {
-    let dir = resolve(flag)?;
-    std::fs::create_dir_all(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    Ok(dir)
-}
-
-fn resolve(flag: Option<&Path>) -> Result<PathBuf, RfError> {
-    if let Some(path) = flag {
-        return Ok(path.to_path_buf());
-    }
-    let home =
-        std::env::var_os("HOME").ok_or_else(|| refused("home_missing", "HOME is not set"))?;
-    Ok(PathBuf::from(home).join(".local/share/ramflux/prx"))
-}
-
-fn print_view(view: &RuntimeView) {
+fn print_status(status: &prx_host::Status) {
     let body = json!({
-        "runtime_path": view.path,
-        "api_base": view.api_base,
-        "pid": view.pid,
-        "started_at": view.started_at,
-        "fresh": view.fresh,
-        "prx_version": view.prx_version,
-        "owner_id": view.owner_id,
+        "runtime_path": status.runtime_path,
+        "api_base": status.api_base,
+        "pid": status.pid,
+        "started_at": status.started_at,
+        "fresh": status.fresh,
+        "prx_version": status.prx_version,
+        "owner_id": status.owner_id,
     });
     println!("{body}");
+}
+
+fn static_code(code: &str) -> &'static str {
+    match code {
+        "ancestor_rejected" => "ancestor_rejected",
+        "confirmation_required" => "confirmation_required",
+        "credential_unavailable" => "credential_unavailable",
+        "desktop_required" => "desktop_required",
+        "field_invalid" => "field_invalid",
+        "home_missing" => "home_missing",
+        "input_invalid" => "input_invalid",
+        "input_missing" => "input_missing",
+        "manifest_unavailable" => "manifest_unavailable",
+        "memory_missing" => "memory_missing",
+        "model_capabilities_unknown" => "model_capabilities_unknown",
+        "provider_missing" => "provider_missing",
+        "prx_command" => "prx_command",
+        "prx_missing" => "prx_missing",
+        "prx_spawn" => "prx_spawn",
+        "runtime_invalid" => "runtime_invalid",
+        "runtime_missing" => "runtime_missing",
+        "runtime_mode" => "runtime_mode",
+        "runtime_stale" => "runtime_stale",
+        "unsupported_platform" => "unsupported_platform",
+        _ => "prx_command",
+    }
 }
