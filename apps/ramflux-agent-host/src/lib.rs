@@ -10,6 +10,7 @@ mod message_input;
 mod participant;
 mod provisioning;
 mod prx;
+mod prx_approval;
 mod prx_sync;
 #[cfg(test)]
 #[path = "../tests/support/prx.rs"]
@@ -20,6 +21,7 @@ mod runner_deferred;
 mod runner_output;
 mod runner_policy;
 mod runner_refusal;
+mod runner_run_approval;
 mod runner_surface;
 mod surface_plan;
 pub use bus::{AgentBus, RfdBus};

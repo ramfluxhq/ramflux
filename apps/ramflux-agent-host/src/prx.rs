@@ -11,7 +11,12 @@ use crate::{
 use reqwest::{Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, io::Read, path::Path, time::Instant};
+use std::{
+    collections::BTreeMap,
+    io::Read,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 const MAX_TOKEN_BYTES: u64 = 8192;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
@@ -109,6 +114,8 @@ pub struct PrxEngine {
     approval_timeout_ms: u64,
     mismatch_logged: bool,
     typed: Option<ramflux_prx_client::PrxClient>,
+    token_file: PathBuf,
+    request_timeout_s: u64,
     limit_turns: Option<u32>,
     limit_cost: Option<u64>,
     prx_agent: Option<String>,
@@ -163,12 +170,26 @@ impl PrxEngine {
             approval_timeout_ms: config.approval_timeout_s.saturating_mul(1000),
             mismatch_logged: false,
             typed,
+            token_file: config.token_file.clone(),
+            request_timeout_s: config.request_timeout_s,
             limit_turns: config.max_concurrent_turns,
             limit_cost: config.max_cost_per_day_cents,
             prx_agent: config.agent_name.clone(),
             prx_provider: config.provider.clone(),
             prx_model: config.model.clone(),
         })
+    }
+
+    fn approval_client(&mut self) -> Result<&ramflux_prx_client::PrxClient> {
+        if self.typed.is_none() {
+            let settings =
+                ramflux_prx_client::ClientConfig::new(self.base_url.as_str(), &self.token_file)
+                    .with_request_timeout(std::time::Duration::from_secs(self.request_timeout_s));
+            self.typed = Some(
+                ramflux_prx_client::PrxClient::new(&settings).map_err(|_| Error::EngineRejected)?,
+            );
+        }
+        self.typed.as_ref().ok_or(Error::EngineRejected)
     }
 
     fn url(&self, path: &str) -> std::result::Result<Url, HttpFailure> {
@@ -749,6 +770,16 @@ impl EngineProvider for PrxEngine {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect()
+    }
+
+    async fn post_run_approval<'a>(
+        &'a mut self,
+        session: &'a str,
+        approval_id: &'a str,
+        decision: &'a str,
+    ) -> Result<crate::engine::RunApprovalPost> {
+        let client = self.approval_client()?;
+        crate::prx_approval::post(client, session, approval_id, decision).await
     }
 
     fn acknowledge(&mut self, event: &EngineEvent) -> Result<()> {

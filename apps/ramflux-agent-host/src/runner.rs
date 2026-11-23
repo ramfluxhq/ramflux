@@ -91,7 +91,8 @@ impl<E: EngineProvider> AgentHost<E> {
             "identity.device_branch.revoked",
             "surface.changed",
             "task.changed",
-            "account.locked"
+            "account.locked",
+            "agent.approval"
         ]);
         let subscription = bus
             .request("bus.subscribe", json!({"topics":topics,"since_seq":self.state.cursor}), None)
@@ -184,6 +185,7 @@ impl<E: EngineProvider> AgentHost<E> {
         if matches!(event.method.as_str(), "conversation.changed" | "group.changed") {
             self.cancel_removed_conversations(bus).await?;
         }
+        crate::runner_run_approval::forward(bus, &mut self.engine, event).await?;
         self.state.cursor = Some(seq);
         self.save_state()
     }

@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at f6ff62bff51877992c99afca3439b3fdee10a260>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at bab257e21fd46f12653a2807bfa13efc3c7a5f42>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -25,9 +25,9 @@ use ramflux_prx_client::{
     ConfigRevision, EraseNotice, ForgetCounts, ForgetReport, ForgetWrites, HISTORY_ERASE_V1,
     HistoryRow, JobState, JobStatus, MESSAGE_CONTEXT_DELIVERY_V1, MESSAGE_DELETE_V1,
     MESSAGE_FORGET_WRITES_V1, MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1, NotReadyReason,
-    OWNER_ID_STABLE_V1, PROMPT_MAX_BYTES, PrxClient, PrxError, PutKind, ReloadStatus, RfMessage,
-    RowBody, RunCode, RunState, SESSION_KEY_V1, SYNC_SNAPSHOT_V1, SYNC_WS_V1, Sender,
-    TARGETED_AGENTS_V1, Target, Tools, TurnDisposition,
+    OWNER_ID_STABLE_V1, PROMPT_MAX_BYTES, PrxClient, PrxError, PutKind, RUN_APPROVALS_V1,
+    ReloadStatus, RfMessage, RowBody, RunCode, RunState, SESSION_KEY_V1, STREAM_FRAMES_V1,
+    SYNC_SNAPSHOT_V1, SYNC_WS_V1, Sender, TARGETED_AGENTS_V1, Target, Tools, TurnDisposition,
 };
 use serde_json::Value;
 use std::fs::File;
@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "f6ff62bff51877992c99afca3439b3fdee10a260";
+const PIN: &str = "bab257e21fd46f12653a2807bfa13efc3c7a5f42";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -544,9 +544,9 @@ async fn bounded<F: std::future::Future<Output = ()>>(body: F) {
         .expect("test: contract test exceeded its deadline");
 }
 
-/// The tokens K-AC2-1 accepts at the pin: the earlier cards, unit A, and the two
-/// sync tokens this pin advertises. Reading the journal is a later card.
-const LANDED_AT_PIN: [&str; 16] = [
+/// The tokens K-AC2-1 accepts at the pin: the earlier cards, unit A, the sync tokens,
+/// and the stream and run-approval tokens this pin advertises.
+const LANDED_AT_PIN: [&str; 18] = [
     CAPABILITIES_V1,
     AGENT_CATALOG_V1,
     AGENT_CRUD_V1,
@@ -563,6 +563,8 @@ const LANDED_AT_PIN: [&str; 16] = [
     MESSAGE_FORGET_WRITES_V1,
     SYNC_SNAPSHOT_V1,
     SYNC_WS_V1,
+    STREAM_FRAMES_V1,
+    RUN_APPROVALS_V1,
 ];
 
 #[tokio::test]
@@ -2218,8 +2220,8 @@ async fn k_b3_partitioned_reads_and_capabilities() {
         let client = daemon.client();
         let caps = capabilities(&client).await;
 
-        // K-B3-0: the advertised set at the pin with targeting on: the landed B1, B2a and B3
-        // tokens; none of the tokens that have not landed.
+        // K-B3-0: the advertised set at the pin with targeting on, including stream frames
+        // and run approvals.
         for token in [
             TARGETED_AGENTS_V1,
             MESSAGE_IDEMPOTENCY_V1,
@@ -2229,11 +2231,10 @@ async fn k_b3_partitioned_reads_and_capabilities() {
             AGENT_LIMITS_V1,
             SYNC_SNAPSHOT_V1,
             SYNC_WS_V1,
+            STREAM_FRAMES_V1,
+            RUN_APPROVALS_V1,
         ] {
             assert!(caps.has(token), "K-B3-0: {token} is advertised");
-        }
-        for token in ["stream_frames_v1", "run_approvals_v1"] {
-            assert!(!caps.has(token), "K-B3-0: {token} must not be advertised yet");
         }
         report("K-B3-0");
 

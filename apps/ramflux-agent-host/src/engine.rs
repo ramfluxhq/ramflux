@@ -202,6 +202,16 @@ pub enum EngineEvent {
         reason: EngineFailure,
     },
 }
+/// One `POST /api/sessions/{id}/approvals/{approval_id}` outcome.
+/// `code: None` is HTTP 200. A `Some` code is a typed PRX refusal.
+pub struct RunApprovalPost {
+    pub approval_id: String,
+    pub run_id: String,
+    pub decision: String,
+    pub code: Option<String>,
+    pub cause: Option<String>,
+}
+
 pub trait EngineProvider {
     /// Whether a conversation has provider work that needs a busy hint rather than a new turn.
     #[must_use]
@@ -307,6 +317,18 @@ pub trait EngineProvider {
         _conversation_id: &'a str,
     ) -> impl Future<Output = Result<()>> + 'a {
         async { Ok(()) }
+    }
+    /// Post one owner decision for a PRX run approval.
+    ///
+    /// # Errors
+    /// The default provider has no PRX client.
+    fn post_run_approval<'a>(
+        &'a mut self,
+        _session: &'a str,
+        _approval_id: &'a str,
+        _decision: &'a str,
+    ) -> impl Future<Output = Result<RunApprovalPost>> + 'a {
+        async { Err(Error::EngineRejected) }
     }
     /// # Errors
     /// Rejects invalid plans. The default provider has no action behavior.

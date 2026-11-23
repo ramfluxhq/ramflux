@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Applies one decoded mirror change. Approvals and unknown kinds are skips.
+//! Applies one decoded mirror change. Unknown kinds are skips.
 
 use super::store::{
     AgentRow, FailureNote, MAX_AGENTS, MAX_ERASES, MAX_RUNS, MAX_SESSIONS, MAX_TURNS, Mirror,
@@ -68,6 +68,10 @@ impl Mirror {
             }
             MirrorOp::Erase(erase) => {
                 self.apply_erase(erase)?;
+                Ok(None)
+            }
+            MirrorOp::Approval(copy) => {
+                self.remember_approval(copy);
                 Ok(None)
             }
             MirrorOp::Skip => Ok(None),

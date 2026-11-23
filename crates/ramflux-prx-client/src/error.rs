@@ -125,6 +125,14 @@ pub enum ApiCode {
     IdempotencyKeyRequired,
     /// `410 snapshot_expired`: the snapshot page token is no longer valid.
     SnapshotExpired,
+    /// `409 approval_decided`: this approval already has a decision.
+    ApprovalDecided,
+    /// `409 approval_run_mismatch`: the approval does not belong to this run.
+    ApprovalRunMismatch,
+    /// `404 approval_unknown`: no such approval.
+    ApprovalUnknown,
+    /// `410 approval_expired`: the approval wait ended. The call never started.
+    ApprovalExpired,
     Unknown(String),
 }
 
@@ -162,6 +170,10 @@ impl ApiCode {
             "purge_pending" => Self::PurgePending,
             "idempotency_key_required" => Self::IdempotencyKeyRequired,
             "snapshot_expired" => Self::SnapshotExpired,
+            "approval_decided" => Self::ApprovalDecided,
+            "approval_run_mismatch" => Self::ApprovalRunMismatch,
+            "approval_unknown" => Self::ApprovalUnknown,
+            "approval_expired" => Self::ApprovalExpired,
             other => Self::Unknown(other.to_owned()),
         }
     }

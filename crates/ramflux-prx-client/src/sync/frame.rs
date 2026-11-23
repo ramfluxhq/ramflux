@@ -4,6 +4,7 @@
 //! JSON frames on `GET /api/sync/ws`. The host masks and writes the bytes.
 
 use super::cursor::{epoch_ok, parse_cursor};
+use super::live;
 use super::op::{MirrorOp, op_from_kind};
 use crate::error::{PrxError, decode_ok, protocol};
 use serde::Deserialize;
@@ -23,7 +24,9 @@ pub enum ServerFrame {
     Ping,
     /// One durable journal event. Boxed so the other frame variants stay small.
     Event(Box<JournalEvent>),
-    /// A stream frame or another live frame this card does not store.
+    /// A live progress frame. The host publishes it and does not ack it.
+    Live(super::live::LiveNotice),
+    /// A stream frame this client does not show, or a frame with no durable effect.
     Ignored,
 }
 
@@ -82,7 +85,8 @@ pub fn decode_server(bytes: &[u8]) -> Result<ServerFrame, PrxError> {
         "ping" => ping(&value),
         "welcome" => welcome(&value),
         "resync_required" => resync(&value),
-        "stream" => Ok(ServerFrame::Ignored),
+        "stream" => Ok(live::decode_stream(&value)),
+        "stream_gap" => Ok(live::decode_gap(&value)),
         "event" => Ok(ServerFrame::Event(Box::new(event(&value)?))),
         _ => Err(protocol("sync frame type is unknown")),
     }

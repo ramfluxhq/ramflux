@@ -2,18 +2,20 @@
 // Copyright (c) 2026 Span Brain
 
 //! Cold snapshot, then a durable WebSocket, into `<state_file>.prx-mirror`.
-//! Stream frames are ignored. Approval events advance the cursor and are not stored.
+//! Live frames are published and not acked. Approval rows are stored and published.
 //! `turn.failed` is recorded. This task does not resubmit the turn.
 
 mod apply;
+mod publish;
 mod store;
 mod ws;
 
 use crate::PrxConfig;
+use publish::Publisher;
 use ramflux_prx_client::{
-    ApiCode, ClientConfig, JournalEvent, PONG_FRAME, PrxClient, PrxError, SNAPSHOT_PAGE_LIMIT,
-    SYNC_SNAPSHOT_V1, SYNC_WS_V1, ServerFrame, SnapshotPage, ack_frame, decode_server, hello_frame,
-    require,
+    ApiCode, ClientConfig, JournalEvent, MirrorOp, PONG_FRAME, PrxClient, PrxError,
+    SNAPSHOT_PAGE_LIMIT, SYNC_SNAPSHOT_V1, SYNC_WS_V1, ServerFrame, SnapshotPage, TurnBody,
+    ack_frame, decode_server, hello_frame, require,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -31,11 +33,13 @@ pub struct SyncTask {
 
 impl SyncTask {
     /// Starts the sync task. A bad URL or a full mirror does not stop the host.
-    pub fn spawn(prx: &PrxConfig, state_file: &Path) -> Self {
+    pub fn spawn(prx: &PrxConfig, state_file: &Path, socket: &Path, account: &str) -> Self {
         let (stop, rx) = watch::channel(false);
         let prx = prx.clone();
         let state_file = state_file.to_path_buf();
-        let join = tokio::spawn(async move { run(prx, state_file, rx).await });
+        let socket = socket.to_path_buf();
+        let account = account.to_owned();
+        let join = tokio::spawn(async move { run(prx, state_file, socket, account, rx).await });
         Self { stop, join }
     }
 
@@ -70,14 +74,20 @@ enum PageStep {
     Flow(Flow),
 }
 
-async fn run(prx: PrxConfig, state_file: PathBuf, mut stop: watch::Receiver<bool>) {
+async fn run(
+    prx: PrxConfig,
+    state_file: PathBuf,
+    socket: PathBuf,
+    account: String,
+    mut stop: watch::Receiver<bool>,
+) {
     eprintln!("prx sync mirror: {}", mirror_path(&state_file).display());
     let mut attempt = 0_u32;
     loop {
         if halted(&stop) {
             return;
         }
-        let flow = cycle(&prx, &state_file, &mut stop).await;
+        let flow = cycle(&prx, &state_file, &socket, &account, &mut stop).await;
         if matches!(flow, Flow::Halt) || halted(&stop) {
             return;
         }
@@ -98,7 +108,13 @@ async fn run(prx: PrxConfig, state_file: PathBuf, mut stop: watch::Receiver<bool
     }
 }
 
-async fn cycle(prx: &PrxConfig, state_file: &Path, stop: &mut watch::Receiver<bool>) -> Flow {
+async fn cycle(
+    prx: &PrxConfig,
+    state_file: &Path,
+    socket: &Path,
+    account: &str,
+    stop: &mut watch::Receiver<bool>,
+) -> Flow {
     let Ok(client) = open_client(prx) else {
         eprintln!("prx sync requires a loopback PRX URL");
         return Flow::Retry;
@@ -118,12 +134,13 @@ async fn cycle(prx: &PrxConfig, state_file: &Path, stop: &mut watch::Receiver<bo
             return Flow::Retry;
         }
     };
+    let mut publisher = Publisher::new(socket, account);
     if !mirror.ready()
-        && let Err(flow) = pull_snapshot(&client, &store, &mut mirror, stop).await
+        && let Err(flow) = pull_snapshot(&client, &store, &mut mirror, stop, &mut publisher).await
     {
         return flow;
     }
-    follow_ws(&client, prx, &store, &mut mirror, stop).await
+    follow_ws(&client, prx, &store, &mut mirror, stop, &mut publisher).await
 }
 
 fn open_client(prx: &PrxConfig) -> Result<PrxClient, ()> {
@@ -144,6 +161,7 @@ async fn pull_snapshot(
     store: &MirrorStore,
     mirror: &mut Mirror,
     stop: &mut watch::Receiver<bool>,
+    publisher: &mut Publisher,
 ) -> Result<(), Flow> {
     let caps = client.capabilities().await.map_err(|_| Flow::Retry)?;
     if require(&caps, SYNC_SNAPSHOT_V1).is_err() || require(&caps, SYNC_WS_V1).is_err() {
@@ -163,11 +181,17 @@ async fn pull_snapshot(
         }
         let token = mirror.page_token().map(str::to_owned);
         match client.sync_snapshot_page(&caps, token.as_deref(), SNAPSHOT_PAGE_LIMIT).await {
-            Ok(page) => match on_page(store, mirror, &page, &mut cuts) {
-                PageStep::Continue => expired = false,
-                PageStep::Ready => return Ok(()),
-                PageStep::Flow(flow) => return Err(flow),
-            },
+            Ok(page) => {
+                let outcome = on_page(store, mirror, &page, &mut cuts);
+                if matches!(outcome, PageStep::Continue | PageStep::Ready) {
+                    publisher.page(&page).await;
+                }
+                match outcome {
+                    PageStep::Continue => expired = false,
+                    PageStep::Ready => return Ok(()),
+                    PageStep::Flow(flow) => return Err(flow),
+                }
+            }
             Err(error) => {
                 if let Some(flow) = on_snapshot_err(store, mirror, &error, &mut expired) {
                     return Err(flow);
@@ -233,6 +257,7 @@ async fn follow_ws(
     store: &MirrorStore,
     mirror: &mut Mirror,
     stop: &mut watch::Receiver<bool>,
+    publisher: &mut Publisher,
 ) -> Flow {
     let Ok(dial) = client.sync_dial() else {
         eprintln!("prx sync requires a loopback PRX URL");
@@ -242,6 +267,7 @@ async fn follow_ws(
     if !mirror.ready() {
         return Flow::Retry;
     }
+    publisher.stored(mirror).await;
     let timeout = Duration::from_secs(prx.request_timeout_s);
     let mut sock = match connect_once(client, &dial, timeout).await {
         Ok(sock) => sock,
@@ -256,7 +282,7 @@ async fn follow_ws(
     if let Err(flow) = read_welcome(&mut sock, mirror, store, stop).await {
         return flow;
     }
-    drive(sock, store, mirror, stop).await
+    drive(sock, store, mirror, stop, publisher).await
 }
 
 async fn connect_once(
@@ -313,7 +339,8 @@ async fn on_welcome_frame(
             Ok(true)
         }
         Ok(ServerFrame::Resync) => Err(mark_resync(mirror, store)),
-        Ok(_) => Err(Flow::Retry),
+        Ok(ServerFrame::Event(_)) => Err(Flow::Retry),
+        Ok(ServerFrame::Live(_) | ServerFrame::Ignored) => Ok(false),
         Err(_) => {
             eprintln!("prx sync frame rejected");
             Err(Flow::Retry)
@@ -339,6 +366,7 @@ async fn drive(
     store: &MirrorStore,
     mirror: &mut Mirror,
     stop: &mut watch::Receiver<bool>,
+    publisher: &mut Publisher,
 ) -> Flow {
     loop {
         if halted(stop) {
@@ -356,7 +384,7 @@ async fn drive(
         match incoming {
             Incoming::Close(code) => return on_close(code, mirror, store, true),
             Incoming::Text(bytes) => {
-                if let Some(flow) = on_text(&mut sock, store, mirror, &bytes).await {
+                if let Some(flow) = on_text(&mut sock, store, mirror, publisher, &bytes).await {
                     return flow;
                 }
             }
@@ -368,14 +396,19 @@ async fn on_text(
     sock: &mut Socket,
     store: &MirrorStore,
     mirror: &mut Mirror,
+    publisher: &mut Publisher,
     bytes: &[u8],
 ) -> Option<Flow> {
     match decode_server(bytes) {
         Ok(ServerFrame::Ping) => sock.send_text(PONG_FRAME).await.err().map(|_| Flow::Live),
         Ok(ServerFrame::Ignored) => None,
+        Ok(ServerFrame::Live(notice)) => {
+            publisher.progress(&notice).await;
+            None
+        }
         Ok(ServerFrame::Resync) => Some(mark_resync(mirror, store)),
         Ok(ServerFrame::Welcome { .. }) => Some(Flow::Live),
-        Ok(ServerFrame::Event(event)) => on_event(sock, store, mirror, &event).await,
+        Ok(ServerFrame::Event(event)) => on_event(sock, store, mirror, publisher, &event).await,
         Err(_) => {
             eprintln!("prx sync frame rejected");
             Some(Flow::Live)
@@ -383,10 +416,23 @@ async fn on_text(
     }
 }
 
+async fn publish_applied(publisher: &mut Publisher, op: &MirrorOp) {
+    match op {
+        MirrorOp::Approval(copy) => publisher.approval(copy).await,
+        MirrorOp::Turn(copy) => {
+            if let TurnBody::Text { content, final_reply: true } = &copy.body {
+                publisher.final_text(copy, content).await;
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn on_event(
     sock: &mut Socket,
     store: &MirrorStore,
     mirror: &mut Mirror,
+    publisher: &mut Publisher,
     event: &JournalEvent,
 ) -> Option<Flow> {
     let failed = match mirror.apply_event(store, event) {
@@ -397,6 +443,7 @@ async fn on_event(
         }
         Err(_) => return Some(Flow::Live),
     };
+    publish_applied(publisher, &event.op).await;
     if let Some(note) = failed {
         eprintln!("prx sync turn.failed reason={} retryable={}", note.reason, note.retryable);
     }

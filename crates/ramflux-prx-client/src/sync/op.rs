@@ -46,8 +46,35 @@ pub enum MirrorOp {
     DeleteMessage { message_id: String },
     /// A history erase or an agent purge. The host deletes matching local copies.
     Erase(EraseCopy),
-    /// An approval, a stream, or a kind this card does not store. The cursor still advances.
+    /// A run-approval row. Pending and decided share one shape.
+    Approval(ApprovalCopy),
+    /// A kind this client does not store. The cursor still advances.
     Skip,
+}
+
+/// One approval the owner can see. `preview` is the redacted summary, at most 512 bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ApprovalCopy {
+    /// PRX approval id (`call.{run}.{digest}`).
+    pub approval_id: String,
+    /// PRX session key.
+    pub session: String,
+    /// Agent name.
+    pub agent: String,
+    /// Run id when the header or payload carried one.
+    pub run_id: Option<String>,
+    /// Tool name. Empty when the payload omitted it.
+    pub tool: String,
+    /// Redacted argument preview.
+    pub preview: String,
+    /// RFC3339 expiry. Empty when the payload omitted it.
+    pub expires_at: String,
+    /// `pending` or `decided`.
+    pub status: String,
+    /// `approved` or `denied` once decided.
+    pub decision: Option<String>,
+    /// Denial cause when PRX sent one.
+    pub cause: Option<String>,
 }
 
 /// One stored turn. The body is the only place message text lives.
@@ -107,7 +134,7 @@ pub(super) fn op_from_snapshot(
         "agent" => agent_op(key, payload),
         "erase_receipt" => erase_op(payload),
         "turn" => turn_op(payload, "", "", "", None),
-        // Approvals and unknown snapshot kinds are not stored.
+        "approval" => approval_op(true, "", "", None, payload),
         _ => Ok(MirrorOp::Skip),
     }
 }
@@ -131,8 +158,87 @@ pub(super) fn op_from_kind(
         "turn.started" => started_op(payload, session, agent, run_id),
         "turn.failed" => failed_op(payload, session, agent, run_id),
         "turn.cancelled" => cancelled_op(session, agent, run_id, payload),
-        // Approvals and unknown journal kinds are not stored. The cursor still advances.
+        "approval.pending" => approval_op(true, session, agent, run_id, payload),
+        "approval.decided" => approval_op(false, session, agent, run_id, payload),
         _ => Ok(MirrorOp::Skip),
+    }
+}
+
+fn approval_op(
+    pending: bool,
+    session: &str,
+    agent: &str,
+    run_id: Option<String>,
+    payload: &Value,
+) -> Result<MirrorOp, PrxError> {
+    let approval_id = req_id(payload, "approval_id")?;
+    let decision = if pending {
+        None
+    } else {
+        let decision = req_id(payload, "decision")?;
+        if decision != "approved" && decision != "denied" {
+            return Err(protocol("sync payload field is invalid"));
+        }
+        Some(decision)
+    };
+    Ok(MirrorOp::Approval(ApprovalCopy {
+        approval_id,
+        session: approval_session(payload, session)?,
+        agent: approval_agent(payload, agent)?,
+        run_id: opt_id(payload, "run_id")?.or(run_id),
+        tool: bounded_text(payload, "tool", 128)?,
+        preview: bounded_text(payload, "summary", 512)?,
+        expires_at: bounded_text(payload, "expires_at", 64)?,
+        status: if pending { "pending" } else { "decided" }.to_owned(),
+        decision,
+        cause: opt_cause(payload)?,
+    }))
+}
+
+fn approval_session(payload: &Value, fallback: &str) -> Result<String, PrxError> {
+    if let Some(value) = opt_id(payload, "session_key")? {
+        return Ok(value);
+    }
+    if let Some(value) = opt_id(payload, "session")? {
+        return Ok(value);
+    }
+    Ok(if nonempty(fallback) { fallback.to_owned() } else { String::new() })
+}
+
+fn approval_agent(payload: &Value, fallback: &str) -> Result<String, PrxError> {
+    let agent = opt_label(payload, "agent")?;
+    if agent.is_empty() { Ok(fallback.to_owned()) } else { Ok(agent) }
+}
+
+fn bounded_text(payload: &Value, key: &str, max: usize) -> Result<String, PrxError> {
+    let Some(text) = loose_str(payload, key)? else {
+        return Ok(String::new());
+    };
+    if text.len() <= max {
+        return Ok(text);
+    }
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(text.get(..end).unwrap_or("").to_owned())
+}
+
+fn loose_str(payload: &Value, key: &str) -> Result<Option<String>, PrxError> {
+    match payload.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if text.len() <= 8192 && !text.chars().any(char::is_control) => {
+            Ok(Some(text.clone()))
+        }
+        Some(Value::String(_)) => Err(protocol("sync payload field is invalid")),
+        Some(_) => Err(protocol("sync payload field has the wrong type")),
+    }
+}
+
+fn opt_cause(payload: &Value) -> Result<Option<String>, PrxError> {
+    match opt_id(payload, "cause")? {
+        Some(cause) if cause.len() > 64 => Err(protocol("sync payload field is invalid")),
+        other => Ok(other),
     }
 }
 

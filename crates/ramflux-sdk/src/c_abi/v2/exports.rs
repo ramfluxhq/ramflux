@@ -619,7 +619,12 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "payload_too_large"
         | "target_not_found"
         | "target_deleted"
-        | "edit_conflict" => E::InvalidArgument as i32,
+        | "edit_conflict"
+        | "field_invalid"
+        | "approval_decided"
+        | "approval_unknown"
+        | "approval_expired"
+        | "approval_run_mismatch" => E::InvalidArgument as i32,
         "InvalidCanonicalJson" => E::InvalidCanonicalJson as i32,
         "UnsupportedVersion" | "AccountSchemaTooNew" | "peer_upgrade_required" => {
             E::UnsupportedVersion as i32

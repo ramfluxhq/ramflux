@@ -21,6 +21,7 @@ mod deferred_attachment;
 pub(crate) mod device_unlock;
 pub(crate) mod manifest_demand;
 pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};
+pub(crate) mod agent_activity;
 pub(crate) mod agent_custody;
 pub(crate) mod agent_custody_calls;
 pub(crate) mod agent_rebind;

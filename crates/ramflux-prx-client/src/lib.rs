@@ -12,6 +12,7 @@
 
 mod agent;
 mod apply;
+mod approvals;
 mod autonomy;
 mod capabilities;
 mod catalog;
@@ -40,13 +41,14 @@ pub use agent::{
     PROMPT_MAX_BYTES, PutKind, PutOutcome, Retired, Tools,
 };
 pub use apply::ApplyOutcome;
+pub use approvals::ApprovalReceipt;
 pub use autonomy::Autonomy;
 pub use capabilities::{
     AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_LIMITS_V1, AGENT_MAIN_READBACK_V1,
     AGENT_MEMORY_PURGE_V1, BuildCommit, CAPABILITIES_V1, Capabilities, HISTORY_ERASE_V1,
     MESSAGE_CONTEXT_DELIVERY_V1, MESSAGE_DELETE_V1, MESSAGE_FORGET_WRITES_V1,
-    MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1, OWNER_ID_STABLE_V1, SESSION_KEY_V1,
-    SYNC_SNAPSHOT_V1, SYNC_WS_V1, TARGETED_AGENTS_V1, require,
+    MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1, OWNER_ID_STABLE_V1, RUN_APPROVALS_V1,
+    SESSION_KEY_V1, STREAM_FRAMES_V1, SYNC_SNAPSHOT_V1, SYNC_WS_V1, TARGETED_AGENTS_V1, require,
 };
 pub use catalog::{Catalog, CatalogModel, CatalogTool};
 pub use client::PrxClient;
@@ -69,9 +71,10 @@ pub use revision::{CatalogRevision, ConfigRevision};
 pub use run::{JobCancel, RunCancel, RunCode, RunState};
 pub use session::SessionCreated;
 pub use sync::{
-    EraseCopy, JournalEvent, MirrorOp, PONG_FRAME, SNAPSHOT_MAX_BODY, SNAPSHOT_PAGE_LIMIT,
-    ServerFrame, SnapshotPage, SnapshotRow, SyncCursor, SyncDial, TurnBody, TurnCopy, ack_frame,
-    decode_server, format_cursor, hello_frame, parse_cursor,
+    ApprovalCopy, EraseCopy, JournalEvent, LiveBody, LiveNotice, MirrorOp, PONG_FRAME,
+    SNAPSHOT_MAX_BODY, SNAPSHOT_PAGE_LIMIT, ServerFrame, SnapshotPage, SnapshotRow, SyncCursor,
+    SyncDial, TurnBody, TurnCopy, ack_frame, decode_server, format_cursor, hello_frame,
+    parse_cursor,
 };
 pub use targeted::{ReloadReport, ReloadStatus, TargetedAgents};
 pub use transport::{ClientConfig, DEFAULT_MAX_BODY_BYTES, DEFAULT_REQUEST_TIMEOUT};

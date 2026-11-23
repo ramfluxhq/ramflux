@@ -3,7 +3,7 @@
 
 //! Owner-only mirror of one PRX journal. The host checkpoint stays separate.
 
-use ramflux_prx_client::{JournalEvent, SnapshotPage, format_cursor, parse_cursor};
+use ramflux_prx_client::{ApprovalCopy, JournalEvent, SnapshotPage, format_cursor, parse_cursor};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
@@ -15,6 +15,7 @@ pub(super) const MAX_AGENTS: usize = 512;
 pub(super) const MAX_TURNS: usize = 8192;
 pub(super) const MAX_RUNS: usize = 1024;
 pub(super) const MAX_ERASES: usize = 4096;
+pub(super) const MAX_APPROVALS: usize = 256;
 const MAX_SEEN: usize = 2048;
 const MIRROR_MAX: usize = 16 * 1024 * 1024;
 pub(super) const TURN_TEXT_CAP: usize = 256 * 1024;
@@ -126,8 +127,29 @@ pub(super) struct Mirror {
     pub(super) run_order: Vec<String>,
     #[serde(default)]
     pub(super) erases: Vec<String>,
+    /// Run approvals, keyed by approval id. At most [`MAX_APPROVALS`].
+    #[serde(default)]
+    pub(super) approvals: BTreeMap<String, ApprovalRow>,
     #[serde(default)]
     seen: VecDeque<String>,
+}
+
+/// One stored approval. The map key is the approval id.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ApprovalRow {
+    pub session: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub tool: String,
+    pub preview: String,
+    pub expires_at: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
 }
 
 pub(super) struct Counts {
@@ -157,6 +179,7 @@ impl Mirror {
             runs: BTreeMap::new(),
             run_order: Vec::new(),
             erases: Vec::new(),
+            approvals: BTreeMap::new(),
             seen: VecDeque::new(),
         }
     }
@@ -255,6 +278,37 @@ impl Mirror {
 
     fn saw(&self, event_id: &str) -> bool {
         self.seen.iter().any(|id| id == event_id)
+    }
+
+    /// Keeps a decided row over a pending one. Drops one pending key, else the smallest key.
+    pub(super) fn remember_approval(&mut self, copy: &ApprovalCopy) {
+        let row = ApprovalRow {
+            session: copy.session.clone(),
+            agent: copy.agent.clone(),
+            run_id: copy.run_id.clone(),
+            tool: copy.tool.clone(),
+            preview: copy.preview.clone(),
+            expires_at: copy.expires_at.clone(),
+            status: copy.status.clone(),
+            decision: copy.decision.clone(),
+            cause: copy.cause.clone(),
+        };
+        if self.approvals.contains_key(&copy.approval_id) {
+            self.approvals.insert(copy.approval_id.clone(), row);
+            return;
+        }
+        while self.approvals.len() >= MAX_APPROVALS {
+            let pending = self
+                .approvals
+                .iter()
+                .find(|(_, stored)| stored.status == "pending")
+                .map(|(id, _)| id.clone());
+            let Some(victim) = pending.or_else(|| self.approvals.keys().next().cloned()) else {
+                break;
+            };
+            self.approvals.remove(&victim);
+        }
+        self.approvals.insert(copy.approval_id.clone(), row);
     }
 
     fn remember(&mut self, event_id: &str) {
@@ -362,6 +416,10 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn validate(mut mirror: Mirror) -> Result<Mirror, StoreError> {
+    while mirror.approvals.len() > MAX_APPROVALS {
+        let Some(victim) = mirror.approvals.keys().next().cloned() else { break };
+        mirror.approvals.remove(&victim);
+    }
     if mirror.v != 1
         || mirror.sessions.len() > MAX_SESSIONS
         || mirror.agents.len() > MAX_AGENTS

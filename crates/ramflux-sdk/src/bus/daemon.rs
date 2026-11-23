@@ -336,6 +336,10 @@ pub(crate) async fn dispatch_local_bus_request(
         method if method.starts_with("diag.") => {
             crate::bus::dispatch::residue::dispatch_residue(request, state)
         }
+        "agent.progress"
+        | "agent.approval.publish"
+        | "agent.approval.decide"
+        | "agent.approval.list" => crate::bus::dispatch::agent_activity::dispatch(request, state),
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
 }

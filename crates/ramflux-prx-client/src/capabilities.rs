@@ -46,6 +46,10 @@ pub const AGENT_MEMORY_PURGE_V1: &str = "agent_memory_purge_v1";
 pub const SYNC_SNAPSHOT_V1: &str = "sync_snapshot_v1";
 /// `GET /api/sync/ws`. Advertised together with `sync_snapshot_v1`.
 pub const SYNC_WS_V1: &str = "sync_ws_v1";
+/// Ephemeral per-run stream frames on the sync socket (`typing`, `tool_status`, `delta`).
+pub const STREAM_FRAMES_V1: &str = "stream_frames_v1";
+/// `POST /api/sessions/{id}/approvals/{approval_id}`.
+pub const RUN_APPROVALS_V1: &str = "run_approvals_v1";
 
 /// The build identity PRX reports.
 #[derive(Debug, Clone, PartialEq, Eq)]

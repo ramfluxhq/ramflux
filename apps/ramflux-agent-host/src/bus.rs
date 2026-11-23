@@ -45,11 +45,13 @@ impl AgentBus for RfdBus {
         body: Value,
         operation: Option<&str>,
     ) -> Result<Value> {
-        // This is the complete capability surface of this host. Human approval decisions are
-        // observed through task.get; the headless account cannot grant or resolve them.
+        // The host publishes live PRX progress and forwards an owner's approval decision.
+        // It does not approve a tool call by itself.
         if !matches!(
             method,
             "account.status"
+                | "agent.progress"
+                | "agent.approval.publish"
                 | "device.list"
                 | "device.refresh"
                 | "identity.directory"

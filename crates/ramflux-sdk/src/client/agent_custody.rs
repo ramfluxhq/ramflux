@@ -33,6 +33,8 @@ pub(crate) enum CustodyBody {
     Cancel(Vec<u8>),
     /// The agent record of a sibling, to apply by `EventOrder` (AGENT-IDENTITY-01 E3).
     Metadata(Box<g::AgentMetadata>),
+    /// A progress or approval row for this owner. It is not a creation plan.
+    Activity(Box<crate::client::agent_activity::ActivityPacket>),
 }
 
 /// Authorizes an `AgentMetadata` broadcast (AGENT-IDENTITY-01 E3): the source must be another device
@@ -132,6 +134,16 @@ impl RamfluxClient {
         };
         match custody.value.as_ref() {
             Some(g::agent_custody_packet::Value::RequestJson(plan_bytes)) => {
+                if let Some(activity) = crate::client::agent_activity::parse_marker(plan_bytes)? {
+                    let record_conversation =
+                        activity.record.get("conversation_id").and_then(|value| value.as_str());
+                    if activity.conversation_id != conversation
+                        || record_conversation != Some(conversation)
+                    {
+                        return Err(refused("agent activity conversation mismatch"));
+                    }
+                    return Ok(CustodyBody::Activity(Box::new(activity)));
+                }
                 check_received_request(
                     plan_bytes,
                     conversation,
@@ -237,6 +249,10 @@ impl RamfluxClient {
             .map_err(|_| refused("agent custody clock range"))?;
         let store = self.agent_creation_store()?;
         match body {
+            CustodyBody::Activity(activity) => {
+                crate::client::agent_activity::commit(self, &activity.state_kind, activity.record)?;
+                Ok(())
+            }
             CustodyBody::Metadata(metadata) => self.receive_agent_metadata(&metadata).map(|_| ()),
             CustodyBody::Plan(plan_bytes) => receive_plan(&store, &plan_bytes, now).map(|_| ()),
             CustodyBody::Cancel(cancel_bytes) => {
