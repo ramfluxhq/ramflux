@@ -100,7 +100,8 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
         SdkError::InboundRejected(_) | SdkError::CallControlReceiptCapacity { .. } => {
             Some("routing_rejected")
         }
-        SdkError::PairingCode("HeadChanged") => Some("head_changed"),
+        // `HeadChanged` stays off this list. A stale observation is retryable until
+        // a head refresh fails to advance the local epoch (`head_refresh::inbound`).
         _ => None,
     }
 }

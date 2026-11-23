@@ -391,8 +391,6 @@ pub(crate) fn migrate_account_index(connection: &Connection) -> Result<(), Stora
             last_opened_at INTEGER,
             host_revoked INTEGER NOT NULL DEFAULT 0 CHECK (host_revoked IN (0, 1))
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_local_account_principal
-            ON local_account(principal_commitment) WHERE host_revoked = 0;
         CREATE TABLE IF NOT EXISTS active_account_state (
             singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
             active_local_account_id TEXT,
@@ -418,6 +416,14 @@ pub(crate) fn migrate_account_index(connection: &Connection) -> Result<(), Stora
         connection,
         "host_revoked",
         "INTEGER NOT NULL DEFAULT 0 CHECK (host_revoked IN (0, 1))",
+    )?;
+    // v1 stores have no second principal index. Drop the old full unique index
+    // and install the live-row index under a new name. `IF NOT EXISTS` would
+    // have left a pre-existing full index in place.
+    connection.execute_batch(
+        "DROP INDEX IF EXISTS idx_local_account_principal;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_local_account_principal_live
+             ON local_account(principal_commitment) WHERE host_revoked = 0;",
     )?;
     Ok(())
 }

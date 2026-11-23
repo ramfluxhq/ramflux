@@ -176,6 +176,14 @@ async fn apply_once(
     if !cover && !open_already_covered(account, turn, handle_generation, prepared, backpressure)? {
         return Ok(None);
     }
+    // A parked head stays held. Re-applying it would charge the retry budget
+    // before the refresh that decides `retry_exhausted`.
+    if !cover {
+        let key = account.client.inbox_admission_key(&prepared.entry)?;
+        if crate::bus::couriers::head_refresh::inbound::head_waiting(account, &key) {
+            return Ok(None);
+        }
+    }
     let entry = &prepared.entry;
     #[cfg(test)]
     if take_manifest_wait() {
@@ -202,6 +210,9 @@ async fn apply_once(
         Kind::PolicyFailure(kind, code) => {
             let key = account.client.inbox_admission_key(entry)?;
             admit_failure(account, turn, handle_generation, entry, sequence, &key, (kind, code))?;
+            if code == "head_changed" {
+                crate::bus::couriers::head_refresh::inbound::arm(account, &key);
+            }
             Ok(None)
         }
         Kind::Projection => {
@@ -226,7 +237,7 @@ fn classified_kind(
             if crate::client::routed::decode(&entry.envelope).is_ok() && directory_pending(&error) {
                 Ok((Kind::Routed, Some(error)))
             } else {
-                match failure_of(&error, entry)? {
+                match failure_of(account, &error, entry)? {
                     Some((kind, code)) => Ok((Kind::PolicyFailure(kind, code), None)),
                     None => Err(error),
                 }
@@ -354,9 +365,10 @@ fn admit_mapped(
     prepared: &ReceiveEntry,
     error: SdkError,
 ) -> Result<Option<Envelope>, SdkError> {
-    match failure_of(&error, &prepared.entry)? {
+    match failure_of(account, &error, &prepared.entry)? {
         Some(pair) => {
             let key = account.client.inbox_admission_key(&prepared.entry)?;
+            let refresh = pair.1 == "head_changed";
             admit_failure(
                 account,
                 turn,
@@ -366,6 +378,9 @@ fn admit_mapped(
                 &key,
                 pair,
             )?;
+            if refresh {
+                crate::bus::couriers::head_refresh::inbound::arm(account, &key);
+            }
             Ok(None)
         }
         None => Err(error),
@@ -407,7 +422,7 @@ fn defer_routed_pending(
     entry: &GatewayInboxEntry,
     error: SdkError,
 ) -> Result<(), SdkError> {
-    let (kind, code) = match failure_of(&error, entry)? {
+    let (kind, code) = match failure_of(account, &error, entry)? {
         Some(pair) => pair,
         None if directory_pending(&error) => (ReceiveFailureKind::Retryable, "inbound_pending"),
         None => return Err(error),
@@ -742,6 +757,7 @@ fn settled_routed_kind(
 /// and every other local refusal keep W0 staged and propagate — a dummy signature
 /// must not rewrite `GatewaySessionNotEstablished`.
 fn failure_of(
+    account: &LocalBusAccountState,
     error: &SdkError,
     entry: &GatewayInboxEntry,
 ) -> Result<Option<(ReceiveFailureKind, &'static str)>, SdkError> {
@@ -751,14 +767,19 @@ fn failure_of(
     // Immutable malformed signature bytes cannot become valid after a directory refresh.
     let wire = wire_signature_error(entry);
     let error = wire.as_ref().unwrap_or(error);
-    if let Some(code) = deterministic(error) {
-        if code == "head_changed" {
-            tracing::warn!(
-                reason_code = "head_changed",
-                inbox_seq = entry.inbox_seq,
-                "stale observation refused; the receive pass continues"
-            );
+    if matches!(error, SdkError::PairingCode("HeadChanged")) {
+        let key = account.client.inbox_admission_key(entry)?;
+        if crate::bus::couriers::head_refresh::inbound::head_changed_final(account, &key, entry)? {
+            return Ok(Some((ReceiveFailureKind::Exhausted, "retry_exhausted")));
         }
+        tracing::warn!(
+            reason_code = "head_changed",
+            inbox_seq = entry.inbox_seq,
+            "stale observation parked; the receive pass continues"
+        );
+        return Ok(Some((ReceiveFailureKind::Retryable, "head_changed")));
+    }
+    if let Some(code) = deterministic(error) {
         return Ok(Some((ReceiveFailureKind::Deterministic, code)));
     }
     if crate::bus::sync_driver::inbound_failure_kind(error) == "InboundPending" {

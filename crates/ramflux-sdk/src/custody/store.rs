@@ -18,6 +18,7 @@ mod networking;
 pub(crate) mod pairing;
 mod publication;
 mod revoked_reserve;
+pub(crate) use revoked_reserve::with_anchor_ceremony;
 mod verification_cache;
 pub(crate) use verification_cache::PublicAuthorityCache;
 #[cfg(test)]
