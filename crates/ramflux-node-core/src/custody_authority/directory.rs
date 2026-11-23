@@ -54,10 +54,23 @@ impl IdentityRegistry {
         identity: &RootQualifiedDeviceRef,
         now: u64,
     ) -> Result<Option<crate::DeviceAuthKeyResponse>, NodeCoreError> {
+        Ok(self.custody_device_auth_key_lookup(identity, now)?.into_key())
+    }
+
+    pub(crate) fn custody_device_auth_key_lookup(
+        &self,
+        identity: &RootQualifiedDeviceRef,
+        now: u64,
+    ) -> Result<crate::DeviceAuthKeyLookup, NodeCoreError> {
+        use crate::{DeviceAuthKeyLookup, DeviceAuthKeyRefusal};
         let Some((evidence, verified)) = self.custody_authority(identity.root_commitment(), now)?
         else {
-            return Ok(None);
+            return Ok(DeviceAuthKeyLookup::Key(None));
         };
+        // Membership includes compacted tombstones, whose branch certificate no longer exists.
+        if verified.revoked_ids().contains(identity.device_id()) {
+            return Ok(DeviceAuthKeyLookup::Refused { reason: DeviceAuthKeyRefusal::Revoked });
+        }
         let Some(entry) = verified
             .envelope()
             .body
@@ -65,7 +78,7 @@ impl IdentityRegistry {
             .iter()
             .find(|entry| entry.device_id == identity.device_id())
         else {
-            return Ok(None);
+            return Ok(DeviceAuthKeyLookup::Key(None));
         };
         let reference = DeviceRef {
             account_anchor: identity.root_commitment().into(),
@@ -74,7 +87,7 @@ impl IdentityRegistry {
         };
         let cert =
             verified.authorize(&reference, "register", now).map_err(|error| crypto(&error))?;
-        Ok(Some(crate::DeviceAuthKeyResponse {
+        Ok(DeviceAuthKeyLookup::Key(Some(Box::new(crate::DeviceAuthKeyResponse {
             custody_authority: Some(Box::new(evidence)),
             root_public_key: None,
             signed_device_set: None,
@@ -84,7 +97,7 @@ impl IdentityRegistry {
             branch_public_key: cert.branch_signing_public_key.clone(),
             target_delivery_id: identity.storage_key().into(),
             revoked: false,
-        }))
+        }))))
     }
 
     pub(crate) fn custody_device_identity(
@@ -98,6 +111,21 @@ impl IdentityRegistry {
 }
 
 impl super::RouterCore {
+    /// Read same-node device authority without collapsing a verified revocation into absence.
+    /// # Errors
+    /// Rejects unqualified selectors, fenced authority and invalid native publications.
+    pub fn mvp1_device_auth_key_lookup_checked(
+        &self,
+        lookup: &str,
+    ) -> Result<crate::DeviceAuthKeyLookup, NodeCoreError> {
+        let control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let registry = &control.mvp1_identities;
+        let identity = registry
+            .resolve_device_selector(lookup)
+            .ok_or_else(|| super::reject("qualified device required"))?;
+        registry.device_auth_key_lookup(&identity)
+    }
+
     /// Resolve an exact retained public head for delayed consent, never for current authorization.
     /// # Errors
     /// Rejects fenced current authority, malformed selectors and durable store failures.

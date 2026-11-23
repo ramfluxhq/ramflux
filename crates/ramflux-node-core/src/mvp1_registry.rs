@@ -205,6 +205,29 @@ pub struct DeviceAuthKeyResponse {
     pub revoked: bool,
 }
 
+/// Same-node device-key read. Revocation carries no fabricated key material.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum DeviceAuthKeyLookup {
+    Refused { reason: DeviceAuthKeyRefusal },
+    Key(Option<Box<DeviceAuthKeyResponse>>),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceAuthKeyRefusal {
+    Revoked,
+}
+
+impl DeviceAuthKeyLookup {
+    pub(crate) fn into_key(self) -> Option<DeviceAuthKeyResponse> {
+        match self {
+            Self::Key(key) => key.map(|key| *key),
+            Self::Refused { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct InboxFetchResponse {
     pub target_delivery_id: String,
@@ -871,6 +894,16 @@ impl IdentityRegistry {
             devices,
             agent_lifecycle: None,
         })
+    }
+
+    pub(crate) fn device_auth_key_lookup(
+        &self,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<DeviceAuthKeyLookup, NodeCoreError> {
+        if self.custody_anchor_known(identity.root_commitment()) {
+            return self.custody_device_auth_key_lookup(identity, crate::now_unix_seconds());
+        }
+        Ok(DeviceAuthKeyLookup::Key(self.device_auth_key(identity).map(Box::new)))
     }
 
     /// A literal name cannot select device authority.
