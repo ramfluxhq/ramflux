@@ -20,6 +20,8 @@ pub(crate) async fn handle(command: PrxCommand) -> Result<(), RfError> {
                 state_dir: opts.state_dir,
                 provider: opts.provider,
                 model: opts.model,
+                native_tools: opts.native_tools,
+                no_native_tools: opts.no_native_tools,
                 binary: opts.binary,
             })
             .await

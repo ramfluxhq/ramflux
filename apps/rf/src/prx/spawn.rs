@@ -47,7 +47,18 @@ pub(crate) fn run(spec: &CommandSpec<'_>) -> Result<(), RfError> {
     if output.status.success() {
         return Ok(());
     }
-    Err(refused("prx_command", redact(&output.stderr, spec.key)))
+    Err(command_error(&output.stderr, spec.key))
+}
+
+fn command_error(stderr: &[u8], key: Option<&str>) -> RfError {
+    let text = String::from_utf8_lossy(stderr);
+    if text.contains("model_capabilities_unknown") {
+        return refused(
+            "model_capabilities_unknown",
+            "this model is outside the catalog; pass exactly one of --native-tools or --no-native-tools",
+        );
+    }
+    refused("prx_command", redact(stderr, key))
 }
 
 pub(crate) fn provider_key(provider: &str) -> Result<Zeroizing<String>, RfError> {

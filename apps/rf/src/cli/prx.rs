@@ -31,6 +31,12 @@ pub(crate) struct PrxBootstrap {
     /// Model id. Omitted when empty.
     #[arg(long)]
     pub(crate) model: Option<String>,
+    /// The model has native tools. Required with `--model` outside the catalog.
+    #[arg(long, conflicts_with = "no_native_tools", requires = "model")]
+    pub(crate) native_tools: bool,
+    /// The model has no native tools. Required with `--model` outside the catalog.
+    #[arg(long, conflicts_with = "native_tools", requires = "model")]
+    pub(crate) no_native_tools: bool,
     /// `prx` binary. The default is `prx` on `PATH`.
     #[arg(long, default_value = "prx")]
     pub(crate) binary: PathBuf,

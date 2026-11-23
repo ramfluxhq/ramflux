@@ -19,6 +19,8 @@ pub(crate) struct Options {
     pub state_dir: Option<PathBuf>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub native_tools: bool,
+    pub no_native_tools: bool,
     pub binary: PathBuf,
 }
 
@@ -82,11 +84,28 @@ fn ensure_config(opts: &Options, dir: &Path) -> Result<(), RfError> {
         opts.provider.as_deref().ok_or_else(|| refused("provider_missing", "pass --provider"))?;
     let key = provider_key(provider)?;
     let model = model_arg(opts.model.as_deref())?;
+    let tools = tool_flag(opts.native_tools, opts.no_native_tools, model.is_some())?;
     let mut args = vec!["init", "--provider", provider, "--from-stdin"];
     if let Some(model) = model {
         args.extend_from_slice(&["--model", model]);
     }
+    if let Some(flag) = tools {
+        args.push(flag);
+    }
     run(&spec(opts, dir, &args, Some(key.as_str())))
+}
+
+/// Exactly one catalog declaration, and only beside a real `--model`.
+fn tool_flag(native: bool, none: bool, has_model: bool) -> Result<Option<&'static str>, RfError> {
+    match (native, none, has_model) {
+        (false, false, _) => Ok(None),
+        (true, false, true) => Ok(Some("--native-tools")),
+        (false, true, true) => Ok(Some("--no-native-tools")),
+        _ => Err(refused(
+            "field_invalid",
+            "pass exactly one of --native-tools or --no-native-tools with --model",
+        )),
+    }
 }
 
 fn issue(opts: &Options, dir: &Path, force: bool) -> Result<(), RfError> {
