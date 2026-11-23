@@ -7,6 +7,9 @@ use crate::EncryptionMode;
 pub enum StorageError {
     #[error("another process holds the account writer lock: {0}")]
     AccountWriterBusy(String),
+    /// The account writer stopped before this immediate transaction so a queued command can run.
+    #[error("account writer paused for a queued command")]
+    WriterPause,
     #[error("segment resource capacity exceeded: {limit}")]
     SegmentResourceCapacity { limit: usize },
     #[error("unsupported raw quota exceeded for source {source_anchor} ({scope:?})")]
@@ -46,7 +49,7 @@ pub enum StorageError {
     #[error("crypto error: {0}")]
     Crypto(#[from] ramflux_crypto::CryptoError),
     #[error("sqlite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(rusqlite::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("account key mismatch")]
@@ -114,6 +117,12 @@ pub enum StorageError {
     PairingField(&'static str),
     #[error("mute_until is outside the safe JSON integer range")]
     MuteUntilOutOfRange,
+}
+
+impl From<rusqlite::Error> for StorageError {
+    fn from(error: rusqlite::Error) -> Self {
+        if crate::writer_budget::is_pause(&error) { Self::WriterPause } else { Self::Sqlite(error) }
+    }
 }
 
 impl StorageError {

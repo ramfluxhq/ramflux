@@ -142,7 +142,7 @@ impl AccountSessionHarness {
             // Either writer may have work; a bounded wait on each keeps both advancing.
             if let Ok(Some(work)) = tokio::time::timeout(
                 std::time::Duration::from_millis(50),
-                source.runtime.connection_work.recv(),
+                source.runtime.recv_connection_work(),
             )
             .await
             {
@@ -150,7 +150,7 @@ impl AccountSessionHarness {
             }
             if let Ok(work) = tokio::time::timeout(
                 std::time::Duration::from_millis(50),
-                self.runtime.connection_work.recv(),
+                self.runtime.recv_connection_work(),
             )
             .await
             {
@@ -187,7 +187,7 @@ impl AccountSessionHarness {
             }
             if let Ok(Some(work)) = tokio::time::timeout(
                 std::time::Duration::from_millis(50),
-                self.runtime.connection_work.recv(),
+                self.runtime.recv_connection_work(),
             )
             .await
             {

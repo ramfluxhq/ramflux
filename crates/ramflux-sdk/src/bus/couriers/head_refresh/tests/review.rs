@@ -49,7 +49,8 @@ async fn demand_during_large_connect_sweep_refreshes_before_network_wait() -> Te
     account.gateway_config.ca_cert = native.root.0.join("ca.pem");
     let handle = account.connection.as_ref().ok_or("connection")?.clone();
     let (writer, mut receiver) = mpsc::channel(2);
-    let child = tokio::spawn(run_with_triggers(handle.test_context(), writer, true, false));
+    let child =
+        tokio::spawn(run_with_triggers(handle.test_context(), writer.clone(), writer, true, false));
     let mut fetched = BTreeSet::new();
     while fetched.len() < PASS_ROOTS {
         let work = next_work(&mut receiver).await?;
@@ -57,7 +58,7 @@ async fn demand_during_large_connect_sweep_refreshes_before_network_wait() -> Te
             assert!(outcome.is_ok());
             fetched.insert(root.clone());
         }
-        apply_work(&mut account, work);
+        let _ = apply_work(&mut account, work);
     }
     assert!(!fetched.contains(&target), "target must still be behind the sweep");
     let admitted = tokio::time::Instant::now();
@@ -67,10 +68,10 @@ async fn demand_during_large_connect_sweep_refreshes_before_network_wait() -> Te
         if let Work::Apply { root, outcome, .. } = &work {
             assert_eq!(root, &target, "a demand must precede the next sweep fetch");
             assert!(outcome.is_ok());
-            apply_work(&mut account, work);
+            let _ = apply_work(&mut account, work);
             break;
         }
-        apply_work(&mut account, work);
+        let _ = apply_work(&mut account, work);
     }
     assert!(admitted.elapsed() < Duration::from_secs(5));
     assert!(!account.head_refresh.pending.contains(&target));
@@ -138,7 +139,8 @@ async fn repeated_demand_cannot_starve_timer_and_failed_roots_back_off() -> Test
     // Hold a demand Prepare while the timer becomes due and another wake queues.
     // A Prepare error must also leave the registered child alive for that timer.
     let (writer, mut receiver) = mpsc::channel(2);
-    let child = tokio::spawn(run_with_triggers(handle.test_context(), writer, false, true));
+    let child =
+        tokio::spawn(run_with_triggers(handle.test_context(), writer.clone(), writer, false, true));
     let Work::Subscribe { reply } = next_work(&mut receiver).await? else {
         return Err("subscribe".into());
     };

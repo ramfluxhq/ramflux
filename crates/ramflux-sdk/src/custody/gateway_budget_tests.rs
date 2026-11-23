@@ -170,12 +170,16 @@ fn assert_deadline_error(origin: Origin, error: SdkError) {
         );
     }
 }
-async fn native_case(origin: Origin) -> Result {
-    let clock = tokio::spawn(async {
+fn held_clock() -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async {
         loop {
             tokio::task::yield_now().await;
         }
-    });
+    })
+}
+
+async fn native_case(origin: Origin) -> Result {
+    let clock = held_clock();
     let fixture = Box::pin(Fixture::with_mode(&[], true))
         .await
         .map_err(|error| error as Box<dyn std::error::Error>)?;
@@ -207,6 +211,7 @@ async fn native_case(origin: Origin) -> Result {
             None,
             limits.clone(),
             Arc::new(EngineConnector { limits, opener: Arc::clone(&opener) }),
+            None,
             None,
         ))
     } else {
