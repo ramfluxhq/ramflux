@@ -59,6 +59,11 @@ impl AccountDb {
         conversation_id: &str,
         mute_until: i64,
     ) -> Result<(), StorageError> {
+        // A value above the I-JSON safe maximum cannot be returned. The
+        // turned-off sentinel (equal to that maximum) is allowed.
+        if mute_until.unsigned_abs() > ramflux_protocol::MAX_SAFE_JSON_INTEGER {
+            return Err(StorageError::MuteUntilOutOfRange);
+        }
         self.ensure_conversation_list_state(conversation_id)?;
         self.connection.execute(
             "UPDATE conversation_list_state
@@ -187,6 +192,19 @@ impl AccountDb {
             params![conversation_id, self.now_unix()],
         )?;
         Ok(())
+    }
+
+    /// JSON mute fields for one stored instant.
+    ///
+    /// The bool is `muted`. The option is `mute_until`: `None` serializes as
+    /// null both when the conversation is not muted and when it is muted until
+    /// turned off.
+    #[must_use]
+    pub fn conversation_mute_fields(&self, mute_until: Option<i64>) -> (bool, Option<i64>) {
+        (
+            mute_until.is_some_and(|until| until > self.now_unix()),
+            crate::mute_until_for_json(mute_until),
+        )
     }
 
     pub(crate) fn read_conversation_list_state(
