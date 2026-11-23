@@ -303,15 +303,31 @@ pub(super) async fn configure_subscription(
         return supervisor.subscribe_stream(request.clone(), connection).await;
     }
     let body: LocalBusSubscriptionOpenRequest = serde_json::from_value(request.body.clone())?;
+    // Phones follow the journal with bus.subscribe. This opener stays the ephemeral,
+    // backup, pairing, and attended-frontend path. Named topics on an open account
+    // also tail the journal after the acknowledgement, so the subscription is not silent.
+    let journal = if body.topics.iter().any(|topic| !topic.is_empty()) {
+        supervisor.prepare_open_journal(request, connection).await?
+    } else {
+        super::supervisor::OpenJournal::Unavailable
+    };
+    if matches!(journal, super::supervisor::OpenJournal::Resync) {
+        supervisor.clear_stream(connection.connection_id);
+        return Ok(());
+    }
     connection.topics.extend(body.topics);
     if let Some(account) = request.account_id.clone() {
         supervisor.subscribe(connection, account);
     }
     connection
         .outbound
-        .send(local_bus_response(request, serde_json::json!({"subscribed":true})))
+        .send(local_bus_response(request, serde_json::json!({"subscribed": true})))
         .await
         .map_err(|_| closed())?;
+    if let super::supervisor::OpenJournal::Ready(follow) = journal {
+        supervisor
+            .install_stream(connection.connection_id, super::subscription::spawn_tail(*follow));
+    }
     Ok(())
 }
 
