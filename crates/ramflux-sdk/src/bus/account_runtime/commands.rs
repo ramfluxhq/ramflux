@@ -3,6 +3,7 @@
 
 //! Claimed commands, lifecycle preemption, and bounded ordinary dispatch.
 
+use super::super::publication_wait::dispatch;
 use super::{AccountRuntime, stopped};
 use crate::bus::actor::AccountCommand;
 use crate::prelude::*;
@@ -259,6 +260,7 @@ impl AccountRuntime {
         }
         #[cfg(test)]
         let receive_gate_hook = self.receive_gate_hook.take();
+        let command_timeout = self.timeouts.command;
         let mut stopping = false;
         let mut cancelled = false;
         let mut preempted = false;
@@ -273,9 +275,7 @@ impl AccountRuntime {
                 result = async {
                     #[cfg(test)]
                     wait_receive_gate(receive_gate_hook).await;
-                    let deadline=command.admission.as_ref().map_or_else(||tokio::time::Instant::now()+self.timeouts.command,|admission|admission.command_deadline);
-                    super::super::command_admission::COMMAND_CONTEXT.scope(deadline, tokio::time::timeout_at(deadline,super::super::mutations::execute(&mut self.state,&self.id,&command))).await
-                        .map_err(|_|super::super::command_admission::unavailable("account command deadline expired"))?
+                    dispatch(&mut self.state, &self.id, &command, command_timeout).await
                 } => result,
             }
         };
