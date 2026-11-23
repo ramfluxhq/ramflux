@@ -137,12 +137,30 @@ fn enrich_message_origin(
     Ok(())
 }
 
+fn activity_topic(key: &str) -> Option<&'static str> {
+    if key.starts_with("agent-approval/") {
+        Some("agent.approval")
+    } else if key.starts_with("agent-progress/") {
+        Some("agent.progress")
+    } else {
+        None
+    }
+}
+
 fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Result<(), SdkError> {
     if let Some(encoded) = key.strip_prefix("group-invitation/") {
         events.push(("group.invitation".to_owned(), invitation_body(encoded), None));
         return Ok(());
     }
     let db = client.account_db()?;
+    if let Some(topic) = activity_topic(key)
+        && let Some(value) = db.load_actor_state::<Value>(key)?
+    {
+        let subject =
+            field(&value, "approval_id").or_else(|| field(&value, "run_id")).map(str::to_owned);
+        events.push((topic.to_owned(), value, subject));
+        return Ok(());
+    }
     if key == "account/networking"
         && let Some(value) = db.load_actor_state::<Value>(key)?
     {
