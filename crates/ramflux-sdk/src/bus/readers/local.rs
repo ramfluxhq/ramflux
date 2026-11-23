@@ -188,6 +188,8 @@ pub(super) fn read(
 
 fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError> {
     let mut status = view.status.clone();
+    status[crate::VerifiedClassification::FIELD] =
+        json!(client.verified_classification(&view.principal)?);
     native_status(client, view, &mut status)?;
     if let Some(connection) = &view.connection {
         let mut snapshot = connection.snapshot();

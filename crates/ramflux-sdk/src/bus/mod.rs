@@ -62,6 +62,7 @@ pub(crate) mod native_account;
 mod networking_events;
 pub(crate) mod own_device_copy;
 pub mod protocol;
+mod publication_wait;
 pub(crate) mod read_model;
 mod readers;
 mod requests;
