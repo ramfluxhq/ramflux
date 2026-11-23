@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+mod account_local;
 pub(crate) mod account_runtime;
 #[cfg(test)]
 pub(crate) use account_runtime::apply_ack_flush;
