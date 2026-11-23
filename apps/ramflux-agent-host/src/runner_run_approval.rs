@@ -16,25 +16,53 @@ pub(crate) async fn forward<E: EngineProvider>(
     engine: &mut E,
     event: &LocalBusFrame,
 ) -> Result<()> {
+    let Some(decision) = owner_decision(event) else { return Ok(()) };
+    let posted =
+        engine.post_run_approval(decision.session, decision.approval_id, decision.name).await?;
+    apply_post(bus, &event.body, &posted).await
+}
+
+/// Posts the decision and does not publish a receipt. Used while the agent bus is down.
+///
+/// # Errors
+/// Returns a transport failure. A coded PRX refusal is `Ok`.
+pub(crate) async fn post_owner_decision<E: EngineProvider>(
+    engine: &mut E,
+    event: &LocalBusFrame,
+) -> Result<()> {
+    let Some(decision) = owner_decision(event) else { return Ok(()) };
+    let posted =
+        engine.post_run_approval(decision.session, decision.approval_id, decision.name).await?;
+    if let Some(code) = posted.code.as_deref() {
+        eprintln!("prx approval forward answered {code}");
+    }
+    Ok(())
+}
+
+struct OwnerDecision<'a> {
+    session: &'a str,
+    approval_id: &'a str,
+    name: &'a str,
+}
+
+fn owner_decision(event: &LocalBusFrame) -> Option<OwnerDecision<'_>> {
     if event.method != "agent.approval" {
-        return Ok(());
+        return None;
     }
     if event.body.get("source").and_then(Value::as_str) != Some("owner") {
-        return Ok(());
+        return None;
     }
     if event.body.get("status").and_then(Value::as_str) != Some("decided") {
-        return Ok(());
+        return None;
     }
-    let Some(approval_id) = text(&event.body, "approval_id") else { return Ok(()) };
-    let Some(session) = text(&event.body, "session") else { return Ok(()) };
-    let Some(decision) = text(&event.body, "decision") else { return Ok(()) };
-    if decision != "approved" && decision != "denied" || !path_id(session) || !path_id(approval_id)
-    {
+    let approval_id = text(&event.body, "approval_id")?;
+    let session = text(&event.body, "session")?;
+    let name = text(&event.body, "decision")?;
+    if (name != "approved" && name != "denied") || !path_id(session) || !path_id(approval_id) {
         eprintln!("prx approval forward skipped");
-        return Ok(());
+        return None;
     }
-    let posted = engine.post_run_approval(session, approval_id, decision).await?;
-    apply_post(bus, &event.body, &posted).await
+    Some(OwnerDecision { session, approval_id, name })
 }
 
 async fn apply_post(
@@ -91,7 +119,9 @@ async fn publish(
 fn receipt(record: &Value, decision: &str, cause: Option<&str>, run_id: &str) -> Option<Value> {
     let approval_id = text(record, "approval_id")?;
     let session = text(record, "session")?;
-    let conversation = text(record, "conversation_id").unwrap_or(session);
+    // A direct conversation id is `dm:` plus the anchor. That is not a PRX path segment.
+    // The owner copy replaces this field with the custodian scope after the publish.
+    let conversation = text(record, "conversation_id").filter(|id| path_id(id)).unwrap_or(session);
     if !path_id(approval_id) || !path_id(session) || !path_id(conversation) {
         return None;
     }

@@ -82,6 +82,30 @@ impl<E: EngineProvider> AgentHost<E> {
         self.owner_account.as_deref()
     }
 
+    /// Cancels every stored PRX run by its session and run id.
+    ///
+    /// A locked account makes the next `start` return [`Error::IdentityLost`] before
+    /// `account.locked` is applied, so the process exit calls this as well.
+    ///
+    /// # Errors
+    /// Returns a provider or checkpoint error. A remote cancel that cannot be confirmed is not an error.
+    pub async fn cancel_live_runs(&mut self) -> Result<()> {
+        let conversations = self.engine.active_conversations();
+        for conversation_id in &conversations {
+            self.engine.cancel(conversation_id).await?;
+        }
+        self.state.approvals.clear();
+        self.save_state()
+    }
+
+    /// Posts one owner approval decision. The agent bus is not required.
+    ///
+    /// # Errors
+    /// Returns a transport failure. A coded PRX refusal is `Ok`.
+    pub async fn post_owner_decision(&mut self, event: &LocalBusFrame) -> Result<()> {
+        crate::runner_run_approval::post_owner_decision(&mut self.engine, event).await
+    }
+
     /// Bind the headless identity and replay from the last durably applied cursor.
     /// # Errors
     /// Rejects revoked/human accounts, unavailable snapshots, stream gaps and state I/O failures.

@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Span Brain
 use clap::Parser;
 use ramflux_agent_host::{
-    AgentHost, Config, CredentialVault, EngineProvider, Error, PrxEngine, RfdBus, RuleEngine,
-    SyncTask, import_provisioning_bundle, subscribe_owner, unlock_provisioned_account,
+    AgentHost, Config, CredentialVault, EngineProvider, Error, PrxEngine, RuleEngine, SyncTask,
+    import_provisioning_bundle, unlock_provisioned_account,
 };
 use std::path::PathBuf;
 mod reconnect;
@@ -61,26 +61,21 @@ async fn run_provider(
 ) -> ramflux_agent_host::Result<()> {
     let mut host = AgentHost::new(config.clone(), provider)?;
     let mut backoff = reconnect::ReconnectBackoff::default();
+    let mut owner = None;
     loop {
         let started = std::time::Instant::now();
-        let attempt = async {
-            let mut bus = RfdBus::connect(&config.socket, &config.account_id).await?;
-            host.start(&mut bus).await?;
-            let mut owner_bus = match host.owner_account() {
-                Some(account) => Some(RfdBus::connect_owner(&config.socket, account).await?),
-                None => None,
-            };
-            if let Some(owner) = owner_bus.as_mut() {
-                subscribe_owner(owner).await?;
+        // The attempt future borrows `host`. Drop it before `stop_host` borrows `host` again.
+        let outcome = tokio::select! {
+            result = reconnect::one_attempt(&config, &mut host, &mut owner) => result,
+            result = tokio::signal::ctrl_c() => {
+                result.map_err(|_| Error::State)?;
+                return Ok(());
             }
-            host.run_paired(&mut bus, &mut owner_bus).await
         };
-        let error = tokio::select! {
-            result=attempt=>match result {
-                Err(error) if !error.stops_host()=>error,
-                other=>return other,
-            },
-            result=tokio::signal::ctrl_c()=>{result.map_err(|_|Error::State)?;return Ok(());}
+        let error = match outcome {
+            Err(error) if !error.stops_host() => error,
+            Err(error) => return stop_host(&mut host, error).await,
+            Ok(()) => return Ok(()),
         };
         let delay = backoff.failed(started.elapsed());
         // No response bodies, plaintext, credentials or endpoint paths enter logs.
@@ -92,9 +87,22 @@ async fn run_provider(
                 delay.as_secs()
             );
         }
-        tokio::select! {
-            ()=tokio::time::sleep(delay)=>{},
-            result=tokio::signal::ctrl_c()=>{result.map_err(|_|Error::State)?;return Ok(());}
+        if reconnect::wait_and_forward(&config, &mut host, &mut owner, delay).await?
+            == reconnect::Wait::Stop
+        {
+            return Ok(());
         }
     }
+}
+
+async fn stop_host(
+    host: &mut AgentHost<impl EngineProvider>,
+    error: Error,
+) -> ramflux_agent_host::Result<()> {
+    if matches!(error, Error::IdentityLost)
+        && let Err(cancel_error) = host.cancel_live_runs().await
+    {
+        eprintln!("prx run cancel was not stored: {cancel_error}");
+    }
+    Err(error)
 }
