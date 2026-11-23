@@ -72,6 +72,17 @@ impl<E: EngineProvider> AgentHost<E> {
     /// # Errors
     /// Returns only identity/storage loss or a transport/stream failure requiring reconnect.
     pub(crate) async fn poll(&mut self, bus: &mut impl AgentBus, now_ms: u64) -> Result<()> {
+        self.poll_with(bus, now_ms, true).await
+    }
+
+    /// `jobs` is false when the bus tick is inside the job-status gap.
+    /// Inbox maintenance and approval drive still run.
+    pub(crate) async fn poll_with(
+        &mut self,
+        bus: &mut impl AgentBus,
+        now_ms: u64,
+        jobs: bool,
+    ) -> Result<()> {
         self.prune_rate_history(now_ms);
         if let Err(error) = bus
             .request("message.receive", json!({"limit":32,"auto_fetch_attachments":false}), None)
@@ -93,7 +104,7 @@ impl<E: EngineProvider> AgentHost<E> {
         }
         self.recover_pending(bus).await?;
         let seq = self.state.cursor.unwrap_or(0);
-        let provider_events = self.engine.poll(now_ms).await?;
+        let provider_events = if jobs { self.engine.poll(now_ms).await? } else { Vec::new() };
         self.save_engine_state_if_changed()?;
         self.handle_engine_events(bus, provider_events, seq, now_ms).await?;
         let approval_events = self.drive_approvals(bus, now_ms).await?;

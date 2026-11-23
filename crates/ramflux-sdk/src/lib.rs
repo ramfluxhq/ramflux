@@ -50,6 +50,7 @@ mod attachment_send;
 pub use attachment_send::PlaintextDigester;
 mod agent_record;
 pub mod custody;
+pub mod prx_host;
 mod prx_owner;
 mod surface;
 pub use surface::{SurfaceSendRequest, new_surface_message_id};
@@ -210,6 +211,7 @@ mod task_refusal;
 mod task_warnings;
 pub use task_refusal::TaskRefusalCode;
 
+pub use client::identity_authority::VerifiedClassification;
 pub use client::identity_authority::profile_read::VerifiedIdentityProfile;
 
 #[cfg(test)]

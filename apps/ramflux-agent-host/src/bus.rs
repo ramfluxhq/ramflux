@@ -26,6 +26,8 @@ pub struct RfdBus {
     client: LocalBusClient,
     account: String,
     next: u64,
+    /// A human owner account must not be checked with the headless identity call.
+    confirm_identity: bool,
 }
 impl RfdBus {
     /// # Errors
@@ -35,7 +37,19 @@ impl RfdBus {
             client: LocalBusClient::connect(socket).await.map_err(|_| Error::Bus)?,
             account: account.into(),
             next: 0,
+            confirm_identity: true,
         })
+    }
+
+    /// Connects as the human custodian. An authentication race reconnects; it does not
+    /// treat that account as a headless participant.
+    ///
+    /// # Errors
+    /// Rejects an unavailable local socket.
+    pub async fn connect_owner(socket: &Path, account: &str) -> Result<Self> {
+        let mut bus = Self::connect(socket, account).await?;
+        bus.confirm_identity = false;
+        Ok(bus)
     }
 }
 impl AgentBus for RfdBus {
@@ -45,11 +59,14 @@ impl AgentBus for RfdBus {
         body: Value,
         operation: Option<&str>,
     ) -> Result<Value> {
-        // This is the complete capability surface of this host. Human approval decisions are
-        // observed through task.get; the headless account cannot grant or resolve them.
+        // The host publishes live PRX progress and forwards an owner's approval decision.
+        // It does not approve a tool call by itself.
         if !matches!(
             method,
             "account.status"
+                | "agent.progress"
+                | "agent.approval.publish"
+                | "agent.job.session"
                 | "device.list"
                 | "device.refresh"
                 | "identity.directory"
@@ -82,11 +99,18 @@ impl AgentBus for RfdBus {
         );
         frame.operation_id = operation.map(str::to_owned);
         frame.deadline_ms = Some(now_ms().saturating_add(30_000));
-        let response = self.client.request_frame_response(frame).await.map_err(|_| Error::Bus)?;
+        let response = match self.client.request_frame_response(frame).await {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("prx bus {method} failed: {error}");
+                return Err(Error::Bus);
+            }
+        };
         if response.kind == ramflux_sdk::LocalBusFrameKind::Error {
             let error = response
                 .error
                 .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::InvalidRequest))?;
+            eprintln!("prx bus {method} refused: {}", error.code);
             if error.code == "resync_required" {
                 return Err(Error::Resync);
             }
@@ -98,7 +122,8 @@ impl AgentBus for RfdBus {
             {
                 return Err(Error::SurfaceRefused(reason));
             }
-            if matches!(error.code.as_str(), "Unauthenticated" | "NotAuthenticated")
+            if self.confirm_identity
+                && matches!(error.code.as_str(), "Unauthenticated" | "NotAuthenticated")
                 && !matches!(method, "account.status" | "device.list" | "identity.directory")
             {
                 // A gateway authentication race is retryable while the local account is valid.
@@ -109,7 +134,7 @@ impl AgentBus for RfdBus {
                     .await
                 {
                     Err(error) if error.stops_host() => Err(error),
-                    Ok(()) | Err(_) => Err(Error::Bus),
+                    Ok(_) | Err(_) => Err(Error::Bus),
                 };
             }
             return Err(match error.code.as_str() {

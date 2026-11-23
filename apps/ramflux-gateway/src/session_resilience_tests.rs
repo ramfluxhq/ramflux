@@ -158,7 +158,7 @@ async fn serve_router(
                             anyhow::ensure!(request.request.path=="/mvp1/principal-lookup","unexpected router path");
                             if first && timeout {std::future::pending::<()>().await;}
                             if first {request.write_json_response(500,&serde_json::json!({"error":"injected router error"})).await?;} else {
-                                request.write_json_response(200,&ramflux_protocol::PrincipalLookupResponse {manifest:Some(ramflux_node_core::DeviceManifestResponse{custody:None,signed_device_set:None,principal_id:"peer".into(),principal_commitment:"peer-root".into(),root_public_key:"peer-key".into(),devices:Vec::new(),agent_lifecycle:None}),reason_code:None}).await?;
+                                request.write_json_response(200,&ramflux_protocol::PrincipalLookupResponse {manifest:Some(ramflux_node_core::DeviceManifestResponse{custody:None,signed_device_set:None,principal_id:"peer".into(),principal_commitment:"peer-root".into(),root_public_key:"peer-key".into(),devices:Vec::new(),agent_lifecycle:None,hosted_agents:Vec::new()}),reason_code:None}).await?;
                             }
                             Ok::<(),anyhow::Error>(())
                         });

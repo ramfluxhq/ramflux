@@ -165,6 +165,18 @@ pub struct EventFrame {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct SurfaceEvent(EventFrame);
+fn validate_mutation_components(mutation: &Mutation) -> Result<(), Reject> {
+    let components = match mutation {
+        Mutation::CreateSurface(create) => create.components.as_deref().unwrap_or(&[]),
+        Mutation::UpdateComponents(update) => update.components.as_slice(),
+        Mutation::UpdateDataModel(_) | Mutation::DeleteSurface(_) => return Ok(()),
+    };
+    for component in components {
+        super::schema::component(component)?;
+    }
+    Ok(())
+}
+
 impl SurfaceEvent {
     #[must_use]
     pub fn conversation_id(&self) -> &str {
@@ -181,6 +193,20 @@ impl SurfaceEvent {
     #[must_use]
     pub fn is_resync(&self) -> bool {
         self.0.resync.is_some()
+    }
+
+    /// Refuse a component this frame carries when the catalog schema rejects it.
+    ///
+    /// # Errors
+    /// Returns the catalog refusal for an unknown or schema-invalid component.
+    pub fn validate_carried_components(&self) -> Result<(), Reject> {
+        if let Some(message) = &self.0.a2ui {
+            validate_mutation_components(&message.mutation)?;
+        }
+        if let Some(resync) = &self.0.resync {
+            validate_mutation_components(&resync.a2ui.mutation)?;
+        }
+        Ok(())
     }
 
     /// Decode original signed bytes, retaining duplicate-key and canonicality evidence.

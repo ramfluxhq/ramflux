@@ -93,14 +93,9 @@ pub(crate) fn stage_to(
         target,
         crate::client::identity_authority::NativeOperation::Sync,
     )?;
-    let epoch = client
-        .account_db()?
-        .client_device_record(target)?
-        .and_then(|record| record["device_epoch"].as_u64())
-        .filter(|epoch| *epoch != 0)
-        .ok_or_else(|| {
-            SdkError::InboundRejected("own history target incarnation missing".into())
-        })?;
+    // A fresh pairing can name the primary on the born roster before the directory row exists.
+    // `InboundPending` leaves the send unqueued so the account maintenance tick tries again.
+    let epoch = client.device_epoch_of(target)?;
     stage_inner(
         client,
         input,

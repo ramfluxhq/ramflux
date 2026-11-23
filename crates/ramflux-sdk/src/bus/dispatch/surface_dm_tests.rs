@@ -331,10 +331,13 @@ async fn assert_deliveries(
                 );
                 let result = peer.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
                 assert_eq!(result.routing.map(|route| route.message_id), Some(timeline.to_owned()));
-                assert!(
-                    peer.client.surface_get("surface", 0, None)?.is_null(),
-                    "human-authored peer cards remain fallback-only"
+                let view = peer.client.surface_get("surface", 0, None)?;
+                assert_eq!(
+                    view["render_allowed"],
+                    serde_json::json!(true),
+                    "authenticated peer cards render for the recipient"
                 );
+                assert!(view["snapshot"].is_object(), "peer snapshot is readable");
                 assert_eq!(peer.client.direct_messages(&conversation(source)?)?.len(), 1);
                 // Exact-envelope retry also retains the committed logical projection.
                 assert_eq!(

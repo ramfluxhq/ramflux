@@ -69,7 +69,16 @@ pub(super) struct Shared {
     pub closed: std::sync::atomic::AtomicBool,
     pub suspended: std::sync::atomic::AtomicBool,
     pub subscription: Mutex<Option<u64>>,
+    pub host_key: Mutex<Option<HostKeyFn>>,
     pub credentials: super::credential::Bridge,
+}
+
+/// In-process provider-key callback. `user` is an opaque pointer supplied by the host.
+#[derive(Clone, Copy)]
+pub(super) struct HostKeyFn {
+    pub call:
+        extern "C" fn(*const u8, usize, *mut u8, usize, *mut usize, *mut std::ffi::c_void) -> i32,
+    pub user: usize,
 }
 
 impl Shared {

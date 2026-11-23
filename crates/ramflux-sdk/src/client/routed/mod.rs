@@ -53,6 +53,7 @@ mod generated_transport;
 mod send_candidate;
 mod session;
 mod typing;
+mod wake_stamp;
 pub(crate) use ephemeral_content::EphemeralContent;
 pub(crate) use prepared::{SendMaterial, SendMaterialRequest};
 
@@ -258,6 +259,107 @@ struct SealedPairPersist<'a> {
     header: Option<&'a SdkDmX3dhHeader>,
     collapse_tag: Option<String>,
     report_commitment: Option<String>,
+}
+
+struct RoutedSeal<'a> {
+    message: &'a GatewayDirectMessage,
+    body: &'a [u8],
+    kind: Kind,
+    local: &'a str,
+    wire_remote: &'a str,
+    bundle: &'a [u8; 32],
+    session: &'a mut ramflux_crypto::DmSession,
+    header: Option<SdkDmX3dhHeader>,
+    remote: &'a str,
+    report: Option<report::DirectReport>,
+    binding: Option<send_cache::Binding>,
+    inner: zeroize::Zeroizing<Vec<u8>>,
+}
+
+fn complete_routed_seal(
+    client: &RamfluxClient,
+    finish: RoutedSeal<'_>,
+) -> Result<SealedRouted, SdkError> {
+    let RoutedSeal {
+        message,
+        body,
+        kind,
+        local,
+        wire_remote,
+        bundle,
+        session,
+        header,
+        remote,
+        report,
+        binding,
+        inner,
+    } = finish;
+    let plaintext = if let Some(ref assembled) = report {
+        zeroize::Zeroizing::new(assembled.framed.as_bytes().to_vec())
+    } else {
+        inner
+    };
+    let aad = if let Some(ref assembled) = report {
+        associated_data_bound(
+            &message.envelope_id,
+            local,
+            wire_remote,
+            bundle,
+            CandidateAadBinding {
+                delivery_mode: "durable",
+                collapse_tag: assembled.collapse_tag,
+                report_commitment: Some(assembled.report_commitment),
+            },
+        )?
+    } else {
+        associated_data(&message.envelope_id, local, wire_remote, bundle)?
+    };
+    let ciphertext = session.encrypt(&plaintext, &aad)?;
+    let collapse_tag =
+        report.as_ref().map(|assembled| ramflux_protocol::encode_base64url(assembled.collapse_tag));
+    let report_commitment = report
+        .as_ref()
+        .map(|assembled| ramflux_protocol::encode_base64url(assembled.report_commitment));
+    persist_sealed_pair(
+        client,
+        &SealedPairPersist {
+            inner_len: plaintext.len().saturating_sub(report.as_ref().map_or(0, |_| {
+                ramflux_protocol::message::outer::FRAME_PREFIX_BYTES
+                    + ramflux_protocol::message::outer::REPORT_OPENING_BYTES
+            })),
+            sealed: &ciphertext,
+            local,
+            remote,
+            bundle,
+            session,
+            message,
+            header: header.as_ref(),
+            collapse_tag: collapse_tag.clone(),
+            report_commitment: report_commitment.clone(),
+        },
+    )?;
+    client.finish_pair_retirement()?;
+    let sealed = SealedRouted {
+        packet: SdkDmEncryptedEnvelope {
+            source_principal_commitment: Some(client.own_account_anchor()?),
+            schema: "ramflux.sdk.dm_x3dh_envelope.v2".to_owned(),
+            version: 2,
+            x3dh: header,
+            ciphertext,
+            collapse_tag,
+            report_commitment,
+        },
+        committed_a0: report.map(|assembled| assembled.a0_bytes),
+        metadata_commitment: report::message_metadata_commitment(
+            body,
+            message.created_at,
+            message.ttl,
+        )?,
+        suppress_wake: false,
+    };
+    let sealed = wake_stamp::apply(sealed, &kind, body);
+    binding.as_ref().map(|cached| cached.persist(client, &sealed)).transpose()?;
+    Ok(sealed)
 }
 
 fn persist_sealed_pair(
@@ -571,7 +673,7 @@ impl RamfluxClient {
         if let Some(binding) = &binding
             && let Some(cached) = binding.load(self)?
         {
-            return Ok(cached);
+            return Ok(wake_stamp::apply(cached, &route.kind, body));
         }
         let SealPair { local, remote, session, header, bundle } = pair;
         let remote = self.device_reference(remote)?;
@@ -592,70 +694,23 @@ impl RamfluxClient {
                 outer_profile,
             },
         )?;
-        let plaintext = if let Some(ref report) = report {
-            zeroize::Zeroizing::new(report.framed.as_bytes().to_vec())
-        } else {
-            inner
-        };
-        let aad = if let Some(ref report) = report {
-            associated_data_bound(
-                &message.envelope_id,
-                local,
-                &wire_remote,
-                &bundle,
-                CandidateAadBinding {
-                    delivery_mode: "durable",
-                    collapse_tag: report.collapse_tag,
-                    report_commitment: Some(report.report_commitment),
-                },
-            )?
-        } else {
-            associated_data(&message.envelope_id, local, &wire_remote, &bundle)?
-        };
-        let ciphertext = session.encrypt(&plaintext, &aad)?;
-        let collapse_tag =
-            report.as_ref().map(|r| ramflux_protocol::encode_base64url(r.collapse_tag));
-        let report_commitment =
-            report.as_ref().map(|r| ramflux_protocol::encode_base64url(r.report_commitment));
-        persist_sealed_pair(
+        complete_routed_seal(
             self,
-            &SealedPairPersist {
-                inner_len: plaintext.len().saturating_sub(report.as_ref().map_or(0, |_| {
-                    ramflux_protocol::message::outer::FRAME_PREFIX_BYTES
-                        + ramflux_protocol::message::outer::REPORT_OPENING_BYTES
-                })),
-                sealed: &ciphertext,
+            RoutedSeal {
+                message,
+                body,
+                kind: route.kind,
                 local,
-                remote: &remote,
+                wire_remote: &wire_remote,
                 bundle: &bundle,
                 session,
-                message,
-                header: header.as_ref(),
-                collapse_tag: collapse_tag.clone(),
-                report_commitment: report_commitment.clone(),
+                header,
+                remote: &remote,
+                report,
+                binding,
+                inner,
             },
-        )?;
-        self.finish_pair_retirement()?;
-
-        let sealed = SealedRouted {
-            packet: SdkDmEncryptedEnvelope {
-                source_principal_commitment: Some(self.own_account_anchor()?),
-                schema: "ramflux.sdk.dm_x3dh_envelope.v2".to_owned(),
-                version: 2,
-                x3dh: header,
-                ciphertext,
-                collapse_tag,
-                report_commitment,
-            },
-            committed_a0: report.map(|sealed| sealed.a0_bytes),
-            metadata_commitment: report::message_metadata_commitment(
-                body,
-                message.created_at,
-                message.ttl,
-            )?,
-        };
-        binding.as_ref().map(|binding| binding.persist(self, &sealed)).transpose()?;
-        Ok(sealed)
+        )
     }
 
     fn prepare_seal_routing(

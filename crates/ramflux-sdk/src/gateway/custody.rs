@@ -118,6 +118,12 @@ async fn refresh_local_publication(
             && ramflux_protocol::custody::object_hash(local.record())?
                 != ramflux_protocol::custody::object_hash(&authority.publication.record)?
         {
+            // The directory moved and this account will not adopt it yet. A recovery
+            // or revoke that names this device is still proof, and must be stored
+            // before the pending error or the desktop retries without learning it.
+            crate::custody::agent_creation::note_if_verified_revokes(
+                &root, &id, &local, &verified, now,
+            )?;
             return Err(SdkError::PairingCode("PublicationPending"));
         }
         crate::custody::accept_publication(&root, &id, &authority, now)

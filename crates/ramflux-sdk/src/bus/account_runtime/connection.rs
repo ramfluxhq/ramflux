@@ -267,6 +267,9 @@ impl AccountRuntime {
                 if generation == handle.generation() && account.client.born_v3_account.is_some() {
                     super::super::native_account::record_networking(account, Some(&error))?;
                     publish_networking = true;
+                    if super::super::host_branch::stop_if_revoked(account, &error).await {
+                        handle.signal_stop();
+                    }
                 }
             }
         }

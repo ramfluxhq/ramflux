@@ -45,6 +45,11 @@ pub(crate) fn signed_offline_wake(
     )?;
     let (class, created_at, expires_at, digest) = match grant {
         CallGrant::Silent => return Ok(None),
+        CallGrant::Message
+            if ramflux_protocol::message::wake_eligibility::suppressed(&input.envelope.ext) =>
+        {
+            return Ok(None);
+        }
         CallGrant::Message => {
             let Some(expires_at) = message_deadline(input) else {
                 return Ok(None);
