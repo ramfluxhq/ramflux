@@ -36,7 +36,7 @@ pub use engine::{
 pub use provisioning::{CredentialVault, import_provisioning_bundle, unlock_provisioned_account};
 pub use prx::PrxEngine;
 pub use prx_sync::SyncTask;
-pub use runner::AgentHost;
+pub use runner::{AgentHost, subscribe_owner};
 
 pub type Result<T> = std::result::Result<T, Error>;
 /// Errors intentionally omit rfd bodies, message text, paths and credentials.

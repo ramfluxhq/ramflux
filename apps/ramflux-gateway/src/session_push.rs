@@ -403,7 +403,7 @@ async fn router_refusal(send: &GatewaySendHandle, id: &str, value: &Value) -> an
     if value.get("incarnation_id").is_some_and(|v| v != id) {
         return Err(Retired.into());
     }
-    if reason == "incarnation_mismatch" {
+    if reason == "incarnation_mismatch" || reason == "recipient_unreachable" {
         return Err(Retired.into());
     }
     let reason = serde_json::from_value::<Reason>(reason.clone()).map_err(|_| Retired)?;
@@ -443,6 +443,45 @@ pub(crate) async fn handle_authorized(
     }
     result
 }
+
+async fn refuse_unusable_native(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    native: Option<&crate::custody::GatewayGrant>,
+) -> anyhow::Result<()> {
+    let Some(grant) = native else { return Ok(()) };
+    match tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        crate::session::validate_native_frame(
+            context,
+            runtime,
+            grant,
+            &ramflux_node_core::GatewayClientFrame::Heartbeat { now: 0 },
+        ),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error))
+            if error.downcast_ref::<crate::session_grant::NativeDeviceRevoked>().is_some() =>
+        {
+            crate::session_grant::close_native_grant(send, "renewal_refused").await?;
+            Err(Retired.into())
+        }
+        _ => {
+            crate::session::write_gateway_handle(
+                send,
+                &ramflux_node_core::GatewayServerFrame::Nack {
+                    reason: "native_session_authority_refused".into(),
+                },
+            )
+            .await?;
+            Err(Retired.into())
+        }
+    }
+}
+
 async fn handle_bound(
     send: &GatewaySendHandle,
     context: &GatewayQuicContext,
@@ -450,30 +489,7 @@ async fn handle_bound(
     bytes: &[u8],
     native: Option<&crate::custody::GatewayGrant>,
 ) -> anyhow::Result<()> {
-    if let Some(grant) = native
-        && !matches!(
-            tokio::time::timeout(
-                REQUEST_TIMEOUT,
-                crate::session::validate_native_frame(
-                    context,
-                    runtime,
-                    grant,
-                    &ramflux_node_core::GatewayClientFrame::Heartbeat { now: 0 }
-                )
-            )
-            .await,
-            Ok(Ok(()))
-        )
-    {
-        crate::session::write_gateway_handle(
-            send,
-            &ramflux_node_core::GatewayServerFrame::Nack {
-                reason: "native_session_authority_refused".into(),
-            },
-        )
-        .await?;
-        return Err(Retired.into());
-    }
+    refuse_unusable_native(send, context, runtime, native).await?;
     let Some(id) = runtime.session_push.as_deref() else {
         return crate::session::write_gateway_handle(
             send,
@@ -494,6 +510,9 @@ async fn handle_bound(
     }
     if let Some(reason) = input_refusal(&frame, runtime) {
         return nack(send, id, reason).await;
+    }
+    if crate::session_fence::channel_closed(context, &runtime.target_delivery_id).await {
+        return Err(Retired.into());
     }
     match frame {
         Client::Resume { resume, .. } => resume_page(send, context, runtime, id, &resume).await,

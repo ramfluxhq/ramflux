@@ -3,7 +3,7 @@
 use clap::Parser;
 use ramflux_agent_host::{
     AgentHost, Config, CredentialVault, EngineProvider, Error, PrxEngine, RfdBus, RuleEngine,
-    SyncTask, import_provisioning_bundle, unlock_provisioned_account,
+    SyncTask, import_provisioning_bundle, subscribe_owner, unlock_provisioned_account,
 };
 use std::path::PathBuf;
 mod reconnect;
@@ -66,7 +66,14 @@ async fn run_provider(
         let attempt = async {
             let mut bus = RfdBus::connect(&config.socket, &config.account_id).await?;
             host.start(&mut bus).await?;
-            host.run(&mut bus).await
+            let mut owner_bus = match host.owner_account() {
+                Some(account) => Some(RfdBus::connect_owner(&config.socket, account).await?),
+                None => None,
+            };
+            if let Some(owner) = owner_bus.as_mut() {
+                subscribe_owner(owner).await?;
+            }
+            host.run_paired(&mut bus, &mut owner_bus).await
         };
         let error = tokio::select! {
             result=attempt=>match result {

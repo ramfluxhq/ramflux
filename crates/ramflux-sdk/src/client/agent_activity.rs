@@ -3,7 +3,7 @@
 
 //! Owner-visible agent progress and run approvals.
 //! A row is an actor-state record plus one journal event. The same source key is inserted once.
-//! Sibling delivery uses a point-to-point custody packet on the rf conversation, not the creation scope.
+//! Sibling delivery is one own-device copy on the owner-agent conversation.
 
 use crate::client::own_device_copy::{OwnMessageInput, OwnPayloadKind};
 use crate::{RamfluxClient, SdkError};
@@ -18,7 +18,6 @@ const MAX_MARKER: usize = 16 * 1024;
 const MAX_APPROVALS: usize = 256;
 const MAX_JOB_SESSIONS: usize = 256;
 const MAX_PROGRESS: usize = 128;
-const MAX_SIBLINGS: usize = 16;
 
 pub(crate) struct ActivityPacket {
     pub conversation_id: String,
@@ -44,7 +43,7 @@ pub(crate) fn parse_marker(bytes: &[u8]) -> Result<Option<ActivityPacket>, SdkEr
         .ok_or_else(|| invalid("agent activity conversation missing"))?;
     let state_kind =
         text(&value, "state_kind").ok_or_else(|| invalid("agent activity key missing"))?;
-    if !state_kind_ok(&state_kind) || !id_ok(&conversation_id) {
+    if !state_kind_ok(&state_kind) || !conversation_ok(&conversation_id) {
         return Err(invalid("agent activity key is invalid"));
     }
     let record =
@@ -91,7 +90,8 @@ pub(crate) fn commit(
     Ok(Some(record))
 }
 
-/// Sends the stored record to other devices of this root. A stage failure does not undo the row.
+/// Sends the stored record to the other devices of this root.
+/// Only an owner-agent `dm:` conversation is staged. A stage failure does not undo the row.
 pub(crate) fn fan_out(
     client: &RamfluxClient,
     state_kind: &str,
@@ -100,7 +100,7 @@ pub(crate) fn fan_out(
     let Some(conversation) = text(record, "conversation_id") else {
         return Ok(());
     };
-    if conversation.is_empty() {
+    if !conversation.starts_with("dm:") || !conversation_ok(&conversation) {
         return Ok(());
     }
     let marker = json!({
@@ -114,28 +114,41 @@ pub(crate) fn fan_out(
     if bytes.len() > MAX_MARKER {
         return Ok(());
     }
-    let own = client.own_account_anchor()?;
-    let me = client.owned_device_identity()?;
-    let now = crate::time::now_unix_timestamp();
-    let mut sent = 0_usize;
-    for key in client.account_db()?.actor_state_keys("directory/device/")? {
-        if sent >= MAX_SIBLINGS {
-            break;
-        }
-        let Some(device) = key.strip_prefix("directory/device/") else {
-            continue;
-        };
-        if device == me.device_id() || !sibling_of(client, device, &own)? {
-            continue;
-        }
-        let Ok(target) = client.device_identity_for_root(&own, device) else {
-            continue;
-        };
-        if stage_one(client, &target, &conversation, &bytes, now).is_ok() {
-            sent = sent.saturating_add(1);
-        }
+    if client.own_sent_has_siblings().ok() != Some(true) {
+        return Ok(());
     }
-    Ok(())
+    let device = client.own_device_ref()?;
+    let qualified = g::QualifiedDevice {
+        account_anchor: device.account_anchor.clone(),
+        device_id: device.device_id.clone(),
+        device_epoch: device.device_epoch,
+    };
+    let packet = g::AgentHostPacket {
+        owner_anchor: client.own_account_anchor()?,
+        source: Some(qualified.clone()),
+        recipient: Some(qualified),
+        correlation_id: "agent-activity".into(),
+        body: Some(g::agent_host_packet::Body::Custody(g::AgentCustodyPacket {
+            value: Some(g::agent_custody_packet::Value::RequestJson(bytes)),
+        })),
+    };
+    let body = crate::client::generated_control::control_from_payload(
+        g::control::Payload::AgentSync(packet),
+    )?
+    .encode_to_vec();
+    let id = ramflux_protocol::hash_base64url(DOMAIN, &body);
+    crate::bus::own_device_copy::stage(
+        client,
+        OwnMessageInput {
+            payload_kind: OwnPayloadKind::Control,
+            id: &id,
+            created_at: crate::time::now_unix_timestamp(),
+            conversation: &conversation,
+            group: None,
+            body: &body,
+        },
+        None,
+    )
 }
 
 /// `Some(true)` when `expires_at` is a UTC timestamp at or before `now`.
@@ -214,67 +227,6 @@ fn source_key(state_kind: &str, record: &Value) -> String {
     format!("agent-progress:{run}:{kind}:{idx}")
 }
 
-fn sibling_of(client: &RamfluxClient, device: &str, own: &str) -> Result<bool, SdkError> {
-    let Some(record) = client.account_db()?.client_record("device", device)? else {
-        return Ok(false);
-    };
-    Ok(record.get("principal_commitment").and_then(Value::as_str) == Some(own))
-}
-
-fn stage_one(
-    client: &RamfluxClient,
-    target: &ramflux_crypto::RootQualifiedDeviceRef,
-    conversation: &str,
-    marker: &[u8],
-    now: i64,
-) -> Result<(), SdkError> {
-    let own = client.owned_device_identity()?;
-    let packet = g::AgentHostPacket {
-        owner_anchor: client.own_account_anchor()?,
-        source: Some(qualified(client, &own)?),
-        recipient: Some(qualified(client, target)?),
-        correlation_id: "agent-activity".into(),
-        body: Some(g::agent_host_packet::Body::Custody(g::AgentCustodyPacket {
-            value: Some(g::agent_custody_packet::Value::RequestJson(marker.to_vec())),
-        })),
-    };
-    let body = crate::client::generated_control::control_from_payload(
-        g::control::Payload::AgentSync(packet),
-    )?
-    .encode_to_vec();
-    let id = ramflux_protocol::hash_base64url(DOMAIN, &body);
-    let created_at = now;
-    crate::bus::own_device_copy::stage_to(
-        client,
-        OwnMessageInput {
-            payload_kind: OwnPayloadKind::Control,
-            id: &id,
-            created_at,
-            conversation,
-            group: None,
-            body: &body,
-        },
-        target,
-    )
-}
-
-fn qualified(
-    client: &RamfluxClient,
-    device: &ramflux_crypto::RootQualifiedDeviceRef,
-) -> Result<g::QualifiedDevice, SdkError> {
-    let epoch = client
-        .account_db()?
-        .client_device_record(device)?
-        .and_then(|record| record.get("device_epoch").and_then(Value::as_u64))
-        .filter(|epoch| *epoch != 0)
-        .ok_or_else(|| invalid("agent activity device epoch missing"))?;
-    Ok(g::QualifiedDevice {
-        account_anchor: device.root_commitment().to_owned(),
-        device_id: device.device_id().to_owned(),
-        device_epoch: epoch,
-    })
-}
-
 fn state_kind_ok(kind: &str) -> bool {
     (kind.starts_with("agent-approval/")
         || kind.starts_with("agent-progress/")
@@ -296,6 +248,17 @@ fn message_id_key(value: &Value) -> bool {
 
 fn text(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+fn conversation_ok(value: &str) -> bool {
+    if id_ok(value) {
+        return true;
+    }
+    let Some(rest) = value.strip_prefix("dm:") else {
+        return false;
+    };
+    rest.len() == 43
+        && rest.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn id_ok(value: &str) -> bool {

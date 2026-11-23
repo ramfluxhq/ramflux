@@ -14,6 +14,8 @@ mod agent;
 mod attachment;
 mod call_bot;
 mod contact;
+mod username;
+pub(crate) use username::*;
 mod conversation_ops;
 mod daemon;
 mod device;
@@ -77,6 +79,7 @@ pub(crate) enum Command {
     Node(NodeCommand),
     Account(AccountCommand),
     Contact(ContactCommand),
+    Username(UsernameCommand),
     Device(DeviceCommand),
     /// Native SAS pairing preview (default-off).
     Pairing(PairingCommand),

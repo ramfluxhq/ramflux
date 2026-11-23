@@ -23,6 +23,8 @@ pub(super) enum AgentCall {
     Record(String),
     /// `agent.delete` (contract 2 `AgentMutation`).
     Delete(Box<g::AgentMutation>),
+    /// `agent.retire` (contract 2 `AgentMutation`): the current primary retires the node record.
+    Retire(Box<g::AgentMutation>),
     /// `agent.watch` (contract 2 `AgentWatch`): the changes after a cursor.
     Watch(Box<g::AgentWatch>),
     /// `agent.persona.edit` (contract 2 `AgentPersonaEdit`).
@@ -41,6 +43,7 @@ pub(super) fn handles(method: &str) -> bool {
             | "agent.get"
             | "agent.watch"
             | "agent.delete"
+            | "agent.retire"
             | "agent.persona.edit"
             | "agent.access.set"
     )
@@ -89,6 +92,7 @@ async fn apply(
         }
         "agent.watch" => AgentCall::Watch(Box::new(decode(body)?)),
         "agent.delete" => AgentCall::Delete(Box::new(decode(body)?)),
+        "agent.retire" => AgentCall::Retire(Box::new(decode(body)?)),
         "agent.persona.edit" => AgentCall::PersonaEdit(Box::new(decode(body)?)),
         "agent.access.set" => AgentCall::AccessSet(Box::new(decode(body)?)),
         _ => return Err(SdkError::CustodySetupInvalid),
@@ -102,6 +106,10 @@ async fn apply(
     if let AgentCall::Delete(mutation) = &call {
         // The running session of the agent goes first (decision r23 F1 a).
         supervisor.close_agent_before_delete(&account_id, mutation).await?;
+    }
+    // An unconfirmed call skips the node proof and lets the actor return `confirmation_required`.
+    if mutation_confirmed(&call) {
+        prove_node_retirement(supervisor, &actor, &account_id, &call).await?;
     }
     let result = actor.agent_call(call).await?;
     crate::prx_owner::after_agent(
@@ -145,6 +153,46 @@ fn purge_anchor(call: &AgentCall) -> Option<String> {
     match call {
         AgentCall::Delete(body) => Some(body.agent_anchor.clone()),
         _ => None,
+    }
+}
+
+fn mutation_confirmed(call: &AgentCall) -> bool {
+    match call {
+        AgentCall::Delete(mutation) | AgentCall::Retire(mutation) => {
+            mutation.confirmed == Some(true)
+        }
+        _ => false,
+    }
+}
+
+/// Node retirement before any local delete or retire. A failed proof leaves local state so a
+/// retry can still sign.
+async fn prove_node_retirement(
+    supervisor: &Supervisor,
+    actor: &AccountActor,
+    human: &str,
+    call: &AgentCall,
+) -> Result<(), SdkError> {
+    match call {
+        AgentCall::Delete(mutation) => {
+            super::agent_retire::prove_agent_delete(
+                supervisor,
+                actor,
+                human,
+                &mutation.agent_anchor,
+            )
+            .await
+        }
+        AgentCall::Retire(mutation) => {
+            super::agent_retire::prove_primary_retire(
+                supervisor,
+                actor,
+                human,
+                &mutation.agent_anchor,
+            )
+            .await
+        }
+        _ => Ok(()),
     }
 }
 

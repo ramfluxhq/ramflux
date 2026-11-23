@@ -119,8 +119,15 @@ pub(crate) enum AgentAction {
         #[arg(long)]
         confirm: bool,
     },
-    /// Delete an agent that has not been bound (state U). Its custody record stays on the node.
+    /// Delete an agent in state U. The node retires the custody record and the local account goes.
     Delete {
+        #[arg(long, allow_hyphen_values = true)]
+        agent: String,
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Retire an agent from the current primary. The node retires the custody record.
+    Retire {
         #[arg(long, allow_hyphen_values = true)]
         agent: String,
         #[arg(long)]

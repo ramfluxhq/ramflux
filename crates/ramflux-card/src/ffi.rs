@@ -6,7 +6,7 @@ compile_error!("Card C ABI requires panic=unwind; use --profile ffi-release");
 mod boundary;
 use crate::{AcceptancePolicy, HOST_ABI};
 use crate::{
-    CardError, CardSession, CardSpec, Event, SignedPackage,
+    CardError, CardSession, CardSpec, HostEvent, SignedPackage,
     package::{MAX_DESCRIPTOR, MAX_PACKAGE},
     spec::{MAX_INPUT, preflight},
 };
@@ -28,7 +28,8 @@ pub struct RamfluxCardOpen {
     pub spec: RamfluxCardBytes,
     pub bytecode: RamfluxCardBytes,
     pub signature: RamfluxCardBytes,
-    /// Application-pinned release key; must never be populated from peer JSON.
+    /// Independently app-pinned release key; never take a key from the peer package.
+    /// Signature checks cannot make attacker-selected bytecode safe for `QuickJS`.
     pub trusted_key: RamfluxCardBytes,
     pub descriptor: RamfluxCardBytes,
     /// Pinned by the embedding release; never derived from the received package.
@@ -41,7 +42,7 @@ thread_local! {
     static IN_CALLBACK: Cell<bool> = const { Cell::new(false) };
 }
 const OK: i32 = 0;
-const MAX_OUTPUT: usize = 128 * 1024;
+const MAX_OUTPUT: usize = 256 * 1024 + 1024;
 #[cfg(test)]
 thread_local! { static TEST_OUTPUT_LIMIT:Cell<usize>=const { Cell::new(MAX_OUTPUT) }; }
 fn output_limit() -> usize {
@@ -58,12 +59,15 @@ const INVALID_HANDLE: i32 = 7;
 const BUSY: i32 = 8;
 fn code(error: &CardError) -> i32 {
     match error {
-        CardError::Invalid(_) | CardError::Json(_) => 1,
-        CardError::Limit(_) | CardError::Memory | CardError::Stack => 2,
+        CardError::Protocol(ramflux_protocol::a2ui::Reject::Limit)
+        | CardError::Limit(_)
+        | CardError::Memory
+        | CardError::Stack => 2,
+        CardError::Protocol(ramflux_protocol::a2ui::Reject::Closed) | CardError::Inactive => 6,
+        CardError::Invalid(_) | CardError::Json(_) | CardError::Protocol(_) => 1,
         CardError::Signature | CardError::Admission(_) => 3,
         CardError::Engine | CardError::Script | CardError::Hardening => 4,
         CardError::Budget => 5,
-        CardError::Inactive => 6,
     }
 }
 fn bytes(input: RamfluxCardBytes, max: usize) -> Result<Vec<u8>, CardError> {
@@ -202,6 +206,25 @@ pub unsafe extern "C" fn ramflux_card_open(
     })
 }
 
+/// Read a complete ABI-5 tree for atomic host reset after a version mismatch.
+/// # Safety
+/// Callback/user must remain valid through the synchronous call; no reentry.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ramflux_card_tree(
+    id: u64,
+    callback: RamfluxCardCallback,
+    user: *mut c_void,
+) -> i32 {
+    boundary::status(|| {
+        apply(id, callback, user, |session| {
+            if !session.is_active() {
+                return Err(CardError::Inactive);
+            }
+            session.tree().cloned().ok_or(CardError::Inactive)
+        })
+    })
+}
+
 /// Replace a complete declarative snapshot on the creating thread.
 /// # Safety
 /// Buffer and callback/user context must be valid for the synchronous call.
@@ -261,7 +284,7 @@ pub unsafe extern "C" fn ramflux_card_event(
         }
         let event = bytes(input, 8192).and_then(|b| {
             preflight(&b, 8192)?;
-            Ok(serde_json::from_slice::<Event>(&b)?)
+            Ok(serde_json::from_slice::<HostEvent>(&b)?)
         });
         match event {
             Ok(event) => apply(id, callback, user, |session| {
@@ -387,7 +410,7 @@ mod tests {
             "callback must report valid JSON: {:?}",
             output.failures
         );
-        let edit = serde_json::to_vec(&serde_json::json!({"token":{"session":id,"version":1,"key":"profile:field"},"event":{"kind":"text","value":"Grace"}})).expect("test: event JSON");
+        let edit = serde_json::to_vec(&serde_json::json!({"token":{"session":id,"signedVersion":1,"editSeq":0,"treeVersion":1,"key":"[\"input\",[],[{\"slot\":\"root\"},{\"slot\":\"child\"},{\"position\":0,\"slot\":\"children\"}]]"},"event":{"kind":"input","value":"Grace"}})).expect("test: event JSON");
         // SAFETY: borrowed event and callback context are live.
         assert_eq!(
             // SAFETY: test inputs and callback context are live; invalid spans are rejected before use.
@@ -395,7 +418,7 @@ mod tests {
             OK,
             "C event must use runtime edit path"
         );
-        let stale = serde_json::to_vec(&serde_json::json!({"token":{"session":id,"version":1,"key":"profile:submit"},"event":{"kind":"submit"}})).expect("test: stale event");
+        let stale = serde_json::to_vec(&serde_json::json!({"token":{"session":id,"signedVersion":1,"editSeq":0,"treeVersion":1,"key":"old"},"event":{"kind":"activate"}})).expect("test: stale event");
         // SAFETY: all input spans remain live.
         assert_eq!(
             // SAFETY: test inputs and callback context are live; invalid spans are rejected before use.
@@ -520,6 +543,32 @@ mod error_tests {
             TEST_OUTPUT_LIMIT.with(|limit| limit.set(MAX_OUTPUT));
         }
     }
+    fn assert_release_floor(input: &mut RamfluxCardOpen) {
+        let original = (input.bytecode, input.signature, input.descriptor);
+        let mut output = Output::default();
+        let user = std::ptr::from_mut(&mut output).cast();
+        let mut id = 99;
+        let mut old_release = release();
+        old_release.version = 1;
+        let old = compile_and_sign(
+            include_bytes!("../library/form.js"),
+            &SigningKey::from_bytes(&[7; 32]),
+            &old_release,
+        )
+        .expect("test: genuine older package");
+        input.bytecode = span(&old.bytecode);
+        input.signature = span(&old.signature);
+        input.descriptor = span(&old.descriptor);
+        // SAFETY: the genuine old package and host policy remain live for this call.
+        let status =
+            unsafe { ramflux_card_open(&raw const *input, Some(callback), user, &raw mut id) };
+        assert_eq!(
+            (status, id, output.count),
+            (3, 0, 0),
+            "C admission must enforce the pinned release floor"
+        );
+        (input.bytecode, input.signature, input.descriptor) = original;
+    }
     #[test]
     fn c_open_policy_submit_and_error_paths_are_fail_closed() {
         let _guard = guard();
@@ -551,25 +600,7 @@ mod error_tests {
             (3, 0, 0),
             "bad signatures must return no handle or callback"
         );
-        let mut old_release = release();
-        old_release.version = 1;
-        let old = compile_and_sign(
-            include_bytes!("../library/form.js"),
-            &SigningKey::from_bytes(&[7; 32]),
-            &old_release,
-        )
-        .expect("test: genuine older package");
-        input.bytecode = span(&old.bytecode);
-        input.signature = span(&old.signature);
-        input.descriptor = span(&old.descriptor);
-        // SAFETY: the genuine old package and host policy remain live for this call.
-        let status =
-            unsafe { ramflux_card_open(&raw const input, Some(callback), user, &raw mut id) };
-        assert_eq!(
-            (status, id, output.count),
-            (3, 0, 0),
-            "C admission must enforce the pinned release floor"
-        );
+        assert_release_floor(&mut input);
         input.bytecode = span(&p.bytecode);
         input.signature = span(&p.signature);
         input.descriptor = span(&p.descriptor);
@@ -588,12 +619,32 @@ mod error_tests {
         let status =
             unsafe { ramflux_card_open(&raw const input, Some(callback), user, &raw mut id) };
         assert_eq!(status, OK, "valid package must still open after failed emission");
+        // SAFETY: the current session and callback context remain live.
+        let status = unsafe { ramflux_card_tree(id, Some(callback), user) };
+        assert_eq!(status, OK, "host can read a complete reset tree");
+        assert_eq!(
+            output
+                .value
+                .as_ref()
+                .and_then(|value| value.pointer("/payload/schema"))
+                .and_then(serde_json::Value::as_str),
+            Some("ramflux.card.tree.v1"),
+            "reset returns a complete ABI5 tree"
+        );
         let invalid = b"{}";
         let before = output.count;
         // SAFETY: bounded invalid JSON is readable; callback context remains live.
         let status = unsafe { ramflux_card_update(id, span(invalid), Some(callback), user) };
         assert_eq!((status, output.count), (1, before), "invalid update must not emit a callback");
-        let submit=serde_json::to_vec(&serde_json::json!({"token":{"session":id,"version":1,"key":"profile:submit"},"event":{"kind":"submit"}})).expect("test: C submit");
+        let submit = SESSIONS.with(|sessions| {
+            let sessions = sessions.borrow();
+            serde_json::to_vec(&crate::session::tests::event(
+                sessions.get(&id).expect("test: live C session"),
+                "button",
+                crate::HostEventKind::Activate,
+            ))
+            .expect("test: current ABI5 C submit")
+        });
         // SAFETY: bounded event buffer and callback/context remain live.
         let status = unsafe { ramflux_card_event(id, span(&submit), Some(callback), user) };
         assert_eq!(status, OK, "C submit must produce a declarative intent");
@@ -604,9 +655,11 @@ mod error_tests {
             "C must preserve typed submit result"
         );
         assert_eq!(
-            value.pointer("/payload/fields/name").and_then(serde_json::Value::as_str),
-            Some("Ada"),
-            "C submit includes only the owned field"
+            value
+                .pointer("/payload/action/context/name/pointer")
+                .and_then(serde_json::Value::as_str),
+            Some("/name"),
+            "C submit selects the resolver-owned input; M3 derives its raw value"
         );
         {
             let _limit = SmallOutput::new();

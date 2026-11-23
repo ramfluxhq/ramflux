@@ -305,6 +305,11 @@ pub(crate) async fn dispatch_local_bus_request(
         "itest.agent.approve_once" => {
             crate::bus::dispatch::itest_agent::approve_once(request, state)
         }
+        "username.mutate"
+        | "username.status"
+        | "username.resolve"
+        | "username.contact.add"
+        | "profile.update" => super::username_directory::dispatch(request, state).await,
         method if method.starts_with("node.") => {
             crate::bus::dispatch::node::dispatch_node_bus_request(request, state).await
         }
@@ -317,6 +322,17 @@ pub(crate) async fn dispatch_local_bus_request(
         "surface.send" | "surface.action" | "surface.resync" | "surface.request_resync" => {
             crate::bus::dispatch::surface::dispatch_surface(request, state, connection).await
         }
+        other => dispatch_local_bus_remainder(request, state, connection, other).await,
+    }
+}
+
+async fn dispatch_local_bus_remainder(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+    connection: &mut LocalBusConnectionState,
+    method: &str,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    match method {
         method if method.starts_with("message.") => {
             Box::pin(dispatch_message_bus_request(request, state, connection)).await
         }

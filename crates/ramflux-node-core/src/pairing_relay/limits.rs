@@ -69,6 +69,14 @@ pub trait PairingClock: Send + Sync {
     /// Returns [`PairingRelayError::InvalidInput`] when the clock cannot be read.
     fn wall_unix_secs(&self) -> Result<u64, PairingRelayError>;
     fn monotonic_ms(&self) -> u64;
+    /// Milliseconds for ready-epoch idle retention. Defaults to [`Self::monotonic_ms`].
+    ///
+    /// Credit, busy retry and lease deadlines stay on [`Self::monotonic_ms`]. A clock
+    /// that adds wall time so an in-process handshake can advance must not let that
+    /// wall time look like peer silence.
+    fn activity_ms(&self) -> u64 {
+        self.monotonic_ms()
+    }
 }
 
 /// Production clock: `ramflux_core::Clock` wall time and a process `Instant`.

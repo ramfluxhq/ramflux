@@ -25,7 +25,10 @@ pub(crate) struct Plan {
 pub(crate) struct BodyPlan {
     plan: Plan,
     own: crate::SdkDeviceManifestResponse,
+    // Production delivery uses `flush`. The courier walk that read these is gone.
+    #[allow(dead_code)]
     devices: Vec<crate::prekey::SdkDeviceManifestEntry>,
+    #[allow(dead_code)]
     approval: Option<ApprovalPlan>,
     body: Zeroizing<Vec<u8>>,
 }
@@ -36,6 +39,8 @@ pub(crate) struct RecipientPlan {
     body: Zeroizing<Vec<u8>>,
     material_hash: String,
 }
+// Production sends `Drive`. Refusal tests still send `Seal`, `Complete`, and `Refused`.
+#[allow(dead_code)]
 pub(crate) enum ContactWork {
     Prepare {
         generation: u64,
@@ -76,6 +81,11 @@ pub(crate) enum ContactWork {
         plan: Box<Plan>,
         reply: oneshot::Sender<Result<(), SdkError>>,
     },
+    /// One production pass of [`super::flush`] on the account writer.
+    Drive {
+        generation: u64,
+        reply: oneshot::Sender<Result<bool, SdkError>>,
+    },
     Refused {
         generation: u64,
         plan: Box<Plan>,
@@ -93,6 +103,7 @@ impl ContactWork {
             | Self::Seal { generation, .. }
             | Self::Complete { generation, .. }
             | Self::Finish { generation, .. }
+            | Self::Drive { generation, .. }
             | Self::Refused { generation, .. } => *generation,
         }
     }
@@ -124,85 +135,11 @@ async fn pass(
     context: &SessionContext,
     writer: &mpsc::Sender<AccountWork>,
 ) -> Result<bool, SdkError> {
-    let generation = context.generation;
     let (reply, response) = oneshot::channel();
-    send(writer, ContactWork::Prepare { generation, reply }).await?;
-    let Some(plan) = response.await.map_err(|_| stopped())?? else { return Ok(false) };
-    let fetch = async {
-        let own =
-            crate::client::contact::fetch_verified_device_manifest(&plan.config, &plan.own_root)
-                .await?;
-        let peer = crate::client::contact::fetch_verified_device_manifest(
-            &plan.config,
-            &plan.intent.peer_root,
-        )
-        .await?;
-        Ok::<_, SdkError>((own, peer))
-    };
-    let manifests =
-        tokio::time::timeout(context.network_wait(), fetch).await.map_err(|_| stopped())??;
-    let (reply, response) = oneshot::channel();
-    send(
-        writer,
-        ContactWork::Body {
-            generation,
-            plan: Box::new(plan),
-            manifests: Box::new(manifests),
-            reply,
-        },
-    )
-    .await?;
-    let Some(mut body) = response.await.map_err(|_| stopped())?? else { return Ok(true) };
-    if let Some(approval) = body.approval.take() {
-        let approved = tokio::time::timeout(context.network_wait(), approval.execute())
-            .await
-            .map_err(|_| stopped())??;
-        let (reply, response) = oneshot::channel();
-        send(
-            writer,
-            ContactWork::Approved {
-                generation,
-                plan: Box::new(body),
-                approved: Box::new(approved),
-                reply,
-            },
-        )
-        .await?;
-        let Some(result) = response.await.map_err(|_| stopped())?? else { return Ok(true) };
-        body = result;
-    }
-    let mut complete = !body.devices.is_empty();
-    for device in std::mem::take(&mut body.devices) {
-        let (reply, response) = oneshot::channel();
-        send(
-            writer,
-            ContactWork::Recipient {
-                generation,
-                plan: Box::new(body.plan.clone()),
-                device: Box::new(device),
-                body: body.body.clone(),
-                reply,
-            },
-        )
-        .await?;
-        let Some((recipient, request)) = response.await.map_err(|_| stopped())?? else { continue };
-        let result = deliver(context, writer, &recipient, request).await;
-        match result {
-            Ok(Some(plan)) => body.plan = plan,
-            Ok(None) => return Ok(true),
-            Err(error) => {
-                complete = false;
-                tracing::debug!(%error,"contact control recipient deferred");
-            }
-        }
-    }
-    if complete {
-        let (reply, response) = oneshot::channel();
-        send(writer, ContactWork::Finish { generation, plan: Box::new(body.plan), reply }).await?;
-        response.await.map_err(|_| stopped())??;
-    }
-    Ok(true)
+    send(writer, ContactWork::Drive { generation: context.generation, reply }).await?;
+    response.await.map_err(|_| stopped())?
 }
+#[cfg(test)]
 async fn deliver(
     context: &SessionContext,
     writer: &mpsc::Sender<AccountWork>,
@@ -262,6 +199,7 @@ async fn deliver(
 }
 /// One classified submit: a certain gateway refusal is the inner `Err`; every uncertain failure
 /// is the outer `Err`.
+#[cfg(test)]
 async fn submit(
     context: &SessionContext,
     envelope: ramflux_protocol::Envelope,
@@ -349,6 +287,11 @@ pub(crate) fn apply(account: &LocalBusAccountState, work: ContactWork) {
                     Ok(())
                 });
                 let _ = reply.send(result);
+            }
+        }
+        ContactWork::Drive { reply, .. } => {
+            if !reply.is_closed() {
+                let _ = reply.send(Ok(false));
             }
         }
     }

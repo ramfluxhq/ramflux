@@ -95,18 +95,24 @@ impl TailJob {
     }
     pub(super) async fn commit(&mut self) -> Result<(), SdkError> {
         let hash = hash(self.manifest.as_ref().ok_or_else(wrong)?)?;
-        let packet = self
-            .io
-            .request(move |participant, db, context, _| {
+        let (relay, origin, probe) = self.activity_inputs();
+        let packet = super::activity::retain_relay_activity(
+            relay,
+            origin,
+            probe,
+            self.io.request(move |participant, db, context, _| {
                 participant.commit_full_tail_receipt(db, context, &hash)
-            })
-            .await?;
+            }),
+        )
+        .await?;
         // B is durably merged even when A loses this reply. Keep only the existing
         // epoch's exact ciphertext cache; the terminal ledger refuses every fresh epoch.
         self.phase = Phase::Finished;
         self.io.cancelled.cancel();
         self.cleanup_pending = true;
-        self.io.cached_admission().await?;
+        let (relay, origin, probe) = self.activity_inputs();
+        super::activity::retain_relay_activity(relay, origin, probe, self.io.cached_admission())
+            .await?;
         let encrypted = self.packet.as_mut().ok_or_else(wrong)?.seal_packet(&packet)?;
         drop(packet);
         self.cached_reply = Some(encrypted.clone());

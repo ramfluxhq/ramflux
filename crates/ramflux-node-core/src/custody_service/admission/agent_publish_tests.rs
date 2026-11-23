@@ -58,6 +58,37 @@ fn agent_record(human_primary: DeviceRef) -> Result<Envelope<DeviceSet>> {
     )?)
 }
 
+// Sorts after "primary": the test driver proves with the first listed device.
+const DESKTOP_DEVICE: &str = "secondary-desktop";
+
+/// The agent's host desktop must be an active device of the human record other than its
+/// primary, so the human record enrolls one before it is published.
+fn enroll_desktop(human: &mut Driver) -> Result {
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([HUMAN_SEED + 1; 32]));
+    let current = verify_record(&human.publication.record, NOW, None, None)?;
+    let desktop_branch = ramflux_crypto::create_device_branch(
+        HUMAN_PRINCIPAL,
+        DESKTOP_DEVICE,
+        1,
+        [HUMAN_SEED + 6; 32],
+    );
+    let agreement = ramflux_crypto::X25519KeyPair::from_seed([HUMAN_SEED + 7; 32]);
+    let mut certificate = human.publication.record.body.devices[0]
+        .branch_certificate
+        .as_ref()
+        .ok_or("human branch certificate")?
+        .body
+        .clone();
+    certificate.device_id = DESKTOP_DEVICE.into();
+    certificate.branch_signing_public_key =
+        encode_base64url(desktop_branch.signing_key.verifying_key().as_bytes());
+    certificate.agreement_identity_public_key = encode_base64url(&agreement.public);
+    certificate.cert_id = encode_base64url([HUMAN_SEED + 8; 32]);
+    human.publication.record =
+        primary.enroll_device(&current, primary.certify_branch(certificate)?, NOW)?;
+    Ok(())
+}
+
 /// Everything one test needs: a real store, router and service with a human custodian
 /// published through the real path, and an agent driver whose record is not yet published.
 struct Fixture {
@@ -77,12 +108,15 @@ fn fixture(name: &str) -> Result<Fixture> {
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
-    let human = Driver::new(HUMAN_PRINCIPAL, HUMAN_SEED)?;
+    let mut human = Driver::new(HUMAN_PRINCIPAL, HUMAN_SEED)?;
     let service = CustodyService::new(human.node.clone(), false, &store, NOW)?;
     assert!(matches!(
         human.run(&service, &router, &store, human.publish())?,
         CustodyServerFrame::Published { .. }
     ));
+    enroll_desktop(&mut human)?;
+    let enrolled = human.run(&service, &router, &store, human.publish())?;
+    assert!(matches!(enrolled, CustodyServerFrame::Published { .. }), "{enrolled:?}");
     let human_primary = human.reference.clone();
     let record = agent_record(human_primary.clone())?;
     let agent_anchor = record.body.account_anchor.clone();
@@ -129,7 +163,7 @@ fn fixture(name: &str) -> Result<Fixture> {
         human_primary: human_primary.clone(),
         desktop: DeviceRef {
             account_anchor: human_primary.account_anchor.clone(),
-            device_id: "desktop".into(),
+            device_id: DESKTOP_DEVICE.into(),
             device_epoch: 1,
         },
         agent_anchor,
@@ -433,10 +467,8 @@ fn plain_publish_refuses_a_new_headless_record_and_accepts_the_unchanged_one() -
         CustodyServerFrame::AgentPublished { .. }
     ));
     // The same custodian primary: an ordinary publication of the unchanged record still succeeds.
-    assert!(matches!(
-        fx.agent.run(&fx.service, &fx.router, &fx.store, plain)?,
-        CustodyServerFrame::Published { .. }
-    ));
+    let unchanged = fx.agent.run(&fx.service, &fx.router, &fx.store, plain)?;
+    assert!(matches!(unchanged, CustodyServerFrame::Published { .. }), "{unchanged:?}");
     Ok(())
 }
 

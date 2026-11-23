@@ -334,10 +334,11 @@ impl FullResumeServer {
         for (account, at) in expired.into_iter().flatten() {
             self.record_expiry(account, at);
         }
+        let activity = self.clock.activity_ms();
         self.ready.retain(|item| {
             mono < item.lease_deadline
                 && item.lease.body.require_live(wall).is_ok()
-                && item.last_activity.iter().all(|activity| mono.saturating_sub(*activity) < 10_000)
+                && item.last_activity.iter().all(|seen| activity.saturating_sub(*seen) < 10_000)
         });
         Ok(())
     }
@@ -480,7 +481,7 @@ impl FullResumeServer {
             if mono >= ready.retrieval_deadline || ready.proof_hashes[signer] != hash {
                 return Err(PairingRelayError::Replay);
             }
-            ready.last_activity[signer] = mono;
+            ready.last_activity[signer] = self.clock.activity_ms();
             return Ok(FullResumeProgress::Ready(Box::new(Self::token(ready, signer))));
         }
         let index = self
@@ -571,6 +572,7 @@ impl FullResumeServer {
             tokens[1][0] ^= 1;
         }
         let pending = self.pending.swap_remove(index);
+        let activity = self.clock.activity_ms();
         let lease_deadline = mono.saturating_add(
             pending.lease.body.expires_at.saturating_sub(wall).saturating_mul(1000),
         );
@@ -589,7 +591,7 @@ impl FullResumeServer {
             tokens,
             retrieval_deadline: pending.deadline,
             lease_deadline,
-            last_activity: [mono; 2],
+            last_activity: [activity; 2],
             resources,
             _allocation: allocation,
             _metadata: metadata,
@@ -714,7 +716,7 @@ impl FullResumeServer {
         let retained = FullControlFrame(Arc::new(permit.attach(bytes)?));
         ready.control = Some(retained);
         ready.control_sent = true;
-        ready.last_activity[0] = mono;
+        ready.last_activity[0] = self.clock.activity_ms();
         Ok(())
     }
     pub(super) fn poll_control(
@@ -745,7 +747,7 @@ impl FullResumeServer {
         }
         ready.poll_credit = credit - 500;
         ready.poll_updated = ready.poll_updated.max(mono);
-        ready.last_activity[1] = mono;
+        ready.last_activity[1] = self.clock.activity_ms();
         Ok(ready.control.clone())
     }
     pub(super) fn reserve_body(
@@ -769,7 +771,7 @@ impl FullResumeServer {
             bytes,
             mono,
         )?;
-        ready.last_activity[signer] = mono;
+        ready.last_activity[signer] = self.clock.activity_ms();
         Ok(FullSendPermit {
             arm: None,
             body: permit,

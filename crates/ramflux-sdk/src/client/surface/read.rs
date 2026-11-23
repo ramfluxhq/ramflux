@@ -32,6 +32,7 @@ impl RamfluxClient {
             .get("author_principal_id")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("surface author missing"))?;
+        // Re-checked on every read: a cached identity cannot keep a card renderable.
         let render_allowed = self.surface_author_is_own_agent(author)?;
         let authored_locally = self.surface_authored_locally(author);
         view["render_allowed"] = json!(render_allowed);

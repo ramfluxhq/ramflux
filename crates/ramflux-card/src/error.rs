@@ -6,6 +6,8 @@ pub enum CardError {
     Limit(&'static str),
     #[error("invalid card: {0}")]
     Invalid(&'static str),
+    #[error("surface refused: {0}")]
+    Protocol(#[from] ramflux_protocol::a2ui::Reject),
     #[error("invalid JSON")]
     Json(#[from] serde_json::Error),
     #[error("package signature or engine mismatch")]

@@ -26,6 +26,8 @@ pub struct RfdBus {
     client: LocalBusClient,
     account: String,
     next: u64,
+    /// A human owner account must not be checked with the headless identity call.
+    confirm_identity: bool,
 }
 impl RfdBus {
     /// # Errors
@@ -35,7 +37,19 @@ impl RfdBus {
             client: LocalBusClient::connect(socket).await.map_err(|_| Error::Bus)?,
             account: account.into(),
             next: 0,
+            confirm_identity: true,
         })
+    }
+
+    /// Connects as the human custodian. An authentication race reconnects; it does not
+    /// treat that account as a headless participant.
+    ///
+    /// # Errors
+    /// Rejects an unavailable local socket.
+    pub async fn connect_owner(socket: &Path, account: &str) -> Result<Self> {
+        let mut bus = Self::connect(socket, account).await?;
+        bus.confirm_identity = false;
+        Ok(bus)
     }
 }
 impl AgentBus for RfdBus {
@@ -101,7 +115,8 @@ impl AgentBus for RfdBus {
             {
                 return Err(Error::SurfaceRefused(reason));
             }
-            if matches!(error.code.as_str(), "Unauthenticated" | "NotAuthenticated")
+            if self.confirm_identity
+                && matches!(error.code.as_str(), "Unauthenticated" | "NotAuthenticated")
                 && !matches!(method, "account.status" | "device.list" | "identity.directory")
             {
                 // A gateway authentication race is retryable while the local account is valid.
@@ -112,7 +127,7 @@ impl AgentBus for RfdBus {
                     .await
                 {
                     Err(error) if error.stops_host() => Err(error),
-                    Ok(()) | Err(_) => Err(Error::Bus),
+                    Ok(_) | Err(_) => Err(Error::Bus),
                 };
             }
             return Err(match error.code.as_str() {

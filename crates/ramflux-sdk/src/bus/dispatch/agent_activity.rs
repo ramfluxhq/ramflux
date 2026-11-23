@@ -32,7 +32,7 @@ fn progress(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let client = client(request, state)?;
+    let account_id = request_account_id(request)?.to_owned();
     let body = &request.body;
     let kind = required(body, "kind")?;
     if !matches!(kind, "typing" | "delta" | "tool" | "gap" | "final") {
@@ -68,7 +68,7 @@ fn progress(
     }
     let slot = idx % u64::from(MAX_SLOTS);
     let state_kind = format!("agent-progress/{run_id}/{kind}/{slot}");
-    stored(client, &state_kind, record)?;
+    stored(state, &account_id, &state_kind, record)?;
     Ok(local_bus_ok(json!({"run_id": run_id, "idx": idx, "kind": kind})))
 }
 
@@ -76,11 +76,11 @@ fn publish(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let client = client(request, state)?;
+    let account_id = request_account_id(request)?.to_owned();
     let record = approval_record(&request.body, "prx")?;
     let id = required(&record, "approval_id")?;
     let state_kind = format!("agent-approval/{id}");
-    stored(client, &state_kind, record.clone())?;
+    stored(state, &account_id, &state_kind, record.clone())?;
     Ok(local_bus_ok(record))
 }
 
@@ -88,16 +88,33 @@ fn decide(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let client = client(request, state)?;
+    let account_id = request_account_id(request)?.to_owned();
     let id = required(&request.body, "approval_id")?;
     let decision = required(&request.body, "decision")?;
     if decision != "approved" && decision != "denied" {
         return Err(field_invalid("decision"));
     }
     let state_kind = format!("agent-approval/{id}");
-    let Some(existing) = client.account_db()?.load_actor_state::<Value>(&state_kind)? else {
+    let existing = {
+        let client = &local_bus_account_mut(state, &account_id)?.client;
+        client.account_db()?.load_actor_state::<Value>(&state_kind)?
+    };
+    let Some(existing) = existing else {
         return Err(refused("approval_unknown", id, None, None));
     };
+    // A stored decision wins over the expiry clock. The other device then sees `approval_decided`.
+    if existing.get("status").and_then(Value::as_str) == Some("decided") {
+        let stored_decision = existing.get("decision").and_then(Value::as_str);
+        if stored_decision == Some(decision) {
+            return Ok(local_bus_ok(existing));
+        }
+        return Err(refused(
+            "approval_decided",
+            id,
+            stored_decision,
+            existing.get("cause").and_then(Value::as_str),
+        ));
+    }
     if let Some(expires_at) = existing.get("expires_at").and_then(Value::as_str)
         && approval_expired(expires_at, crate::time::now_unix_timestamp()) == Some(true)
     {
@@ -108,24 +125,12 @@ fn decide(
             Some("expired"),
         ));
     }
-    if existing.get("status").and_then(Value::as_str) == Some("decided") {
-        let stored = existing.get("decision").and_then(Value::as_str);
-        if stored == Some(decision) {
-            return Ok(local_bus_ok(existing));
-        }
-        return Err(refused(
-            "approval_decided",
-            id,
-            stored,
-            existing.get("cause").and_then(Value::as_str),
-        ));
-    }
     let mut record = existing;
     record["status"] = json!("decided");
     record["decision"] = json!(decision);
     record["source"] = json!("owner");
     record.as_object_mut().ok_or_else(|| field_invalid("record"))?.remove("cause");
-    stored(client, &state_kind, record.clone())?;
+    stored(state, &account_id, &state_kind, record.clone())?;
     Ok(local_bus_ok(record))
 }
 
@@ -149,11 +154,68 @@ fn list(
     Ok(local_bus_ok(json!({"approvals": approvals})))
 }
 
-fn stored(client: &RamfluxClient, state_kind: &str, record: Value) -> Result<(), SdkError> {
-    if let Some(stored) = agent_activity::commit(client, state_kind, record)? {
-        let _ = agent_activity::fan_out(client, state_kind, &stored);
+fn stored(
+    state: &mut LocalBusDaemonState,
+    account_id: &str,
+    state_kind: &str,
+    record: Value,
+) -> Result<(), SdkError> {
+    let owner = custodian_of(state, account_id);
+    if !commit_one(state, account_id, state_kind, record.clone())? {
+        return Ok(());
+    }
+    if let Some(owner) = owner {
+        project_owner(state, account_id, &owner, state_kind, record);
     }
     Ok(())
+}
+
+fn custodian_of(state: &LocalBusDaemonState, account_id: &str) -> Option<String> {
+    let id = local_bus_account(state, account_id)
+        .ok()?
+        .client
+        .born_v3_account
+        .as_ref()?
+        .custodian_account_id()?;
+    if id.is_empty() || id == account_id { None } else { Some(id.to_owned()) }
+}
+
+fn commit_one(
+    state: &mut LocalBusDaemonState,
+    account_id: &str,
+    state_kind: &str,
+    record: Value,
+) -> Result<bool, SdkError> {
+    let client = &local_bus_account_mut(state, account_id)?.client;
+    let Some(stored) = agent_activity::commit(client, state_kind, record)? else {
+        return Ok(false);
+    };
+    let _ = agent_activity::fan_out(client, state_kind, &stored);
+    Ok(true)
+}
+
+/// Copies one agent-account row onto the open custodian, on the owner-agent conversation.
+fn project_owner(
+    state: &mut LocalBusDaemonState,
+    agent_id: &str,
+    owner_id: &str,
+    state_kind: &str,
+    mut record: Value,
+) {
+    let Some(scope) = owner_scope(state, agent_id, owner_id) else {
+        return;
+    };
+    let Some(object) = record.as_object_mut() else {
+        return;
+    };
+    object.insert("conversation_id".to_owned(), json!(scope));
+    let _ = commit_one(state, owner_id, state_kind, record);
+}
+
+fn owner_scope(state: &LocalBusDaemonState, agent_id: &str, owner_id: &str) -> Option<String> {
+    let agent = local_bus_account(state, agent_id).ok()?.client.own_account_anchor().ok()?;
+    let owner = local_bus_account(state, owner_id).ok()?.client.own_account_anchor().ok()?;
+    crate::custody::agent_creation::expected_scope(&owner, &agent).ok()
 }
 
 fn approval_record(body: &Value, source: &str) -> Result<Value, SdkError> {
@@ -165,7 +227,7 @@ fn approval_record(body: &Value, source: &str) -> Result<Value, SdkError> {
         return Err(field_invalid("status"));
     }
     let decision = optional(body, "decision");
-    if status == "decided" && decision != Some("approved") && decision != Some("denied") {
+    if status == "decided" && !matches!(decision, Some("approved" | "denied" | "expired")) {
         return Err(field_invalid("decision"));
     }
     let approval_id = required(body, "approval_id")?;
@@ -189,6 +251,8 @@ fn approval_record(body: &Value, source: &str) -> Result<Value, SdkError> {
     }
     if let Some(cause) = optional(body, "cause") {
         record["cause"] = json!(cause);
+    } else if decision == Some("expired") {
+        record["cause"] = json!("expired");
     }
     Ok(record)
 }

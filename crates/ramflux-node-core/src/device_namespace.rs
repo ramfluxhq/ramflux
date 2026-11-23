@@ -198,6 +198,7 @@ impl IdentityRegistry {
             root_public_key: public.clone(),
             signed_device_set: None,
             devices,
+            agent_lifecycle: None,
         })
     }
     pub(crate) fn record_is_revoked(&self, device: &IdentityDeviceRecord) -> bool {
