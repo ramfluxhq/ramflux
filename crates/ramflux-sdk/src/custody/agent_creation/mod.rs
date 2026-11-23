@@ -42,7 +42,8 @@ pub use commit::commit_approved;
 pub(crate) use commit::desktop_is_enrolled;
 pub(crate) use delete::{agent_account_id, is_retired_agent_account, retire_agent_material};
 pub(crate) use host_revoked::{
-    host_branch_marked, note_host_branch_revoked, note_if_verified_revokes, suspend_hosted_agents,
+    host_branch_marked, marked_account_anchor, note_host_branch_revoked, note_if_verified_revokes,
+    suspend_hosted_agents,
 };
 pub use machine::{
     BeginInput, BeginOutcome, PrimarySigning, apply_decision, begin, cancel, primary_sign_decision,

@@ -11,6 +11,24 @@ use std::{
 };
 
 pub(super) fn reserve_account(root: &Path, id: &str, anchor: &str) -> Result<PathBuf, SdkError> {
+    insert_reservation(root, id, anchor, None)
+}
+
+pub(super) fn reserve_beside_retained(
+    root: &Path,
+    id: &str,
+    anchor: &str,
+    retained_id: &str,
+) -> Result<PathBuf, SdkError> {
+    insert_reservation(root, id, anchor, Some(retained_id))
+}
+
+fn insert_reservation(
+    root: &Path,
+    id: &str,
+    anchor: &str,
+    retained_id: Option<&str>,
+) -> Result<PathBuf, SdkError> {
     let parent = root.join("custody_accounts");
     if !parent.try_exists()? {
         private_directory(&parent)?;
@@ -24,7 +42,11 @@ pub(super) fn reserve_account(root: &Path, id: &str, anchor: &str) -> Result<Pat
     #[cfg(test)]
     super::race_hooks::run(super::race_hooks::Stage::BeforeReservation, root, id)?;
     let index = ramflux_storage::AccountIndex::open(root)?;
-    if let Err(error) = index.reserve_account(id, anchor) {
+    let inserted = match retained_id {
+        Some(retained) => index.reserve_beside_retained(id, anchor, retained),
+        None => index.reserve_account(id, anchor),
+    };
+    if let Err(error) = inserted {
         fs::remove_dir(&dir)?;
         crate::platform::fs::sync_path(&parent)?;
         return match error {

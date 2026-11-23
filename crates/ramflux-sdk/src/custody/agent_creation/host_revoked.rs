@@ -17,6 +17,21 @@ const FILE_NAME: &str = "host_branch_revoked.json";
 const MAX_MARKER_BYTES: usize = 4 * 1024;
 const MAX_FIELD: usize = 128;
 
+/// Account anchor stored in a readable revocation marker.
+#[must_use]
+pub(crate) fn marked_account_anchor(root: &Path, account_id: &str) -> Option<String> {
+    let path = marker_path(root, account_id).ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    if !marker_bytes_ok(&bytes) {
+        return None;
+    }
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()?
+        .get("account_anchor")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
 /// Whether this account has a readable revocation marker.
 #[must_use]
 pub(crate) fn host_branch_marked(root: &Path, account_id: &str) -> bool {

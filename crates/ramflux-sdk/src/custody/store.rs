@@ -17,6 +17,7 @@ mod genesis;
 mod networking;
 pub(crate) mod pairing;
 mod publication;
+mod revoked_reserve;
 mod verification_cache;
 pub(crate) use verification_cache::PublicAuthorityCache;
 #[cfg(test)]
@@ -700,7 +701,7 @@ pub(crate) fn reserve_pairing_account(
     id: &str,
     anchor: &str,
 ) -> Result<PathBuf, SdkError> {
-    genesis::reserve_account(root, id, anchor)
+    revoked_reserve::reserve_for_ceremony(root, id, anchor)
 }
 
 /// Production vault-ref allocator (`custody_vault_reference.v1`). Same bytes as genesis.

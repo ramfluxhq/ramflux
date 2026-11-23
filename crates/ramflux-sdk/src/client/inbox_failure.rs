@@ -100,6 +100,7 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
         SdkError::InboundRejected(_) | SdkError::CallControlReceiptCapacity { .. } => {
             Some("routing_rejected")
         }
+        SdkError::PairingCode("HeadChanged") => Some("head_changed"),
         _ => None,
     }
 }

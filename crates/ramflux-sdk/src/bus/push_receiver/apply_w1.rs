@@ -752,6 +752,13 @@ fn failure_of(
     let wire = wire_signature_error(entry);
     let error = wire.as_ref().unwrap_or(error);
     if let Some(code) = deterministic(error) {
+        if code == "head_changed" {
+            tracing::warn!(
+                reason_code = "head_changed",
+                inbox_seq = entry.inbox_seq,
+                "stale observation refused; the receive pass continues"
+            );
+        }
         return Ok(Some((ReceiveFailureKind::Deterministic, code)));
     }
     if crate::bus::sync_driver::inbound_failure_kind(error) == "InboundPending" {
