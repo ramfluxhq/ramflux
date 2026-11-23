@@ -123,6 +123,7 @@ impl Binding {
             packet: cached.packet,
             committed_a0: cached.committed_a0,
             metadata_commitment: cached.metadata_commitment,
+            suppress_wake: false,
         }))
     }
     pub(super) fn persist(

@@ -518,11 +518,15 @@ pub(crate) fn gateway_envelope_from_sealed(
     sealed: crate::client::routed::SealedRouted,
     franking: Option<&SdkDmFrankingMetadata>,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
+    let suppress_wake = sealed.suppress_wake;
     let (packet, committed_a0, metadata_commitment) = sealed.into_parts();
     message.encrypted_body = serde_json::to_vec(&packet)?;
     let mut envelope =
         gateway_direct_message_envelope_sealed(config, message, franking, committed_a0.as_deref())?;
     add_message_metadata_commitment(config, &mut envelope, metadata_commitment)?;
+    if suppress_wake {
+        stamp_signed_silent_wake(config, &mut envelope)?;
+    }
     Ok(envelope)
 }
 
@@ -532,6 +536,7 @@ pub(crate) fn gateway_generated_envelope_from_sealed(
     message: &mut GatewayDirectMessage,
     sealed: crate::client::routed::SealedRouted,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
+    let suppress_wake = sealed.suppress_wake;
     let (packet, committed, metadata) = sealed.into_parts();
     message.encrypted_body = serde_json::to_vec(&packet)?;
     let mut envelope = candidate_direct_message_envelope(
@@ -546,6 +551,9 @@ pub(crate) fn gateway_generated_envelope_from_sealed(
         },
     )?;
     add_message_metadata_commitment(config, &mut envelope, metadata)?;
+    if suppress_wake {
+        stamp_signed_silent_wake(config, &mut envelope)?;
+    }
     ramflux_protocol::message::outer::decode_candidate_outer_ijson(
         &ramflux_protocol::canonical_json_bytes(&envelope)?,
     )
@@ -558,12 +566,13 @@ pub(crate) fn gateway_ephemeral_envelope_from_sealed(
     message: &mut GatewayDirectMessage,
     sealed: crate::client::routed::SealedRouted,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
+    let suppress_wake = sealed.suppress_wake;
     let (packet, committed, metadata_commitment) = sealed.into_parts();
     if metadata_commitment.is_some() {
         return Err(SdkError::InboundRejected("Message metadata on ephemeral delivery".into()));
     }
     message.encrypted_body = serde_json::to_vec(&packet)?;
-    candidate_direct_message_envelope(
+    let mut envelope = candidate_direct_message_envelope(
         config,
         message,
         None,
@@ -573,7 +582,26 @@ pub(crate) fn gateway_ephemeral_envelope_from_sealed(
             priority: ramflux_protocol::Priority::Low,
             outer_profile: None,
         },
-    )
+    )?;
+    if suppress_wake {
+        stamp_signed_silent_wake(config, &mut envelope)?;
+    }
+    Ok(envelope)
+}
+
+fn stamp_signed_silent_wake(
+    sealing: &SealingConfig,
+    envelope: &mut ramflux_protocol::Envelope,
+) -> Result<(), SdkError> {
+    ramflux_protocol::message::wake_eligibility::mark_silent(&mut envelope.ext);
+    let branch = sealing
+        .config()
+        .device_branch
+        .as_ref()
+        .ok_or_else(|| SdkError::GatewaySessionRejected("sealing config incomplete".into()))?;
+    envelope.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(branch, envelope)?;
+    Ok(())
 }
 
 pub(crate) fn gateway_direct_message_envelope_sealed(
