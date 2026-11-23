@@ -4,7 +4,7 @@
 //! One read-modify-write that installs admission limits on a named agent.
 //! Callers that have no bound set do not call this.
 
-use crate::agent::{AgentConfig, AgentLimits, PutOutcome, Tools};
+use crate::agent::{AgentConfig, AgentLimits, DEFAULT_APPROVAL_WAIT_SECS, PutOutcome, Tools};
 use crate::autonomy::Autonomy;
 use crate::capabilities::Capabilities;
 use crate::client::PrxClient;
@@ -50,6 +50,7 @@ pub async fn publish_named_limits(
             tools: tools_of(spec.tool_names),
             enabled: true,
             limits: Some(spec.limits.clone()),
+            approval_wait_secs: DEFAULT_APPROVAL_WAIT_SECS,
         },
     };
     client.put(caps, name, &config, &listed.revision, false).await

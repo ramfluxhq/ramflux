@@ -20,8 +20,31 @@ use std::collections::BTreeSet;
 
 /// Largest `prompt` PRX stores, in bytes. Over it PRX returns `field_invalid`.
 pub const PROMPT_MAX_BYTES: usize = 32_768;
+/// Seconds PRX waits for an approval when the field is omitted. The pin stores `1..=86400`.
+pub const DEFAULT_APPROVAL_WAIT_SECS: u64 = 600;
+const APPROVAL_WAIT_MAX_SECS: u64 = 86_400;
 const MAIN_NAME: &str = "main";
 const WILDCARD: &str = "*";
+
+fn default_approval_wait_secs() -> u64 {
+    DEFAULT_APPROVAL_WAIT_SECS
+}
+
+fn approval_wait_in_range(secs: u64) -> bool {
+    (1..=APPROVAL_WAIT_MAX_SECS).contains(&secs)
+}
+
+fn deserialize_approval_wait_secs<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let secs = u64::deserialize(deserializer)?;
+    if approval_wait_in_range(secs) {
+        Ok(secs)
+    } else {
+        Err(serde::de::Error::custom("approval_wait_secs is outside the documented range"))
+    }
+}
 
 /// An agent's tools: all of Main's (`["*"]` on the wire) or named ones (`[]` is no tools).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +117,8 @@ pub struct AgentConfig {
     pub enabled: bool,
     /// `None`, or both inner fields unset, means PRX's default (no admission limits).
     pub limits: Option<AgentLimits>,
+    /// How long PRX waits for an approval, in seconds. `1..=86400`. The pin's default is 600.
+    pub approval_wait_secs: u64,
 }
 
 impl AgentConfig {
@@ -102,6 +127,9 @@ impl AgentConfig {
             return Err(local_refusal(ApiCode::FieldInvalid));
         }
         if self.limits.as_ref().is_some_and(|limits| !limits.bounds_ok()) {
+            return Err(local_refusal(ApiCode::FieldInvalid));
+        }
+        if !approval_wait_in_range(self.approval_wait_secs) {
             return Err(local_refusal(ApiCode::FieldInvalid));
         }
         self.tools.check_local()
@@ -113,7 +141,8 @@ impl AgentConfig {
     }
 
     /// The `PUT` body: a full replacement, `prompt` only when present, `limits` only when a bound
-    /// is set. An unset inner field is JSON null, which is what PRX stores.
+    /// is set. `approval_wait_secs` is always sent. An unset inner limit is JSON null, which is
+    /// what PRX stores.
     fn to_body(&self) -> Value {
         let mut body = Map::new();
         body.insert("provider".to_owned(), json!(self.provider));
@@ -121,6 +150,7 @@ impl AgentConfig {
         body.insert("autonomy".to_owned(), json!(autonomy_wire(self.autonomy)));
         body.insert("tools".to_owned(), json!(self.tools.to_wire()));
         body.insert("enabled".to_owned(), json!(self.enabled));
+        body.insert("approval_wait_secs".to_owned(), json!(self.approval_wait_secs));
         if let Some(prompt) = &self.prompt {
             body.insert("prompt".to_owned(), json!(prompt));
         }
@@ -155,6 +185,13 @@ struct WireConfig {
     autonomy: Autonomy,
     tools: Vec<String>,
     enabled: bool,
+    /// Absent on a readback that predates the field. PRX's default is 600. `0` and values over
+    /// 86400 are refused. JSON null fails closed.
+    #[serde(
+        default = "default_approval_wait_secs",
+        deserialize_with = "deserialize_approval_wait_secs"
+    )]
+    approval_wait_secs: u64,
     /// Absent on older readbacks. An explicit JSON null fails closed. Inner nulls are unset.
     #[serde(default, deserialize_with = "present")]
     limits: Option<WireLimits>,
@@ -197,6 +234,7 @@ impl WireConfig {
             tools: Tools::from_wire(self.tools)?,
             enabled: self.enabled,
             limits: limits_from_wire(self.limits)?,
+            approval_wait_secs: self.approval_wait_secs,
         })
     }
 }
@@ -274,6 +312,8 @@ pub struct MainReadback {
     pub model: String,
     pub autonomy: Autonomy,
     pub tools: Tools,
+    /// How long PRX waits for an approval, in seconds. `1..=86400`. Absent means 600.
+    pub approval_wait_secs: u64,
     pub revision: ConfigRevision,
     pub incarnation: String,
 }
@@ -285,6 +325,11 @@ struct WireMainConfig {
     model: String,
     autonomy: Autonomy,
     tools: Vec<String>,
+    #[serde(
+        default = "default_approval_wait_secs",
+        deserialize_with = "deserialize_approval_wait_secs"
+    )]
+    approval_wait_secs: u64,
 }
 
 #[derive(Deserialize)]
@@ -359,6 +404,7 @@ impl MainReadback {
             model: wire.config.model,
             autonomy: wire.config.autonomy,
             tools: Tools::from_wire(wire.config.tools)?,
+            approval_wait_secs: wire.config.approval_wait_secs,
             revision: wire.revision,
             incarnation: wire.incarnation,
         })
@@ -494,6 +540,10 @@ mod tests {
             .expect("test: documented readback decodes");
         assert_eq!(read.config.tools, Tools::All);
         assert_eq!(read.config.prompt, None, "absent prompt means PRX composition");
+        assert_eq!(
+            read.config.approval_wait_secs, DEFAULT_APPROVAL_WAIT_SECS,
+            "an absent wait is the pin default"
+        );
         assert!(read.config.enabled);
         assert_eq!(read.status, AgentStatus::Active);
     }
@@ -581,11 +631,18 @@ mod tests {
             MainReadback::from_body(body.as_bytes()).expect("test: documented Main shape decodes");
         assert_eq!(main.autonomy, Autonomy::Full);
         assert_eq!(main.tools, Tools::All);
+        assert_eq!(main.approval_wait_secs, DEFAULT_APPROVAL_WAIT_SECS, "an absent wait is 600");
         let with_enabled = body.replace(r#""tools":["*"]}"#, r#""tools":["*"],"enabled":true}"#);
-        assert!(matches!(
-            MainReadback::from_body(with_enabled.as_bytes()),
-            Err(PrxError::Protocol { .. })
-        ));
+        let wait_zero =
+            body.replace(r#""tools":["*"]}"#, r#""tools":["*"],"approval_wait_secs":0}"#);
+        let wait_high =
+            body.replace(r#""tools":["*"]}"#, r#""tools":["*"],"approval_wait_secs":86401}"#);
+        for bad in [with_enabled, wait_zero, wait_high] {
+            assert!(
+                matches!(MainReadback::from_body(bad.as_bytes()), Err(PrxError::Protocol { .. })),
+                "Main readback must fail closed: {bad}"
+            );
+        }
     }
 
     #[test]
@@ -615,11 +672,19 @@ mod tests {
             tools: Tools::All,
             enabled: true,
             limits: None,
+            approval_wait_secs: DEFAULT_APPROVAL_WAIT_SECS,
         };
         let body = config.to_body();
         assert!(body.get("prompt").is_none(), "absent prompt is not sent");
         assert_eq!(body.get("tools"), Some(&json!(["*"])));
+        assert_eq!(
+            body.get("approval_wait_secs"),
+            Some(&json!(DEFAULT_APPROVAL_WAIT_SECS)),
+            "the wait is always sent"
+        );
         assert!(body.get("limits").is_none(), "unset limits are not sent");
+        let waited = AgentConfig { approval_wait_secs: 30, ..config.clone() };
+        assert_eq!(waited.to_body().get("approval_wait_secs"), Some(&json!(30)));
         let bounded = AgentConfig {
             limits: Some(AgentLimits {
                 max_concurrent_turns: Some(1),
@@ -680,6 +745,32 @@ mod tests {
             AgentReadback::from_body(out_of_range.as_bytes(), &name()),
             Err(PrxError::Protocol { .. })
         ));
+        for secs in [1_u64, 86_400] {
+            let body = readback(
+                &format!(
+                    r#"{{"provider":"p","model":"m","autonomy":"full","tools":["*"],"enabled":true,"approval_wait_secs":{secs}}}"#
+                ),
+                "active",
+            );
+            let parsed = AgentReadback::from_body(body.as_bytes(), &name())
+                .expect("test: a wait on the documented bound decodes");
+            assert_eq!(parsed.config.approval_wait_secs, secs);
+        }
+        for secs in [0_u64, 86_401] {
+            let body = readback(
+                &format!(
+                    r#"{{"provider":"p","model":"m","autonomy":"full","tools":["*"],"enabled":true,"approval_wait_secs":{secs}}}"#
+                ),
+                "active",
+            );
+            assert!(
+                matches!(
+                    AgentReadback::from_body(body.as_bytes(), &name()),
+                    Err(PrxError::Protocol { .. })
+                ),
+                "approval_wait_secs {secs} is outside 1..=86400"
+            );
+        }
     }
 
     #[tokio::test]
@@ -695,6 +786,7 @@ mod tests {
             tools: Tools::All,
             enabled: true,
             limits: None,
+            approval_wait_secs: DEFAULT_APPROVAL_WAIT_SECS,
         };
         let oversized =
             AgentConfig { prompt: Some("x".repeat(PROMPT_MAX_BYTES + 1)), ..base.clone() };
@@ -728,6 +820,8 @@ mod tests {
             }),
             ..base.clone()
         };
+        let wait_zero = AgentConfig { approval_wait_secs: 0, ..base.clone() };
+        let wait_high = AgentConfig { approval_wait_secs: 86_401, ..base.clone() };
         let cases = [
             (oversized, ApiCode::FieldInvalid),
             (duplicate, ApiCode::AgentToolsInvalid),
@@ -736,6 +830,8 @@ mod tests {
             (turns_high, ApiCode::FieldInvalid),
             (cost_zero, ApiCode::FieldInvalid),
             (cost_high, ApiCode::FieldInvalid),
+            (wait_zero, ApiCode::FieldInvalid),
+            (wait_high, ApiCode::FieldInvalid),
         ];
         for (config, expected) in cases {
             let result = client.put(&caps, &name(), &config, &revision, false).await;
@@ -778,6 +874,17 @@ mod tests {
             "disabled",
         );
         crate::test_support::assert_null_refused(&literal, "/config/prompt", |b| {
+            AgentReadback::from_body(b, &name())
+        });
+    }
+
+    #[test]
+    fn null_approval_wait_secs_is_refused() {
+        let literal = readback(
+            r#"{"provider":"p","model":"m","autonomy":"full","tools":["*"],"enabled":true,"approval_wait_secs":600}"#,
+            "active",
+        );
+        crate::test_support::assert_null_refused(&literal, "/config/approval_wait_secs", |b| {
             AgentReadback::from_body(b, &name())
         });
     }

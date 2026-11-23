@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at d9215c41f7848942071ae664a89187f92b3143e6>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at f1d430cedee6277829f4b3826c2e451ca6858cbc>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "d9215c41f7848942071ae664a89187f92b3143e6";
+const PIN: &str = "f1d430cedee6277829f4b3826c2e451ca6858cbc";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -524,6 +524,7 @@ fn config(
         tools,
         enabled,
         limits: None,
+        approval_wait_secs: ramflux_prx_client::DEFAULT_APPROVAL_WAIT_SECS,
     }
 }
 
@@ -701,6 +702,7 @@ async fn k_ac2_6_stored_credential_for_non_default_provider() {
             tools: Tools::All,
             enabled: true,
             limits: None,
+            approval_wait_secs: ramflux_prx_client::DEFAULT_APPROVAL_WAIT_SECS,
         };
         let rev = list_revision(&client, &caps).await;
         let outcome = client
@@ -1329,7 +1331,8 @@ async fn paired_rf_daemon(extra: &str) -> (Daemon, ModelStub) {
 /// A `ModelStub`: a loopback OpenAI-compatible endpoint that counts the model requests it
 /// receives and answers `500` after `hold` (zero: at once). It is the only model endpoint the
 /// rf rows use, so a count that does not move proves that no model request was made, and a
-/// long `hold` keeps a turn live for the rows that need one.
+/// long `hold` keeps a turn live for the rows that need one. A completing stub answers a JSON
+/// chat completion, or an SSE stream when the request sets `"stream":true`.
 struct ModelStub {
     port: u16,
     requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -1360,24 +1363,50 @@ impl ModelStub {
                 let counter = counter.clone();
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = vec![0_u8; 16_384];
-                    if matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {
-                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut buf = Vec::new();
+                    let mut chunk = [0_u8; 8_192];
+                    loop {
+                        if buf.len() >= 262_144
+                            || http_request_complete(&buf)
+                            || headers_without_content_length(&buf)
+                        {
+                            break;
+                        }
+                        match stream.read(&mut chunk).await {
+                            Ok(n @ 1..) => {
+                                if buf.is_empty() {
+                                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                }
+                                buf.extend_from_slice(&chunk[..n]);
+                            }
+                            Ok(0) | Err(_) => break,
+                        }
                     }
+                    let streaming = request_asks_for_stream(&buf);
                     tokio::time::sleep(hold).await;
-                    let (status, body) = if complete {
+                    let (status, content_type, body): (&str, &str, &str) = if !complete {
+                        (
+                            "500 Internal Server Error",
+                            "application/json",
+                            r#"{"error":{"message":"contract stub: no model","type":"stub"}}"#,
+                        )
+                    } else if streaming {
                         (
                             "200 OK",
-                            r#"{"id":"stub-1","object":"chat.completion","created":0,"model":"stub-model","choices":[{"index":0,"message":{"role":"assistant","content":"stub reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+                            "text/event-stream",
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"stub reply\"}}]}\n\n\
+                             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                             data: [DONE]\n\n",
                         )
                     } else {
                         (
-                            "500 Internal Server Error",
-                            r#"{"error":{"message":"contract stub: no model","type":"stub"}}"#,
+                            "200 OK",
+                            "application/json",
+                            r#"{"id":"stub-1","object":"chat.completion","created":0,"model":"stub-model","choices":[{"index":0,"message":{"role":"assistant","content":"stub reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
                         )
                     };
                     let response = format!(
-                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
@@ -1396,6 +1425,29 @@ impl ModelStub {
     fn count(&self) -> usize {
         self.requests.load(std::sync::atomic::Ordering::SeqCst)
     }
+}
+
+/// Headers with no `Content-Length` are complete. Waiting for EOF would stall the client.
+fn headers_without_content_length(buf: &[u8]) -> bool {
+    let Some(split) = buf.windows(4).position(|mark| mark == b"\r\n\r\n") else {
+        return false;
+    };
+    content_length(&String::from_utf8_lossy(&buf[..split])).is_none()
+}
+
+fn request_asks_for_stream(bytes: &[u8]) -> bool {
+    let body = match bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+        Some(split) => {
+            let header = String::from_utf8_lossy(&bytes[..split]);
+            let body = &bytes[split + 4..];
+            match content_length(&header) {
+                Some(length) if body.len() >= length => &body[..length],
+                _ => body,
+            }
+        }
+        None => bytes,
+    };
+    body.windows(13).any(|window| window == b"\"stream\":true")
 }
 
 impl Drop for ModelStub {
@@ -2229,8 +2281,8 @@ async fn k_b3_partitioned_reads_and_capabilities() {
         let client = daemon.client();
         let caps = capabilities(&client).await;
 
-        // K-B3-0: the advertised set at the pin with targeting on, including stream frames
-        // and run approvals.
+        // K-B3-0: the advertised set at the pin with targeting on, including stream frames,
+        // run approvals, and host bootstrap.
         for token in [
             TARGETED_AGENTS_V1,
             MESSAGE_IDEMPOTENCY_V1,
