@@ -14,6 +14,17 @@ use zeroize::Zeroizing;
 
 /// IANA `SFrame` `AES_256_GCM_SHA512_128` cipher suite.
 pub const SFRAME_AES_256_GCM_SHA512_128: u16 = 5;
+
+/// Counters one receiving key remembers. A counter this far behind the highest
+/// accepted counter is refused. Authentication runs before the window moves.
+pub const SFRAME_REPLAY_WINDOW: u64 = 128;
+
+/// [`SFrameReceiver`] stores the window in one `u128` bitmap.
+#[allow(
+    clippy::cast_lossless,
+    reason = "u128::BITS is a u32 and From is not usable in a const yet"
+)]
+const _: () = assert!(SFRAME_REPLAY_WINDOW == u128::BITS as u64);
 const MAX_PLAINTEXT: usize = 64 * 1024;
 const MAX_METADATA: usize = 4096;
 const TAG_BYTES: usize = 16;
@@ -161,7 +172,7 @@ impl SFrameSender {
         Ok(frame)
     }
 }
-/// One receiving key with a 128-counter replay window. Authentication precedes window mutation.
+/// One receiving key. The replay window is [`SFRAME_REPLAY_WINDOW`]. Authentication precedes window mutation.
 pub struct SFrameReceiver {
     kid: u64,
     key: Key,
@@ -196,7 +207,7 @@ impl SFrameReceiver {
             && header.counter <= highest
         {
             let age = highest - header.counter;
-            if age >= 128 || (self.seen >> age) & 1 != 0 {
+            if age >= SFRAME_REPLAY_WINDOW || (self.seen >> age) & 1 != 0 {
                 return Err(CryptoError::SFrame("replay"));
             }
         }

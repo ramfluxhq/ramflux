@@ -962,7 +962,9 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::TaskDeliveryTimeout => RamfluxErrorCode::TransportUnavailable,
         #[rustfmt::skip]
         SdkError::Protocol(_) | SdkError::Json(_) | SdkError::InvalidGatewayCursor(_) => RamfluxErrorCode::InvalidCanonicalJson,
-        SdkError::PriorityWriterAccess | SdkError::Io(_) => RamfluxErrorCode::Internal,
+        SdkError::PriorityWriterAccess | SdkError::WriterPause | SdkError::Io(_) => {
+            RamfluxErrorCode::Internal
+        }
         SdkError::CustodyVaultUnavailable
         | SdkError::CustodyVault(_)
         | SdkError::AttachmentDeleted
@@ -971,7 +973,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::GrantInvalidated
         | SdkError::RemoteAppApprovalRequired
         | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
-        SdkError::ContactInput(crate::ContactReason::LookupRateLimited)
+        SdkError::AccountCommandBackpressure
+        | SdkError::ContactInput(crate::ContactReason::LookupRateLimited)
         | SdkError::ContactRequestCapacity(_)
         | SdkError::CallControlReceiptCapacity { .. }
         | SdkError::TaskManifestWorkerCapacity
@@ -1133,6 +1136,7 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
         | E::EventIdConflict(_)
         | E::IdentityLifecycleBlocked(_)
         | E::InvalidRecoveryState { .. }
+        | E::WriterPause
         | E::PairingField(_)
         | E::TransferExportRefused(_) => RamfluxErrorCode::StorageFailed,
     }

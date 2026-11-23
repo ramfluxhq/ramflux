@@ -6,6 +6,11 @@
 use std::time::Duration;
 
 pub(crate) const NETWORK_WAIT: Duration = Duration::from_secs(5);
+/// Background writer work yields at the next immediate transaction after this slice
+/// when a command is queued. Strictly inside the residence budget so the command
+/// is claimed before admission expires.
+pub(crate) const WRITER_SLICE: Duration = Duration::from_secs(1);
+const _: () = assert!(WRITER_SLICE.as_secs() < NETWORK_WAIT.as_secs());
 pub(crate) const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const COMMAND_DEADLINE: Duration = Duration::from_secs(25);

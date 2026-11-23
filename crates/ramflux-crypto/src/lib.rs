@@ -143,7 +143,9 @@ pub const fn crate_name() -> &'static str {
     CRATE_NAME
 }
 
-pub use sframe::{SFRAME_AES_256_GCM_SHA512_128, SFrameHeader, SFrameReceiver, SFrameSender};
+pub use sframe::{
+    SFRAME_AES_256_GCM_SHA512_128, SFRAME_REPLAY_WINDOW, SFrameHeader, SFrameReceiver, SFrameSender,
+};
 
 #[cfg(test)]
 mod identity_profile_tests;

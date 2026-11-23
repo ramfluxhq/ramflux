@@ -63,6 +63,7 @@ async fn manager_attempt_timeout_drops_an_uncooperative_connector_and_real_lease
                 entered: Arc::clone(&entered),
             }),
             None,
+            None,
         );
         entered.notified().await;
         let start = Instant::now();
@@ -120,6 +121,7 @@ async fn manager_retries_connector_error_with_the_same_backoff_policy()
                 attempts: Arc::clone(&attempts),
                 next: Connector { sessions, frame: limits.frame },
             }),
+            None,
             None,
         );
         tokio::task::yield_now().await;
@@ -192,6 +194,7 @@ async fn manager_honours_a_long_local_cooldown_across_status_polls_and_network_r
                 next: Connector { sessions, frame: limits.frame },
                 resets: crate::custody::capacity_hint::unix_now() + 600,
             }),
+            None,
             None,
         );
         while handle.snapshot().phase != ConnectionPhase::Backoff {

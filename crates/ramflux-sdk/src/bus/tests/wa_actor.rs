@@ -31,6 +31,8 @@ use std::time::Duration;
 
 #[path = "wa_actor/checkpoint_fairness.rs"]
 mod checkpoint_fairness;
+#[path = "wa_actor/sweep_jump.rs"]
+mod sweep_jump;
 
 fn snap(runtime: &super::super::AccountRuntime) -> Result<ReceiveLedgerSnap, SdkError> {
     let account = account_of(runtime)?;
@@ -222,7 +224,7 @@ where
         tokio::select! {
             biased;
             result = &mut pass => return Ok(result??),
-            work = runtime.connection_work.recv() => {
+            work = runtime.recv_connection_work() => {
                 runtime.apply_connection_work(work.ok_or("closed")?).await?;
             }
             () = poll_spawned() => {}
@@ -265,22 +267,31 @@ async fn fill_sealed(fixture: &mut Fixture, start: u64, n: u64) -> Case {
     Ok(())
 }
 
-async fn watch<F>(secs: u64, fut: F) -> Case
+/// Coarse wall-clock hang bound for a whole case. Readiness and business
+/// waits use [`PHASE_WALL`] and fail on their own. This bound stays on the
+/// real clock, so a paused Tokio clock cannot hide a stall, and it leaves
+/// room for account setup on a loaded shared runner.
+const WATCHDOG_WALL: Duration = Duration::from_secs(180);
+
+/// One readiness or business wait. The wait returns as soon as its predicate
+/// holds; expiry is a failure, not a silent success.
+const PHASE_WALL: Duration = Duration::from_secs(30);
+
+async fn watch<F>(fut: F) -> Case
 where
     F: Future<Output = Case>,
 {
-    tokio::time::timeout(
-        Duration::from_secs(secs),
-        LocalSet::new()
-            .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(fut)))),
-    )
-    .await
-    .expect("hang")
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog_for(
+            WATCHDOG_WALL,
+            Box::pin(fut),
+        )))
+        .await
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn never_ack_above_c() -> Case {
-    watch(25, never_ack_above_c_case()).await
+    watch(never_ack_above_c_case()).await
 }
 
 async fn never_ack_above_c_case() -> Case {
@@ -409,7 +420,7 @@ async fn ack_batch_timing_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn ack_lost_before_and_after_commit() -> Case {
-    watch(25, ack_lost_case()).await
+    watch(ack_lost_case()).await
 }
 
 async fn ack_lost_case() -> Case {
@@ -491,7 +502,7 @@ async fn drive_pass_anchored(
                 result??;
                 break;
             }
-            work = runtime.connection_work.recv() => {
+            work = runtime.recv_connection_work() => {
                 runtime.apply_connection_work(work.ok_or("closed")?).await?;
             }
         }
@@ -504,9 +515,10 @@ async fn connected_and_sweep() -> Case {
     // Real-time watchdog only: a tokio timeout would fire when the paused clock
     // advances through the 900 s sweep.
     LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
-            connected_and_sweep_real(),
-        ))))
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog_for(
+            WATCHDOG_WALL,
+            Box::pin(connected_and_sweep_real()),
+        )))
         .await
 }
 
@@ -515,7 +527,7 @@ async fn drain_ready(runtime: &mut super::super::AccountRuntime) -> Case<bool> {
     for _ in 0..64 {
         tokio::task::yield_now().await;
         let mut any = false;
-        while let Ok(work) = runtime.connection_work.try_recv() {
+        while let Ok(work) = runtime.try_recv_connection_work() {
             any = true;
             progressed = true;
             runtime.apply_connection_work(work).await?;
@@ -547,7 +559,7 @@ async fn wait_until_live(
         if handle.snapshot().state == NetworkingState::Live {
             return Ok(());
         }
-        match tokio::time::timeout(Duration::from_millis(20), runtime.connection_work.recv()).await
+        match tokio::time::timeout(Duration::from_millis(20), runtime.recv_connection_work()).await
         {
             Ok(Some(work)) => runtime.apply_connection_work(work).await?,
             Ok(None) => return Err("connection work closed".into()),
@@ -563,8 +575,8 @@ async fn wait_connected_receive(
     runtime: &mut super::super::AccountRuntime,
     handle: &crate::bus::connection_manager::ConnectionHandle,
 ) -> Case {
-    pump_until(runtime, Duration::from_secs(10), || {
-        handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true))
+    pump_until(runtime, PHASE_WALL, "Connected receive", |_| {
+        Ok(handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true)))
     })
     .await?;
     if !handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true)) {
@@ -587,17 +599,18 @@ async fn wait_connected_receive(
 async fn pump_until(
     runtime: &mut super::super::AccountRuntime,
     wall: Duration,
-    mut done: impl FnMut() -> bool,
+    label: &str,
+    mut done: impl FnMut(&mut super::super::AccountRuntime) -> Case<bool>,
 ) -> Case {
     let start = std::time::Instant::now();
     while start.elapsed() < wall {
         drain_ready(runtime).await?;
         poll_spawned().await;
         drain_ready(runtime).await?;
-        if done() {
+        if done(runtime)? {
             return Ok(());
         }
-        match runtime.connection_work.try_recv() {
+        match runtime.try_recv_connection_work() {
             Ok(work) => runtime.apply_connection_work(work).await?,
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => tokio::task::yield_now().await,
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -605,7 +618,22 @@ async fn pump_until(
             }
         }
     }
-    Ok(())
+    Err(format!("{label} was not reached within {wall:?}").into())
+}
+
+/// Pump until `wall` elapses. `done` becoming true is the failure, so a
+/// predicate that must stay false uses this instead of [`pump_until`].
+async fn stays_until(
+    runtime: &mut super::super::AccountRuntime,
+    wall: Duration,
+    label: &str,
+    done: impl FnMut(&mut super::super::AccountRuntime) -> Case<bool>,
+) -> Case {
+    match pump_until(runtime, wall, label, done).await {
+        Ok(()) => Err(label.into()),
+        Err(error) if error.to_string().contains("was not reached") => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 async fn pump_anchored(
@@ -626,7 +654,7 @@ async fn pump_anchored(
         if !live || busy || progressed {
             idle = 0;
             // Engine RPCs run on tokio::spawn; blocking recv() starves them under pause.
-            match runtime.connection_work.try_recv() {
+            match runtime.try_recv_connection_work() {
                 Ok(work) => runtime.apply_connection_work(work).await?,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                     tokio::task::yield_now().await;
@@ -680,15 +708,15 @@ async fn connected_and_sweep_real() -> Case {
     });
     let wait_resume = std::time::Instant::now();
     let mut resume_elapsed = None;
-    pump_until(&mut runtime, Duration::from_secs(10), || {
+    pump_until(&mut runtime, PHASE_WALL, "Connected receive", |_| {
         if resume_elapsed.is_none()
             && let Ok(n) = gateway.lock().map(|g| g.resumes.len())
             && n > 0
         {
             resume_elapsed = Some(live_at.elapsed());
         }
-        handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true))
-            || wait_resume.elapsed() > Duration::from_secs(10)
+        Ok(handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true))
+            || wait_resume.elapsed() > PHASE_WALL)
     })
     .await?;
     if !handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true)) {
@@ -733,38 +761,7 @@ async fn connected_and_sweep_real() -> Case {
         handle.snapshot(),
         handle.test_receive_last_error()
     );
-    tokio::time::advance(Duration::from_secs(899)).await;
-    pump_until(&mut runtime, Duration::from_millis(200), || {
-        handle.snapshot().state != NetworkingState::Live
-    })
-    .await?;
-    assert_eq!(
-        handle.snapshot().state,
-        NetworkingState::Live,
-        "session must stay Live through 899s snap={:?} err={:?}",
-        handle.snapshot(),
-        handle.test_receive_last_error()
-    );
-    assert_eq!(
-        gateway.lock().map_err(|_| "gateway")?.resumes.len(),
-        1,
-        "no Resume until 900s snap={:?}",
-        handle.snapshot()
-    );
-    tokio::time::advance(Duration::from_millis(1_000)).await;
-    pump_until(&mut runtime, Duration::from_secs(10), || {
-        gateway.lock().map_or(0, |g| g.resumes.len()) >= 2
-            || handle.snapshot().state != NetworkingState::Live
-    })
-    .await?;
-    let resumes = gateway.lock().map_err(|_| "gateway")?.resumes.len();
-    assert!(
-        resumes >= 2,
-        "Sweep Resume at 900s: resumes={resumes} trace={:?} err={:?} snap={:?}",
-        handle.test_receive_trace(),
-        handle.test_receive_last_error(),
-        handle.snapshot()
-    );
+    sweep_jump::jump_sweep(&mut runtime, &handle, &gateway).await?;
     drop(release_hold);
     let _ = inhibit.await;
     tokio::time::resume();
@@ -776,7 +773,7 @@ async fn connected_and_sweep_real() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn stale_page_suffix_progress() -> Case {
-    watch(40, stale_page_suffix_progress_case()).await
+    watch(stale_page_suffix_progress_case()).await
 }
 
 async fn stale_page_suffix_progress_case() -> Case {
@@ -809,7 +806,7 @@ async fn stale_page_suffix_progress_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn routed_seen_duplicate_covers_and_acks() -> Case {
-    watch(25, seen_duplicate_case()).await
+    watch(seen_duplicate_case()).await
 }
 
 async fn seen_duplicate_case() -> Case {
@@ -836,7 +833,7 @@ async fn seen_duplicate_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn routed_contact_request_covers_and_acks() -> Case {
-    watch(30, contact_request_case()).await
+    watch(contact_request_case()).await
 }
 
 async fn contact_request_case() -> Case {
@@ -892,7 +889,7 @@ async fn contact_request_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn restart_staged_applies_after_empty_page() -> Case {
-    watch(40, restart_staged_applies_after_empty_page_case()).await
+    watch(restart_staged_applies_after_empty_page_case()).await
 }
 
 async fn restart_staged_applies_after_empty_page_case() -> Case {
@@ -932,7 +929,7 @@ async fn restart_staged_applies_after_empty_page_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn oversize_fetch_entry_refreshes_cursor() -> Case {
-    watch(40, oversize_fetch_entry_refreshes_cursor_case()).await
+    watch(oversize_fetch_entry_refreshes_cursor_case()).await
 }
 
 async fn oversize_fetch_entry_refreshes_cursor_case() -> Case {
@@ -973,7 +970,7 @@ async fn oversize_fetch_entry_refreshes_cursor_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn start_connection_bind_refuses_standalone_receive() -> Case {
-    watch(40, start_connection_bind_refuses_standalone_receive_case()).await
+    watch(start_connection_bind_refuses_standalone_receive_case()).await
 }
 
 async fn start_connection_bind_refuses_standalone_receive_case() -> Case {
@@ -1029,7 +1026,7 @@ fn publish_resync(handle: &crate::bus::connection_manager::ConnectionHandle, aft
 
 #[tokio::test(flavor = "current_thread")]
 async fn routed_committed_covers_and_acks() -> Case {
-    watch(25, routed_committed_covers_and_acks_case()).await
+    watch(routed_committed_covers_and_acks_case()).await
 }
 
 async fn routed_committed_covers_and_acks_case() -> Case {
@@ -1090,7 +1087,7 @@ async fn routed_committed_covers_and_acks_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn reorder_and_gap() -> Case {
-    watch(25, reorder_and_gap_case()).await
+    watch(reorder_and_gap_case()).await
 }
 
 async fn reorder_and_gap_case() -> Case {
@@ -1128,15 +1125,13 @@ async fn reorder_and_gap_case() -> Case {
     Ok(())
 }
 
-/// Real-time failure bound for each phase of the gap catch-up: the Resume request, then the
-/// completed receive pass. The gap deadline and the pass work run on the real clock (only the
-/// timer wake is virtual), so a CPU-starved shared runner needs seconds, not the idle ~1 s. Both
-/// waits return the moment their condition holds; the bound only limits a genuine failure.
-const GAP_PHASE_WALL: Duration = Duration::from_secs(10);
+/// Real-time failure bound for each phase of the gap catch-up. The gap deadline
+/// and the pass work run on the real clock (only the timer wake is virtual).
+/// [`PHASE_WALL`] is that bound: both waits return when the condition holds.
 
 #[tokio::test(flavor = "current_thread")]
 async fn gap_timer() -> Case {
-    watch(25, gap_timer_case()).await
+    watch(gap_timer_case()).await
 }
 
 async fn gap_timer_case() -> Case {
@@ -1169,8 +1164,8 @@ async fn gap_timer_case() -> Case {
     tokio::time::advance(Duration::from_millis(1)).await;
     handle.notify_receive_wake();
     let gateway_gap = Arc::clone(&gateway);
-    pump_until(&mut runtime, GAP_PHASE_WALL, || {
-        gateway_gap.lock().is_ok_and(|g| g.resumes.len() > connected)
+    pump_until(&mut runtime, PHASE_WALL, "Resume after the gap deadline", |_| {
+        Ok(gateway_gap.lock().is_ok_and(|g| g.resumes.len() > connected))
     })
     .await?;
     assert!(
@@ -1182,13 +1177,14 @@ async fn gap_timer_case() -> Case {
     // A recorded Resume request precedes response intake and actor ApplyPage work.
     // Wait for the completed receive pass, rather than a fixed number of idle yields.
     let completion = handle.clone();
-    pump_until(&mut runtime, GAP_PHASE_WALL, || {
-        completion.test_receive_trace().iter().filter(|entry| entry.1).count() > receive_baseline
+    pump_until(&mut runtime, PHASE_WALL, "gap receive completion", |_| {
+        Ok(completion.test_receive_trace().iter().filter(|entry| entry.1).count()
+            > receive_baseline)
     })
     .await?;
     assert!(
         handle.test_receive_trace().iter().filter(|entry| entry.1).count() > receive_baseline,
-        "gap receive pass must finish within {GAP_PHASE_WALL:?} before the cursor oracle: \
+        "gap receive pass must finish within {PHASE_WALL:?} before the cursor oracle: \
          trace={:?} err={:?}",
         handle.test_receive_trace(),
         handle.test_receive_last_error()
@@ -1205,9 +1201,10 @@ async fn coalesced_resync() -> Case {
     // Real-time watchdog only: a tokio timeout can fire if catch-up registers a
     // long `limits.sync` sleep under a paused clock.
     LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
-            coalesced_resync_case(),
-        ))))
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog_for(
+            WATCHDOG_WALL,
+            Box::pin(coalesced_resync_case()),
+        )))
         .await
 }
 
@@ -1258,11 +1255,12 @@ async fn coalesced_resync_case() -> Case {
 #[tokio::test(flavor = "current_thread")]
 async fn buffered_push_survives_router_retirement() -> Case {
     // Real-time watchdog only: catch-up under a paused clock can register a
-    // long `limits.sync` sleep that would fire `watch(25)`.
+    // long `limits.sync` sleep. Phase waits fail on their own labels.
     LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
-            buffered_push_survives_router_retirement_case(),
-        ))))
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog_for(
+            WATCHDOG_WALL,
+            Box::pin(buffered_push_survives_router_retirement_case()),
+        )))
         .await
 }
 
@@ -1283,7 +1281,19 @@ async fn buffered_push_survives_router_retirement_case() -> Case {
         .ok_or("seq2")?;
     tokio::time::pause();
     publish_deliver(&handle, seq2);
-    pump_anchored(&mut runtime, &handle).await?;
+    let gate = handle.clone();
+    // A hole delivery only wakes the loop. Retire after W0 is durable and no
+    // pass is inside the gateway, so the hint starts a fresh Resume.
+    pump_until(&mut runtime, PHASE_WALL, "seq 2 staged and admitted", |runtime| {
+        let held = snap(runtime)?;
+        Ok(held.receipts.iter().any(|row| row.0 == 2 && row.1 == "staged")
+            && gate.reorder().contains(2)
+            && !gate.reorder().in_flight())
+    })
+    .await?;
+    let resumes_before = gateway.lock().map_err(|_| "gateway")?.resumes.len();
+    let success_before = handle.test_receive_trace().iter().filter(|entry| entry.1).count();
+    let cursor_before = handle.reorder().cursor();
     {
         let mut served = gateway.lock().map_err(|_| "gateway")?;
         served.resume_losses = vec![(1, 2, "expired")];
@@ -1292,7 +1302,31 @@ async fn buffered_push_survives_router_retirement_case() -> Case {
     }
     handle.reorder().note_hint(crate::bus::push_receiver::reorder::CatchUpHint::Resync);
     handle.notify_receive_wake();
-    pump_anchored(&mut runtime, &handle).await?;
+    let gateway_resume = Arc::clone(&gateway);
+    pump_until(&mut runtime, PHASE_WALL, "Resume after router retirement", |_| {
+        Ok(gateway_resume.lock().is_ok_and(|served| served.resumes.len() > resumes_before))
+    })
+    .await?;
+    // The loss covers the staged seq, so this pass does not record `(trigger, true)`.
+    // Covering the hole is the completion: `sync` is the 24h sweep hold, and a
+    // paused clock never reaches that deadline.
+    let covered = handle.clone();
+    if let Err(error) =
+        pump_until(&mut runtime, PHASE_WALL, "retirement page covered the hole", |_| {
+            let success = covered.test_receive_trace().iter().filter(|entry| entry.1).count();
+            Ok(covered.reorder().cursor() > cursor_before || success > success_before)
+        })
+        .await
+    {
+        return Err(format!(
+            "{error}; err={:?} in_flight={} cursor={} trace={:?}",
+            handle.test_receive_last_error(),
+            handle.reorder().in_flight(),
+            handle.reorder().cursor(),
+            handle.test_receive_trace()
+        )
+        .into());
+    }
     let held = snap(&runtime)?;
     assert!(
         held.receipts.iter().any(|row| row.0 == 2 && row.1 == "staged"),
@@ -1310,7 +1344,7 @@ async fn buffered_push_survives_router_retirement_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn push_without_polling() -> Case {
-    watch(25, push_without_polling_case()).await
+    watch(push_without_polling_case()).await
 }
 
 async fn push_without_polling_case() -> Case {
@@ -1356,7 +1390,7 @@ async fn push_without_polling_case() -> Case {
 /// the TLS gateway, recipient catch-up/ACK on the wire, then restart with pending messages.
 #[tokio::test(flavor = "current_thread")]
 async fn session_push_two_account_restart_catch_up() -> Case {
-    watch(40, session_push_two_account_restart_catch_up_case()).await
+    watch(session_push_two_account_restart_catch_up_case()).await
 }
 
 async fn session_push_two_account_restart_catch_up_case() -> Case {
@@ -1607,7 +1641,7 @@ async fn resume_fixture_isolates_target_watermarks() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn compat_then_push_actor_keeps_receive_live() -> Case {
-    watch(30, async {
+    watch(async {
         let mut fixture = Fixture::new("compat-push-actor").await?;
         let target = fixture.source.target_delivery_id.clone();
         let _ = fixture.source.client.account_db()?.activate_receive_ledger(ReceiveMigrate {
@@ -1668,7 +1702,7 @@ async fn compat_then_push_actor_keeps_receive_live() -> Case {
 /// A lost ACK on an echoed push session is not reapplied or reprojected on the same epoch.
 #[tokio::test(flavor = "current_thread")]
 async fn compat_ack_lag_reset_does_not_reapply_or_project() -> Case {
-    watch(40, compat_ack_lag_reset_case()).await
+    watch(compat_ack_lag_reset_case()).await
 }
 
 async fn compat_ack_lag_reset_case() -> Case {

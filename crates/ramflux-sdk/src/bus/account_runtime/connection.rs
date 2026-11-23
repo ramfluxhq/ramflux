@@ -23,6 +23,7 @@ impl AccountRuntime {
             account.timeouts = self.timeouts.clone();
             account.transfer_slots = Some(self.transfers.slots.clone());
             account.connection_work = Some(self.connection_sender.clone());
+            account.head_completion = Some(self.head_completion_sender.clone());
             #[cfg(test)]
             if self.state.config.test_session_connector.is_some() {
                 account.test_connector.clone_from(&self.state.config.test_session_connector);
@@ -91,6 +92,7 @@ impl AccountRuntime {
             tokio::select! {
                 biased;
                 ready=&mut ready=>{ready?;break;},
+                work=self.head_rx.recv()=>{if let Some(work)=work {self.apply_connection_work(work).await?;}},
                 work=self.connection_work.recv()=>{if let Some(work)=work {
                     #[cfg(test)]
                     let outcome = matches!(&work, AccountWork::Connected { .. } | AccountWork::Failed { .. });
@@ -162,6 +164,15 @@ impl AccountRuntime {
     }
 
     async fn apply_connection_work_inner(&mut self, work: AccountWork) -> Result<bool, SdkError> {
+        // A directory attempt awaits one queued command between commits. That
+        // retry cannot hold the account borrow the other arms use.
+        let work = match work {
+            AccountWork::Directory(work) => {
+                self.apply_directory_pausing(*work).await?;
+                return Ok(false);
+            }
+            other => other,
+        };
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };
@@ -193,7 +204,7 @@ impl AccountRuntime {
                     super::super::delivery_receipts::apply_background(account, *work);
                 }
             }
-            AccountWork::Directory(work) => self.apply_directory_work(*work)?,
+            AccountWork::Directory(_) => return Ok(false),
             AccountWork::PrepareReceiveEpoch { .. }
             | AccountWork::ResetReceiveEpoch { .. }
             | AccountWork::PrepareReceive { .. }
@@ -413,45 +424,53 @@ impl AccountRuntime {
         if generation != handle.generation() || reply.is_closed() {
             return Ok(false);
         }
-        let Some(account) = self.state.accounts.get_mut(&self.id) else {
-            return Ok(false);
-        };
         let target = entry.entry.target_delivery_id.clone();
-        let active = match ledger_is_active(account, handle.generation(), &target) {
-            Ok(active) => active,
-            Err(error) => {
-                let _ = reply.send(Err(error));
+        let turn = {
+            let Some(account) = self.state.accounts.get_mut(&self.id) else {
                 return Ok(false);
+            };
+            let active = match ledger_is_active(account, handle.generation(), &target) {
+                Ok(active) => active,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return Ok(false);
+                }
+            };
+            if active {
+                match page_turn(account, generation, &target, turn) {
+                    Ok(turn) => Some(turn),
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return Ok(false);
+                    }
+                }
+            } else {
+                None
             }
         };
-        if !active {
+        let Some(turn) = turn else {
             self.apply_receive_entry(generation, entry, source, backpressure, reply).await?;
             return Ok(false);
-        }
-        let turn = match page_turn(account, generation, &target, turn) {
-            Ok(turn) => turn,
-            Err(error) => {
-                let _ = reply.send(Err(error));
-                return Ok(false);
-            }
         };
         let current = handle.clone();
         #[cfg(test)]
         let started = {
-            if let Some(handle) = &account.connection {
-                handle.test_record_receive("apply-start", std::time::Duration::ZERO);
+            if let Some(connection) =
+                self.state.accounts.get(&self.id).and_then(|account| account.connection.as_ref())
+            {
+                connection.test_record_receive("apply-start", std::time::Duration::ZERO);
             }
             std::time::Instant::now()
         };
-        let result = Box::pin(super::super::push_receiver::apply_w1::apply_page(
-            account,
-            &turn,
-            &|| current.generation(),
-            entry,
-            source,
-            backpressure,
-        ))
-        .await;
+        let Some((result, reply)) =
+            self.apply_page_pausing(&turn, &current, (entry, source, backpressure), reply).await?
+        else {
+            return Ok(false);
+        };
+        let Some(account) = self.state.accounts.get_mut(&self.id) else {
+            let _ = reply.send(result);
+            return Ok(false);
+        };
         #[cfg(any(test, feature = "itest-memory-vault"))]
         if result.is_ok() {
             let cursor = super::super::push_receiver::apply_w1::read_cursor(
@@ -494,6 +513,82 @@ impl AccountRuntime {
         }
         let _ = reply.send(result);
         Ok(false)
+    }
+
+    async fn apply_page_pausing(
+        &mut self,
+        turn: &super::super::connection_manager::ReceiveTurn,
+        current: &crate::bus::connection_manager::ConnectionHandle,
+        first: (
+            super::super::connection_manager::ReceiveEntry,
+            super::super::sync_driver::source::PreparedSource,
+            Box<super::super::contact_backpressure::Backpressure>,
+        ),
+        reply: tokio::sync::oneshot::Sender<
+            Result<super::super::connection_manager::ReceiveApplied, SdkError>,
+        >,
+    ) -> Result<
+        Option<(
+            Result<super::super::connection_manager::ReceiveApplied, SdkError>,
+            tokio::sync::oneshot::Sender<
+                Result<super::super::connection_manager::ReceiveApplied, SdkError>,
+            >,
+        )>,
+        SdkError,
+    > {
+        let mut resume = None;
+        let mut first = Some(first);
+        loop {
+            ramflux_storage::writer_budget::begin_attempt();
+            let yielded = {
+                let _scope = ramflux_storage::writer_budget::PauseScope::enter();
+                let Some(account) = self.state.accounts.get_mut(&self.id) else {
+                    let _ = reply.send(Err(SdkError::AccountDbNotUnlocked));
+                    return Ok(None);
+                };
+                let applied = if let Some(saved) = resume.take() {
+                    Box::pin(super::super::push_receiver::apply_w1::resume_apply_page(
+                        account,
+                        saved,
+                        &|| current.generation(),
+                    ))
+                    .await
+                } else if let Some((entry, source, backpressure)) = first.take() {
+                    Box::pin(super::super::push_receiver::apply_w1::apply_page(
+                        account,
+                        turn,
+                        &|| current.generation(),
+                        entry,
+                        source,
+                        backpressure,
+                    ))
+                    .await
+                } else {
+                    let _ = reply.send(Err(SdkError::WriterPause));
+                    return Ok(None);
+                };
+                if let Err(SdkError::WriterPause) = &applied {
+                    if let Some(saved) = super::writer_slice::take_apply() {
+                        resume = Some(saved);
+                        None
+                    } else {
+                        let _ = reply.send(Err(SdkError::WriterPause));
+                        return Ok(None);
+                    }
+                } else {
+                    Some(applied)
+                }
+            };
+            match yielded {
+                None => {
+                    // The page stays on this attempt. A demanded head already
+                    // queued is applied before the page continues.
+                    self.prefer_demanded_head().await?;
+                    self.service_waiting_commands().await?;
+                }
+                Some(finished) => return Ok(Some((finished, reply))),
+            }
+        }
     }
 
     async fn apply_receive_entry(

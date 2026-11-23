@@ -28,6 +28,7 @@ mod conversation_helpers;
 mod database;
 #[cfg(feature = "itest-work-budget")]
 mod database_work;
+pub mod writer_budget;
 #[cfg(feature = "itest-work-budget")]
 pub use database_work::{SqlWorkProbe, SqlWorkScope, SqlWorkSnapshot};
 mod database_checkpoint;

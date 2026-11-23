@@ -125,6 +125,7 @@ async fn fixture() -> Case<Fixture> {
                         release: initial_release,
                     }),
                     None,
+                    None,
                 );
                 account.engine = None;
                 account.connection = Some(connection.clone());
