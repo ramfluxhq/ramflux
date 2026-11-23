@@ -115,6 +115,8 @@ pub enum StorageError {
     InvalidRecoveryState { recovery_id: String, expected: String },
     #[error("invalid pairing field: {0}")]
     PairingField(&'static str),
+    #[error("mute_until is outside the safe JSON integer range")]
+    MuteUntilOutOfRange,
 }
 
 impl From<rusqlite::Error> for StorageError {

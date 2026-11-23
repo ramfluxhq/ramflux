@@ -397,7 +397,8 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         | E::IdentityLifecycleBlocked(_)
         | E::InvalidRecoveryState { .. }
         | E::WriterPause
-        | E::PairingField(_) => "ValidationFailed",
+        | E::PairingField(_)
+        | E::MuteUntilOutOfRange => "ValidationFailed",
     }
 }
 

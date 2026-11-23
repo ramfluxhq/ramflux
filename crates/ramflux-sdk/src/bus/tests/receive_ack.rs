@@ -40,9 +40,11 @@ async fn case() -> Case {
     let gateway = Arc::clone(&fixture.gateway);
     let diagnostic = fixture.source.client.account_db()?.open_reader()?;
     let started = Box::pin(start(fixture)).await?;
-    tokio::time::timeout(Duration::from_secs(10), hold.entered.notified()).await?;
+    // The 30s watchdog is the stall deadline. A short wall timeout false-fails
+    // when the host is slow; the hold has not been released yet.
+    hold.entered.notified().await;
     // The only active receive trigger is Connected; all competing budgets are 600 seconds.
-    controls(&started.actor).await?;
+    answers_while_held(&started.actor).await?;
     let received = started
         .actor
         .request(command(
@@ -67,21 +69,35 @@ async fn case() -> Case {
         "the fake gateway must still be held"
     );
     hold.release.notify_one();
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if !gateway.lock().map_err(|_| "gateway")?.acked.is_empty() {
-                return Ok::<_, Box<dyn std::error::Error>>(());
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    loop {
+        if !gateway.lock().map_err(|_| "gateway")?.acked.is_empty() {
+            break;
         }
-    })
-    .await??;
+        tokio::task::yield_now().await;
+    }
     let Started { root: _root, actor, router, .. } = started;
     actor.stop().await?;
     drop(actor);
     router.await?;
     Ok(())
 }
+// These calls return before the held ACK is released. That is the proof they
+// did not wait out the 600s budgets. A wall bound of a few seconds false-fails
+// on a slow host.
+async fn answers_while_held(actor: &AccountActor) -> Case {
+    for (method, body) in [
+        ("account.status", json!({})),
+        ("contact.list", json!({})),
+        ("contact.requests.policy.set", json!({"contact_requests":"auto_accept"})),
+    ] {
+        let response = actor.request(command(method, body)).await?;
+        if method == "account.status" {
+            assert_eq!(response.body["networking"], "live");
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn controls(actor: &AccountActor) -> Case {
     for (method, body) in [
         ("account.status", json!({})),

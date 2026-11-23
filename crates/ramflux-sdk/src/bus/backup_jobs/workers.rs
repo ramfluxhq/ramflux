@@ -87,7 +87,8 @@ pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFail
         | E::IdentityLifecycleBlocked(_)
         | E::InvalidRecoveryState { .. }
         | E::WriterPause
-        | E::PairingField(_) => failure(BackupFailureCode::Unreadable),
+        | E::PairingField(_)
+        | E::MuteUntilOutOfRange => failure(BackupFailureCode::Unreadable),
     }
 }
 

@@ -34,10 +34,46 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
     ),
     ("itest_http.rs:dispatch_protected_itest_request", Class::Edge),
     ("quic_dispatch.rs:forward_quic_envelope", Class::Edge),
-    ("session.rs:handle_gateway_submit", Class::Edge),
-    ("session.rs:handle_gateway_own_device_fanout", Class::Edge),
+    ("session/submission.rs:handle_gateway_submit", Class::Edge),
+    ("session/submission.rs:handle_gateway_own_device_fanout", Class::Edge),
     (
-        "session.rs:dispatch_offline_wake",
+        "session/submission.rs:attach_franking_node_tag",
+        Class::NonIngress(
+            "stamps the franking node tag on an envelope already admitted by handle_gateway_submit; no persist",
+        ),
+    ),
+    (
+        "session/submission.rs:committed_fanout_entry",
+        Class::NonIngress(
+            "derives the committed entry for an own-device fanout after handle_gateway_own_device_fanout admitted it; no persist",
+        ),
+    ),
+    (
+        "session/submission.rs:committed_submit_entry",
+        Class::NonIngress(
+            "derives the committed entry from the router response after handle_gateway_submit admitted it; no persist",
+        ),
+    ),
+    (
+        "session/submission.rs:deliver_own_device_fanout_entry",
+        Class::NonIngress(
+            "delivers an already committed own-device fanout entry; envelope was admitted and persisted upstream",
+        ),
+    ),
+    (
+        "session/submission.rs:deliver_submitted_to_peer",
+        Class::NonIngress(
+            "delivers an already committed submit to the peer session; envelope was admitted and persisted upstream",
+        ),
+    ),
+    (
+        "session/submission.rs:reply_and_deliver_submitted",
+        Class::NonIngress(
+            "replies and delivers after handle_gateway_submit committed; no new persist",
+        ),
+    ),
+    (
+        "session/submission.rs:dispatch_offline_wake",
         Class::NonIngress("offline wake via spawn_blocking; no envelope persist"),
     ),
     (
@@ -67,7 +103,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
     let edge_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Edge).count();
-    assert_eq!((non_ingress_count, edge_count), (6, 4));
+    assert_eq!((non_ingress_count, edge_count), (12, 4));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");
@@ -168,7 +204,7 @@ async fn drive_control_gateway_edge(
     control: &ramflux_node_core::GatewaySubmitFrame,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match entry {
-        "session.rs:handle_gateway_submit" => {
+        "session/submission.rs:handle_gateway_submit" => {
             let (_fixture_directory_0, fixture_value_0) =
                 crate::session::tests::test_gateway_context()?;
             let context = fixture_value_0;
@@ -178,7 +214,7 @@ async fn drive_control_gateway_edge(
                 Err(error) => assert_eq!(error.to_string(), CONTROL_SUBMIT_ERR, "{entry}"),
             }
         }
-        "session.rs:handle_gateway_own_device_fanout" => {
+        "session/submission.rs:handle_gateway_own_device_fanout" => {
             let (_fixture_directory_1, fixture_value_1) =
                 crate::session::tests::test_gateway_context()?;
             let context = fixture_value_1;
@@ -219,7 +255,7 @@ async fn drive_marked_gateway_edge(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_capture_directory, capture) = capture_path(ordinal);
     match entry {
-        "session.rs:handle_gateway_submit" => {
+        "session/submission.rs:handle_gateway_submit" => {
             let (_fixture_directory_3, fixture_value_3) =
                 crate::session::tests::test_gateway_context()?;
             let context = fixture_value_3;
@@ -240,7 +276,7 @@ async fn drive_marked_gateway_edge(
                 "{entry} gateway store changed"
             );
         }
-        "session.rs:handle_gateway_own_device_fanout" => {
+        "session/submission.rs:handle_gateway_own_device_fanout" => {
             let (_fixture_directory_4, fixture_value_4) =
                 crate::session::tests::test_gateway_context()?;
             let context = fixture_value_4;

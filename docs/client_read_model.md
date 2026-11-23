@@ -139,7 +139,7 @@ Response key: `conversations`. Each row contains:
 | `unread_count` | Count after the stored reader watermark and clear boundary |
 | `is_unread` | Existing local unread projection, including manual unread markers |
 | `last_activity` | Last nondeleted message timestamp, or null |
-| `muted`, `mute_until` | Current mute flag and optional expiry |
+| `muted`, `mute_until` | `muted` is whether a mute is in force. `mute_until` is a unix expiry at most 2^53−1, or null. Null with `muted: true` means muted until turned off; null with `muted: false` means not muted |
 | `disappearing` | `{timer_seconds,countdown_mode,scope}` or null |
 | `archived`, `hidden` | Stored list flags |
 

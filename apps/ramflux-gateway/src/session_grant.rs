@@ -22,6 +22,22 @@ impl std::fmt::Display for NativeDeviceRevoked {
 
 impl std::error::Error for NativeDeviceRevoked {}
 
+/// Preserve the router's explicit tombstone refusal before looking for usable key material.
+/// # Errors
+/// Returns [`NativeDeviceRevoked`] for a revoked read; a missing key stays unavailable.
+pub(crate) fn require_native_key(
+    lookup: ramflux_node_core::DeviceAuthKeyLookup,
+) -> anyhow::Result<ramflux_node_core::DeviceAuthKeyResponse> {
+    use ramflux_node_core::{DeviceAuthKeyLookup, DeviceAuthKeyRefusal};
+    match lookup {
+        DeviceAuthKeyLookup::Refused { reason: DeviceAuthKeyRefusal::Revoked } => {
+            Err(NativeDeviceRevoked.into())
+        }
+        DeviceAuthKeyLookup::Key(Some(key)) => Ok(*key),
+        DeviceAuthKeyLookup::Key(None) => anyhow::bail!("native branch unavailable"),
+    }
+}
+
 /// Revocation is its own error. Every other mismatch stays "native authority changed".
 /// # Errors
 /// Returns [`NativeDeviceRevoked`] when the device-auth record is revoked, and an
