@@ -369,6 +369,9 @@ message AgentCustodyStatus {
   optional bytes request_json = 5;
   optional bytes receipt_json = 6;
   optional AgentFailure error = 7;
+  // `register_plan_hash` of the frozen plan. `agent.creation.decide` repeats it.
+  // Empty when this status has no plan. The phone does not hash the plan itself.
+  string request_hash = 8;
 }
 // The result arms of this module: list (page), get and edit (record), watch (ack) and creation
 // custody. Arms 4-8 belong to later agent stages.
@@ -383,7 +386,8 @@ message AgentConfigResult {
 
 // The agent record (AGENT-CONFIG-01 contract 1). `host`, `config`, `revision`, `observation` and
 // `cleanup` belong to the bound-runtime stages: they are present in the message but always absent or
-// empty in this module. `access` is RF-owned and validated by the record store.
+// empty in this module. `access` is RF-owned and validated by the record store. `base` is the stored
+// event identity that `agent.access.set` must send back unchanged.
 message AgentRecord {
   string agent_anchor = 1;
   string custodian_anchor = 2;
@@ -396,6 +400,7 @@ message AgentRecord {
   string cleanup = 9;
   AgentAccessPolicy access = 10;
   string role = 11;
+  EventIdentity base = 12;
 }
 
 // The owner metadata broadcast (contract 4): RF-owned persona, access and identity, ordered by the

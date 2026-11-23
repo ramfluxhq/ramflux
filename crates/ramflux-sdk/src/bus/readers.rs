@@ -198,34 +198,6 @@ impl AccountReaders {
         Ok(())
     }
 
-    pub(super) fn requires_network(&self, request: &LocalBusFrame) -> bool {
-        let Ok(view) = self.view.read() else {
-            return true;
-        };
-        let spool = request
-            .body
-            .get("operation_id")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|id| view.upload_relays.get(id))
-            .copied();
-        super::method_table::requires_network(
-            &request.method,
-            &request.body,
-            view.account_has_relay,
-            spool,
-        )
-    }
-
-    pub(super) fn networking_pending(&self) -> SdkError {
-        self.view
-            .read()
-            .ok()
-            .and_then(|view| {
-                view.connection.as_ref().map(super::connection_manager::ConnectionHandle::pending)
-            })
-            .unwrap_or(SdkError::NetworkingPending)
-    }
-
     pub(super) async fn request(
         &self,
         request: LocalBusFrame,

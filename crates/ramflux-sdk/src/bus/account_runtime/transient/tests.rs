@@ -23,6 +23,7 @@ fn runtime(
     let (_, shutdown) = watch::channel(false);
     let (events, batches) = mpsc::channel(8);
     let (connection_sender, connection_work) = mpsc::channel(2);
+    let (head_completion_sender, head_rx) = mpsc::channel(1);
     (
         AccountRuntime {
             timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
@@ -39,6 +40,7 @@ fn runtime(
             receiver,
             lifecycle,
             preempt,
+            command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             events,
             shutdown,
             readers: Arc::new(Mutex::new(None)),
@@ -49,6 +51,9 @@ fn runtime(
             transfers: uploads::Transfers::start(),
             connection_sender,
             connection_work,
+            head_completion_sender,
+            head_rx,
+            deferred: std::collections::VecDeque::new(),
             ledger: None,
             pairing: super::super::pairing_calls::Calls::default(),
             username: super::super::username_calls::Calls::default(),

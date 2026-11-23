@@ -532,6 +532,11 @@ impl Connection {
         if let Some(name) = &savepoint {
             self.execute_batch(&format!("SAVEPOINT {name}"))?;
         } else {
+            // Yield before BEGIN when a queued account command is waiting. The
+            // statement has not started, so the caller can retry this attempt.
+            if immediate && crate::writer_budget::should_pause() {
+                return Err(crate::writer_budget::pause_error());
+            }
             let transaction_id =
                 NEXT_TRANSACTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mode =
@@ -735,6 +740,7 @@ impl Transaction<'_> {
             self.connection.execute_batch(&format!("RELEASE SAVEPOINT {name}"))?;
         } else {
             self.connection.execute_batch("COMMIT")?;
+            crate::writer_budget::note_durable_commit();
         }
         self.committed = true;
         Ok(())
