@@ -6,7 +6,6 @@
 //! `turn.failed` is recorded. This task does not resubmit the turn.
 
 mod apply;
-mod sha1;
 mod store;
 mod ws;
 
@@ -16,11 +15,11 @@ use ramflux_prx_client::{
     SYNC_SNAPSHOT_V1, SYNC_WS_V1, ServerFrame, SnapshotPage, ack_frame, decode_server, hello_frame,
     require,
 };
-use sha1::random_bytes;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use store::{Mirror, MirrorStore, StoreError, mirror_path};
 use tokio::sync::watch;
+use ws::random_bytes;
 use ws::{Incoming, Socket, WsFail};
 
 /// Background mirror of the PRX journal. Drop stops the task.

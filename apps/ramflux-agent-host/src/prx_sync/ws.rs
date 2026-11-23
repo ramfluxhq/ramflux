@@ -3,8 +3,9 @@
 
 //! A minimal RFC 6455 client for `GET /api/sync/ws` on loopback, without TLS.
 
-use super::sha1::{base64, random_bytes, websocket_accept};
+use base64::Engine;
 use ramflux_prx_client::SyncDial;
+use sha1::Digest;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -97,7 +98,7 @@ impl Socket {
     async fn handshake(&mut self, dial: &SyncDial, token: &str) -> Result<(), WsFail> {
         let mut raw_key = [0_u8; 16];
         random_bytes(&mut raw_key).map_err(|_| WsFail::Protocol)?;
-        let key = base64(&raw_key).ok_or(WsFail::Protocol)?;
+        let key = standard_b64(&raw_key).ok_or(WsFail::Protocol)?;
         let expected = websocket_accept(&key).ok_or(WsFail::Protocol)?;
         let mut request = Zeroizing::new(String::new());
         push_request(&mut request, dial, token, &key)?;
@@ -399,4 +400,35 @@ fn close_code(payload: &[u8]) -> Result<u16, WsFail> {
     } else {
         Err(WsFail::Protocol)
     }
+}
+
+/// Fills `dest` from `/dev/urandom`.
+///
+/// # Errors
+/// Returns an error when the device cannot be read.
+pub(super) fn random_bytes(dest: &mut [u8]) -> std::io::Result<()> {
+    if dest.len() > 64 {
+        return Err(std::io::Error::other("random request is too long"));
+    }
+    let mut file = std::fs::File::open("/dev/urandom")?;
+    std::io::Read::read_exact(&mut file, dest)
+}
+
+fn standard_b64(input: &[u8]) -> Option<String> {
+    if input.len() > 64 {
+        return None;
+    }
+    Some(base64::engine::general_purpose::STANDARD.encode(input))
+}
+
+fn websocket_accept(key: &str) -> Option<String> {
+    const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    if key.len() > 128 {
+        return None;
+    }
+    let mut joined = String::with_capacity(key.len().saturating_add(GUID.len()));
+    joined.push_str(key);
+    joined.push_str(GUID);
+    let digest = sha1::Sha1::digest(joined.as_bytes());
+    standard_b64(digest.as_ref())
 }

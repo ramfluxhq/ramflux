@@ -3470,6 +3470,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 name = "ramflux-agent-host"
 version = "0.2.5"
 dependencies = [
+ "base64",
  "bytes",
  "clap",
  "ed25519-dalek",
@@ -3487,6 +3488,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha1",
  "tempfile",
  "thiserror 2.0.21",
  "time",
