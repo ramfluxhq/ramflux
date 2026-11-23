@@ -35,7 +35,8 @@ pub enum LiveBody {
     Typing,
     /// Live assistant text. Not the authoritative final.
     Delta(String),
-    /// One tool phase. `denied` and `expired` never invent `started`.
+    /// One tool phase. A token outside the known set is kept so the surface can
+    /// render it as neutral activity. `denied` and `expired` never invent `started`.
     Tool { tool: String, phase: String, cause: Option<String> },
     /// The daemon dropped earlier frames for this run.
     Gap,
@@ -99,13 +100,7 @@ fn typing_body(value: &Value) -> Option<LiveBody> {
 }
 
 fn tool_body(value: &Value, child_run_id: Option<&str>) -> Option<LiveBody> {
-    let phase = text(value, "phase")?;
-    if !matches!(
-        phase.as_str(),
-        "started" | "succeeded" | "failed" | "denied" | "cancelled" | "awaiting_approval"
-    ) {
-        return None;
-    }
+    let phase = text(value, "phase").filter(|phase| phase_token(phase))?;
     let tool = text(value, "tool").unwrap_or_default();
     if tool.len() > 128 || tool.chars().any(char::is_control) {
         return None;
@@ -115,6 +110,15 @@ fn tool_body(value: &Value, child_run_id: Option<&str>) -> Option<LiveBody> {
         cause = Some("no_resolver".to_owned());
     }
     Some(LiveBody::Tool { tool, phase, cause })
+}
+
+/// A phase token the surface can show. Unknown names stay; they render as neutral activity.
+fn phase_token(phase: &str) -> bool {
+    !phase.is_empty()
+        && phase.len() <= 64
+        && phase
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 fn text(value: &Value, key: &str) -> Option<String> {

@@ -100,9 +100,7 @@ fn approval_body(copy: &ApprovalCopy) -> Option<Value> {
     if copy.status != "pending" && copy.status != "decided" {
         return None;
     }
-    if copy.status == "decided"
-        && !matches!(copy.decision.as_deref(), Some("approved" | "denied" | "expired"))
-    {
+    if copy.status == "decided" && !copy.decision.as_deref().is_some_and(decision_token) {
         return None;
     }
     let mut body = json!({
@@ -212,6 +210,11 @@ fn expiry(value: &str) -> String {
             byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':' | b'T' | b'Z' | b'+' | b'.')
         });
     if value.is_empty() || legal { value.to_owned() } else { String::new() }
+}
+
+/// Any decision id is stored. Only the exact token `approved` continues tools.
+fn decision_token(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
 }
 
 fn path_id(value: &str) -> bool {

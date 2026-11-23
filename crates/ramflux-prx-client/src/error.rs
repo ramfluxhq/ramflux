@@ -133,6 +133,9 @@ pub enum ApiCode {
     ApprovalUnknown,
     /// `410 approval_expired`: the approval wait ended. The call never started.
     ApprovalExpired,
+    /// `400 model_capabilities_unknown`: the model is outside the catalog and is
+    /// not declared. Nothing was written.
+    ModelCapabilitiesUnknown,
     Unknown(String),
 }
 
@@ -174,6 +177,7 @@ impl ApiCode {
             "approval_run_mismatch" => Self::ApprovalRunMismatch,
             "approval_unknown" => Self::ApprovalUnknown,
             "approval_expired" => Self::ApprovalExpired,
+            "model_capabilities_unknown" => Self::ModelCapabilitiesUnknown,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -442,6 +446,7 @@ mod tests {
             ("purge_pending", ApiCode::PurgePending),
             ("idempotency_key_required", ApiCode::IdempotencyKeyRequired),
             ("snapshot_expired", ApiCode::SnapshotExpired),
+            ("model_capabilities_unknown", ApiCode::ModelCapabilitiesUnknown),
         ];
         for (wire, expected) in cases {
             let body = format!(r#"{{"error":{{"code":"{wire}","message":"m"}}}}"#);
