@@ -117,6 +117,7 @@ async fn case() -> Case {
         limits(),
         Arc::new(Connector { sessions, frame: Duration::from_secs(600) }),
         None,
+        None,
     );
     handle.require_live(Duration::from_secs(600)).await?;
     let mut first = handle.subscribe([FrameKind::Deliver]);
