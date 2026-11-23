@@ -9,7 +9,7 @@
 
 use crate::autonomy::Autonomy;
 use crate::capabilities::{
-    AGENT_CRUD_V1, AGENT_LIMITS_V1, AGENT_MAIN_READBACK_V1, RUN_APPROVALS_V1, Capabilities, require,
+    AGENT_CRUD_V1, AGENT_LIMITS_V1, AGENT_MAIN_READBACK_V1, Capabilities, RUN_APPROVALS_V1, require,
 };
 use crate::client::PrxClient;
 use crate::error::{ApiCode, PrxError, decode_ok, local_refusal, present, protocol};
@@ -714,10 +714,7 @@ mod tests {
             "a set bound sends both fields"
         );
         let both_unset = AgentConfig { limits: Some(AgentLimits::default()), ..config.clone() };
-        assert!(
-            both_unset.to_body(true).get("limits").is_none(),
-            "both-unset limits are omitted"
-        );
+        assert!(both_unset.to_body(true).get("limits").is_none(), "both-unset limits are omitted");
         let empty =
             AgentConfig { prompt: Some(String::new()), tools: Tools::List(Vec::new()), ..config };
         assert_eq!(

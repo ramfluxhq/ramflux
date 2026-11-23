@@ -158,7 +158,9 @@ fn purge_anchor(call: &AgentCall) -> Option<String> {
 
 fn mutation_confirmed(call: &AgentCall) -> bool {
     match call {
-        AgentCall::Delete(mutation) | AgentCall::Retire(mutation) => mutation.confirmed == Some(true),
+        AgentCall::Delete(mutation) | AgentCall::Retire(mutation) => {
+            mutation.confirmed == Some(true)
+        }
         _ => false,
     }
 }
@@ -173,8 +175,13 @@ async fn prove_node_retirement(
 ) -> Result<(), SdkError> {
     match call {
         AgentCall::Delete(mutation) => {
-            super::agent_retire::prove_agent_delete(supervisor, actor, human, &mutation.agent_anchor)
-                .await
+            super::agent_retire::prove_agent_delete(
+                supervisor,
+                actor,
+                human,
+                &mutation.agent_anchor,
+            )
+            .await
         }
         AgentCall::Retire(mutation) => {
             super::agent_retire::prove_primary_retire(
