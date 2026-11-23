@@ -4,7 +4,7 @@
 //! Cancellable counterpart of the explicit HTTP directory and federation transport.
 
 use crate::SdkError;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use std::{sync::OnceLock, time::Duration};
 
 pub(crate) async fn get<R: DeserializeOwned>(
@@ -13,14 +13,6 @@ pub(crate) async fn get<R: DeserializeOwned>(
     budget: Duration,
 ) -> Result<R, SdkError> {
     request(base, path, None, budget).await
-}
-pub(crate) async fn post<T: Serialize, R: DeserializeOwned>(
-    base: &str,
-    path: &str,
-    value: &T,
-    budget: Duration,
-) -> Result<R, SdkError> {
-    request(base, path, Some(serde_json::to_vec(value)?), budget).await
 }
 async fn request<R: DeserializeOwned>(
     base: &str,
@@ -50,17 +42,7 @@ async fn request<R: DeserializeOwned>(
             .send()
             .await
             .map_err(http_error)?;
-        let status = response.status();
-        if response.content_length().is_none() {
-            return Err(SdkError::LocalBus("SDK HTTP response missing Content-Length".into()));
-        }
-        let body = response.bytes().await.map_err(http_error)?;
-        if status != reqwest::StatusCode::OK {
-            return Err(SdkError::LocalBus(format!(
-                "SDK HTTP request failed: {status}: {}",
-                String::from_utf8_lossy(&body)
-            )));
-        }
+        let body = read_bounded_body(response).await?;
         Ok(serde_json::from_slice(&body)?)
     })
     .await
@@ -73,6 +55,38 @@ async fn request<R: DeserializeOwned>(
 }
 fn http_error(error: reqwest::Error) -> SdkError {
     SdkError::LocalBus(error.without_url().to_string())
+}
+
+/// Directory and prekey bodies. Declared length and each chunk are refused
+/// before the buffer grows past this cap, including a non-200 body.
+pub(crate) const DIRECTORY_BODY_LIMIT: usize = 1024 * 1024;
+
+async fn read_bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, SdkError> {
+    let status = response.status();
+    let declared = response
+        .content_length()
+        .ok_or_else(|| SdkError::LocalBus("SDK HTTP response missing Content-Length".into()))?;
+    if declared > DIRECTORY_BODY_LIMIT as u64 {
+        return Err(body_limit());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(http_error)? {
+        if body.len().saturating_add(chunk.len()) > DIRECTORY_BODY_LIMIT {
+            return Err(body_limit());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if status != reqwest::StatusCode::OK {
+        return Err(SdkError::Transport(ramflux_transport::TransportError::HttpStatus {
+            status: status.as_u16(),
+            body: String::new(),
+        }));
+    }
+    Ok(body)
+}
+
+fn body_limit() -> SdkError {
+    SdkError::LocalBus("SDK HTTP response exceeds size limit".into())
 }
 
 /// Trust policy for directory fetches and the prekey probe.

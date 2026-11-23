@@ -24,6 +24,17 @@ fn submission_now() -> u64 {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) struct SubmitIngress<'a> {
+    pub(crate) origin: ramflux_node_core::RouterEnvelopeOrigin,
+    pub(crate) verified_source_node_id: Option<&'a str>,
+}
+
+pub(crate) struct OwnedSubmitIngress {
+    pub(crate) origin: ramflux_node_core::RouterEnvelopeOrigin,
+    pub(crate) verified_source_node_id: Option<String>,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct AsyncForwardContext<'a> {
     pub(crate) client: Option<&'a crate::router_runtime::LocalFederationForwardClient>,
     pub(crate) semaphore: &'a std::sync::Arc<tokio::sync::Semaphore>,
@@ -42,7 +53,29 @@ pub(crate) fn submit_envelope(
     if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
         return Ok(crate::durable_mode::rejected_security(&envelope));
     }
-    submit_envelope_mesh(state, store, forward, envelope, total_started, origin)
+    submit_envelope_with_source(
+        state,
+        store,
+        forward,
+        envelope,
+        total_started,
+        SubmitIngress { origin, verified_source_node_id: None },
+    )
+}
+
+#[cfg(any(test, feature = "itest-http"))]
+pub(crate) fn submit_envelope_with_source(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    forward: AsyncForwardContext<'_>,
+    envelope: ramflux_protocol::Envelope,
+    total_started: Instant,
+    ingress: SubmitIngress<'_>,
+) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+        return Ok(crate::durable_mode::rejected_security(&envelope));
+    }
+    submit_envelope_mesh_with_source(state, store, forward, envelope, total_started, ingress)
         .map(|response| response.delivery)
 }
 pub(crate) fn submit_envelope_mesh(
@@ -53,15 +86,41 @@ pub(crate) fn submit_envelope_mesh(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+    submit_envelope_mesh_with_source(
+        state,
+        store,
+        forward,
+        envelope,
+        total_started,
+        SubmitIngress { origin, verified_source_node_id: None },
+    )
+}
+
+pub(crate) fn submit_envelope_mesh_with_source(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    forward: AsyncForwardContext<'_>,
+    envelope: ramflux_protocol::Envelope,
+    total_started: Instant,
+    ingress: SubmitIngress<'_>,
+) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
     if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
         return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
     }
     ramflux_node_core::publication::capture(|| {
-        submit_envelope_mesh_inner(state, store, forward, envelope, total_started, origin)
+        submit_envelope_mesh_inner_with_source(
+            state,
+            store,
+            forward,
+            envelope,
+            total_started,
+            ingress,
+        )
     })?
     .published_blocking()?
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn submit_envelope_mesh_inner(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
@@ -70,12 +129,30 @@ pub(crate) fn submit_envelope_mesh_inner(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+    submit_envelope_mesh_inner_with_source(
+        state,
+        store,
+        forward,
+        envelope,
+        total_started,
+        SubmitIngress { origin, verified_source_node_id: None },
+    )
+}
+
+fn submit_envelope_mesh_inner_with_source(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    forward: AsyncForwardContext<'_>,
+    envelope: ramflux_protocol::Envelope,
+    total_started: Instant,
+    ingress: SubmitIngress<'_>,
+) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
     if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
         return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
     }
     let target = envelope.target_delivery_id.clone();
     let result =
-        (|| match prepare_submission(state, store, forward, envelope, total_started, origin)? {
+        (|| match prepare_submission(state, store, forward, envelope, total_started, ingress)? {
             PreparedSubmit::Complete(response) => Ok(*response),
             PreparedSubmit::Waiting(waiter) => {
                 let runtime = tokio::runtime::Builder::new_current_thread().build()?;
@@ -206,17 +283,17 @@ fn prepare_submission(
     forward: AsyncForwardContext<'_>,
     mut envelope: ramflux_protocol::Envelope,
     total_started: Instant,
-    origin: ramflux_node_core::RouterEnvelopeOrigin,
+    ingress: SubmitIngress<'_>,
 ) -> anyhow::Result<PreparedSubmit> {
     if let Some(done) = early_submit_refusal(state, store, &envelope)? {
         return Ok(done);
     }
     record_decoded(&envelope);
-    let (source, mut source_lease) = match authenticate_submission(state, store, &envelope, origin)?
-    {
-        SourceAdmission::Admitted(source, lease) => (source, lease),
-        SourceAdmission::Refused(response) => return Ok(complete_response(*response)),
-    };
+    let (source, mut source_lease) =
+        match authenticate_submission(state, store, &mut envelope, ingress)? {
+            SourceAdmission::Admitted(source, lease) => (source, lease),
+            SourceAdmission::Refused(response) => return Ok(complete_response(*response)),
+        };
     let submission = match store.acquire_submission(&envelope.target_delivery_id) {
         Ok(mut lease) => {
             if let Some(source) = source_lease.take() {
@@ -248,18 +325,23 @@ fn prepare_submission(
     }
     state.refresh_registered_envelope_authority(&mut envelope)?;
     let now_unix_seconds = i64::try_from(submission_now()).unwrap_or(i64::MAX);
-    let replay =
-        match replay_window_or_duplicate(store, &source, &envelope, origin, now_unix_seconds)? {
-            Ok(replay) => replay,
-            Err(done) => return Ok(done),
-        };
+    let replay = match replay_window_or_duplicate(
+        store,
+        &source,
+        &envelope,
+        ingress.origin,
+        now_unix_seconds,
+    )? {
+        Ok(replay) => replay,
+        Err(done) => return Ok(done),
+    };
     let dispatch_started = Instant::now();
     let outcome = if forward.client.is_some() {
         let preparation = state.prepare_envelope_with_home_node_forward_at(
             &source,
             envelope,
             now_unix_seconds,
-            origin,
+            ingress.origin,
             forward.timeout.as_secs().max(1),
         );
         complete_sync_forward(state, forward, preparation)?
@@ -302,22 +384,34 @@ enum SourceAdmission {
 fn authenticate_submission(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
-    envelope: &ramflux_protocol::Envelope,
-    origin: ramflux_node_core::RouterEnvelopeOrigin,
+    envelope: &mut ramflux_protocol::Envelope,
+    ingress: SubmitIngress<'_>,
 ) -> anyhow::Result<SourceAdmission> {
-    let source = match state.authenticated_envelope_source_from(envelope, Some(store), origin) {
+    let origin = ingress.origin;
+    if origin != ramflux_node_core::RouterEnvelopeOrigin::Federation {
+        envelope.ext.ext.remove(ramflux_protocol::VERIFIED_SOURCE_HOME);
+    }
+    let source = match state.authenticated_envelope_source_with_peer(
+        envelope,
+        Some(store),
+        origin,
+        ingress.verified_source_node_id,
+    ) {
         Ok(source) => source,
         Err(ramflux_node_core::NodeCoreError::Capacity { .. }) => {
-            return Ok(SourceAdmission::Refused(Box::new(
-                ramflux_node_core::EnvelopeSubmitResponse {
-                    migration_refusal: None,
-                    outcome: "rejected_capacity".into(),
-                    target_delivery_id: envelope.target_delivery_id.clone(),
-                    inbox_seq: None,
-                    cursor: None,
-                    nack: None,
-                },
-            )));
+            return Ok(SourceAdmission::Refused(Box::new(refused_outcome(
+                &envelope.target_delivery_id,
+                "rejected_capacity",
+            ))));
+        }
+        Err(error)
+            if origin == ramflux_node_core::RouterEnvelopeOrigin::Federation
+                && federation_authority_refusal(&error) =>
+        {
+            return Ok(SourceAdmission::Refused(Box::new(refused_outcome(
+                &envelope.target_delivery_id,
+                "rejected_authority",
+            ))));
         }
         Err(error) => return Err(error.into()),
     };
@@ -343,6 +437,35 @@ fn authenticate_submission(
         None
     };
     Ok(SourceAdmission::Admitted(source, source_lease))
+}
+
+fn refused_outcome(
+    target_delivery_id: &str,
+    outcome: &str,
+) -> ramflux_node_core::EnvelopeSubmitResponse {
+    ramflux_node_core::EnvelopeSubmitResponse {
+        migration_refusal: None,
+        outcome: outcome.to_owned(),
+        target_delivery_id: target_delivery_id.to_owned(),
+        inbox_seq: None,
+        cursor: None,
+        nack: None,
+    }
+}
+
+fn federation_authority_refusal(error: &ramflux_node_core::NodeCoreError) -> bool {
+    match error {
+        ramflux_node_core::NodeCoreError::SourceAuthorityRefused { .. }
+        | ramflux_node_core::NodeCoreError::CustodyConflict { .. }
+        | ramflux_node_core::NodeCoreError::Unauthorized(_) => true,
+        ramflux_node_core::NodeCoreError::ItestHttp(message) => {
+            message.contains("envelope root authority mismatch")
+                || message.contains("foreign custody")
+                || message.contains("native forwarded")
+                || message.contains("stale native")
+        }
+        _ => false,
+    }
 }
 
 fn complete_sync_forward(
@@ -414,6 +537,25 @@ pub(crate) async fn submit_envelope_mesh_async(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+    submit_envelope_mesh_async_with_source(
+        state,
+        store,
+        forward,
+        envelope,
+        total_started,
+        OwnedSubmitIngress { origin, verified_source_node_id: None },
+    )
+    .await
+}
+
+pub(crate) async fn submit_envelope_mesh_async_with_source(
+    state: &std::sync::Arc<ramflux_node_core::RouterCore>,
+    store: &std::sync::Arc<ramflux_node_core::RouterRedbStore>,
+    forward: AsyncForwardContext<'_>,
+    envelope: ramflux_protocol::Envelope,
+    total_started: Instant,
+    ingress: OwnedSubmitIngress,
+) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
     if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
         return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
     }
@@ -421,6 +563,7 @@ pub(crate) async fn submit_envelope_mesh_async(
     let publication = store.publication_core()?;
     let state = std::sync::Arc::clone(state);
     let store = std::sync::Arc::clone(store);
+    let OwnedSubmitIngress { origin, verified_source_node_id } = ingress;
     let client = forward.client.cloned();
     let semaphore = std::sync::Arc::clone(forward.semaphore);
     let timeout = forward.timeout;
@@ -436,7 +579,10 @@ pub(crate) async fn submit_envelope_mesh_async(
                 AsyncForwardContext { client: client.as_ref(), semaphore: &semaphore, timeout },
                 envelope,
                 total_started,
-                origin,
+                SubmitIngress {
+                    origin,
+                    verified_source_node_id: verified_source_node_id.as_deref(),
+                },
             )
         })
     })
@@ -1137,4 +1283,10 @@ fn submission_response(
     ramflux_node_core::record_router_submit_response_us(elapsed_us(response_started));
     ramflux_node_core::record_router_submit_total_us(elapsed_us(total_started));
     response
+}
+
+/// A cross-node submit is accepted only from the sender's own gateway.
+#[must_use]
+pub(crate) fn gateway_may_forward_submit(peer_service_id: &str) -> bool {
+    peer_service_id == "ramflux-gateway"
 }

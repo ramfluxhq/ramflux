@@ -165,7 +165,6 @@ fn bus_reason_code(error: &SdkError) -> Option<String> {
         SdkError::CustodyConfirmRejected(reason) => reason.token().to_owned(),
         SdkError::CustodyExpired => "deadline".into(),
         SdkError::ContactConfirmationRequired(_) => "root_replacement_confirmation_required".into(),
-        SdkError::ContactHomeNodeUnsupported => "invalid_card".into(),
         SdkError::PairingCode(code) => {
             let token = pairing_https_token(code)?;
             token.to_owned()

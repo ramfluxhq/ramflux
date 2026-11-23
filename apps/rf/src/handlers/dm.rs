@@ -26,7 +26,6 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
             super::attachment::send_dm(&mut bus, send).await
         }
         DmAction::Send(send) => {
-            let federation = rf_federation_route(&send)?;
             let content = crate::utils::media_content(&send.body, &send.media_ref)?;
             let request = LocalBusMessageSubmitRequest {
                 content: Some(content),
@@ -45,7 +44,7 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
                     .ttl
                     .min(u32::try_from(ramflux_protocol::REPLAY_WINDOW_SECONDS).unwrap_or(300)),
                 attachments: Vec::new(),
-                federation,
+                federation: None,
             };
             print_json(
                 &bus.request(
@@ -254,27 +253,6 @@ fn rf_dm_ack_envelope_id(ack: &DmAck) -> Result<String, RfError> {
                 "dm ack for conversation {conversation} requires --envelope or --message"
             )))
         }
-    }
-}
-
-pub(crate) fn rf_federation_route(
-    send: &DmSend,
-) -> Result<Option<LocalBusFederationRoute>, RfError> {
-    match (&send.federation_url, &send.source_node, &send.target_node, &send.recipient_prekey_url) {
-        (None, None, None, None) => Ok(None),
-        (Some(federation_url), Some(source_node), Some(target_node), recipient_prekey_url) => {
-            Ok(Some(LocalBusFederationRoute {
-                federation_url: federation_url.clone(),
-                source_node_id: source_node.clone(),
-                target_node_id: target_node.clone(),
-                required_capability: send.federation_capability.clone(),
-                admin_token: send.federation_admin_token.clone(),
-                recipient_prekey_url: recipient_prekey_url.clone(),
-            }))
-        }
-        _ => Err(RfError::Message(
-            "federated dm send requires --federation-url, --source-node, --target-node, and optional --recipient-prekey-url only with that route".to_owned(),
-        )),
     }
 }
 

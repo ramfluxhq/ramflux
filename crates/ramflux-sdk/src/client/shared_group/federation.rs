@@ -41,21 +41,10 @@ impl RamfluxClient {
         group: &str,
         root: &str,
     ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
-        let manifest = if let Some(federation) = self.shared_group_federation_route(group, root)? {
-            let url = federation.recipient_prekey_url.ok_or_else(|| {
-                SdkError::LocalBus("federated group route requires recipient_prekey_url".into())
-            })?;
-            let expected = root.to_owned();
-            tokio::task::spawn_blocking(move || {
-                crate::client::contact::fetch_verified_device_manifest_from_url(&url, &expected)
-            })
-            .await
-            .map_err(|error| {
-                SdkError::LocalBus(format!("group manifest worker failed: {error}"))
-            })??
-        } else {
-            crate::client::contact::fetch_verified_device_manifest(gateway, root).await?
-        };
+        let caller =
+            self.shared_group_federation_route(group, root)?.map(|route| route.target_node_id);
+        crate::client::recipient_home::pin_choice(self, root, caller.as_deref())?;
+        let manifest = self.peer_device_manifest(gateway, root).await?;
         self.persist_fetched_identity_directory(&manifest)?;
         Ok(manifest)
     }

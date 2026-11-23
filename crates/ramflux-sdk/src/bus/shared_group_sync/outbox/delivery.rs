@@ -174,17 +174,18 @@ async fn deliver_one(
     };
     let federation = client.shared_group_federation_route(&state.group_id, root)?;
     let route = crate::client::routed::Route::group_control(&state.group_id);
-    let sealed = if let Some(federation) = &federation {
-        client.seal_routed_federated_as(
-            engine,
-            &message,
-            &bytes,
-            federation.recipient_prekey_url.as_deref(),
+    let sealed = crate::client::recipient_home::seal_member(
+        client,
+        engine,
+        crate::client::recipient_home::MemberSeal {
+            message: &message,
+            body: &bytes,
+            commitment: root,
+            federation: federation.as_ref(),
             route,
-        )?
-    } else {
-        client.seal_routed_as(engine, &message, &bytes, route).await?
-    };
+        },
+    )
+    .await?;
     // GroupControl has no Direct report payload; into_parts still carries committed_a0 (None).
     intent.active = Some(StagedEnvelope {
         federation,

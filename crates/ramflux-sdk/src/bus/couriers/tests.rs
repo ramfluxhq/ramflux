@@ -66,7 +66,6 @@ async fn group_and_call_control_bypass_saturated_task_limiter() -> Case {
         let capacity = limiter;
         let _permits = capacity.acquire_many(4).await?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
         let server = tokio::spawn(async move {
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().await?;
@@ -90,8 +89,9 @@ async fn group_and_call_control_bypass_saturated_task_limiter() -> Case {
         let (handle, _io) = fixture().await?;
         let context = handle.test_context();
         let route = crate::LocalBusFederationRoute {
-            federation_url: format!("http://{address}"), source_node_id: "a".into(), target_node_id: "b".into(),
-            required_capability: "group".into(), admin_token: None, recipient_prekey_url: None,
+            source_node_id: "a".into(),
+            target_node_id: "b".into(),
+            required_capability: "group".into(),
         };
         let envelope = entry("bypass", 1)?.envelope;
         assert!(matches!(crate::bus::couriers::federation::submit_until(&context, envelope.clone(), Some(route.clone()), context.call_deadline(), false).await, Err(crate::SdkError::TaskForwardWorkerCapacity)));

@@ -19,6 +19,7 @@ pub(crate) struct TokioRouterRuntime {
     store: Arc<ramflux_node_core::RouterRedbStore>,
     node_id: String,
     home_node_forward: Option<LocalFederationForwardClient>,
+    cross_node_forward: std::sync::OnceLock<crate::cross_node_forward::Client>,
     forward_semaphore: Arc<tokio::sync::Semaphore>,
     forward_timeout: Duration,
     custody: std::sync::OnceLock<Arc<ramflux_node_core::CustodyService>>,
@@ -79,6 +80,7 @@ impl TokioRouterRuntime {
             store,
             node_id,
             home_node_forward,
+            cross_node_forward: std::sync::OnceLock::new(),
             forward_semaphore: Arc::new(tokio::sync::Semaphore::new(concurrency.max(1))),
             forward_timeout,
             custody: std::sync::OnceLock::new(),
@@ -152,6 +154,34 @@ impl RouterHandle {
         match self {
             Self::Tokio(runtime) => &runtime.node_id,
         }
+    }
+
+    pub(crate) fn install_cross_node_forward(
+        &self,
+        client: crate::cross_node_forward::Client,
+    ) -> anyhow::Result<()> {
+        let Self::Tokio(runtime) = self;
+        runtime
+            .cross_node_forward
+            .set(client)
+            .map_err(|_| anyhow::anyhow!("forward client already installed"))
+    }
+
+    pub(crate) fn forward_cross_node(
+        &self,
+        request: &ramflux_node_core::HomeSubmitForward,
+    ) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError>
+    {
+        let Self::Tokio(runtime) = self;
+        runtime
+            .cross_node_forward
+            .get()
+            .ok_or_else(|| {
+                ramflux_node_core::NodeCoreError::ItestHttp(
+                    "missing federation mesh endpoint".into(),
+                )
+            })?
+            .forward(request)
     }
 
     pub(crate) fn install_gateway_client_capabilities(&self, configured: &[String]) {
@@ -273,6 +303,33 @@ impl RouterHandle {
         }
     }
 
+    #[cfg(feature = "itest-http")]
+    pub(crate) fn submit_envelope_from_source(
+        &self,
+        envelope: ramflux_protocol::Envelope,
+        total_started: Instant,
+        origin: ramflux_node_core::RouterEnvelopeOrigin,
+        verified_source_node_id: Option<&str>,
+    ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+        if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+            return Ok(crate::durable_mode::rejected_security(&envelope));
+        }
+        match self {
+            Self::Tokio(runtime) => crate::router_engine::submit_envelope_with_source(
+                runtime.state.as_ref(),
+                runtime.store.as_ref(),
+                crate::router_engine::AsyncForwardContext {
+                    client: runtime.home_node_forward.as_ref(),
+                    semaphore: &runtime.forward_semaphore,
+                    timeout: runtime.forward_timeout,
+                },
+                envelope,
+                total_started,
+                crate::router_engine::SubmitIngress { origin, verified_source_node_id },
+            ),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn submit_envelope_async_from(
         &self,
@@ -331,6 +388,36 @@ impl RouterHandle {
         }
     }
 
+    pub(crate) fn submit_envelope_mesh_from_source(
+        &self,
+        envelope: ramflux_protocol::Envelope,
+        total_started: Instant,
+        origin: ramflux_node_core::RouterEnvelopeOrigin,
+        verified_source_node_id: Option<&str>,
+    ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+        #[cfg(test)]
+        self.count_submit_call();
+        if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+            return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
+        }
+        #[cfg(test)]
+        self.count_dispatch();
+        match self {
+            Self::Tokio(runtime) => crate::router_engine::submit_envelope_mesh_with_source(
+                runtime.state.as_ref(),
+                runtime.store.as_ref(),
+                crate::router_engine::AsyncForwardContext {
+                    client: runtime.home_node_forward.as_ref(),
+                    semaphore: &runtime.forward_semaphore,
+                    timeout: runtime.forward_timeout,
+                },
+                envelope,
+                total_started,
+                crate::router_engine::SubmitIngress { origin, verified_source_node_id },
+            ),
+        }
+    }
+
     pub(crate) async fn submit_envelope_mesh_async_from(
         &self,
         envelope: ramflux_protocol::Envelope,
@@ -357,6 +444,39 @@ impl RouterHandle {
                     envelope,
                     total_started,
                     origin,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(crate) async fn submit_envelope_mesh_async_from_source(
+        &self,
+        envelope: ramflux_protocol::Envelope,
+        total_started: Instant,
+        origin: ramflux_node_core::RouterEnvelopeOrigin,
+        verified_source_node_id: Option<String>,
+    ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+        #[cfg(test)]
+        self.count_submit_call();
+        if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+            return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
+        }
+        #[cfg(test)]
+        self.count_dispatch();
+        match self {
+            Self::Tokio(runtime) => {
+                crate::router_engine::submit_envelope_mesh_async_with_source(
+                    &runtime.state,
+                    &runtime.store,
+                    crate::router_engine::AsyncForwardContext {
+                        client: runtime.home_node_forward.as_ref(),
+                        semaphore: &runtime.forward_semaphore,
+                        timeout: runtime.forward_timeout,
+                    },
+                    envelope,
+                    total_started,
+                    crate::router_engine::OwnedSubmitIngress { origin, verified_source_node_id },
                 )
                 .await
             }

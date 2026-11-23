@@ -39,3 +39,11 @@ crates/ramflux-transport/src/quic_gateway.rs | decode_quic_gateway_response | 1 
 crates/ramflux-transport/src/quic_gateway.rs | read_gateway_session_json | 1 | B | strict=parse_i_json; admission=B ingress boundary
 crates/ramflux-transport/src/quic_gateway.rs | read_json_frame | 1 | B | strict=parse_i_json; admission=B ingress boundary
 crates/ramflux-transport/src/quic_gateway.rs | read_quic_json_frame | 1 | B | strict=parse_i_json; admission=B ingress boundary
+crates/ramflux-transport/src/mesh_quic/admitted.rs | push | 1 | E | excluded=bounded routing-header string only; no envelope body read
+crates/ramflux-transport/src/mesh_quic/admitted.rs | push | 2 | E | excluded=bounded routing metadata only; body replaced by null before route admission
+crates/ramflux-transport/src/mesh_quic/admitted.rs | decode | 1 | B | strict=parse_i_json; admission=shared federation QUIC ingress after pre-body route policy
+crates/ramflux-transport/src/mesh_quic/admitted.rs | accept_admitted_request | 1 | E | excluded=raw body size observation after strict shared decode; no authority admitted
+crates/ramflux-transport/src/compio_mesh/admitted.rs | accept_admitted_request | 1 | E | excluded=raw body size observation after strict shared decode; no authority admitted
+crates/ramflux-transport/src/mesh_http.rs | post_signed_federation_envelope | 1 | B | strict=parse_i_json; admission=pinned-server signed federation envelope response
+crates/ramflux-transport/src/mesh_quic.rs | mesh_quic_post_signed_envelope | 1 | E | excluded=response value conversion after transport strict decoding
+crates/ramflux-transport/src/test_node_endpoints.rs | test_node_endpoints | 1 | E | excluded=bounded local fixture socket map outside Envelope/Ack/Nack containment closure

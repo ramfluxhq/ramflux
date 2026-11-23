@@ -52,15 +52,17 @@ pub(super) async fn plan(
                 })?
         } else if account.task_prepared_only {
             return Err(SdkError::TaskManifestWorkerCapacity);
-        } else if let Some(federation) = &route.federation {
-            let manifest = super::task_transport::fetch_federated_manifest(
-                federation
-                    .recipient_prekey_url
-                    .as_deref()
-                    .ok_or_else(|| invalid("task group federated prekey URL missing"))?,
+        } else if let Some(federation) = &route.federation
+            && let Some(base) = crate::client::recipient_home::directory_base(
+                &account.client,
                 commitment,
+                Some(federation.target_node_id.as_str()),
+                true,
             )
-            .await?;
+            .await?
+        {
+            let manifest =
+                super::task_transport::fetch_federated_manifest(&base, commitment).await?;
             account.client.persist_fetched_identity_directory(&manifest)?;
             manifest
                 .devices
