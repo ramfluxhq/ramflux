@@ -547,16 +547,23 @@ impl CustodyService {
             return Err(CustodyRefusal::BindingRefused);
         }
         self.refuse_suspended_session(router, scope.store, &session, &publication, now)?;
-        let _home =
-            if matches!(action, CustodySessionAction::Ack { .. } | CustodySessionAction::Close) {
-                None
-            } else {
-                Some(home_operation(scope, &session.device_ref, &request.nonce, now)?)
-            };
+        let _home = if matches!(
+            action,
+            CustodySessionAction::Ack { .. }
+                | CustodySessionAction::Close
+                | CustodySessionAction::UsernameDirectory { .. }
+        ) {
+            None
+        } else {
+            Some(home_operation(scope, &session.device_ref, &request.nonce, now)?)
+        };
         self.leases().request(session_id, &request.nonce)?;
         // Authenticated submit persistence and retry waits use mailbox ownership;
         // they must not retain the service-wide admission lock.
-        if matches!(action, CustodySessionAction::Submit { .. }) {
+        if matches!(
+            action,
+            CustodySessionAction::Submit { .. } | CustodySessionAction::UsernameDirectory { .. }
+        ) {
             drop(admission);
         }
         self.perform_action(scope, &session, &authority, &source, attempt.action)
@@ -572,6 +579,19 @@ impl CustodyService {
         let Scope { router, store, now, .. } = scope;
         let cert = authority.authorize(&session.device_ref, "message", now).map_err(invalid)?;
         match action {
+            CustodySessionAction::UsernameDirectory { request } => {
+                if session.binding_mode == BindingMode::NoChannelBinding {
+                    return Err(CustodyRefusal::BindingRefused);
+                }
+                self.username
+                    .as_ref()
+                    .ok_or(CustodyRefusal::Unsupported)?
+                    .execute(router, store, source, *request, now)
+                    .map(|response| CustodyServerFrame::UsernameDirectory {
+                        response: Box::new(response),
+                    })
+                    .map_err(persistence)
+            }
             CustodySessionAction::HomeMigration { .. } => Err(CustodyRefusal::Unsupported),
             CustodySessionAction::Lookup { device_ref } => {
                 let p = router

@@ -399,7 +399,7 @@ fn assert_negative_cases(cases: &[Case]) {
 
 #[test]
 fn username_canonical_domains_and_maxima() -> Result<(), Box<dyn std::error::Error>> {
-    assert!(!enabled());
+    assert!(enabled(), "complete username CLI/service path is activated");
     let vectors = corpus()?;
     require_review_coverage(&vectors)?;
     for case in &vectors.valid {

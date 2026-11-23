@@ -141,8 +141,25 @@ crates/ramflux-node-core/src/test_support/notification_authority.rs | post | 2 |
 crates/ramflux-node-core/src/test_support/notification_authority.rs | post | 3 | E | excluded=bounded native test fixture; no external signed envelope admission
 crates/ramflux-node-core/src/test_support/notification_authority.rs | post | 4 | E | excluded=bounded native test fixture; no external signed envelope admission
 crates/ramflux-node-core/src/test_support/notification_authority.rs | post | 5 | E | excluded=bounded native test fixture; no external signed envelope admission
-crates/ramflux-node-core/src/username_directory/checkpoint.rs | append | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/username_directory/checkpoint.rs | read_safe_wall | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/username_directory/checkpoint.rs | release_result_owner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/username_directory/checkpoint.rs | release_result_owner | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-node-core/src/username_directory/mod.rs | read_head | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/transport.rs | decode_reporting_request | 1 | B | strict=parse_i_json; admission=bounded canonical reporting-home request before proof and home-history admission
+crates/ramflux-node-core/src/username_directory/checkpoint_batch.rs | install_projection_results | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/checkpoint_batch.rs | member_batch | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/checkpoint_batch.rs | pair | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/checkpoint_batch.rs | pair | 2 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/checkpoint_batch.rs | prune_batches | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/checkpoint_group.rs | append_group | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/home.rs | reporting_roots | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/home.rs | retry_later_for | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/home.rs | update | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/home.rs | read_root | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/image.rs | detail_count | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/image.rs | held_skeleton | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/image.rs | update_indexes | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/reporting.rs | read | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/reporting.rs | prune | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/schema.rs | read_head | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/home.rs | begin | 1 | E | excluded=closed username intent and due-index metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/home.rs | update | 2 | E | excluded=closed username intent and due-index metadata outside Envelope/Ack/Nack containment closure
