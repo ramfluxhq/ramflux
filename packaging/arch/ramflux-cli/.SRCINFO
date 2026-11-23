@@ -1,0 +1,25 @@
+pkgbase = ramflux-cli
+	pkgdesc = Ramflux command-line client, daemon and terminal interface
+	pkgver = 0.2.5
+	pkgrel = 1
+	url = https://github.com/ramfluxhq/ramflux
+	arch = x86_64
+	arch = aarch64
+	license = BSD-3-Clause
+	license = AGPL-3.0-or-later
+	makedepends = rust
+	makedepends = git
+	makedepends = pkgconf
+	makedepends = perl
+	depends = gcc-libs
+	depends = glibc
+	optdepends = libsecret: Secret Service integration tools
+	optdepends = gnome-keyring: Secret Service provider for device custody
+	optdepends = kwallet: alternative Secret Service provider
+	optdepends = dbus: user session bus for Secret Service
+	source = ramflux-v0.2.5.tar.gz::https://api.github.com/repos/ramfluxhq/ramflux/tarball/refs/tags/v0.2.5
+	source = ramflux-tui-v0.2.5.tar.gz::https://api.github.com/repos/ramfluxhq/ramflux-tui/tarball/refs/tags/v0.2.5
+	sha256sums = d2e1ee4bd2470573a84c249413aec9ccf8d61399e680aa5555b81256fa498bb8
+	sha256sums = 9cc574e4726f94b0430fa4d728ae79c06def314e3f62fd113f94c01e3431744a
+
+pkgname = ramflux-cli

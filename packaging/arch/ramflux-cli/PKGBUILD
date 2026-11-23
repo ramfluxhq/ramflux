@@ -1,0 +1,41 @@
+# Build matching release tags; no system service or user state is installed.
+pkgname=ramflux-cli
+pkgver=0.2.5
+pkgrel=1
+pkgdesc='Ramflux command-line client, daemon and terminal interface'
+arch=('x86_64' 'aarch64')
+url='https://github.com/ramfluxhq/ramflux'
+license=('BSD-3-Clause' 'AGPL-3.0-or-later')
+depends=('gcc-libs' 'glibc')
+makedepends=('rust' 'git' 'pkgconf' 'perl')
+optdepends=('libsecret: Secret Service integration tools'
+            'gnome-keyring: Secret Service provider for device custody'
+            'kwallet: alternative Secret Service provider'
+            'dbus: user session bus for Secret Service')
+source=("ramflux-v${pkgver}.tar.gz::https://api.github.com/repos/ramfluxhq/ramflux/tarball/refs/tags/v${pkgver}"
+        "ramflux-tui-v${pkgver}.tar.gz::https://api.github.com/repos/ramfluxhq/ramflux-tui/tarball/refs/tags/v${pkgver}")
+sha256sums=('d2e1ee4bd2470573a84c249413aec9ccf8d61399e680aa5555b81256fa498bb8'
+            '9cc574e4726f94b0430fa4d728ae79c06def314e3f62fd113f94c01e3431744a')
+_product_commit=ee3d574ce3eb3cb833197fa8612d2135e6828f7e
+_tui_commit=02f2ca4402b7aae67f3b4dd089e3d18aca154a8d
+
+prepare() {
+  mv "ramfluxhq-ramflux-${_product_commit:0:7}" product
+  mv "ramfluxhq-ramflux-tui-${_tui_commit:0:7}" tui
+}
+
+build() {
+  export RAMFLUX_PRODUCTION_BUILD=1
+  unset RAMFLUX_ITEST_BUILD
+  export CARGO_TARGET_DIR="$srcdir/target"
+  RAMFLUX_GIT_SHA="$_product_commit" cargo build --locked --release --manifest-path product/Cargo.toml -p ramflux-rf --bin rf
+  RAMFLUX_GIT_SHA="$_tui_commit" cargo build --locked --release --manifest-path tui/Cargo.toml --bin rf-tui
+}
+
+package() {
+  install -Dm755 "$srcdir/target/release/rf" "$pkgdir/usr/bin/rf"
+  install -Dm755 "$srcdir/target/release/rf-tui" "$pkgdir/usr/bin/rf-tui"
+  install -Dm644 product/LICENSE "$pkgdir/usr/share/licenses/$pkgname/ramflux-LICENSE"
+  install -Dm644 product/NOTICE "$pkgdir/usr/share/licenses/$pkgname/ramflux-NOTICE"
+  install -Dm644 tui/LICENSE "$pkgdir/usr/share/licenses/$pkgname/ramflux-tui-LICENSE"
+}

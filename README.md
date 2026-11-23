@@ -7,6 +7,9 @@ This repository is the BSD-3-Clause Ramflux core. It contains the seven node
 services, the Rust SDK, the reference `rf` CLI, and the shared protocol,
 cryptography, storage, transport, sync, and core libraries.
 
+For Linux CLI/TUI release archives and the Arch/Omarchy package, see
+[Linux installation](docs/install-linux-cli.md).
+
 ## What is in this workspace
 
 - `apps/ramflux-gateway` — client entrypoint for GatewayFrame sessions.
