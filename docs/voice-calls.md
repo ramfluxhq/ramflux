@@ -1,6 +1,6 @@
 # One-to-one voice calls
 
-An attended human account starts a call from an existing direct conversation:
+An account starts a call from an existing direct conversation:
 
 ```sh
 rf call invite --account alice --conversation=thread

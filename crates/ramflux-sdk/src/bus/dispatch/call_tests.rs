@@ -136,35 +136,6 @@ async fn a_media_engine_cannot_reacquire_keys_with_a_restart_flag() -> Result<()
     drop(state);
     Ok(())
 }
-#[tokio::test]
-async fn headless_and_nonhuman_accounts_cannot_mutate_calls_or_obtain_media_keys()
--> Result<(), SdkError> {
-    let (root, mut state, id) = fixture("call-human-only")?;
-    let path = local_bus_account_manifest_path(&root, "alice");
-    let mut manifest = read_local_bus_account_manifest(&path)?;
-    for (mode, kind) in [
-        (LocalBusClientMode::HeadlessAi, None),
-        (LocalBusClientMode::AttendedCli, Some("headless_ai")),
-    ] {
-        manifest.client_mode = mode;
-        manifest.kind = kind.map(str::to_owned);
-        write_local_bus_account_manifest(&root, &manifest)?;
-        for method in
-            ["call.invite", "call.answer", "call.reject", "call.hangup", "call.media.session"]
-        {
-            assert!(
-                matches!(
-                    dispatch(&request(method, &id), &mut state).await,
-                    Err(SdkError::CapabilityDenied(_))
-                ),
-                "{method}"
-            );
-        }
-    }
-    assert_eq!(local_bus_account(&state, "alice")?.client.voice_calls[&id].row.state, "active");
-    drop(state);
-    Ok(())
-}
 #[test]
 fn daemon_restart_ends_unrecoverable_calls_and_retains_a_public_timeline_record()
 -> Result<(), SdkError> {
@@ -270,30 +241,5 @@ fn generated_call_ids_are_full_length_and_never_look_like_cli_flags() -> Result<
             16
         );
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn native_call_mutation_gate_needs_no_legacy_manifest()
--> Result<(), Box<dyn std::error::Error>> {
-    let fixture = crate::client::native_test_support::Fixture::new("native-call-gate").await?;
-    let id = fixture.client.account_db()?.local_account_id.clone();
-    let root = fixture.root.0.clone();
-    assert!(!local_bus_account_manifest_path(&root, &id).exists());
-    let account = LocalBusAccountState::disconnected(
-        fixture.client,
-        fixture.config,
-        fixture.manifest.principal_commitment,
-    );
-    let state = LocalBusDaemonState {
-        account_index: None,
-        nodes: crate::node::NodeStore::default(),
-        config: LocalBusConfig::new(root.join("bus.sock"), &root),
-        accounts: BTreeMap::from([(id.clone(), account)]),
-        active_account_id: None,
-        attended_accounts: BTreeSet::new(),
-        subscribers: BTreeMap::new(),
-    };
-    require_attended_human(&state, &id)?;
     Ok(())
 }
