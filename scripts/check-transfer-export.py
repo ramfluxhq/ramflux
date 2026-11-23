@@ -30,9 +30,13 @@ ADD_COLUMN = re.compile(r'ALTER\s+TABLE\s+"?([a-z_][a-z0-9_]*)"?\s+ADD\s+COLUMN\
 ENSURE_COLUMN = re.compile(r'ensure_column\(\s*[a-z_]+\s*,\s*"([a-z_][a-z0-9_]*)"\s*,\s*"([a-z_][a-z0-9_]*)"')
 KIND_LITERAL = re.compile(r'"([a-z][a-z0-9-]*/[a-z0-9_{}./:-]*)"')
 # `client_record` / `persist_client_record` store `directory/{segment}/{id}` (read_model.rs).
-# The segment is a separate literal, so the kind scan above does not see it.
+# The segment is a separate literal or a `&str` const, so the kind scan above does not see it.
 CLIENT_DIRECTORY = re.compile(
     r'(?:persist_client_record|client_record)\(\s*"([a-z][a-z0-9_-]*)"')
+CLIENT_DIRECTORY_CONST = re.compile(
+    r'(?:persist_client_record|client_record)\(\s*([A-Z][A-Z0-9_]*)\b')
+CONST_SEGMENT = re.compile(
+    r'\bconst\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"([a-z][a-z0-9_-]*)"\s*;')
 CONSTRAINTS = ('PRIMARY', 'UNIQUE', 'FOREIGN', 'CHECK', 'CONSTRAINT')
 
 
@@ -117,10 +121,18 @@ def census():
         for table, column in ADD_COLUMN.findall(text) + ENSURE_COLUMN.findall(text):
             columns.setdefault(table, set()).add(column)
     sdk_texts = [production_text(path) for path in production_files(SDK)]
-    for text in list(texts.values()) + sdk_texts:
+    combined = list(texts.values()) + sdk_texts
+    segments = {}
+    for text in combined:
+        for name, value in CONST_SEGMENT.findall(text):
+            segments.setdefault(name, set()).add(value)
+    for text in combined:
         kinds.update(KIND_LITERAL.findall(text))
         for segment in CLIENT_DIRECTORY.findall(text):
             kinds.add('directory/%s/' % segment)
+        for name in CLIENT_DIRECTORY_CONST.findall(text):
+            for segment in segments.get(name, ()):
+                kinds.add('directory/%s/' % segment)
     return tables, columns, kinds, texts
 
 

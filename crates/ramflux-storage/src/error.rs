@@ -124,11 +124,7 @@ pub enum StorageError {
 
 impl From<rusqlite::Error> for StorageError {
     fn from(error: rusqlite::Error) -> Self {
-        if crate::writer_budget::is_pause(&error) {
-            Self::WriterPause
-        } else {
-            Self::Sqlite(error)
-        }
+        if crate::writer_budget::is_pause(&error) { Self::WriterPause } else { Self::Sqlite(error) }
     }
 }
 

@@ -4,8 +4,8 @@
 //! Typed body declarations (A1). A carried JSON body leaves as the canonical re-serialization
 //! of its declared type, never as the original bytes. B runs the same code on what it receives.
 //! `MessageMetadata` and `EventIdentity` refuse any non-null field the type drops. Directory
-//! identity and conversation project the declared subset and drop every other field; a wrong
-//! type or a missing required field still refuses the export.
+//! identity, conversation and the attachment authority pin project the declared subset and
+//! drop every other field; a wrong type or a missing required field still refuses the export.
 use crate::StorageError;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -28,6 +28,8 @@ pub(crate) enum ActorCodec {
     DirectoryIdentity,
     /// `directory/conversation/`: the fields a directory list needs, and nothing else.
     DirectoryConversation,
+    /// `directory/config/`: the large-attachment authority pin, and nothing else.
+    DirectoryConfig,
 }
 
 impl BodyCodec {
@@ -42,7 +44,10 @@ impl BodyCodec {
 impl ActorCodec {
     pub(crate) const fn version(self) -> u32 {
         match self {
-            Self::EventIdentity | Self::DirectoryIdentity | Self::DirectoryConversation => 1,
+            Self::EventIdentity
+            | Self::DirectoryIdentity
+            | Self::DirectoryConversation
+            | Self::DirectoryConfig => 1,
         }
     }
 
@@ -52,6 +57,7 @@ impl ActorCodec {
         match self {
             Self::DirectoryIdentity => Some("directory/identity/"),
             Self::DirectoryConversation => Some("directory/conversation/"),
+            Self::DirectoryConfig => Some("directory/config/"),
             Self::EventIdentity => None,
         }
     }
@@ -108,6 +114,7 @@ pub(crate) fn canonical(
         (BodyCodec::ActorNamespace, Some(ActorCodec::DirectoryConversation)) => {
             directory_conversation(bytes)
         }
+        (BodyCodec::ActorNamespace, Some(ActorCodec::DirectoryConfig)) => directory_config(bytes),
         _ => Err(undeclared()),
     }
 }
@@ -165,6 +172,40 @@ fn req_string(map: &serde_json::Map<String, Value>, key: &str) -> Result<String,
     match opt_string(map, key)? {
         Some(value) if !value.is_empty() => Ok(value),
         _ => Err(undeclared()),
+    }
+}
+
+fn req_bool(map: &serde_json::Map<String, Value>, key: &str) -> Result<bool, StorageError> {
+    match map.get(key) {
+        Some(Value::Bool(value)) => Ok(*value),
+        _ => Err(undeclared()),
+    }
+}
+
+fn req_u64(map: &serde_json::Map<String, Value>, key: &str) -> Result<u64, StorageError> {
+    match map.get(key) {
+        Some(Value::Number(number)) => number.as_u64().ok_or_else(undeclared),
+        _ => Err(undeclared()),
+    }
+}
+
+/// Any JSON string, including empty. A missing field or a non-string refuses.
+fn any_string(map: &serde_json::Map<String, Value>, key: &str) -> Result<String, StorageError> {
+    match map.get(key) {
+        Some(Value::String(value)) => Ok(value.clone()),
+        _ => Err(undeclared()),
+    }
+}
+
+/// Exactly 64 hex characters of a 32-byte public key. Longer blobs are refused.
+/// The canonical form is lowercase so the importer's hex decoder accepts it.
+fn req_public_hex(map: &serde_json::Map<String, Value>, key: &str) -> Result<String, StorageError> {
+    let text = any_string(map, key)?;
+    let bytes = text.as_bytes();
+    if bytes.len() == 64 && bytes.iter().all(u8::is_ascii_hexdigit) {
+        Ok(text.to_ascii_lowercase())
+    } else {
+        Err(undeclared())
     }
 }
 
@@ -259,6 +300,30 @@ fn directory_conversation(bytes: &[u8]) -> Result<Vec<u8>, StorageError> {
         title: opt_string(&map, "title")?,
         participants: opt_strings(&map, "participants")?,
         participant_roots: opt_strings(&map, "participant_roots")?,
+    };
+    Ok(serde_json::to_vec(&body)?)
+}
+
+/// Large-attachment authority pin. The key is the node's signing public key, not a
+/// device or vault secret. Extra fields stay on A. A wrong type refuses the export.
+#[derive(serde::Serialize)]
+struct DirectoryConfig {
+    enabled: bool,
+    source: String,
+    authority_generation: u64,
+    authority_public_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    home_node_id: Option<String>,
+}
+
+fn directory_config(bytes: &[u8]) -> Result<Vec<u8>, StorageError> {
+    let map = json_object(bytes)?;
+    let body = DirectoryConfig {
+        enabled: req_bool(&map, "enabled")?,
+        source: any_string(&map, "source")?,
+        authority_generation: req_u64(&map, "authority_generation")?,
+        authority_public_key: req_public_hex(&map, "authority_public_key")?,
+        home_node_id: opt_string(&map, "home_node_id")?,
     };
     Ok(serde_json::to_vec(&body)?)
 }
