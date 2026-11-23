@@ -180,6 +180,44 @@ async fn conversation_removal_cancels_the_job() -> TestResult {
 }
 
 #[tokio::test]
+async fn ack_without_urls_polls_by_job_id_and_cancels_the_run() -> TestResult {
+    let server = FakePrx::start(vec![
+        step(
+            hyper::Method::POST,
+            "/api/sessions",
+            StatusCode::CREATED,
+            json!({"session_id":"session-1"}),
+        ),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/session-1/message?mode=async",
+            StatusCode::ACCEPTED,
+            json!({"job_id":"job-1","run_id":"run-job-1"}),
+        ),
+        step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({"status":"running"})),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/session-1/runs/run-job-1/cancel",
+            StatusCode::OK,
+            json!({}),
+        ),
+    ])
+    .await?;
+    let (_root, mut engine) = engine(&server, 2)?;
+    assert!(matches!(
+        submit(&mut engine).await?.as_slice(),
+        [EngineEvent::Intents { intents, .. }] if intents.is_empty()
+    ));
+    assert!(engine.poll(2).await?.is_empty());
+    engine.cancel("conversation").await?;
+    let seen = server.seen().await;
+    assert!(seen.iter().any(|line| line == "GET /api/jobs/job-1"));
+    assert!(seen.iter().any(|line| line == "POST /api/sessions/session-1/runs/run-job-1/cancel"));
+    assert!(seen.iter().all(|line| !(line.contains("/api/jobs/") && line.contains("/cancel"))));
+    Ok(())
+}
+
+#[tokio::test]
 async fn missing_session_is_recreated_once() -> TestResult {
     let server = FakePrx::start(vec![
         step(

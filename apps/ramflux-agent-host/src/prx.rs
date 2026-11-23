@@ -29,8 +29,11 @@ mod flows;
 #[serde(deny_unknown_fields)]
 struct PrxJob {
     job_id: String,
+    /// Poll path from the ACK. Empty when the ACK omitted it; poll uses `/api/jobs/{job_id}`.
+    #[serde(default)]
     poll_url: String,
-    /// Hint path returned at submit. Cancel posts the run route, not this URL.
+    /// Hint path from an older ACK. Cancel posts the run route, not this URL.
+    #[serde(default)]
     cancel_url: String,
     message_id: String,
     #[serde(default)]
@@ -356,7 +359,13 @@ impl PrxEngine {
         job: &PrxJob,
         now_ms: u64,
     ) -> std::result::Result<Option<EngineEvent>, HttpFailure> {
-        let response = self.request(Method::GET, &job.poll_url, None).await?;
+        let derived = if valid_path(&job.poll_url) {
+            None
+        } else {
+            Some(job_poll_path(&job.job_id).ok_or(HttpFailure::Invalid)?)
+        };
+        let poll_url = derived.as_deref().unwrap_or(job.poll_url.as_str());
+        let response = self.request(Method::GET, poll_url, None).await?;
         if response.status == StatusCode::NOT_FOUND {
             return Ok(Some(EngineEvent::VisibleFailure {
                 conversation_id: conversation_id.to_owned(),
@@ -779,8 +788,8 @@ impl EngineProvider for PrxEngine {
                 !valid_id(conversation)
                     || !valid_id(&job.job_id)
                     || !valid_id(&job.message_id)
-                    || !valid_path(&job.poll_url)
-                    || !valid_path(&job.cancel_url)
+                    || !(job.poll_url.is_empty() || valid_path(&job.poll_url))
+                    || !(job.cancel_url.is_empty() || valid_path(&job.cancel_url))
                     || !optional_segment(&job.run_id)
                     || !optional_segment(&job.session_id)
             })
@@ -944,16 +953,11 @@ fn parse_job(
             .ok_or(HttpFailure::Invalid)
     };
     let job_id = field("job_id")?;
-    let poll_url = body["poll_url"]
-        .as_str()
-        .filter(|value| valid_path(value))
-        .ok_or(HttpFailure::Invalid)?
-        .to_owned();
-    let cancel_url = body["cancel_url"]
-        .as_str()
-        .filter(|value| valid_path(value))
-        .ok_or(HttpFailure::Invalid)?
-        .to_owned();
+    let mut poll_url = optional_url(body, "poll_url")?;
+    if poll_url.is_empty() {
+        poll_url = job_poll_path(&job_id).ok_or(HttpFailure::Invalid)?;
+    }
+    let cancel_url = optional_url(body, "cancel_url")?;
     let run_id = body["run_id"]
         .as_str()
         .filter(|value| valid_segment(value))
@@ -971,6 +975,26 @@ fn parse_job(
         run_id,
         session_id: String::new(),
     })
+}
+
+/// A missing or null URL is absent. A present value must already be an `/api/` path.
+fn optional_url(body: &Value, name: &str) -> std::result::Result<String, HttpFailure> {
+    match body.get(name) {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(value) => value
+            .as_str()
+            .filter(|path| valid_path(path))
+            .map(str::to_owned)
+            .ok_or(HttpFailure::Invalid),
+    }
+}
+
+fn job_poll_path(job_id: &str) -> Option<String> {
+    if !valid_segment(job_id) {
+        return None;
+    }
+    let path = format!("/api/jobs/{job_id}");
+    valid_path(&path).then_some(path)
 }
 
 fn parse_job_result(
@@ -1235,6 +1259,40 @@ mod tests {
             assert!(!valid_path(path));
         }
         assert!(valid_path("/api/jobs/job-1/cancel"));
+    }
+
+    #[test]
+    fn async_ack_with_ids_only_uses_the_job_poll_and_run_cancel() {
+        let body = json!({
+            "job_id": "b3dc4630-2422-47e3-b656-dc6dcecde137",
+            "run_id": "de70bf03-5015-44d0-afbf-26b17a45481a"
+        });
+        let Ok(job) = parse_job(&body, "message-1", 10) else {
+            panic!("ack with job_id and run_id must be stored");
+        };
+        assert_eq!(job.poll_url, "/api/jobs/b3dc4630-2422-47e3-b656-dc6dcecde137");
+        assert_eq!(job.cancel_url, "");
+        assert_eq!(
+            run_cancel_path("rf-session", &job.run_id).as_deref(),
+            Some("/api/sessions/rf-session/runs/de70bf03-5015-44d0-afbf-26b17a45481a/cancel")
+        );
+    }
+
+    #[test]
+    fn a_supplied_illegal_url_is_still_rejected() {
+        let poll = json!({
+            "job_id": "job-1",
+            "run_id": "run-1",
+            "poll_url": "/api/../secret"
+        });
+        assert!(parse_job(&poll, "message-1", 10).is_err());
+        let cancel = json!({
+            "job_id": "job-1",
+            "run_id": "run-1",
+            "cancel_url": "https://evil.example/cancel"
+        });
+        assert!(parse_job(&cancel, "message-1", 10).is_err());
+        assert!(parse_job(&json!({"job_id": "job-1"}), "message-1", 10).is_err());
     }
 
     #[test]
