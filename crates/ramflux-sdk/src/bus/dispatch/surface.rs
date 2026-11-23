@@ -141,7 +141,7 @@ fn read_surface_inner(client: &RamfluxClient, request: &LocalBusFrame) -> Result
                     client.resolve_surface_reference(surface_id, conversation, author)?;
                 match reference {
                     Some(reference) => client.surface_get_ref(&reference, after, action),
-                    None => client.foreign_refusal_read(surface_id, conversation, author),
+                    None => Ok(Value::Null),
                 }
             } else {
                 client.surface_get(required(&request.body, "surface_id")?, after, action)

@@ -837,6 +837,42 @@ pub(crate) mod tests {
         Ok((carrier, content))
     }
 
+    fn assert_peer_card_rendered(
+        target: &Fixture,
+        outgoing: &GatewayDirectMessage,
+        reference: &str,
+        exact: Vec<u8>,
+    ) -> TestResult {
+        let detail = target
+            .client
+            .generated_message_detail(&outgoing.conversation_id, &outgoing.message_id)?;
+        assert_eq!(
+            detail.message.kind, "surface",
+            "numeric dispatch must expose a typed Surface message"
+        );
+        let state = target.client.surface_get_ref(reference, 0, None)?;
+        assert_eq!(
+            state["render_allowed"],
+            serde_json::json!(true),
+            "an authenticated peer card renders on the recipient"
+        );
+        assert!(state["snapshot"].is_object(), "peer snapshot is readable");
+        assert!(
+            target
+                .client
+                .direct_messages(&outgoing.conversation_id)?
+                .iter()
+                .any(|message| message.message_id == outgoing.message_id),
+            "native delivery must retain its timeline entry"
+        );
+        assert_eq!(
+            target.client.account_db()?.message_content(&outgoing.message_id)?,
+            Some(exact),
+            "native projection must preserve the exact generated Inner"
+        );
+        Ok(())
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn typed_surface_crosses_real_pair_and_erases_its_canonical_authored_copy() -> TestResult
     {
@@ -889,29 +925,8 @@ pub(crate) mod tests {
                 .receive(envelope, 1)
                 .await
                 .map_err(|error| format!("surface peer receive: {error}"))?;
-            let detail = target
-                .client
-                .generated_message_detail(&outgoing.conversation_id, &outgoing.message_id)?;
-            assert_eq!(
-                detail.message.kind, "surface",
-                "numeric dispatch must expose a typed Surface message"
-            );
             let reference = carrier.surface_reference()?;
-            let state = target.client.surface_get_ref(&reference, 0, None)?;
-            assert!(state.is_null(), "a foreign human author must remain fallback-only");
-            assert!(
-                target
-                    .client
-                    .direct_messages(&outgoing.conversation_id)?
-                    .iter()
-                    .any(|message| message.message_id == outgoing.message_id),
-                "native fallback delivery must retain its timeline entry"
-            );
-            assert_eq!(
-                target.client.account_db()?.message_content(&outgoing.message_id)?,
-                Some(prepared.exact.clone()),
-                "native projection must preserve the exact generated Inner"
-            );
+            assert_peer_card_rendered(&target, &outgoing, &reference, prepared.exact.clone())?;
             let history_keys = native_history_targets(&mut source, &reference)
                 .await
                 .map_err(|error| format!("surface sibling history: {error}"))?;

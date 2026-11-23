@@ -913,8 +913,8 @@ async fn native_author_planning_reads_need_public_account_provenance_without_a_b
         "data readers need the author's signed base to derive the next v3 frame"
     );
     assert_eq!(
-        after["render_allowed"], false,
-        "planning access does not grant an agent renderer authority over itself"
+        after["render_allowed"], true,
+        "an open authenticated card stays renderable without a live branch signer"
     );
     Ok(())
 }
