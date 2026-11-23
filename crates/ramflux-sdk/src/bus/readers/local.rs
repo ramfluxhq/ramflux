@@ -263,6 +263,13 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
             status["networking_reason"] = json!(snapshot.cause);
             status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
         }
+        // A retired agent stays listed in the local custody record. The node's
+        // refusal is the fact the local surfaces follow; it wins over that record.
+        if snapshot.cause.as_ref().is_some_and(crate::AccountNetworkingReason::agent_retired) {
+            status["local_device_authorized"] = json!(false);
+            status["networking_reason"] = json!(snapshot.cause);
+            status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
+        }
         status["session_delivery_mode"] = json!(connection.session_mode().receive_label());
         status["networking_snapshot"] = json!(snapshot);
         status["active_transport_kind"] = json!(snapshot.active_transport_kind);
