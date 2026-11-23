@@ -273,25 +273,65 @@ pub struct GatewayForwardAck {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum GatewayClientFrame {
-    PushRouteRegister { request: Box<crate::PushRouteRegistrationFrame> },
-    PushRouteDeregister { request: Box<crate::PushRouteDeregistrationFrame> },
-    VoiceLease { request: Box<ramflux_protocol::VoiceLeaseFrame> },
-    Attachment { request: Box<crate::AttachmentFrame> },
-    Open { open: GatewayOpenFrame },
-    Auth { auth: GatewayAuthFrame },
-    Submit { submit: GatewaySubmitFrame },
-    OwnDeviceFanout { fanout: GatewayOwnDeviceFanoutFrame },
-    IdentityRegister { request: IdentityRegisterRequest },
-    PrekeyPublish { request: PrekeyPublishRequest },
-    PrekeyFetch { device_id: String },
-    PrincipalManifestFetch { principal_id: String },
-    RelayTokenV3Issue { request: Box<GatewayRelayTokenV3IssueRequest> },
-    Ack { ack: ramflux_protocol::Ack },
-    Cursor { target_delivery_id: String },
-    Resume { resume: GatewayResumeFrame },
-    Nack { nack: ramflux_protocol::Nack },
-    Heartbeat { now: u64 },
-    Close { reason: String },
+    PushRouteRegister {
+        request: Box<crate::PushRouteRegistrationFrame>,
+    },
+    PushRouteDeregister {
+        request: Box<crate::PushRouteDeregistrationFrame>,
+    },
+    VoiceLease {
+        request: Box<ramflux_protocol::VoiceLeaseFrame>,
+    },
+    Attachment {
+        request: Box<crate::AttachmentFrame>,
+    },
+    Open {
+        open: GatewayOpenFrame,
+    },
+    Auth {
+        auth: GatewayAuthFrame,
+    },
+    Submit {
+        submit: GatewaySubmitFrame,
+    },
+    OwnDeviceFanout {
+        fanout: GatewayOwnDeviceFanoutFrame,
+    },
+    IdentityRegister {
+        request: IdentityRegisterRequest,
+    },
+    PrekeyPublish {
+        request: PrekeyPublishRequest,
+    },
+    PrekeyFetch {
+        device_id: String,
+    },
+    PrincipalManifestFetch {
+        principal_id: String,
+    },
+    RelayTokenV3Issue {
+        request: Box<GatewayRelayTokenV3IssueRequest>,
+    },
+    Ack {
+        ack: ramflux_protocol::Ack,
+    },
+    Cursor {
+        target_delivery_id: String,
+    },
+    Resume {
+        resume: GatewayResumeFrame,
+    },
+    Nack {
+        nack: ramflux_protocol::Nack,
+    },
+    Heartbeat {
+        now: u64,
+    },
+    Close {
+        reason: String,
+    },
+    /// Ask the gateway to re-admit the live native custody grant. A heartbeat does not.
+    GrantRenew,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -392,6 +432,10 @@ pub enum GatewayServerFrame {
         state: ramflux_protocol::CallResolutionState,
         media_allowed: bool,
         wake_resolved: bool,
+    },
+    /// Server unix expiry of the renewed native grant. Still capped at 300 seconds.
+    GrantRenewed {
+        expires_at: u64,
     },
 }
 
