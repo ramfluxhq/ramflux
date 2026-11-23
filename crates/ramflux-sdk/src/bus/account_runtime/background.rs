@@ -67,6 +67,9 @@ impl AccountRuntime {
             return Ok(());
         }
         self.reopen_account_db()?;
+        if let Some(account) = self.state.accounts.get_mut(&self.id) {
+            account.head_refresh.release_after_suspend();
+        }
         if self.state.accounts.contains_key(&self.id) {
             self.initialize_readers()?;
             self.start_courier();
