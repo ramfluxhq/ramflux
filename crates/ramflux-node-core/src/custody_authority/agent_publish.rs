@@ -29,6 +29,18 @@ fn refused(refusal: CustodyRefusal) -> NodeCoreError {
     NodeCoreError::AgentPublishRefused(refusal)
 }
 
+fn host_of(
+    plan: &RegisterPlan,
+    primary: DeviceRef,
+) -> crate::router_store::agent_host::AgentHostBinding {
+    crate::router_store::agent_host::AgentHostBinding {
+        owner_anchor: plan.owner_anchor.clone(),
+        desktop: plan.desktop.clone(),
+        primary,
+        agent_device: plan.agent_device.clone(),
+    }
+}
+
 /// Digests of the three objects a saved authorization is keyed by.
 struct Digests {
     plan: String,
@@ -277,7 +289,7 @@ impl RouterCore {
             profile_hash: object_hash(input.agent_profile)
                 .map_err(|_| refused(CustodyRefusal::InvalidInput))?,
             custodian_head_hash: human_head,
-            custodian_primary: primary,
+            custodian_primary: primary.clone(),
             accepted_at: now,
         };
         let row = StoredAgentPublish {
@@ -286,6 +298,7 @@ impl RouterCore {
             decision_hash: digests.decision,
             receipt: receipt.clone(),
         };
+        let host = host_of(input.plan, primary);
         drop(control);
         store.record_agent_publication(&AgentPublicationWrite {
             request_id: &input.plan.request_id,
@@ -295,6 +308,7 @@ impl RouterCore {
             expected: expected.as_ref(),
             source,
             now,
+            host: &host,
         })?;
         let mut control = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let registry = &mut control.mvp1_identities;

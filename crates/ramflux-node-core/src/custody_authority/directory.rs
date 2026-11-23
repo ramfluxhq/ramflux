@@ -185,6 +185,7 @@ impl super::RouterCore {
         now: u64,
         store: &super::RouterRedbStore,
     ) -> Result<Option<crate::DeviceManifestResponse>, NodeCoreError> {
+        let agent_lifecycle = store.agent_lifecycle_label(anchor)?;
         if let Some(native) = self.custody_manifest(anchor, now, store)? {
             return Ok(Some(crate::DeviceManifestResponse {
                 signed_device_set: None,
@@ -200,6 +201,7 @@ impl super::RouterCore {
                     .clone(),
                 devices: Vec::new(),
                 custody: Some(Box::new(native)),
+                agent_lifecycle,
             }));
         }
         let native = self
@@ -211,7 +213,10 @@ impl super::RouterCore {
         if native {
             return Err(super::reject("native account authority unavailable"));
         }
-        Ok(self.mvp1_device_manifest(anchor))
+        Ok(self.mvp1_device_manifest(anchor).map(|mut manifest| {
+            manifest.agent_lifecycle = agent_lifecycle;
+            manifest
+        }))
     }
 
     /// Use the ordinary authenticated lookup and quotas for either current authority scheme.
