@@ -282,7 +282,7 @@ fn approval_record(body: &Value, source: &str) -> Result<Value, SdkError> {
         return Err(field_invalid("status"));
     }
     let decision = optional(body, "decision");
-    if status == "decided" && !matches!(decision, Some("approved" | "denied" | "expired")) {
+    if status == "decided" && !decision.is_some_and(decision_token) {
         return Err(field_invalid("decision"));
     }
     let approval_id = required(body, "approval_id")?;
@@ -381,6 +381,11 @@ fn cap_bytes(text: &str, max: usize) -> String {
         end -= 1;
     }
     text.get(..end).unwrap_or("").to_owned()
+}
+
+/// A stored decision id. Only `approved` is approved; every other id is not.
+fn decision_token(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
 }
 
 fn field_invalid(key: &str) -> SdkError {

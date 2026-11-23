@@ -30,10 +30,17 @@ mod flows;
 struct PrxJob {
     job_id: String,
     poll_url: String,
+    /// Hint path returned at submit. Cancel posts the run route, not this URL.
     cancel_url: String,
     message_id: String,
     #[serde(default)]
     deadline_ms: u64,
+    /// Durable id from the 202 body. Empty on a checkpoint written before it was stored.
+    #[serde(default)]
+    run_id: String,
+    /// Session the run was admitted on. Empty on an older checkpoint.
+    #[serde(default)]
+    session_id: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -331,11 +338,14 @@ impl PrxEngine {
         if response.status != StatusCode::ACCEPTED {
             return Err(HttpFailure::Rejected);
         }
-        let job = parse_job(
+        let mut job = parse_job(
             &response.body,
             input.conversation.message_id,
             now_ms.saturating_add(self.turn_timeout_ms),
         )?;
+        if valid_segment(&session) {
+            job.session_id = session;
+        }
         self.state.jobs.insert(input.conversation.conversation_id.to_owned(), job);
         Ok(())
     }
@@ -429,7 +439,8 @@ impl PrxEngine {
         if self.state.jobs.contains_key(conversation_id) {
             return Err(HttpFailure::Rejected);
         }
-        let session = self.state.sessions.get(conversation_id).ok_or(HttpFailure::Rejected)?;
+        let session =
+            self.state.sessions.get(conversation_id).ok_or(HttpFailure::Rejected)?.to_owned();
         let approval_path = format!("api/sessions/{session}/approvals/{decision_id}");
         if !approved {
             let response = self.request(Method::DELETE, &approval_path, None).await;
@@ -456,10 +467,12 @@ impl PrxEngine {
             }
         };
         self.state.pending.remove(conversation_id);
-        self.state.jobs.insert(
-            conversation_id.to_owned(),
-            parse_job(&response.body, message_id, now_ms.saturating_add(self.turn_timeout_ms))?,
-        );
+        let mut job =
+            parse_job(&response.body, message_id, now_ms.saturating_add(self.turn_timeout_ms))?;
+        if valid_segment(&session) {
+            job.session_id = session;
+        }
+        self.state.jobs.insert(conversation_id.to_owned(), job);
         Ok(())
     }
 
@@ -558,6 +571,29 @@ impl PrxEngine {
                 .await;
         }
     }
+
+    fn cancel_session(&self, conversation_id: &str, job: &PrxJob) -> String {
+        self.state
+            .sessions
+            .get(conversation_id)
+            .cloned()
+            .filter(|id| valid_segment(id))
+            .unwrap_or_else(|| job.session_id.clone())
+    }
+
+    /// Posts `POST /api/sessions/{session}/runs/{run}/cancel`. A missing run id, a 404
+    /// `run_unknown`, or any other failure is outcome-unknown: the local job is already dropped
+    /// and this does not retry.
+    async fn post_run_cancel(&self, session_id: &str, run_id: &str) {
+        let Some(path) = run_cancel_path(session_id, run_id) else {
+            eprintln!("prx cancel outcome unknown");
+            return;
+        };
+        match self.request(Method::POST, &path, Some(json!({}))).await {
+            Ok(response) if response.status.is_success() => {}
+            _ => eprintln!("prx cancel outcome unknown"),
+        }
+    }
 }
 
 impl EngineProvider for PrxEngine {
@@ -626,7 +662,8 @@ impl EngineProvider for PrxEngine {
             .collect::<Vec<_>>();
         for (conversation, job) in jobs {
             let result = if now_ms >= job.deadline_ms {
-                let _ = self.request(Method::POST, &job.cancel_url, Some(json!({}))).await;
+                let session = self.cancel_session(&conversation, &job);
+                self.post_run_cancel(&session, &job.run_id).await;
                 self.revoke_pending(&conversation).await;
                 Ok(Some(failure(&conversation, &job.message_id, EngineFailure::TurnTimeout)))
             } else {
@@ -698,7 +735,8 @@ impl EngineProvider for PrxEngine {
 
     async fn cancel<'a>(&'a mut self, conversation_id: &'a str) -> Result<()> {
         if let Some(job) = self.state.jobs.remove(conversation_id) {
-            let _ = self.request(Method::POST, &job.cancel_url, Some(json!({}))).await;
+            let session = self.cancel_session(conversation_id, &job);
+            self.post_run_cancel(&session, &job.run_id).await;
         }
         self.revoke_pending(conversation_id).await;
         self.state.completed.remove(conversation_id);
@@ -743,6 +781,8 @@ impl EngineProvider for PrxEngine {
                     || !valid_id(&job.message_id)
                     || !valid_path(&job.poll_url)
                     || !valid_path(&job.cancel_url)
+                    || !optional_segment(&job.run_id)
+                    || !optional_segment(&job.session_id)
             })
             || self
                 .state
@@ -914,10 +954,23 @@ fn parse_job(
         .filter(|value| valid_path(value))
         .ok_or(HttpFailure::Invalid)?
         .to_owned();
+    let run_id = body["run_id"]
+        .as_str()
+        .filter(|value| valid_segment(value))
+        .ok_or(HttpFailure::Invalid)?
+        .to_owned();
     if !valid_id(message_id) {
         return Err(HttpFailure::Invalid);
     }
-    Ok(PrxJob { job_id, poll_url, cancel_url, message_id: message_id.to_owned(), deadline_ms })
+    Ok(PrxJob {
+        job_id,
+        poll_url,
+        cancel_url,
+        message_id: message_id.to_owned(),
+        deadline_ms,
+        run_id,
+        session_id: String::new(),
+    })
 }
 
 fn parse_job_result(
@@ -1130,6 +1183,18 @@ fn valid_path(value: &str) -> bool {
 
 fn valid_segment(value: &str) -> bool {
     valid_id(value) && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+}
+
+fn optional_segment(value: &str) -> bool {
+    value.is_empty() || valid_segment(value)
+}
+
+fn run_cancel_path(session_id: &str, run_id: &str) -> Option<String> {
+    if !valid_segment(session_id) || !valid_segment(run_id) {
+        return None;
+    }
+    let path = format!("/api/sessions/{session_id}/runs/{run_id}/cancel");
+    valid_path(&path).then_some(path)
 }
 
 fn valid_approval(approval: &EngineApproval) -> bool {

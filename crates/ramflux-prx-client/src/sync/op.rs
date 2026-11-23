@@ -75,7 +75,8 @@ pub struct ApprovalCopy {
     pub expires_at: String,
     /// `pending` or `decided`.
     pub status: String,
-    /// `approved`, `denied`, or `expired` once decided.
+    /// Decision id once decided. Only `approved` is approved. Any other id,
+    /// including `cancelled`, is not approved.
     pub decision: Option<String>,
     /// Denial cause when PRX sent one.
     pub cause: Option<String>,
@@ -192,12 +193,10 @@ fn approval_op(
     }))
 }
 
-/// A terminal PRX decision. `expired` carries that cause when the payload omits one.
+/// A terminal PRX decision. Any decision id is stored. Only `approved` is approved.
+/// `expired` carries that cause when the payload omits one.
 fn decided_fields(payload: &Value) -> Result<(Option<String>, Option<String>), PrxError> {
     let decision = req_id(payload, "decision")?;
-    if !matches!(decision.as_str(), "approved" | "denied" | "expired") {
-        return Err(protocol("sync payload field is invalid"));
-    }
     let mut cause = opt_cause(payload)?;
     if decision == "expired" && cause.is_none() {
         cause = Some("expired".to_owned());
@@ -224,14 +223,7 @@ fn bounded_text(payload: &Value, key: &str, max: usize) -> Result<String, PrxErr
     let Some(text) = loose_str(payload, key)? else {
         return Ok(String::new());
     };
-    if text.len() <= max {
-        return Ok(text);
-    }
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    Ok(text.get(..end).unwrap_or("").to_owned())
+    Ok(cut_bytes(&text, max))
 }
 
 fn loose_str(payload: &Value, key: &str) -> Result<Option<String>, PrxError> {
@@ -246,10 +238,28 @@ fn loose_str(payload: &Value, key: &str) -> Result<Option<String>, PrxError> {
 }
 
 fn opt_cause(payload: &Value) -> Result<Option<String>, PrxError> {
-    match opt_id(payload, "cause")? {
-        Some(cause) if cause.len() > 64 => Err(protocol("sync payload field is invalid")),
-        other => Ok(other),
+    match payload.get("cause") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(cause_text(text)),
+        Some(_) => Err(protocol("sync payload field has the wrong type")),
     }
+}
+
+/// A cause longer than 64 bytes is cut on a char boundary. A control character is unknown.
+fn cause_text(text: &str) -> Option<String> {
+    let cut = cut_bytes(text, 64);
+    if cut.is_empty() || cut.chars().any(char::is_control) { None } else { Some(cut) }
+}
+
+fn cut_bytes(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.get(..end).unwrap_or("").to_owned()
 }
 
 fn check_payload(payload: &Value) -> Result<(), PrxError> {

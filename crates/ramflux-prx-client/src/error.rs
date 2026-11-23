@@ -139,6 +139,9 @@ pub enum ApiCode {
     XinTaskUnknown,
     /// `404 xin_goal_unknown`.
     XinGoalUnknown,
+    /// `400 model_capabilities_unknown`: the model is outside the catalog and is
+    /// not declared. Nothing was written.
+    ModelCapabilitiesUnknown,
     Unknown(String),
 }
 
@@ -183,6 +186,7 @@ impl ApiCode {
             "cron_job_unknown" => Self::CronJobUnknown,
             "xin_task_unknown" => Self::XinTaskUnknown,
             "xin_goal_unknown" => Self::XinGoalUnknown,
+            "model_capabilities_unknown" => Self::ModelCapabilitiesUnknown,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -451,6 +455,7 @@ mod tests {
             ("purge_pending", ApiCode::PurgePending),
             ("idempotency_key_required", ApiCode::IdempotencyKeyRequired),
             ("snapshot_expired", ApiCode::SnapshotExpired),
+            ("model_capabilities_unknown", ApiCode::ModelCapabilitiesUnknown),
         ];
         for (wire, expected) in cases {
             let body = format!(r#"{{"error":{{"code":"{wire}","message":"m"}}}}"#);
