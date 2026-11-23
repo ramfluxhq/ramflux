@@ -20,7 +20,6 @@ use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
 
 use super::PassphrasePolicyError;
-use crate::SdkError;
 
 /// Minimum Unicode scalar values in the NFC form of a new archive passphrase.
 pub const MIN_PASSPHRASE_SCALARS: usize = 15;
@@ -43,16 +42,6 @@ pub fn check_new_archive_passphrase(passphrase: &str) -> Result<(), PassphrasePo
         return Err(PassphrasePolicyError::TooCommon);
     }
     Ok(())
-}
-
-/// Admit UTF-8 archive passphrase bytes.
-///
-/// # Errors
-/// Returns [`SdkError::CustodySetupInvalid`] for non-UTF-8 bytes, or a
-/// [`PassphrasePolicyError`] for a rule failure.
-pub(crate) fn admit_new_archive_passphrase(bytes: &[u8]) -> Result<(), SdkError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
-    Ok(check_new_archive_passphrase(text)?)
 }
 
 fn common_passphrases() -> &'static HashSet<String> {

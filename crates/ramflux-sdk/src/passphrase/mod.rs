@@ -9,7 +9,6 @@ mod archive;
 mod code;
 mod policy_error;
 
-pub(crate) use archive::admit_new_archive_passphrase;
 pub use archive::{
     MIN_ACCEPTED_PASSPHRASE_SCALARS, MIN_PASSPHRASE_SCALARS, check_new_archive_passphrase,
 };
