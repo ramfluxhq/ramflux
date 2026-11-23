@@ -5,6 +5,39 @@
 use super::{Carrier, Outcome, Payload, PayloadKind, Receipt, SurfaceSender, key};
 use crate::{RamfluxClient, SdkError};
 use serde_json::json;
+
+fn covered_current_event(
+    carrier: &Carrier,
+    event: &ramflux_protocol::SurfaceEvent,
+    state: &ramflux_protocol::SurfaceState,
+) -> Result<Outcome, SdkError> {
+    match ramflux_protocol::SurfaceState::validate_proof(event) {
+        Ok(proved)
+            if proved.version() == state.version()
+                && proved.hash() == state.hash()
+                && proved.content() == state.content()
+                && proved.conversation_id() == state.conversation_id() =>
+        {
+            Outcome::accepted(&carrier.author_principal_id, state)
+        }
+        Err(error) if covered_wire_is_broken(&error) => Ok(Outcome::protocol_rejected(&error)),
+        Ok(_) | Err(_) => {
+            Ok(Outcome::protocol_rejected(&ramflux_protocol::SurfaceReject::Integrity))
+        }
+    }
+}
+
+fn covered_wire_is_broken(error: &ramflux_protocol::SurfaceReject) -> bool {
+    matches!(
+        error,
+        ramflux_protocol::SurfaceReject::Integrity
+            | ramflux_protocol::SurfaceReject::Encoding
+            | ramflux_protocol::SurfaceReject::Conflict
+            | ramflux_protocol::SurfaceReject::Validation(_)
+            | ramflux_protocol::SurfaceReject::Limit
+    )
+}
+
 impl RamfluxClient {
     pub(crate) fn project_surface_message(
         &self,
@@ -91,13 +124,8 @@ impl RamfluxClient {
                 Some(action.version())
             }
         };
-        let covered = carrier.sender_principal_id == carrier.author_principal_id
-            && matches!(&payload,Payload::Event(event) if event.version()<=self.surface_snapshot_floor(&carrier.surface_reference()?)?);
-        let mut outcome = if covered {
-            let (_, state) = self
-                .surface_state_ref(&carrier.surface_reference()?)?
-                .ok_or_else(|| super::invalid("snapshot floor has no surface state"))?;
-            Outcome::accepted(&carrier.author_principal_id, &state)?
+        let mut outcome = if let Some(outcome) = self.covered_author_event(&carrier, &payload)? {
+            outcome
         } else {
             self.apply_surface_payload(&carrier, payload, outbound, sender.group_epoch)?
         };
@@ -130,6 +158,38 @@ impl RamfluxClient {
         self.store_surface_message_reference(&carrier, message, sender, &outcome)?;
         Ok(outcome)
     }
+
+    /// An author event at or below the snapshot floor is already delivered only when it is the
+    /// stored document. A different wire is the same typed refusal a first admission would return.
+    fn covered_author_event(
+        &self,
+        carrier: &Carrier,
+        payload: &Payload,
+    ) -> Result<Option<Outcome>, SdkError> {
+        let Payload::Event(event) = payload else {
+            return Ok(None);
+        };
+        if carrier.sender_principal_id != carrier.author_principal_id {
+            return Ok(None);
+        }
+        let reference = carrier.surface_reference()?;
+        if event.version() > self.surface_snapshot_floor(&reference)? {
+            return Ok(None);
+        }
+        let (_, state) = self
+            .surface_state_ref(&reference)?
+            .ok_or_else(|| super::invalid("snapshot floor has no surface state"))?;
+        if event.version() == state.version() {
+            return Ok(Some(covered_current_event(carrier, event, &state)?));
+        }
+        if let Err(error) = ramflux_protocol::SurfaceState::validate_proof(event)
+            && covered_wire_is_broken(&error)
+        {
+            return Ok(Some(Outcome::protocol_rejected(&error)));
+        }
+        Ok(Some(Outcome::accepted(&carrier.author_principal_id, &state)?))
+    }
+
     fn replay_surface_delivery(
         &self,
         carrier: &Carrier,

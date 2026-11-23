@@ -361,6 +361,27 @@ async fn copy_own_for_test(
     )
 }
 
+fn function_call_root(
+    account: &LocalBusAccountState,
+    carrier: &Carrier,
+    thread: &Value,
+    group: Option<&str>,
+) -> Result<String, SdkError> {
+    if group.is_none() {
+        return peer_commitments(account, carrier, thread)?
+            .into_keys()
+            .next()
+            .ok_or_else(|| invalid("surface direct peer missing"));
+    }
+    account
+        .client
+        .born_v3_account
+        .as_ref()
+        .and_then(|born| born.record().body.profile.custodian.as_ref())
+        .map(|custodian| custodian.account_anchor.clone())
+        .ok_or_else(|| invalid("agent RPC requires its verified human custodian"))
+}
+
 async fn send_private(
     account: &mut LocalBusAccountState,
     carrier: &Carrier,
@@ -377,13 +398,7 @@ async fn send_private(
         return Ok(serde_json::to_value(outcome)?);
     }
     let root = if carrier.payload_kind == PayloadKind::FunctionCall {
-        account
-            .client
-            .born_v3_account
-            .as_ref()
-            .and_then(|a| a.record().body.profile.custodian.as_ref())
-            .map(|c| c.account_anchor.clone())
-            .ok_or_else(|| invalid("agent RPC requires its verified human custodian"))?
+        function_call_root(account, carrier, &thread, group)?
     } else {
         account
             .client
