@@ -84,9 +84,24 @@ impl TryFrom<i32> for GeneratedErrorCode {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum ErrorDetails {
-    ResyncRequired { cursor: u64, floor: u64, head: u64 },
-    EditConflict { target: String, expected: u64, received: u64 },
-    StorageCapacity { scope: String, source: String },
+    ResyncRequired {
+        cursor: u64,
+        floor: u64,
+        head: u64,
+    },
+    EditConflict {
+        target: String,
+        expected: u64,
+        received: u64,
+    },
+    StorageCapacity {
+        scope: String,
+        source: String,
+    },
+    /// Closed pairing HTTPS refusal. `pairing` is a static token, never a path or certificate.
+    Pairing {
+        pairing: String,
+    },
     Empty {},
 }
 
