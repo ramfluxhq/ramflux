@@ -2,7 +2,7 @@
 
 Admission is disabled by default. Enabling it requires an operator decision and a
 separate mounted random cookie key. The proposed deployment policy is 60 admissions
-per observed source in 60 seconds, with cookie TTL 60 seconds; this change does
+per observed source in 60 seconds, with cookie TTL 60 seconds; the default configuration does
 not activate that policy.
 
 ```toml
@@ -81,7 +81,7 @@ are unchanged. Cookies are reusable within TTL for the observed source, includin
 port rebinding, and are not a hard handshake quota. Admission follows transport
 handshake establishment and cannot prevent transport handshake floods.
 
-## Gateway format 3 and controller reset
+## Gateway format 3 and operator reset
 
 Gateway stores now require the `gateway_state_format` marker `3`. Every existing
 file without that marker is refused at startup with `GatewayStateResetRequired`,
@@ -89,7 +89,7 @@ before publishing state or adding tables/markers. There is no old replay snapsho
 reader, ownerless accounting, legacy clock import or session snapshot migration.
 Downgrade is unsupported.
 
-At the next deployment the controller resets demo gateway state: stop every
+To reset an incompatible gateway store, stop every
 gateway using the configured gateway redb file, back up that file and its own
 sidecars, then remove only that gateway database and its sidecars. Restart to
 create a fresh format 3 store. This deliberately retires gateway sessions, resume
@@ -122,7 +122,7 @@ cache is limited to8MiB, leaving headroom within the64MiB replay-cache budget fo
 allocation overhead; eviction never removes disk evidence. Cleanup holds at most64
 small candidates. Full checkpoints never serialize the replay ledger.
 
-These **OPEN-VALUE** allocations retain the declared full-validity traffic profile:
+These capacity allocations retain the declared full-validity traffic profile:
 two combined signed operations/minute for604800+120 seconds require20164 live
 identities, below32768. Higher profiles require corresponding share/storage
 increases. Default planning uses512 logical bytes/identity and256/root:
@@ -151,7 +151,7 @@ storage_budget_bytes = 137438953472
 `disk_replay_storage_measurement_and_bounded_restore` records actual file growth
 and all-index bytes for32768 committed identities with maximum-width generation
 and expiry counters. Deployment sizing must include every index, page overhead
-and database working space. Measured on the QA fixture:632 bytes/identity file
+and database working space. Measured in the bounded replay-storage fixture:632 bytes/identity file
 growth,350 stored bytes plus205
 bytes of index metadata/fragmentation; maximum encoded replay body118 bytes
 (decoder bound256). The fixture exceeds the8MiB cache and checks replay after

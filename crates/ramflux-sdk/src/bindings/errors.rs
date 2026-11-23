@@ -84,9 +84,28 @@ impl TryFrom<i32> for GeneratedErrorCode {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum ErrorDetails {
-    ResyncRequired { cursor: u64, floor: u64, head: u64 },
-    EditConflict { target: String, expected: u64, received: u64 },
-    StorageCapacity { scope: String, source: String },
+    ResyncRequired {
+        cursor: u64,
+        floor: u64,
+        head: u64,
+    },
+    EditConflict {
+        target: String,
+        expected: u64,
+        received: u64,
+    },
+    StorageCapacity {
+        scope: String,
+        source: String,
+    },
+    /// Closed pairing HTTPS refusal. `pairing` is a static token, never a path or certificate.
+    Pairing {
+        pairing: String,
+    },
+    /// Static non-secret token naming which argument or state was rejected.
+    Reason {
+        reason: String,
+    },
     Empty {},
 }
 
@@ -113,22 +132,29 @@ impl<'de> Deserialize<'de> for AdapterError {
         }
         let wire = WireError::deserialize(deserializer)?;
         let code = GeneratedErrorCode::try_from(wire.code).map_err(D::Error::custom)?;
-        let details_match = matches!(
-            (&code, &wire.details),
-            (GeneratedErrorCode::StorageCapacity, ErrorDetails::StorageCapacity { .. })
-                | (GeneratedErrorCode::ResyncRequired, ErrorDetails::ResyncRequired { .. })
-                | (GeneratedErrorCode::EditConflict, ErrorDetails::EditConflict { .. })
-        );
         let requires_details = matches!(
             code,
             GeneratedErrorCode::StorageCapacity
                 | GeneratedErrorCode::ResyncRequired
                 | GeneratedErrorCode::EditConflict
         );
-        if wire.name != code.name()
-            || (requires_details && !details_match)
-            || (!requires_details && !matches!(&wire.details, ErrorDetails::Empty {}))
+        let details_ok = match (&code, &wire.details) {
+            (GeneratedErrorCode::StorageCapacity, ErrorDetails::StorageCapacity { .. })
+            | (GeneratedErrorCode::ResyncRequired, ErrorDetails::ResyncRequired { .. })
+            | (GeneratedErrorCode::EditConflict, ErrorDetails::EditConflict { .. })
+            | (
+                GeneratedErrorCode::InvalidArgument,
+                ErrorDetails::Empty {} | ErrorDetails::Reason { .. },
+            ) => true,
+            (_, ErrorDetails::Empty {}) => !requires_details,
+            _ => false,
+        };
+        if let ErrorDetails::Reason { reason } = &wire.details
+            && !reason_token(reason)
         {
+            return Err(D::Error::custom("generated error reason is not a token"));
+        }
+        if wire.name != code.name() || !details_ok {
             return Err(D::Error::custom("generated error code/name/details mismatch"));
         }
         Ok(Self {
@@ -237,6 +263,12 @@ impl AdapterError {
         };
         Self::new(code, error.to_string())
     }
+}
+
+fn reason_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[cfg(test)]

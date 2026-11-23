@@ -25,11 +25,16 @@ pub(super) async fn serve(
     let root_lease = super::data_root_lock::DataRootLock::acquire(&config.data_root)?;
     crate::custody::reconcile_incomplete_markers(&config.data_root, &root_lease)?;
     let _ = std::fs::remove_dir_all(object_get_spool_dir(&config.data_root));
-    if let Some(parent) = config.socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if config.socket_path.exists() {
-        std::fs::remove_file(&config.socket_path)?;
+    #[cfg(unix)]
+    super::socket_dir::prepare(&config.socket_path).await?;
+    #[cfg(not(unix))]
+    {
+        if let Some(parent) = config.socket_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if config.socket_path.exists() {
+            std::fs::remove_file(&config.socket_path)?;
+        }
     }
     let listener = crate::platform::listener::bind(&config.socket_path)?;
     let owner = listener.owner()?;
@@ -425,16 +430,62 @@ pub(super) async fn configure_subscription(
         return supervisor.subscribe_stream(request.clone(), connection).await;
     }
     let body: LocalBusSubscriptionOpenRequest = serde_json::from_value(request.body.clone())?;
+    // Phones follow the journal with bus.subscribe. Live topics stay on this
+    // ephemeral router so account start-up can publish. A journal topic is refused.
+    let journal = open_named_journal(supervisor, connection, request, &body.topics).await?;
+    if matches!(journal, super::supervisor::OpenJournal::Resync) {
+        supervisor.clear_stream(connection.connection_id);
+        return Ok(());
+    }
     connection.topics.extend(body.topics);
     if let Some(account) = request.account_id.clone() {
         supervisor.subscribe(connection, account);
     }
     connection
         .outbound
-        .send(local_bus_response(request, serde_json::json!({"subscribed":true})))
+        .send(local_bus_response(request, serde_json::json!({"subscribed": true})))
         .await
         .map_err(|_| closed())?;
+    if let super::supervisor::OpenJournal::Ready(follow) = journal {
+        supervisor
+            .install_stream(connection.connection_id, super::subscription::spawn_tail(*follow));
+    }
     Ok(())
+}
+
+/// Journal replay is `bus.subscribe`. Live event names stay on the ephemeral router.
+async fn open_named_journal(
+    supervisor: &Supervisor,
+    connection: &LocalBusConnectionState,
+    request: &LocalBusFrame,
+    topics: &[String],
+) -> Result<super::supervisor::OpenJournal, SdkError> {
+    if !asks_for_journal(topics) {
+        return Ok(super::supervisor::OpenJournal::Unavailable);
+    }
+    let opened = supervisor.prepare_open_journal(request, connection).await?;
+    // A wildcard before the account reader exists would otherwise acknowledge and deliver nothing.
+    if matches!(opened, super::supervisor::OpenJournal::Unavailable)
+        && topics.iter().any(|topic| topic == "*")
+    {
+        return Err(SdkError::LocalBus("unsupported reader request".to_owned()));
+    }
+    Ok(opened)
+}
+
+fn asks_for_journal(topics: &[String]) -> bool {
+    topics.iter().any(|topic| !topic.is_empty() && !ephemeral_subscription_topic(topic))
+}
+
+/// Topics the subscription router delivers without reading the account journal.
+fn ephemeral_subscription_topic(topic: &str) -> bool {
+    matches!(
+        topic,
+        "state.changed"
+            | "account.restore.finished"
+            | "mcp.approval.request"
+            | ramflux_protocol::message::TRANSIENT_TOPIC
+    )
 }
 
 fn rejected_request(request: &mut LocalBusFrame, error: &SdkError) -> LocalBusFrame {

@@ -60,6 +60,7 @@ pub(super) struct Shared {
     pub closed: std::sync::atomic::AtomicBool,
     pub subscription: Mutex<Option<u64>>,
     pub host_key: Mutex<Option<HostKeyFn>>,
+    pub credentials: super::credential::Bridge,
 }
 
 /// In-process provider-key callback. `user` is an opaque pointer supplied by the host.
@@ -80,6 +81,7 @@ impl Shared {
         );
         crate::bus::inprocess::erase_value(&mut value);
         let Ok(mut operations) = self.operations.lock() else { return };
+        self.credentials.forget(id);
         let Some(operation) = operations.get(&id) else { return };
         let Ok(mut subscription) = self.subscription.lock() else { return };
         let detached = if let Ok(mut state) = operation.state.lock() {
