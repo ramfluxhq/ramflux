@@ -30,6 +30,9 @@ pub struct LocalBusConfig {
     pub data_root: PathBuf,
     /// Shared by every actor of this process. True while files are released for the background.
     pub(crate) background: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// In-process unlock reads this at request time. Socket daemons leave it false.
+    /// The C ABI client replaces it with the host callback's registration flag.
+    pub(crate) credential_callback: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Test-only custody retry budget for this daemon's thread (production is always 90 s).
     #[cfg(test)]
     pub test_retry_budget: Option<std::time::Duration>,
@@ -1097,6 +1100,7 @@ impl LocalBusConfig {
             socket_path: socket_path.into(),
             data_root: data_root.into(),
             background: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            credential_callback: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             test_retry_budget: None,
             #[cfg(test)]

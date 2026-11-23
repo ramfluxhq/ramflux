@@ -404,12 +404,17 @@ impl Supervisor {
             self.set_active(&id).await?;
             return Ok(reply(serde_json::to_value(result)?));
         }
-        // The in-process carrier cannot answer `device.credential.request`. Sending it makes the
-        // C ABI reader tear the worker down, and every later call completes as Closed.
-        if !prompts {
+        // Without a registered callback the in-process carrier cannot answer
+        // `device.credential.request`. Sending it makes the C ABI reader tear the worker down.
+        // A device wrap already returned above, so cold open and resume stay prompt-free.
+        if !prompts && !self.credential_callback_registered() {
             return Err(code_required());
         }
         self.prompted_unlock(call, &id).await
+    }
+
+    fn credential_callback_registered(&self) -> bool {
+        self.config.credential_callback.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 

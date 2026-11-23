@@ -29,6 +29,8 @@ impl BusStream for MemoryStream {
     }
 
     fn accepts_credential_prompt(&self) -> bool {
+        // Connect samples this once, before the host can register a callback.
+        // Unlock reads that registration directly.
         false
     }
 
