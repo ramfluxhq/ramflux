@@ -86,6 +86,7 @@ impl Client {
                 router: None,
                 auth_deadline: tokio::time::Instant::now() + Duration::from_secs(10),
                 authenticated: false,
+                handed_off: false,
             },
         })
     }

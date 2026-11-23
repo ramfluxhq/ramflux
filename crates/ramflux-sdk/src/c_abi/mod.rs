@@ -929,7 +929,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::NetworkingPending
         | SdkError::NetworkingPendingContext { .. }
         | SdkError::CustodyModeDowngrade
-        | SdkError::AgentCustodyUnsupported => RamfluxErrorCode::UnsupportedVersion,
+        | SdkError::AgentCustodyUnsupported
+        | SdkError::UsernameDirectoryRefused(_) => RamfluxErrorCode::UnsupportedVersion,
         SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable) => {
             RamfluxErrorCode::PermissionDenied
         }

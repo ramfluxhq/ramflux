@@ -125,9 +125,22 @@ impl AccountDb {
         let activity:Option<i64>=self.connection.query_row("SELECT max(created_at) FROM direct_message_projection WHERE conversation_id=?1 AND deleted=0",params![id],|row|row.get(0))?;
         let unread:u64=self.connection.query_row("SELECT count(*) FROM direct_message_projection m WHERE m.conversation_id=?1 AND m.deleted=0 AND m.created_at>?3 AND NOT EXISTS (SELECT 1 FROM conversation_read_state r JOIN direct_message_projection last ON last.message_id=r.read_through_message_id WHERE r.conversation_id=?1 AND r.reader_id=?2 AND (m.created_at<last.created_at OR (m.created_at=last.created_at AND m.message_id<=last.message_id)))",params![id,reader,state.cleared_at.unwrap_or(i64::MIN)],|row|row.get(0))?;
         let (muted, mute_until) = self.conversation_mute_fields(state.mute_until);
-        Ok(
-            json!({"id":id,"archived":state.archived,"hidden":state.hidden_at.is_some(),"last_activity":activity,"unread_count":unread,"is_unread":projection.is_unread,"muted":muted,"mute_until":mute_until,"disappearing":self.disappearing_policy(id)?.map(|policy|json!({"timer_seconds":policy.timer_seconds,"countdown_mode":policy.countdown_mode,"scope":policy.scope}))}),
-        )
+        let disappearing = self.disappearing_policy(id)?.map(|policy| {
+            json!({"timer_seconds":policy.timer_seconds,"countdown_mode":policy.countdown_mode,"scope":policy.scope})
+        });
+        Ok(json!({
+            "id": id,
+            "archived": state.archived,
+            "hidden": state.hidden_at.is_some(),
+            "last_activity": activity,
+            "unread_count": unread,
+            "is_unread": projection.is_unread,
+            "muted": muted,
+            "mute_until": mute_until,
+            "pinned": state.pin_order.is_some(),
+            "pin_order": state.pin_order,
+            "disappearing": disappearing,
+        }))
     }
 }
 
