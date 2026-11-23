@@ -318,7 +318,9 @@ impl<E: EngineProvider> AgentHost<E> {
         reason: EngineFailure,
         events: &mut Vec<EngineEvent>,
     ) -> Result<()> {
-        if let Err(error) = self.update_task(bus, bridge, view, "failed", reason.reply()).await {
+        if let Err(error) =
+            self.update_task(bus, bridge, view, "failed", reason.reply().as_ref()).await
+        {
             match error {
                 Error::SurfaceRefused(refusal) => {
                     // A signed task can refuse terminalization while a human step is open.
@@ -844,6 +846,12 @@ mod tests {
             authorization: crate::PrxAuthorization::Supervised,
             turn_timeout_s: 120,
             approval_timeout_s: 600,
+            agent_name: None,
+            provider: None,
+            model: None,
+            max_concurrent_turns: None,
+            max_cost_per_day_cents: None,
+            erase_session_on_delete: false,
         };
         config.rules.clear();
         config.engine = Some(crate::EngineConfig { prx: prx.clone() });

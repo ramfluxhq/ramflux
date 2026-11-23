@@ -142,7 +142,7 @@ impl PrxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::Tools;
+    use crate::agent::{DEFAULT_APPROVAL_WAIT_SECS, Tools};
     use crate::autonomy::Autonomy;
 
     const HEX: &str = "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6";
@@ -165,6 +165,8 @@ mod tests {
             autonomy: Autonomy::Full,
             tools: Tools::All,
             enabled: true,
+            limits: None,
+            approval_wait_secs: DEFAULT_APPROVAL_WAIT_SECS,
         }
     }
 
