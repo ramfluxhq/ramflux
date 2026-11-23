@@ -59,6 +59,7 @@ async fn dispatch_group_bus_request_inner(
     match request.method.as_str() {
         // Native shared-group sync consumes these; reaching here means no local shared state.
         "group.create"
+        | "group.leave"
         | "group.member.add"
         | "group.member.remove"
         | "group.role.set"
@@ -85,19 +86,7 @@ async fn dispatch_group_bus_request_inner(
                 .client
                 .groups()?
                 .into_iter()
-                .map(|group| {
-                    let name = account
-                        .client
-                        .account_db()?
-                        .shared_group_state(&group.group_id)?
-                        .map(|state| (state.view().name.clone(), state.view().name_epoch));
-                    let mut metadata = serde_json::to_value(group)?;
-                    if let Some((name, epoch)) = name {
-                        metadata["name"] = serde_json::json!(name);
-                        metadata["name_epoch"] = serde_json::json!(epoch);
-                    }
-                    Ok(metadata)
-                })
+                .map(|group| group_list_row(account, group))
                 .collect::<Result<Vec<_>, SdkError>>()?;
             Ok(local_bus_ok(serde_json::json!({ "groups": groups })))
         }
@@ -842,6 +831,31 @@ pub(crate) async fn dispatch_group_receive_request(
         "conversation_id": body.conversation_id,
         "snapshot_sequence": account.client.account_db()?.journal_bounds()?.head_seq,
     })))
+}
+
+fn group_list_row(
+    account: &LocalBusAccountState,
+    group: GroupState,
+) -> Result<serde_json::Value, SdkError> {
+    let db = account.client.account_db()?;
+    let shared = db.shared_group_state(&group.group_id)?;
+    let saved = db.client_record("group", &group.group_id)?;
+    let mut metadata = serde_json::to_value(group)?;
+    if let Some(state) = shared.as_ref() {
+        metadata["name"] = serde_json::json!(state.view().name);
+        metadata["name_epoch"] = serde_json::json!(state.view().name_epoch);
+    }
+    let conversation =
+        shared.as_ref().map(|state| state.view().conversation_id.clone()).or_else(|| {
+            saved
+                .as_ref()
+                .and_then(|row| row.get("conversation_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+    metadata["conversation_id"] =
+        conversation.map_or(serde_json::Value::Null, |id| serde_json::json!(id));
+    Ok(metadata)
 }
 
 pub(crate) mod history;

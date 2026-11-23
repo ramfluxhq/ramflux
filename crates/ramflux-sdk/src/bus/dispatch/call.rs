@@ -45,15 +45,20 @@ pub(crate) async fn dispatch(
     let mut next =
         account.client.voice_calls.get(id).cloned().ok_or_else(|| invalid("call not live"))?;
     match request.method.as_str() {
+        "call.answer"
+            if next.media_held
+                && next.local == next.callee
+                && next.row.state == "incoming_ringing"
+                && !next.expired(now) =>
+        {
+            next.request_answer();
+        }
         "call.answer" => next.answer(now)?,
         "call.reject" => next.end(true, now)?,
         "call.hangup" => next.end(false, now)?,
         _ => return Err(invalid("unknown call method")),
     }
-    account
-        .client
-        .account_db()?
-        .write_transaction(|| account.client.persist_call_row(&next.row))?;
+    account.client.account_db()?.write_transaction(|| account.client.persist_live_call(&next))?;
     let row = next.row.clone();
     account.client.voice_calls.insert(id.into(), next);
     if let Some(handle) = &account.connection {
@@ -152,10 +157,7 @@ async fn invite(
             .clone();
         call.pin_peer(target, key)?;
     }
-    account
-        .client
-        .account_db()?
-        .write_transaction(|| account.client.persist_call_row(&call.row))?;
+    account.client.account_db()?.write_transaction(|| account.client.persist_live_call(&call))?;
     let row = call.row.clone();
     account.client.voice_calls.insert(id, call);
     if let Some(handle) = &account.connection {
@@ -224,9 +226,17 @@ pub(crate) use driver::drive;
 pub(crate) use driver::expire_due;
 
 pub(crate) fn list(client: &RamfluxClient) -> Result<Value, SdkError> {
-    let mut rows = client.account_db()?.voice_call_rows(false)?;
-    rows.sort_by_key(|r| std::cmp::Reverse((r.created_at, r.call_id.clone())));
-    Ok(json!({"calls":rows}))
+    let live = client.account_db()?.voice_call_rows(true)?;
+    let mut calls = crate::client::call::history::listed(client, &live)?;
+    calls.sort_by(|left, right| stamp(right).cmp(&stamp(left)));
+    Ok(json!({"calls": calls}))
+}
+
+fn stamp(row: &Value) -> (i64, &str) {
+    (
+        row.get("created_at").and_then(Value::as_i64).unwrap_or(0),
+        row.get("call_id").and_then(Value::as_str).unwrap_or(""),
+    )
 }
 
 #[cfg(test)]

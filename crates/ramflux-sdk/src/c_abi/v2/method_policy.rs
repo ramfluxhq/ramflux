@@ -119,6 +119,7 @@ policies! {
     "contact.rejected" => ("contact", false, true, false, false),
     "contact.remove" => ("contact", true, true, false, false),
     "contact.request" => ("contact", true, true, false, false),
+    "contact.requests.decline" => ("contact", true, true, false, false),
     "contact.requests.list" => ("contact", false, true, false, false),
     "contact.requests.policy.get" => ("contact", false, true, false, false),
     "contact.requests.policy.set" => ("contact", true, true, false, false),
@@ -166,6 +167,7 @@ policies! {
     "group.invitation.accept" => ("group", true, true, false, false),
     "group.invitation.decline" => ("group", true, true, false, false),
     "group.invitations.list" => ("group", false, true, false, false),
+    "group.leave" => ("group", true, true, false, false),
     "group.list" => ("group", false, true, false, false),
     "group.member.add" => ("group", true, true, false, false),
     "group.member.kick" => ("group", true, true, false, false),
@@ -263,13 +265,9 @@ policies! {
     "profile.update" => ("profile", true, true, false, false),
 }
 
-// Search stays unavailable to native hosts until its separate ABI integration is admitted.
+// Search and daemon shutdown stay unavailable. Username methods and the
+// profile alias are executable. The master phrase is not a bus field.
 pub(super) const DENIED_METHODS: &[&str] = &[
-    "username.mutate",
-    "username.status",
-    "username.resolve",
-    "username.contact.add",
-    "profile.update",
     "daemon.stop",
     "search.cancel",
     "search.cursor.close",
@@ -300,9 +298,9 @@ pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
     "ramflux.message.v1.ContactSafetyVerifyResult";
 /// blake3 of the generated message descriptor set.
 pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
-    "88d7da63263e2132e048ee86d833bd12c95088c80e112cce03456bf00fd6dab9";
+    "50108989877d6e1601743d5d242862d4e130155bf3bd1b3fd28b213426b42686";
 /// Immutable product commit whose tree contains this CAS policy and descriptor.
-pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "679c753bdaa6bd31c8b5b493cfc4cbe8088a3537";
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "36cf7b76679c625c0bc9a31fe20d8ce95b35523f";
 
 pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
     let mut rows = METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify");
@@ -318,7 +316,7 @@ pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
         && CONTACT_VERIFY_CAS_CONTRACT == "CONTACT-VERIFY-CAS-01"
         && CONTACT_VERIFY_CAS_REQUEST_TYPE == "ramflux.message.v1.ContactSafetyVerifyRequest"
         && CONTACT_VERIFY_CAS_RESPONSE_TYPE == "ramflux.message.v1.ContactSafetyVerifyResult"
-        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "679c753bdaa6bd31c8b5b493cfc4cbe8088a3537"
+        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "36cf7b76679c625c0bc9a31fe20d8ce95b35523f"
 }
 
 #[cfg(test)]

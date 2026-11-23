@@ -201,7 +201,8 @@ async fn gateway_quic(profile: &NodeProfile, ca: &Path) -> Result<&'static str, 
     let mut stream = client.open_bidi_stream().await?;
     let result = app_challenge(&mut stream).await;
     let _ = stream.finish();
-    client.close();
+    drop(stream);
+    client.shutdown().await;
     result
 }
 

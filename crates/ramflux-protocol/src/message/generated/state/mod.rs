@@ -53,6 +53,18 @@ pub use call_control_types::*;
 #[path = "call_endpoint.rs"]
 mod call_endpoint_types;
 pub use call_endpoint_types::*;
+#[path = "call_summary.rs"]
+mod call_summary_types;
+pub use call_summary_types::*;
+#[path = "call_summary_failure.rs"]
+mod call_summary_failure_types;
+pub use call_summary_failure_types::*;
+#[path = "call_summary_outcome.rs"]
+mod call_summary_outcome_types;
+pub use call_summary_outcome_types::*;
+#[path = "call_summary_participant.rs"]
+mod call_summary_participant_types;
+pub use call_summary_participant_types::*;
 #[path = "needs_me.rs"]
 mod needs_me_types;
 pub use needs_me_types::*;

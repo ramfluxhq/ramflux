@@ -241,6 +241,9 @@ fn redirected_bus_code(error: &SdkError) -> Option<&'static str> {
     if matches!(error, SdkError::LocalBusRefused { code, .. } if code == "transfer_requires_sync") {
         return Some("transfer_requires_sync");
     }
+    if matches!(error, SdkError::LocalBusRefused { code, .. } if code == "ClientSuspended") {
+        return Some("ClientSuspended");
+    }
     if let SdkError::GroupRefused { operation, .. } = error {
         return Some(operation.error_code());
     }

@@ -162,6 +162,14 @@ impl AccountRuntime {
                     let _ = reply.send(result);
                 }
             }
+            #[cfg(feature = "c-abi")]
+            super::super::actor::PrivateCommand::ReleaseFiles { reply } => {
+                let _ = reply.send(self.release_for_suspend().await);
+            }
+            #[cfg(feature = "c-abi")]
+            super::super::actor::PrivateCommand::ReopenFiles { reply } => {
+                let _ = reply.send(self.reopen_from_suspend());
+            }
         }
         Ok(())
     }
@@ -171,7 +179,23 @@ impl AccountRuntime {
             .await
     }
 
+    async fn park_command(&mut self, command: &mut AccountCommand) -> Result<bool, SdkError> {
+        if command.private.as_ref().is_some_and(super::background::is_file_command) {
+            let Some(backup) = command.private.take() else { return Ok(false) };
+            self.apply_private(backup, &command.request).await?;
+            return Ok(true);
+        }
+        if self.state.config.background.load(std::sync::atomic::Ordering::Acquire) {
+            super::background::reject_suspended(command);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     async fn apply_command(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
+        if self.park_command(&mut command).await? {
+            return Ok(false);
+        }
         self.refresh_networking_expiry().await;
         if command.admission.as_ref().is_some_and(|admission| !admission.claim()) {
             return Ok(false);

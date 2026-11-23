@@ -69,24 +69,7 @@ fn conversation(
         value[field] = saved.get(field).cloned().unwrap_or(Value::Null);
     }
     value["self_principal_id"] = own.get("principal_id").cloned().unwrap_or(Value::Null);
-    if let Some(commitment) =
-        value.pointer("/direct_route/recipient_principal_commitment").and_then(Value::as_str)
-        && let Some(peer) = db.client_record("commitment", commitment)?
-        && let Some(principal) = peer.get("principal_id").and_then(Value::as_str)
-        && let Some(identity) = db.client_record("identity", principal)?
-        && let Some(devices) = identity.get("devices").and_then(Value::as_array)
-    {
-        let selected =
-            value.pointer("/direct_route/recipient_device_ids/0").and_then(Value::as_str);
-        if let Some(device) = devices
-            .iter()
-            .find(|device| device.get("device_id").and_then(Value::as_str) == selected)
-        {
-            value["direct_route"]["target_delivery_id"] = device["target_delivery_id"].clone();
-        } else {
-            value["direct_route"] = Value::Null;
-        }
-    }
+    attach_direct_peer(client, db, &mut value)?;
     if let Some(group) = value.get("group_id").and_then(Value::as_str) {
         let routes = super::super::group_delivery::directory(client, group)?;
         let mut participants = std::collections::BTreeSet::new();
@@ -121,6 +104,51 @@ fn conversation(
     }
     super::list_facts::attach_conversation(client, id, &mut value)?;
     Ok(value)
+}
+
+fn attach_direct_peer(
+    client: &RamfluxClient,
+    db: &ramflux_storage::AccountDb,
+    value: &mut Value,
+) -> Result<(), SdkError> {
+    let Some(commitment) =
+        value.pointer("/direct_route/recipient_principal_commitment").and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    let Some(peer) = db.client_record("commitment", commitment)? else {
+        return Ok(());
+    };
+    let Some(principal) = peer.get("principal_id").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    value["peer_principal_id"] = json!(principal);
+    let identity = db.client_record("identity", principal)?;
+    let stored = identity
+        .as_ref()
+        .and_then(|row| row.get("display_name"))
+        .filter(|name| name.is_string() && name.as_str().is_some_and(|text| !text.is_empty()));
+    value["peer_display_name"] = client
+        .read_profile_facts(principal)
+        .map(|facts| facts.profile.display_name.clone())
+        .filter(|name| !name.is_empty())
+        .map(|name| json!(name))
+        .or_else(|| stored.cloned())
+        .unwrap_or(Value::Null);
+    let Some(devices) =
+        identity.as_ref().and_then(|row| row.get("devices")).and_then(Value::as_array)
+    else {
+        return Ok(());
+    };
+    let selected = value.pointer("/direct_route/recipient_device_ids/0").and_then(Value::as_str);
+    if let Some(device) =
+        devices.iter().find(|device| device.get("device_id").and_then(Value::as_str) == selected)
+    {
+        value["direct_route"]["target_delivery_id"] = device["target_delivery_id"].clone();
+    } else {
+        value["direct_route"] = Value::Null;
+    }
+    Ok(())
 }
 
 fn group_row(client: &RamfluxClient, id: &str, saved: &Value) -> Result<Value, SdkError> {

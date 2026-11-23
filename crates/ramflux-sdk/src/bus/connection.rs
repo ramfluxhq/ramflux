@@ -111,6 +111,7 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     supervisor: Rc<Supervisor>,
     id: u64,
 ) -> Result<(), SdkError> {
+    let credential_prompts = stream.accepts_credential_prompt();
     let generations = stream.subscription_generations();
     let (reader, writer) = stream.into_halves();
     let (outbound, receiver) = super::outbound::LocalBusOutbound::channel(64, generations);
@@ -129,8 +130,8 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     ));
     let _cleanup =
         ConnectionTasks { reader: reader_task.abort_handle(), writer: writer_task.abort_handle() };
-    let mut connection = LocalBusConnectionState::new(id, outbound.clone());
-    connection.credential_channel = Some(credential_input.channel());
+    let mut connection = LocalBusConnectionState::new(id, outbound.clone())
+        .with_credentials(credential_input.channel(), credential_prompts);
     let mut requests = JoinSet::new();
     let mut inflight = BTreeSet::new();
     let mut ceremony: Option<crate::custody::CreationCeremony> = None;

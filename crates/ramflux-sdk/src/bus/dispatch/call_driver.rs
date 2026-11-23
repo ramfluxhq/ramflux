@@ -39,7 +39,7 @@ pub(crate) async fn drive(account: &mut LocalBusAccountState) -> Result<usize, S
             account
                 .client
                 .account_db()?
-                .write_transaction(|| account.client.persist_call_row(&next.row))?;
+                .write_transaction(|| account.client.persist_live_call(&next))?;
         }
         account.client.voice_calls.insert(id.clone(), next);
         count += drive_controls(account, &id, now).await?;
@@ -246,7 +246,7 @@ pub(crate) fn expire_due(account: &mut LocalBusAccountState) -> Result<(), SdkEr
         account
             .client
             .account_db()?
-            .write_transaction(|| account.client.persist_call_row(&next.row))?;
+            .write_transaction(|| account.client.persist_live_call(&next))?;
         account.client.voice_calls.insert(id, next);
     }
     Ok(())

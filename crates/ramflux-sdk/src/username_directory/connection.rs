@@ -62,6 +62,7 @@ impl UsernameConnection {
         &self,
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
+        deadline: tokio::time::Instant,
     ) -> Result<Box<CustodyConnection>, SdkError> {
         // Take ownership before any await. Cancellation or any failed request closes this
         // stream instead of leaving a partially consumed frame for a later command.
@@ -81,7 +82,7 @@ impl UsernameConnection {
             }
         }
         tracing::debug!("username native transport opening");
-        Box::pin(CustodyConnection::connect(config, vault)).await.map(Box::new)
+        Box::pin(CustodyConnection::connect_until(config, vault, deadline)).await.map(Box::new)
     }
 
     pub(crate) fn retain(

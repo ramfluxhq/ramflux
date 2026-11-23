@@ -34,7 +34,7 @@ impl GroupOperation {
             "group.member.add" => Some(Self::MemberAdd),
             "group.send" => Some(Self::Send),
             "group.name.set" => Some(Self::Rename),
-            "group.member.remove" => Some(Self::MemberRemove),
+            "group.leave" | "group.member.remove" => Some(Self::MemberRemove),
             _ => None,
         }
     }

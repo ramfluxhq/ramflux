@@ -678,6 +678,8 @@ pub(crate) struct LocalBusConnectionState {
     pub(crate) credential_channel: Option<
         std::sync::Arc<crate::custody::pairing::private_credential::PrivateCredentialChannel>,
     >,
+    /// Socket clients answer `device.credential.request`. The in-process carrier does not.
+    pub(crate) credential_prompts: bool,
     pub(crate) connection_id: u64,
     pub(crate) outbound: super::outbound::LocalBusOutbound,
     pub(crate) topics: BTreeSet<String>,
@@ -692,12 +694,25 @@ impl LocalBusConnectionState {
     ) -> Self {
         Self {
             credential_channel: None,
+            credential_prompts: true,
             connection_id,
             outbound: outbound.into(),
             topics: BTreeSet::new(),
             attended_account_id: None,
             pending_events: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_credentials(
+        mut self,
+        channel: std::sync::Arc<
+            crate::custody::pairing::private_credential::PrivateCredentialChannel,
+        >,
+        prompts: bool,
+    ) -> Self {
+        self.credential_channel = Some(channel);
+        self.credential_prompts = prompts;
+        self
     }
 
     pub(crate) fn push_event(&mut self, event: LocalBusFrame) {

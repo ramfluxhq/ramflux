@@ -38,6 +38,7 @@ pub(super) async fn dispatch(
     }
     if method != "group.create"
         && method != "group.name.set"
+        && method != "group.leave"
         && !matches!(
             method,
             "group.member.add"
@@ -131,6 +132,32 @@ pub(super) async fn dispatch(
     Ok(Some(result))
 }
 
+fn leave_change(
+    account: &LocalBusAccountState,
+    previous: Option<&ramflux_crypto::VerifiedGroupState>,
+) -> Result<Option<GroupStateChange>, SdkError> {
+    let state = previous.ok_or(StorageError::GroupPermissionDenied)?;
+    let own = account.client.owned_device_identity()?;
+    let member = state
+        .view()
+        .members
+        .iter()
+        .find(|member| {
+            member.identity.root_commitment == own.root_commitment()
+                && member.identity.device_id == own.device_id()
+        })
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    if member.role == ramflux_protocol::group_state::SharedGroupRole::Owner {
+        return Err(SdkError::LocalBus(
+            "the owner leaves only after transferring ownership".into(),
+        ));
+    }
+    Ok(Some(GroupStateChange::Remove {
+        root_commitment: member.identity.root_commitment.clone(),
+        device_id: member.identity.device_id.clone(),
+    }))
+}
+
 fn local_actor_matches(account: &LocalBusAccountState, actor: &str) -> bool {
     actor == account.gateway_config.device_id
         || (account.client.born_v3_account.is_some()
@@ -144,6 +171,9 @@ async fn requested_change(
     body: &Value,
     method: &str,
 ) -> Result<Option<GroupStateChange>, SdkError> {
+    if method == "group.leave" {
+        return leave_change(account, previous);
+    }
     if method == "group.create" {
         let creator = required(body, "creator_id")?;
         let valid = if account.client.born_v3_account.is_some() {
