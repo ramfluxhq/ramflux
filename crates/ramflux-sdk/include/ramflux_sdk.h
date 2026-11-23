@@ -144,6 +144,10 @@ enum RamfluxV2Status
    A refused call had no business effects. An admitted call reports effects `unknown`.
    */
   RAMFLUX_V2_STATUS_SUSPENDED = 30,
+  /*
+   Host custody is locked, including before the first device unlock. No client was opened.
+   */
+  RAMFLUX_V2_STATUS_VAULT_LOCKED = 31,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
@@ -303,6 +307,7 @@ int32_t ramflux_v2_negotiate(uint32_t major, uint32_t min_minor, struct RamfluxB
 
 /*
  Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?,allow_secret_exports?}`.
+ The host must supply an existing private directory; see the shared-root contract.
  This may block during startup; invoke off the UI thread. Output is zero on failure.
  */
 int32_t ramflux_v2_client_open(const uint8_t *config,
@@ -312,7 +317,8 @@ int32_t ramflux_v2_client_open(const uint8_t *config,
 /*
  Open with trusted host OS credential storage (provider ABI version 1).
  The table is borrowed only during this call; retained context lives through shutdown.
- Android M4 supplies non-synchronizing Keystore wrapping; iOS may supply Keychain storage.
+ Custody preflight runs before startup; locked custody returns `VaultLocked` (31).
+ Mobile providers must allow background use after the first device unlock.
  */
 int32_t ramflux_v2_client_open_with_custody(const uint8_t *config,
                                             size_t len,

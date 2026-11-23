@@ -18,6 +18,7 @@ mod credential;
 mod custody;
 #[cfg(test)]
 mod custody_tests;
+mod data_root;
 mod exports;
 mod input;
 mod input_config;

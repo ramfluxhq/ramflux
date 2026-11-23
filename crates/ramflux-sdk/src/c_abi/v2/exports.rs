@@ -27,6 +27,8 @@ pub enum RamfluxV2Status {
     /// The client released its files. 28 and 29 belong to pairing on `RamfluxErrorCode`.
     /// A refused call had no business effects. An admitted call reports effects `unknown`.
     Suspended = 30,
+    /// Host custody is locked, including before the first device unlock. No client was opened.
+    VaultLocked = 31,
 }
 
 #[derive(Default)]
@@ -214,6 +216,7 @@ pub extern "C" fn ramflux_v2_negotiate(
 }
 
 /// Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?,allow_secret_exports?}`.
+/// The host must supply an existing private directory; see the shared-root contract.
 /// This may block during startup; invoke off the UI thread. Output is zero on failure.
 #[unsafe(no_mangle)]
 #[must_use]
@@ -227,7 +230,8 @@ pub extern "C" fn ramflux_v2_client_open(
 
 /// Open with trusted host OS credential storage (provider ABI version 1).
 /// The table is borrowed only during this call; retained context lives through shutdown.
-/// Android M4 supplies non-synchronizing Keystore wrapping; iOS may supply Keychain storage.
+/// Custody preflight runs before startup; locked custody returns `VaultLocked` (31).
+/// Mobile providers must allow background use after the first device unlock.
 #[unsafe(no_mangle)]
 #[must_use]
 pub extern "C" fn ramflux_v2_client_open_with_custody(
@@ -275,12 +279,11 @@ fn open_inner(
 ) -> Result<(), CAbiError> {
     write_handle(out_client, 0)?;
     let mut config: Config = input(config, len)?;
-    if config.data_root.is_empty() || !std::path::Path::new(&config.data_root).is_absolute() {
-        return Err(invalid("data_root must be absolute"));
+    if let Some(vault) = &vault {
+        vault.preflight().map_err(|error| super::data_root::custody_error(&error))?;
     }
-    std::fs::create_dir_all(&config.data_root).map_err(|_| invalid("data_root"))?;
-    let candidate_root =
-        std::fs::canonicalize(&config.data_root).map_err(|_| invalid("data_root"))?;
+    let candidate_root = super::data_root::validate(&config.data_root)?;
+    config.data_root = candidate_root.to_str().ok_or_else(|| invalid("data_root encoding"))?.into();
     // A registered root remains reserved until shutdown is acknowledged, even if
     // its OS lease is released just before the worker publishes completion.
     // No bridge registry lock spans filesystem I/O.
