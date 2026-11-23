@@ -53,7 +53,7 @@ fn planned() -> Result<Planned, Box<dyn std::error::Error>> {
 #[test]
 fn creation_writes_one_record_in_state_u_and_replays_the_first_identity() -> TestResult {
     let (plan, records, _fixture) = planned()?;
-    let intent = AgentIntent { persona: persona(), access: owner_access() };
+    let intent = AgentIntent::new(persona(), owner_access());
     let first = create_from_plan(&records, &plan, &intent)?;
     assert_eq!(first.lifecycle, "U", "the new agent is in state U");
     assert_eq!(
@@ -79,17 +79,12 @@ fn an_invalid_access_policy_or_persona_refuses_and_writes_nothing() -> TestResul
     let (plan, records, _fixture) = planned()?;
     let mut bad_dm = owner_access();
     bad_dm.dm = "everyone".into();
-    let refused =
-        create_from_plan(&records, &plan, &AgentIntent { persona: persona(), access: bad_dm });
+    let refused = create_from_plan(&records, &plan, &AgentIntent::new(persona(), bad_dm));
     assert!(matches!(refused, Err(SdkError::AgentCreationRefused("access_policy_invalid"))));
 
     let mut no_name = persona();
     no_name.name = "  ".into();
-    let refused = create_from_plan(
-        &records,
-        &plan,
-        &AgentIntent { persona: no_name, access: owner_access() },
-    );
+    let refused = create_from_plan(&records, &plan, &AgentIntent::new(no_name, owner_access()));
     assert!(matches!(refused, Err(SdkError::AgentCreationRefused("persona_invalid"))));
     assert!(records.load(&plan.agent_anchor)?.is_none(), "no record after a refusal");
     Ok(())
@@ -122,7 +117,7 @@ fn allowed_humans_need_allowlist_and_must_be_unique() -> TestResult {
 #[test]
 fn a_record_file_that_names_another_agent_is_refused() -> TestResult {
     let (plan, records, _fixture) = planned()?;
-    create_from_plan(&records, &plan, &AgentIntent { persona: persona(), access: owner_access() })?;
+    create_from_plan(&records, &plan, &AgentIntent::new(persona(), owner_access()))?;
     let source = records.load(&plan.agent_anchor)?.ok_or("the record")?;
     // The record of one agent planted under another agent's file name.
     let other = "other-agent-anchor-0000000000000000000000";
@@ -138,7 +133,7 @@ fn a_record_file_that_names_another_agent_is_refused() -> TestResult {
 #[test]
 fn watch_reads_changes_after_a_cursor_across_a_tombstone_and_refuses_bad_cursors() -> TestResult {
     let (plan, records, _fixture) = planned()?;
-    let intent = AgentIntent { persona: persona(), access: owner_access() };
+    let intent = AgentIntent::new(persona(), owner_access());
     let empty = records.changes(parse_cursor("")?)?;
     assert!(empty.records.is_empty() && empty.cursor == 0 && !empty.more, "no record, cursor zero");
 
@@ -192,7 +187,7 @@ fn watch_reads_changes_after_a_cursor_across_a_tombstone_and_refuses_bad_cursors
 #[test]
 fn a_retired_anchor_is_never_created_again_on_this_device() -> TestResult {
     let (plan, records, _fixture) = planned()?;
-    let intent = AgentIntent { persona: persona(), access: owner_access() };
+    let intent = AgentIntent::new(persona(), owner_access());
     let first = create_from_plan(&records, &plan, &intent)?;
     retire(&records, &plan.agent_anchor, &first.identity, &plan.desktop, 2)?;
     let again = create_from_plan(&records, &plan, &intent);

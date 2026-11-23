@@ -31,3 +31,23 @@ pub(super) fn write_buffer(out: *mut *mut RamfluxBuffer, bytes: Vec<u8>) -> Resu
     }
     Ok(())
 }
+
+pub(super) fn discard_output(out: *mut *mut RamfluxBuffer) {
+    if out.is_null() {
+        return;
+    }
+    // SAFETY: the caller owns this output slot for the duration of the call.
+    let buffer = unsafe { out.replace(std::ptr::null_mut()) };
+    if buffer.is_null() {
+        return;
+    }
+    // SAFETY: the pointer was produced by write_buffer and has not been freed.
+    let buffer = unsafe { Box::from_raw(buffer) };
+    if buffer.ptr.is_null() {
+        return;
+    }
+    let raw = std::ptr::slice_from_raw_parts_mut(buffer.ptr, buffer.len);
+    // SAFETY: write_buffer allocated this exact boxed slice and stored its length.
+    let mut bytes = unsafe { Box::from_raw(raw) };
+    zeroize::Zeroize::zeroize(bytes.as_mut());
+}

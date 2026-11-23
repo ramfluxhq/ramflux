@@ -271,6 +271,7 @@ fn ack_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRunti
         limits(),
         Arc::new(PendingConnect),
         None,
+        None,
     );
     let generation = handle.generation();
     account.connection = Some(handle);
@@ -285,15 +286,21 @@ fn ack_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRunti
         }
     });
     let (connection_sender, connection_work) = mpsc::channel(8);
+    let (head_completion_sender, head_rx) = mpsc::channel(1);
     let (_lifecycle_sender, lifecycle) = mpsc::channel(4);
     let (_preempt_sender, preempt) = watch::channel(0_u64);
     let runtime = super::super::AccountRuntime {
         timeouts: limits(),
         lifecycle,
         preempt,
+        command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         connection_sender,
         connection_work,
+        head_completion_sender,
+        head_rx,
+        deferred: std::collections::VecDeque::new(),
         ledger: None,
+        resume_receive_until: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
         pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
         username: crate::bus::account_runtime::username_calls::Calls::default(),
@@ -423,7 +430,7 @@ async fn drive<T>(
     loop {
         tokio::select! {
             result = &mut future => return Ok(result),
-            work = runtime.connection_work.recv() => {
+            work = runtime.recv_connection_work() => {
                 runtime.apply_connection_work(work.ok_or("writer closed")?).await?;
             }
         }

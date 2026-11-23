@@ -165,6 +165,7 @@ impl AccountSessionHarness {
             }
         });
         let (connection_sender, connection_work) = mpsc::channel(2);
+        let (head_completion_sender, head_rx) = mpsc::channel(1);
         let mut runtime = AccountRuntime {
             timeouts,
             id,
@@ -172,6 +173,7 @@ impl AccountSessionHarness {
             receiver,
             lifecycle,
             preempt,
+            command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             readers: Arc::new(RoutingMutex::new(None)),
             events,
             shutdown,
@@ -182,7 +184,11 @@ impl AccountSessionHarness {
             transfers: uploads::Transfers::start(),
             connection_sender,
             connection_work,
+            head_completion_sender,
+            head_rx,
+            deferred: std::collections::VecDeque::new(),
             ledger: None,
+            resume_receive_until: None,
             transient: crate::bus::account_runtime::TransientHost::default(),
             pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
             username: crate::bus::account_runtime::username_calls::Calls::default(),
@@ -231,7 +237,7 @@ impl AccountSessionHarness {
         loop {
             tokio::select! {
                 result = &mut future => return result.map_err(|error| SdkError::GatewaySessionRejected(format!("account fixture exchange: {error:?}"))),
-                Some(work) = self.runtime.connection_work.recv() => Box::pin(self.runtime.apply_connection_work(work)).await?,
+                Some(work) = self.runtime.recv_connection_work() => Box::pin(self.runtime.apply_connection_work(work)).await?,
             }
         }
     }
@@ -348,7 +354,7 @@ impl AccountSessionHarness {
             {
                 return Ok(());
             }
-            let work = match tokio::time::timeout_at(deadline, self.runtime.connection_work.recv())
+            let work = match tokio::time::timeout_at(deadline, self.runtime.recv_connection_work())
                 .await
             {
                 Ok(Some(work)) => work,
@@ -398,7 +404,7 @@ impl AccountSessionHarness {
             if self.call_media(id)? == expected {
                 return Ok(());
             }
-            let work = tokio::time::timeout_at(deadline, self.runtime.connection_work.recv())
+            let work = tokio::time::timeout_at(deadline, self.runtime.recv_connection_work())
                 .await
                 .map_err(|_| SdkError::NetworkingPending)?
                 .ok_or(SdkError::GatewaySessionNotEstablished)?;
@@ -422,7 +428,7 @@ impl AccountSessionHarness {
             if call.pending.is_empty() || call.retry_attempts > 0 {
                 return Ok(());
             }
-            let work = tokio::time::timeout_at(deadline, self.runtime.connection_work.recv())
+            let work = tokio::time::timeout_at(deadline, self.runtime.recv_connection_work())
                 .await
                 .map_err(|_| SdkError::NetworkingPending)?
                 .ok_or(SdkError::GatewaySessionNotEstablished)?;
@@ -610,8 +616,7 @@ impl AccountSessionHarness {
             }
             let work = self
                 .runtime
-                .connection_work
-                .recv()
+                .recv_connection_work()
                 .await
                 .ok_or(SdkError::GatewaySessionNotEstablished)?;
             Box::pin(self.runtime.apply_connection_work(work)).await?;

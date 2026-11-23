@@ -213,20 +213,35 @@ async fn sdk_policy_gateway_request(
     config: &GatewaySessionConfig,
     request: &ramflux_transport::GatewayQuicRequest,
 ) -> Result<ramflux_transport::GatewayQuicResponse, SdkError> {
-    tokio::time::timeout(config.timeout.saturating_mul(3), async {
-        let (_owner, mut stream, _kind) =
-            crate::gateway::engine::open_gateway_session_transport(config).await?;
-        ramflux_transport::write_gateway_session_json(&mut *stream, request).await?;
-        if native_directory_request(config, request) {
-            let bytes =
-                ramflux_transport::GatewaySessionFrameSource::recv_custody_frame(&mut *stream)
-                    .await?;
-            return Ok(ramflux_protocol::parse_i_json(&bytes)?);
-        }
-        Ok(ramflux_transport::read_gateway_session_json(&mut *stream).await?)
-    })
+    let (owner, mut stream, _kind) = tokio::time::timeout(
+        config.timeout.saturating_mul(3),
+        crate::gateway::engine::open_gateway_session_transport(config),
+    )
     .await
-    .map_err(|_| SdkError::GatewaySessionRejected("gateway request timed out".into()))?
+    .map_err(|_| SdkError::GatewaySessionRejected("gateway request timed out".into()))??;
+    let result = tokio::time::timeout(
+        config.timeout.saturating_mul(3),
+        policy_gateway_exchange(&mut *stream, config, request),
+    )
+    .await;
+    let _ = stream.finish();
+    drop(stream);
+    owner.shutdown().await;
+    result.map_err(|_| SdkError::GatewaySessionRejected("gateway request timed out".into()))?
+}
+
+async fn policy_gateway_exchange(
+    stream: &mut (dyn ramflux_transport::GatewaySessionTransport + Send),
+    config: &GatewaySessionConfig,
+    request: &ramflux_transport::GatewayQuicRequest,
+) -> Result<ramflux_transport::GatewayQuicResponse, SdkError> {
+    ramflux_transport::write_gateway_session_json(stream, request).await?;
+    if native_directory_request(config, request) {
+        let bytes =
+            ramflux_transport::GatewaySessionFrameSource::recv_custody_frame(stream).await?;
+        return Ok(ramflux_protocol::parse_i_json(&bytes)?);
+    }
+    Ok(ramflux_transport::read_gateway_session_json(stream).await?)
 }
 
 async fn sdk_quic_gateway_request(
@@ -243,21 +258,31 @@ async fn sdk_quic_gateway_request(
     )
     .await?;
     client.set_session_timeout(config.timeout);
-    if native_directory_request(config, request) {
-        let mut stream = client.open_bidi_stream().await?;
-        return tokio::time::timeout(timeout, async {
-            ramflux_transport::write_gateway_session_json(&mut stream, request).await?;
-            let bytes =
-                ramflux_transport::GatewaySessionFrameSource::recv_custody_frame(&mut stream)
-                    .await?;
-            Ok(ramflux_protocol::parse_i_json(&bytes)?)
-        })
-        .await
-        .map_err(|_| {
-            SdkError::GatewaySessionRejected("native directory request timed out".into())
-        })?;
+    let result = quic_gateway_exchange(&mut client, config, request, timeout).await;
+    client.shutdown().await;
+    result
+}
+
+async fn quic_gateway_exchange(
+    client: &mut ramflux_transport::QuicGatewayClient,
+    config: &GatewaySessionConfig,
+    request: &ramflux_transport::GatewayQuicRequest,
+    timeout: Duration,
+) -> Result<ramflux_transport::GatewayQuicResponse, SdkError> {
+    if !native_directory_request(config, request) {
+        return Ok(client.request(request).await?);
     }
-    Ok(client.request(request).await?)
+    let mut stream = client.open_bidi_stream().await?;
+    let result = tokio::time::timeout(timeout, async {
+        ramflux_transport::write_gateway_session_json(&mut stream, request).await?;
+        let bytes =
+            ramflux_transport::GatewaySessionFrameSource::recv_custody_frame(&mut stream).await?;
+        Ok(ramflux_protocol::parse_i_json(&bytes)?)
+    })
+    .await
+    .map_err(|_| SdkError::GatewaySessionRejected("native directory request timed out".into()))?;
+    let _ = stream.finish();
+    result
 }
 
 async fn sdk_tcp_tls_gateway_request(
@@ -335,25 +360,6 @@ where
     sdk_http_json_request_with_deadline(base_url, request.as_bytes(), None, deadline)
 }
 
-pub(crate) fn sdk_http_post_json_with_deadline<T, R>(
-    base_url: &str,
-    path: &str,
-    value: &T,
-    deadline: std::time::Instant,
-) -> Result<R, SdkError>
-where
-    T: serde::Serialize,
-    R: serde::de::DeserializeOwned,
-{
-    let body = serde_json::to_vec(value)?;
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        sdk_http_host_port(base_url)?,
-        body.len()
-    );
-    sdk_http_json_request_with_deadline(base_url, request.as_bytes(), Some(&body), deadline)
-}
-
 fn sdk_http_json_request_with_deadline<R>(
     base_url: &str,
     request_head: &[u8],
@@ -394,10 +400,7 @@ where
     stream.flush()?;
     let (status_line, body) = read_sdk_http_response(&mut stream)?;
     if !status_line.contains(" 200 ") {
-        return Err(SdkError::LocalBus(format!(
-            "SDK HTTP request failed: {status_line}: {}",
-            String::from_utf8_lossy(&body)
-        )));
+        return Err(SdkError::LocalBus(format!("SDK HTTP request failed: {status_line}")));
     }
     Ok(serde_json::from_slice(&body)?)
 }
@@ -456,10 +459,7 @@ where
     stream.flush()?;
     let (status_line, body) = read_sdk_http_response(&mut stream)?;
     if !status_line.contains(" 200 ") {
-        return Err(SdkError::LocalBus(format!(
-            "SDK HTTP request failed: {status_line}: {}",
-            String::from_utf8_lossy(&body)
-        )));
+        return Err(SdkError::LocalBus(format!("SDK HTTP request failed: {status_line}")));
     }
     Ok(serde_json::from_slice(&body)?)
 }
@@ -493,6 +493,9 @@ fn read_sdk_http_response(stream: &mut impl Read) -> Result<(String, Vec<u8>), S
     }
     let content_length = content_length
         .ok_or_else(|| SdkError::LocalBus("SDK HTTP response missing Content-Length".to_owned()))?;
+    if content_length > http_async::DIRECTORY_BODY_LIMIT {
+        return Err(SdkError::LocalBus("SDK HTTP response exceeds size limit".to_owned()));
+    }
     let mut body = vec![0_u8; content_length];
     reader.read_exact(&mut body)?;
     Ok((status_line, body))

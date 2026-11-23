@@ -14,7 +14,9 @@ use std::ffi::{c_char, c_void};
 mod credential;
 mod request;
 mod state;
+pub(crate) use credential::CallbackProvider;
 pub use credential::CredentialCallback;
+pub(crate) use credential::UsernameMasterHold;
 /// Nullable host callback; null unregisters and drains outstanding uses.
 pub type CredentialProviderCallback = Option<
     extern "C" fn(

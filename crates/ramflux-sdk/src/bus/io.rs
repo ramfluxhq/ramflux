@@ -98,7 +98,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
             details: body.get("details").cloned().map(Box::new),
-            retry_after_ms: None,
+            retry_after_ms: refused_retry_after_ms(body),
             cause: None,
         };
     }
@@ -127,7 +127,8 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
                 Some(u64::from(retry.clamped().retry_after_ms))
             }
             SdkError::NetworkingPendingContext { retry_after_ms, .. } => *retry_after_ms,
-            SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some(1_000),
+            SdkError::AccountCommandBackpressure
+            | SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some(1_000),
             SdkError::CustodyCapacity { capacity } => {
                 Some(crate::custody::capacity_hint::retry_after_ms(
                     *capacity,
@@ -145,8 +146,17 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
     }
 }
 
+fn refused_retry_after_ms(body: &serde_json::Value) -> Option<u64> {
+    body.get("retry_after_ms").and_then(serde_json::Value::as_u64).or_else(|| {
+        body.get("retry_after_secs")
+            .and_then(serde_json::Value::as_i64)
+            .map(|secs| u64::try_from(secs).map_or(0, |wait| wait.saturating_mul(1_000)))
+    })
+}
+
 fn bus_reason_code(error: &SdkError) -> Option<String> {
     Some(match error {
+        SdkError::AccountCommandBackpressure => "account_command_backpressure".into(),
         SdkError::UsernameDirectoryRefused(code) => code.as_str().into(),
         SdkError::Storage(StorageError::AccountWriterBusy(_)) => "account_busy".into(),
         SdkError::ContactInput(reason) => reason.to_string(),
@@ -155,7 +165,10 @@ fn bus_reason_code(error: &SdkError) -> Option<String> {
         SdkError::CustodyConfirmRejected(reason) => reason.token().to_owned(),
         SdkError::CustodyExpired => "deadline".into(),
         SdkError::ContactConfirmationRequired(_) => "root_replacement_confirmation_required".into(),
-        SdkError::ContactHomeNodeUnsupported => "invalid_card".into(),
+        SdkError::PairingCode(code) => {
+            let token = pairing_https_token(code)?;
+            token.to_owned()
+        }
         _ if local_bus_error_code(error) == "transfer_requires_sync" => {
             "head_or_removal_floor_mismatch".into()
         }
@@ -180,8 +193,20 @@ fn bus_error_details(error: &SdkError) -> Option<Box<serde_json::Value>> {
         SdkError::EditConflict { target, expected, received } => Some(Box::new(
             serde_json::json!({"target": target, "expected": expected, "received": received}),
         )),
+        SdkError::PairingCode(code) => {
+            pairing_https_token(code).map(|token| Box::new(serde_json::json!({"pairing": token})))
+        }
         _ => None,
     }
+}
+
+/// Static pairing HTTPS tokens. Other pairing codes keep their existing empty details.
+fn pairing_https_token(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "UntrustedPeer" => "UntrustedPeer",
+        "ResumeRequired" => "ResumeRequired",
+        _ => return None,
+    })
 }
 
 fn generated_error_body(error: &crate::bindings::AdapterError) -> LocalBusErrorBody {
@@ -203,26 +228,30 @@ fn vault_reason_details(reason: crate::custody::CustodyVaultReason) -> serde_jso
     details
 }
 
-pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
+fn redirected_bus_code(error: &SdkError) -> Option<&'static str> {
     if let SdkError::DirectoryAuthorityUnavailable { source, .. } = error {
-        return local_bus_error_code(source);
+        return Some(local_bus_error_code(source));
     }
     if super::account_runtime::head_refresh::is_freshness_refusal(error) {
-        return "NetworkingPending";
+        return Some("NetworkingPending");
     }
     if let SdkError::LifecycleShared(source) = error {
-        return local_bus_error_code(source);
+        return Some(local_bus_error_code(source));
     }
-    if matches!(error,SdkError::LocalBusRefused{code,..} if code == "transfer_requires_sync") {
-        return "transfer_requires_sync";
+    if matches!(error, SdkError::LocalBusRefused { code, .. } if code == "transfer_requires_sync") {
+        return Some("transfer_requires_sync");
+    }
+    if matches!(error, SdkError::LocalBusRefused { code, .. } if code == "ClientSuspended") {
+        return Some("ClientSuspended");
     }
     if let SdkError::GroupRefused { operation, .. } = error {
-        return operation.error_code();
+        return Some(operation.error_code());
     }
-    if let Some(code) = crate::error_policy::security_code(error) {
-        return code;
-    }
-    if let Some(code) = custody_unit_code(error) {
+    crate::error_policy::security_code(error).or_else(|| custody_unit_code(error))
+}
+
+pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
+    if let Some(code) = redirected_bus_code(error) {
         return code;
     }
     match error {
@@ -244,6 +273,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::AttachmentDeleted => "AttachmentDeleted",
         SdkError::Crypto(CryptoError::GroupLeaseUnavailable) => "GroupLeaseUnavailable",
         SdkError::ContactInput(crate::ContactReason::AnchorMismatch) => "AnchorMismatch",
+        SdkError::AccountCommandBackpressure => "account_command_backpressure",
         SdkError::NetworkingPending
         | SdkError::NetworkingPendingContext { .. }
         | SdkError::NodeUnreachable { .. }
@@ -334,6 +364,8 @@ fn custody_unit_code(error: &SdkError) -> Option<&'static str> {
         SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
         SdkError::AgentCustodyUnsupported => "AgentCustodyUnsupported",
         SdkError::AgentCreationRefused(token) => token,
+        SdkError::AgentNotRetired => "agent_not_retired",
+        SdkError::PrxCall(code) => code,
         SdkError::CustodySetupInvalid => "CustodySetupInvalid",
         SdkError::CustodyConfirmRejected(reason) => reason.family(),
         SdkError::CustodyExpired => "CustodyExpired",
@@ -393,6 +425,7 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         | E::EventIdConflict(_)
         | E::IdentityLifecycleBlocked(_)
         | E::InvalidRecoveryState { .. }
+        | E::WriterPause
         | E::PairingField(_)
         | E::MuteUntilOutOfRange => "ValidationFailed",
     }

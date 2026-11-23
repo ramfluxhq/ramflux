@@ -5,7 +5,7 @@
 //! response bound. The HTTP stack is the workspace's `reqwest` (same features as
 //! `apps/ramflux-agent-host`).
 
-use crate::error::{PrxError, config, decode_api_error, protocol, rate_limited};
+use crate::error::{PrxError, config, decode_api_error, limit_or_rate, protocol};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, IF_MATCH, RETRY_AFTER};
 use reqwest::{Method, Url, redirect};
 use serde_json::Value;
@@ -109,10 +109,22 @@ impl Transport {
         if_match: Option<&str>,
         body: Option<&Value>,
     ) -> Result<Raw, PrxError> {
-        let mut raw = self.send_once(&method, path, if_match, body).await?;
+        self.call_keyed(method, path, if_match, None, body).await
+    }
+
+    /// Like `call`, and also sends `Idempotency-Key` when `idempotency_key` is set.
+    pub(crate) async fn call_keyed(
+        &self,
+        method: Method,
+        path: &str,
+        if_match: Option<&str>,
+        idempotency_key: Option<&str>,
+        body: Option<&Value>,
+    ) -> Result<Raw, PrxError> {
+        let mut raw = self.send_once(&method, path, if_match, idempotency_key, body).await?;
         if raw.status == 401 {
             self.reload_token()?;
-            raw = self.send_once(&method, path, if_match, body).await?;
+            raw = self.send_once(&method, path, if_match, idempotency_key, body).await?;
         }
         Self::check_status(raw)
     }
@@ -127,7 +139,7 @@ impl Transport {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Raw, PrxError> {
-        self.send_once(&method, path, None, body).await
+        self.send_once(&method, path, None, None, body).await
     }
 
     /// Sends one request and returns the raw answer, with the same single token re-read on a 401
@@ -138,10 +150,10 @@ impl Transport {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Raw, PrxError> {
-        let mut raw = self.send_once(&method, path, None, body).await?;
+        let mut raw = self.send_once(&method, path, None, None, body).await?;
         if raw.status == 401 {
             self.reload_token()?;
-            raw = self.send_once(&method, path, None, body).await?;
+            raw = self.send_once(&method, path, None, None, body).await?;
         }
         Ok(raw)
     }
@@ -150,8 +162,9 @@ impl Transport {
         if (200..300).contains(&raw.status) {
             Ok(raw)
         } else if raw.status == 429 {
-            // No built-in retry (card D4): the caller decides.
-            Err(rate_limited(raw.retry_after, &raw.body))
+            // No built-in retry (card D4): the caller decides. Admission refusals stay distinct
+            // from the shared API limit.
+            Err(limit_or_rate(raw.retry_after, &raw.body))
         } else {
             Err(decode_api_error(raw.status, &raw.body))
         }
@@ -162,6 +175,7 @@ impl Transport {
         method: &Method,
         path: &str,
         if_match: Option<&str>,
+        idempotency_key: Option<&str>,
         body: Option<&Value>,
     ) -> Result<Raw, PrxError> {
         let url = self.base.join(path).map_err(|_| config("request path is invalid"))?;
@@ -175,6 +189,11 @@ impl Transport {
             let value = HeaderValue::from_str(revision)
                 .map_err(|_| config("revision is not a header value"))?;
             request = request.header(IF_MATCH, value);
+        }
+        if let Some(key) = idempotency_key {
+            let value = HeaderValue::from_str(key)
+                .map_err(|_| config("idempotency key is not a header value"))?;
+            request = request.header("idempotency-key", value);
         }
         if let Some(payload) = body {
             let bytes = serde_json::to_vec(payload)

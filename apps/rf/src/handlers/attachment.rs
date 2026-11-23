@@ -153,7 +153,7 @@ async fn prepare_one(
     let mut body = json!({
         "operation_id": operation,
         "file_name": file_name,
-        "mime": "application/octet-stream",
+        "mime": media_type(path)?,
     });
     match kind {
         Kind::Dm { conversation } => {
@@ -203,6 +203,83 @@ async fn prepare_one(
     )
     .await?;
     Ok(prepare_id)
+}
+
+fn media_type(path: &Path) -> Result<&'static str, RfError> {
+    let mut file = std::fs::File::open(path)?;
+    let mut header = [0_u8; 64];
+    let read = std::io::Read::read(&mut file, &mut header)?;
+    Ok(sniffed_media_type(&header[..read]))
+}
+
+fn sniffed_media_type(header: &[u8]) -> &'static str {
+    image_type(header)
+        .or_else(|| audio_type(header))
+        .or_else(|| video_type(header))
+        .unwrap_or("application/octet-stream")
+}
+
+fn image_type(header: &[u8]) -> Option<&'static str> {
+    if header.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if header.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("image/png");
+    }
+    if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if header.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    if header.starts_with(b"RIFF") && header.len() >= 12 && &header[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    ftyp_image(header)
+}
+
+fn ftyp_image(header: &[u8]) -> Option<&'static str> {
+    let brand = ftyp_brand(header)?;
+    Some(match brand {
+        b"avif" | b"avis" => "image/avif",
+        b"heic" | b"heix" | b"hevc" | b"heif" | b"mif1" | b"msf1" => "image/heic",
+        _ => return None,
+    })
+}
+
+fn audio_type(header: &[u8]) -> Option<&'static str> {
+    if header.starts_with(b"fLaC") {
+        return Some("audio/flac");
+    }
+    if header.starts_with(b"OggS") {
+        return Some("audio/ogg");
+    }
+    if header.starts_with(b"ID3") {
+        return Some("audio/mpeg");
+    }
+    if header.starts_with(b"RIFF") && header.len() >= 12 && &header[8..12] == b"WAVE" {
+        return Some("audio/wav");
+    }
+    if header.len() >= 2 && header[0] == 0xFF && header[1] & 0xE0 == 0xE0 {
+        return Some(if header[1] & 0x06 == 0 { "audio/aac" } else { "audio/mpeg" });
+    }
+    None
+}
+
+fn video_type(header: &[u8]) -> Option<&'static str> {
+    if header.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        let webm = header.windows(4).any(|window| window == b"webm");
+        return Some(if webm { "video/webm" } else { "video/x-matroska" });
+    }
+    let brand = ftyp_brand(header)?;
+    Some(match brand {
+        b"qt  " => "video/quicktime",
+        _ => "video/mp4",
+    })
+}
+
+fn ftyp_brand(header: &[u8]) -> Option<&[u8]> {
+    (header.len() >= 12 && &header[4..8] == b"ftyp").then(|| &header[8..12])
 }
 
 /// Length and digest of a local file, read in bounded chunks.

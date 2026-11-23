@@ -98,8 +98,9 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
         })
         .await?;
     if let Some(attempt) = saved {
-        let manifest = federation::manifest(
+        let manifest = federation::manifest_for_route(
             &context,
+            &writer,
             &plan.config,
             &attempt.root,
             attempt.federation.as_ref(),
@@ -129,7 +130,9 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
                 account.client.shared_group_federation_route(captured.packet.group(), &owned_root)
             })
             .await?;
-        let manifest = federation::manifest(&context, &plan.config, &root, route.as_ref()).await;
+        let manifest =
+            federation::manifest_for_route(&context, &writer, &plan.config, &root, route.as_ref())
+                .await;
         let captured = plan.clone();
         let selected =
             writer.apply(move |account| target(account, captured, &root, route, manifest)).await?;
@@ -138,12 +141,17 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
             &mut target.request,
             SendMaterialRequest { root: None, prekey: None },
         );
-        let material = federation::material(
+        let root = target.root.clone();
+        let material = federation::material_for_route(
             &context,
             &target.plan.config,
             request,
             crate::bus::connection_manager::CallClass::Bulk,
-            target.route.as_ref(),
+            federation::HomeLookup {
+                writer: &writer,
+                commitment: &root,
+                route: target.route.as_ref(),
+            },
         )
         .await;
         let Some(sealed) = writer.apply(move |account| seal(account, target, material)).await?
@@ -156,13 +164,12 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
     Ok(active)
 }
 async fn submit(context: &SessionContext, writer: &Writer, sealed: Sealed) -> Result<(), SdkError> {
+    let root = sealed.attempt.root.clone();
+    let stored = sealed.attempt.federation.clone();
+    let route = federation::pinned_submit_route(writer, &root, stored).await?;
     let outcome = tokio::time::timeout_at(
         context.receipt_deadline(),
-        federation::submit_classified(
-            context,
-            sealed.attempt.envelope.clone(),
-            sealed.attempt.federation.clone(),
-        ),
+        federation::submit_classified(context, sealed.attempt.envelope.clone(), route),
     )
     .await
     .map_err(|_| SdkError::InboundPending("group courier submit deadline".into()))??;
@@ -483,13 +490,11 @@ async fn process_incoming(context: &SessionContext, writer: &Writer) -> Result<b
     let waiting = writer.apply(incoming).await?;
     let active = !waiting.is_empty();
     for mut item in waiting {
-        let Ok(manifest) = federation::manifest(
-            context,
-            &item.config,
-            &item.record.request.actor.identity.root_commitment,
-            item.route.as_ref(),
-        )
-        .await
+        let root = item.record.request.actor.identity.root_commitment.clone();
+        let route = item.route.clone();
+        let Ok(manifest) =
+            federation::manifest_for_route(context, writer, &item.config, &root, route.as_ref())
+                .await
         else {
             continue;
         };

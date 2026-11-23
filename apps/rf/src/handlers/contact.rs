@@ -188,12 +188,9 @@ pub(crate) fn rf_contact_federated_request(
         recipient_device_id: federated.recipient_device,
         target_delivery_id: federated.target_delivery,
         federation: LocalBusFederationRoute {
-            federation_url: federated.federation_url,
-            source_node_id: federated.source_node,
-            target_node_id: federated.target_node,
-            required_capability: federated.federation_capability,
-            admin_token: federated.federation_admin_token,
-            recipient_prekey_url: federated.recipient_prekey_url,
+            source_node_id: String::new(),
+            target_node_id: String::new(),
+            required_capability: String::new(),
         },
     }
 }

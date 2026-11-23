@@ -113,6 +113,23 @@ impl crate::gateway::access::ClassifiedSubmit for SessionClient {
     {
         self.submit_envelope_classified(envelope)
     }
+
+    fn submit_classified_to(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+        target_node: Option<String>,
+    ) -> GatewayCallFuture<'_, Result<GatewayInboxEntry, crate::gateway::session_push::SubmitRefusal>>
+    {
+        Box::pin(self.handle.call_generation(
+            move |engine| {
+                Box::pin(async move {
+                    engine.submit_envelope_classified_to(envelope, target_node).await
+                })
+            },
+            self.deadline,
+            self.generation,
+        ))
+    }
 }
 
 #[allow(private_interfaces)]

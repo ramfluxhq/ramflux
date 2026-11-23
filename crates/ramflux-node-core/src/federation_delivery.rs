@@ -19,10 +19,39 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const FEDERATION_OPAQUE_DELIVERY_CAPABILITY: &str = "opaque_delivery";
+const MAX_ACTIVE_NODE_BLOCKS: usize = 1024;
+const MAX_PEER_PINS: usize = 1024;
+const MAX_NEW_PEER_PINS_PER_HOUR: usize = 32;
 
 impl FederationTrustState {
-    pub fn apply_bad_node_advisory(&mut self, advisory: BadNodeAdvisory) {
+    /// Record an operator or peer advisory. Cleared rows are dropped. A new active
+    /// block is refused at the cap so a live denial is never evicted to make room.
+    ///
+    /// # Errors
+    /// Returns [`NodeCoreError::Capacity`] when another active block would exceed the cap.
+    pub fn apply_bad_node_advisory(
+        &mut self,
+        advisory: BadNodeAdvisory,
+        now: u64,
+    ) -> Result<(), NodeCoreError> {
+        self.advisories_by_id.retain(|_, row| row.expires_at > now);
+        if advisory.reason_code != "block" || advisory.expires_at <= now {
+            if advisory.expires_at <= now {
+                self.advisories_by_id.remove(&advisory.advisory_id);
+            } else {
+                self.advisories_by_id.insert(advisory.advisory_id.clone(), advisory);
+            }
+            return Ok(());
+        }
+        let replacing = self
+            .advisories_by_id
+            .get(&advisory.advisory_id)
+            .is_some_and(|row| row.reason_code == "block" && row.expires_at > now);
+        if !replacing && active_block_count(self, now) >= MAX_ACTIVE_NODE_BLOCKS {
+            return Err(NodeCoreError::Capacity { resource: "federation node blocks" });
+        }
         self.advisories_by_id.insert(advisory.advisory_id.clone(), advisory);
+        Ok(())
     }
 
     pub fn record_lifecycle_tombstone(&mut self, response: FederatedLifecycleTombstoneResponse) {
@@ -43,6 +72,75 @@ impl FederationTrustState {
                 && advisory.expires_at > now
         });
         route_is_active && !locally_blocked
+    }
+
+    /// An operator block refuses a new pin before any network fetch.
+    #[must_use]
+    pub fn peer_pin_blocked(&self, node_id: &str, now: u64) -> bool {
+        self.advisories_by_id.values().any(|advisory| {
+            advisory.subject_node_id == node_id
+                && advisory.reason_code == "block"
+                && advisory.expires_at > now
+        })
+    }
+
+    /// A node that already has a pin is not a new pin. Nothing in the table is removed.
+    ///
+    /// # Errors
+    /// Returns an error when another pin would pass 1024 stored pins or 32 new pins in the
+    /// last hour. Pins of nodes that already have contacts stay because no pin is evicted.
+    pub fn admit_new_peer_pin(&self, node_id: &str, now: u64) -> Result<(), NodeCoreError> {
+        if self.discovery_pins_by_node.contains_key(node_id) {
+            return Ok(());
+        }
+        if self.discovery_pins_by_node.len() >= MAX_PEER_PINS {
+            return Err(NodeCoreError::ItestHttp("federation peer pin table is full".to_owned()));
+        }
+        let window = now.saturating_sub(60 * 60);
+        let recent =
+            self.discovery_pins_by_node.values().filter(|pin| pin.first_seen_at >= window).count();
+        if recent >= MAX_NEW_PEER_PINS_PER_HOUR {
+            return Err(NodeCoreError::ItestHttp("federation peer pin rate is full".to_owned()));
+        }
+        Ok(())
+    }
+
+    /// Inbound first-use pins have a durable 16/hour sub-quota within the shared 32/hour
+    /// and 1024-pin caps, leaving room for outbound pinning.
+    /// # Errors
+    /// Capacity or an operator block refuses admission.
+    pub fn admit_inbound_peer_pin(&self, node: &str, now: u64) -> Result<(), NodeCoreError> {
+        if self.peer_pin_blocked(node, now) {
+            return Err(NodeCoreError::Unauthorized("federation node blocked".into()));
+        }
+        self.admit_new_peer_pin(node, now)?;
+        if self.discovery_pins_by_node.contains_key(node) {
+            return Ok(());
+        }
+        let recent = self
+            .discovery_pins_by_node
+            .values()
+            .filter(|pin| {
+                pin.pin_source == crate::FederationPinSource::InboundSigned
+                    && now.saturating_sub(pin.first_seen_at) < 3600
+            })
+            .count();
+        if recent >= 16 {
+            return Err(NodeCoreError::Capacity { resource: "inbound federation pins" });
+        }
+        Ok(())
+    }
+
+    /// Mark a newly installed, signed-request-authenticated pin for its durable sub-quota.
+    /// # Errors
+    /// The staged discovery must have installed a pin first.
+    pub fn mark_inbound_peer_pin(&mut self, node: &str) -> Result<(), NodeCoreError> {
+        let pin = self
+            .discovery_pins_by_node
+            .get_mut(node)
+            .ok_or_else(|| NodeCoreError::Unauthorized("missing staged pin".into()))?;
+        pin.pin_source = crate::FederationPinSource::InboundSigned;
+        Ok(())
     }
 
     #[must_use]
@@ -135,6 +233,14 @@ impl FederationTrustState {
         }
         Ok(())
     }
+}
+
+fn active_block_count(state: &FederationTrustState, now: u64) -> usize {
+    state
+        .advisories_by_id
+        .values()
+        .filter(|row| row.reason_code == "block" && row.expires_at > now)
+        .count()
 }
 
 fn required_capability_for_federated_envelope(

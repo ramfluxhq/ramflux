@@ -29,14 +29,34 @@ pub(crate) struct RefreshState {
     cursor: Option<(bool, String)>,
     sweep_cursor: Option<(bool, String)>,
     failures: BTreeMap<String, (tokio::time::Instant, u8)>,
+    /// A foreign fetch or pin failure, stamped when the writer recorded it.
+    /// A command takes only a stamp at or after its own preparation.
+    foreign_errors: BTreeMap<String, (Instant, Arc<SdkError>)>,
     inbound: inbound::Inbound,
     wake: Arc<tokio::sync::Notify>,
+    /// Fires only when a root is inserted while a pass holds the lease. The in-flight
+    /// fetch then drops that lease so the new demand is not stuck behind it.
+    preempt: Arc<tokio::sync::Notify>,
     // A dropped/cancelled pass releases ownership without needing an actor message.
     active: Weak<()>,
 }
 impl RefreshState {
     fn retry_ready(&self, root: &str) -> bool {
         self.failures.get(root).is_none_or(|(until, _)| *until <= tokio::time::Instant::now())
+    }
+
+    /// The session suspend just stopped no longer owns the pass. A lease, backoff or
+    /// preempt permit from those sockets must not block the session resume starts.
+    #[cfg(feature = "c-abi")]
+    pub(crate) fn release_after_suspend(&mut self) {
+        if let Some(work) = super::directory::take_paused()
+            && !matches!(work, super::directory::DirectoryWork::HeadRefresh(_))
+        {
+            super::directory::stash_paused(work);
+        }
+        self.active = Weak::new();
+        self.failures.clear();
+        self.preempt = Arc::new(tokio::sync::Notify::new());
     }
 
     /// Returns false at capacity so activation can return a retryable result.
@@ -51,8 +71,37 @@ impl RefreshState {
             return false;
         }
         self.pending.insert(root);
+        if self.active.upgrade().is_some() {
+            self.preempt.notify_one();
+        }
         self.wake.notify_one();
         true
+    }
+
+    fn note_foreign(&mut self, root: &str, error: SdkError) -> Arc<SdkError> {
+        let shared = Arc::new(error);
+        self.foreign_errors.insert(root.to_owned(), (Instant::now(), Arc::clone(&shared)));
+        shared
+    }
+
+    /// The typed refusal for a demanded root whose foreign fetch failed after `since`.
+    pub(crate) fn take_demanded_foreign(
+        &mut self,
+        roots: &BTreeSet<String>,
+        since: Instant,
+    ) -> Option<SdkError> {
+        let root = roots
+            .iter()
+            .find(|root| {
+                self.foreign_errors.get(root.as_str()).is_some_and(|(at, _)| *at >= since)
+            })?
+            .clone();
+        let (_, error) = self.foreign_errors.remove(&root)?;
+        let source = match Arc::try_unwrap(error) {
+            Ok(error) => error,
+            Err(error) => SdkError::LifecycleShared(error),
+        };
+        Some(SdkError::DirectoryAuthorityUnavailable { root, source: Box::new(source) })
     }
 }
 
@@ -79,6 +128,8 @@ pub(crate) struct Plan {
     remaining_passes: usize,
     retried_demands: usize,
     config: GatewaySessionConfig,
+    origins: BTreeMap<String, crate::client::foreign_manifest::SenderManifestOrigin>,
+    preempt: Arc<tokio::sync::Notify>,
 }
 pub(crate) enum Work {
     Subscribe {
@@ -100,7 +151,7 @@ pub(crate) enum Work {
     },
 }
 
-fn eligible_roots(account: &LocalBusAccountState) -> Result<BTreeSet<String>, SdkError> {
+pub(crate) fn eligible_roots(account: &LocalBusAccountState) -> Result<BTreeSet<String>, SdkError> {
     let mut roots = BTreeSet::from([account.principal_commitment.clone()]);
     for link in account.client.friend_links()? {
         if link.state == "accepted" {
@@ -154,6 +205,7 @@ fn prepare_due_limit(
     let eligible = eligible_roots(account)?;
     account.head_refresh.pending.retain(|root| eligible.contains(root));
     account.head_refresh.failures.retain(|root, _| eligible.contains(root));
+    account.head_refresh.foreign_errors.retain(|root, _| eligible.contains(root));
     let now = Instant::now();
     let freshness = account.client.native_head_freshness.borrow();
     let candidates: BTreeSet<_> = eligible
@@ -202,7 +254,12 @@ fn prepare_due_limit(
         })
         .count();
     let remaining_passes = candidates.len().saturating_sub(selected.len()).div_ceil(PASS_ROOTS);
-    let roots = selected.into_iter().map(|(_, root)| root).collect();
+    let roots: Vec<String> = selected.into_iter().map(|(_, root)| root).collect();
+    let origins = planned_origins(account, &roots);
+    let roots: Vec<String> = roots.into_iter().filter(|root| origins.contains_key(root)).collect();
+    if roots.is_empty() {
+        return Ok(None);
+    }
     let lease = Arc::new(());
     account.head_refresh.active = Arc::downgrade(&lease);
     Ok(Some(Plan {
@@ -212,7 +269,43 @@ fn prepare_due_limit(
         remaining_passes,
         retried_demands,
         config: account.gateway_config.clone(),
+        origins,
+        preempt: Arc::clone(&account.head_refresh.preempt),
     }))
+}
+
+fn planned_origins(
+    account: &mut LocalBusAccountState,
+    roots: &[String],
+) -> BTreeMap<String, crate::client::foreign_manifest::SenderManifestOrigin> {
+    let mut origins = BTreeMap::new();
+    for root in roots {
+        match account.client.pinned_manifest_origin(root) {
+            Ok(origin) => {
+                origins.insert(root.clone(), origin);
+            }
+            Err(error) => {
+                let _ = account.head_refresh.note_foreign(root, error);
+            }
+        }
+    }
+    origins
+}
+
+fn pass_current(account: &LocalBusAccountState, plan: &Plan, root: &str) -> bool {
+    plan.fence.current(account)
+        && account.head_refresh.active.ptr_eq(&Arc::downgrade(&plan.lease))
+        && plan.roots.iter().any(|candidate| candidate == root)
+}
+
+fn record_failure(account: &mut LocalBusAccountState, root: &str) {
+    let previous = account.head_refresh.failures.get(root).map_or(0, |(_, count)| *count);
+    let count = previous.saturating_add(1).min(6);
+    let delay = Duration::from_secs((5_u64 << (count - 1)).min(150));
+    account
+        .head_refresh
+        .failures
+        .insert(root.to_owned(), (tokio::time::Instant::now() + delay, count));
 }
 
 fn apply(
@@ -223,23 +316,35 @@ fn apply(
     outcome: Result<SdkDeviceManifestResponse, SdkError>,
 ) -> Result<bool, SdkError> {
     let result = apply_verified(account, plan, root, fetched_after, outcome);
-    if plan.fence.current(account)
-        && account.head_refresh.active.ptr_eq(&Arc::downgrade(&plan.lease))
-        && plan.roots.iter().any(|candidate| candidate == root)
-    {
-        if matches!(result, Ok(true)) {
+    // A pause is not a failed fetch. Counting it would back off a root that was not applied.
+    if matches!(&result, Err(SdkError::WriterPause)) {
+        return result;
+    }
+    if !pass_current(account, plan, root) {
+        return result;
+    }
+    match result {
+        Ok(true) => {
             account.head_refresh.failures.remove(root);
-        } else {
-            let previous = account.head_refresh.failures.get(root).map_or(0, |(_, count)| *count);
-            let count = previous.saturating_add(1).min(6);
-            let delay = Duration::from_secs((5_u64 << (count - 1)).min(150));
-            account
-                .head_refresh
-                .failures
-                .insert(root.to_owned(), (tokio::time::Instant::now() + delay, count));
+            account.head_refresh.foreign_errors.remove(root);
+            Ok(true)
+        }
+        Ok(false) => {
+            record_failure(account, root);
+            Ok(false)
+        }
+        Err(error) => {
+            record_failure(account, root);
+            if matches!(
+                plan.origins.get(root),
+                Some(crate::client::foreign_manifest::SenderManifestOrigin::Remote { .. })
+            ) {
+                Err(SdkError::LifecycleShared(account.head_refresh.note_foreign(root, error)))
+            } else {
+                Err(error)
+            }
         }
     }
-    result
 }
 
 fn apply_verified(
@@ -287,29 +392,57 @@ fn apply_verified(
 }
 
 /// Invoked only on the account writer. All network inputs are owned values.
-pub(crate) fn apply_work(account: &mut LocalBusAccountState, work: Work) {
+/// `WriterPause` is returned with the same work stashed, and the reply is not sent.
+pub(crate) fn apply_work(account: &mut LocalBusAccountState, work: Work) -> Result<(), SdkError> {
     match work {
         Work::Subscribe { reply } => {
             // Client-side demand and the queue's own enqueues wake the same refresh task.
             account.head_refresh.wake = account.client.manifest_demand.wake.clone();
             let _ = reply.send(account.head_refresh.wake.clone());
+            Ok(())
         }
         Work::Prepare { fence, periodic, retry_budget, attempted, reply } => {
-            if !reply.is_closed() {
-                let _ = reply.send(prepare_due_limit(
-                    account,
-                    fence,
-                    periodic,
-                    &attempted,
-                    1,
-                    retry_budget,
-                ));
+            if reply.is_closed() {
+                return Ok(());
             }
+            let result =
+                prepare_due_limit(account, fence.clone(), periodic, &attempted, 1, retry_budget);
+            if matches!(&result, Err(SdkError::WriterPause)) {
+                super::directory::stash_paused(super::directory::DirectoryWork::HeadRefresh(
+                    Work::Prepare { fence, periodic, retry_budget, attempted, reply },
+                ));
+                return Err(SdkError::WriterPause);
+            }
+            let _ = reply.send(result);
+            Ok(())
         }
         Work::Apply { plan, root, fetched_after, outcome, reply } => {
-            if !reply.is_closed() {
-                let _ = reply.send(apply(account, &plan, &root, fetched_after, *outcome));
+            if reply.is_closed() {
+                return Ok(());
             }
+            let manifest = match *outcome {
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return Ok(());
+                }
+                Ok(manifest) => manifest,
+            };
+            // The clone is this attempt. The original stays so a pause retries the same apply.
+            let result = apply(account, &plan, &root, fetched_after, Ok(manifest.clone()));
+            if matches!(&result, Err(SdkError::WriterPause)) {
+                super::directory::stash_paused(super::directory::DirectoryWork::HeadRefresh(
+                    Work::Apply {
+                        plan,
+                        root,
+                        fetched_after,
+                        outcome: Box::new(Ok(manifest)),
+                        reply,
+                    },
+                ));
+                return Err(SdkError::WriterPause);
+            }
+            let _ = reply.send(result);
+            Ok(())
         }
     }
 }
@@ -326,16 +459,32 @@ pub(crate) async fn pass(
     let mut cancel = context.cancel.clone();
     let mut attempted = BTreeSet::new();
     let mut retry_budget = RETRY_DEMAND_SHARE;
-    let fetch = fetch_pass(&context, &writer, false, &mut attempted, &mut retry_budget);
+    let fetch = fetch_pass(&context, &writer, &writer, false, &mut attempted, &mut retry_budget);
     tokio::select! {
         biased;
         _ = cancel.changed() => Ok(()),
         result = fetch => result.map(|_| ()),
     }
 }
+/// `None` when a root was inserted while this pass held the lease. The caller drops
+/// the plan so the next Prepare can fetch that root after the command began.
+async fn fetch_unless_preempted(
+    plan: &Plan,
+    root: &str,
+) -> Option<Result<SdkDeviceManifestResponse, SdkError>> {
+    let fetch = fetch_planned(plan, root);
+    tokio::pin!(fetch);
+    tokio::select! {
+        biased;
+        () = plan.preempt.notified() => None,
+        outcome = &mut fetch => Some(outcome),
+    }
+}
+
 async fn fetch_pass(
     context: &SessionContext,
     writer: &mpsc::Sender<AccountWork>,
+    completion: &mpsc::Sender<AccountWork>,
     periodic: bool,
     attempted: &mut BTreeSet<String>,
     retry_budget: &mut usize,
@@ -361,15 +510,21 @@ async fn fetch_pass(
         let plan = Arc::new(plan);
         remaining = plan.remaining_passes;
         *retry_budget = retry_budget.saturating_sub(plan.retried_demands);
+        let mut yielded = false;
         for root in &plan.roots {
             let fetched_after = Instant::now();
-            let outcome = super::directory::fetch(&plan.config, root).await;
+            let Some(outcome) = fetch_unless_preempted(&plan, root).await else {
+                // A root inserted while this lease was held is not this pass. Drop it
+                // and Prepare again so that fetch begins after the command did.
+                yielded = true;
+                break;
+            };
             attempted.insert(root.clone());
             let (reply, response) = oneshot::channel();
             send(
-                writer,
+                completion,
                 Work::Apply {
-                    plan: plan.clone(),
+                    plan: Arc::clone(&plan),
                     root: root.clone(),
                     fetched_after,
                     outcome: Box::new(outcome),
@@ -377,15 +532,60 @@ async fn fetch_pass(
                 },
             )
             .await?;
-            let _ = response.await.map_err(|_| stopped())?;
+            let applied = response.await.map_err(|_| stopped())?;
+            foreign_fetch_status(&plan, root, applied)?;
         }
         // Release the pass lease and re-read demands before the next network fetch.
         drop(plan);
+        if yielded {
+            continue;
+        }
         if remaining == 0 {
             break;
         }
     }
     Ok(remaining)
+}
+
+const FETCH_ATTEMPT: Duration = Duration::from_secs(5);
+
+async fn fetch_planned(plan: &Plan, root: &str) -> Result<SdkDeviceManifestResponse, SdkError> {
+    use crate::client::foreign_manifest::SenderManifestOrigin;
+    let Some(origin) = plan.origins.get(root) else {
+        return Err(SdkError::LocalBus("manifest origin was not prepared".into()));
+    };
+    match origin {
+        SenderManifestOrigin::Local => super::directory::fetch(&plan.config, root).await,
+        SenderManifestOrigin::Remote { .. } => tokio::time::timeout(
+            FETCH_ATTEMPT,
+            crate::client::foreign_manifest::fetch_sender_manifest(
+                &plan.config,
+                origin.clone(),
+                root,
+            ),
+        )
+        .await
+        .map_err(|_| SdkError::NodeTimeout { retry_after_ms: 5_000 })?,
+    }
+}
+
+fn foreign_fetch_status(
+    plan: &Plan,
+    root: &str,
+    applied: Result<bool, SdkError>,
+) -> Result<(), SdkError> {
+    if let Err(error) = applied
+        && matches!(
+            plan.origins.get(root),
+            Some(crate::client::foreign_manifest::SenderManifestOrigin::Remote { .. })
+        )
+    {
+        return Err(SdkError::DirectoryAuthorityUnavailable {
+            root: root.to_owned(),
+            source: Box::new(error),
+        });
+    }
+    Ok(())
 }
 
 async fn send(writer: &mpsc::Sender<AccountWork>, work: Work) -> Result<(), SdkError> {
@@ -399,13 +599,18 @@ fn stopped() -> SdkError {
 }
 
 /// The registered session child refreshes on connect, demand and the half-bound timer.
-pub(crate) async fn run(context: SessionContext, writer: mpsc::Sender<AccountWork>) {
-    run_with_triggers(context, writer, true, true).await;
+pub(crate) async fn run(
+    context: SessionContext,
+    writer: mpsc::Sender<AccountWork>,
+    completion: mpsc::Sender<AccountWork>,
+) {
+    run_with_triggers(context, writer, completion, true, true).await;
 }
 
 async fn cycle(
     context: &SessionContext,
     writer: &mpsc::Sender<AccountWork>,
+    completion: &mpsc::Sender<AccountWork>,
     periodic: bool,
 ) -> Result<(), SdkError> {
     let mut attempted = BTreeSet::new();
@@ -414,7 +619,10 @@ async fn cycle(
         if pass > 0 {
             tokio::time::sleep(PASS_PAUSE).await;
         }
-        if fetch_pass(context, writer, periodic, &mut attempted, &mut retry_budget).await? == 0 {
+        if fetch_pass(context, writer, completion, periodic, &mut attempted, &mut retry_budget)
+            .await?
+            == 0
+        {
             break;
         }
     }
@@ -436,6 +644,7 @@ fn advance_sweep(next: &mut tokio::time::Instant, now: tokio::time::Instant) -> 
 async fn run_with_triggers(
     context: SessionContext,
     writer: mpsc::Sender<AccountWork>,
+    completion: mpsc::Sender<AccountWork>,
     connect: bool,
     periodic: bool,
 ) {
@@ -450,7 +659,7 @@ async fn run_with_triggers(
         let mut next_sweep = tokio::time::Instant::now() + REFRESH_INTERVAL;
         let mut timer = tokio::time::interval_at(next_sweep, REFRESH_INTERVAL);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        if connect && let Err(error) = cycle(&context, &writer, true).await {
+        if connect && let Err(error) = cycle(&context, &writer, &completion, true).await {
             tracing::debug!(%error, "connect head refresh deferred");
         }
         loop {
@@ -460,7 +669,7 @@ async fn run_with_triggers(
                 () = wake.notified() => {},
             }
             let periodic = periodic && advance_sweep(&mut next_sweep, tokio::time::Instant::now());
-            if let Err(error) = cycle(&context, &writer, periodic).await {
+            if let Err(error) = cycle(&context, &writer, &completion, periodic).await {
                 tracing::debug!(%error, "head refresh cycle deferred");
             }
         }
@@ -479,8 +688,12 @@ async fn run_with_triggers(
 }
 
 #[cfg(test)]
-pub(crate) async fn run_without_timer(context: SessionContext, writer: mpsc::Sender<AccountWork>) {
-    run_with_triggers(context, writer, true, false).await;
+pub(crate) async fn run_without_timer(
+    context: SessionContext,
+    writer: mpsc::Sender<AccountWork>,
+    completion: mpsc::Sender<AccountWork>,
+) {
+    run_with_triggers(context, writer, completion, true, false).await;
 }
 
 #[cfg(test)]

@@ -30,14 +30,16 @@ refresh reason, independent of the session's transport phase.
 
 Native group mutations enqueue refreshes for stale own and group-member authority
 roots. New sends do the same for the recipient or member roots. The five-second
-budget measured from command admission bounds the wait, including when the
-session is Live. A held or failed fetch returns `NetworkingPending` with
-`retry_after_ms` and `details.networking`. When that budget ends, the writer
-applies connection work already in its queue (two slots) and reads authority
-again. A head Apply that was already queued is not refused away. A fetch that
-has not queued its Apply still returns `NetworkingPending`. No send uses an
-unapplied head, and a fetch started before the command began does not authorize
-it. A successful verified apply permits the command to continue. Legacy
+budget measured from command admission bounds the fetch, including when the
+session is Live. While that wait is outstanding it counts as a queued command,
+so directory and backfill pause between commits and yield the writer. A demanded
+head Apply uses a one-slot channel serviced before generic overflow while that
+demand is active. Prepare may still use the shared connection queue. A commit
+already running is not interrupted. A held or failed fetch returns `NetworkingPending`
+with `retry_after_ms` and `details.networking`. A fetch that still has no Apply
+returns the same pending outcome at five seconds. No send uses an unapplied head,
+and a fetch started before the command began does not authorize it. A successful verified
+apply permits the command to continue. Legacy
 freshness refusals are serialized as this typed pending outcome. `group.history`
 reads stored history, name and roster through the local reader pool without a
 session, sync or inbound application.

@@ -28,8 +28,6 @@ pub(super) struct AccountView {
     pub native: Option<Box<crate::custody::BornAccount>>,
     pub account_root: Option<std::path::PathBuf>,
     pub connection: Option<super::super::connection_manager::ConnectionHandle>,
-    pub account_has_relay: bool,
-    pub upload_relays: BTreeMap<String, bool>,
     principal: String,
     anchor: String,
     status: Value,
@@ -107,8 +105,6 @@ impl AccountView {
             account_root: native.as_ref().map(|_| client.account_index().map(|index| index.root().to_path_buf())).transpose()?,
             native,
             connection: account.connection.clone(),
-            account_has_relay:account.client.node_relay_options.is_some(),
-            upload_relays:account.object_put_spools.iter().map(|(id,spool)|(id.clone(),spool.relay_endpoint.is_some())).collect(),
             principal: account.gateway_config.principal_id.clone(),
             anchor: account.principal_commitment.clone(),
             status,
@@ -226,12 +222,14 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
         status["session_id"] = json!(snapshot.session_id);
     }
     // After the snapshot copy. That copy is what put pending and a null reason
-    // back over the revoked-branch overlay.
-    if view.native.is_some()
-        && let Some(root) = view.account_root.as_deref()
-    {
-        let id = client.account_db()?.local_account_id.clone();
-        super::super::host_branch::overlay_status(&mut status, root, &id);
+    // back over the revoked-branch overlay. Sibling catch-up then runs, and it
+    // leaves a revoked branch alone because authorization is already false.
+    if view.native.is_some() {
+        if let Some(root) = view.account_root.as_deref() {
+            let id = client.account_db()?.local_account_id.clone();
+            super::super::host_branch::overlay_status(&mut status, root, &id);
+        }
+        hold_fresh_sibling_catch_up(client, &mut status)?;
     }
     Ok(status)
 }
@@ -293,6 +291,69 @@ fn native_status(
             json!(client.account_db()?.load_actor_state::<String>("account/node-id")?);
     }
     Ok(())
+}
+
+const SIBLING_CATCH_UP_SECS: u64 = 45;
+
+/// The driver's first send waits on reported `live`. A just-enrolled sibling has not received
+/// its contact copy yet, so this reports pending until an accepted friend link exists or the
+/// bound elapses. The session snapshot stays live and receive continues.
+fn hold_fresh_sibling_catch_up(client: &RamfluxClient, status: &mut Value) -> Result<(), SdkError> {
+    if status.get("networking").and_then(Value::as_str) != Some("live") {
+        return Ok(());
+    }
+    if status.get("local_device_authorized") == Some(&Value::Bool(false)) {
+        return Ok(());
+    }
+    let Some(device) = status.get("device_id").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let root = match client.own_account_anchor() {
+        Ok(root) => root,
+        Err(SdkError::IdentityRootMissing) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let now = crate::custody::network_now()?;
+    let Some(authority) = client.current_custody_authority(&root, now)? else {
+        return Ok(());
+    };
+    let body = &authority.envelope().body;
+    let Some(local) = body.devices.iter().find(|entry| entry.device_id == device) else {
+        return Ok(());
+    };
+    let Some(started) =
+        local.branch_certificate.as_ref().map(|certificate| certificate.body.not_before)
+    else {
+        return Ok(());
+    };
+    if now.saturating_sub(started) > SIBLING_CATCH_UP_SECS {
+        return Ok(());
+    }
+    let sibling = body.devices.iter().any(|entry| {
+        entry.device_id != device
+            && authority
+                .authorize(
+                    &ramflux_protocol::custody::DeviceRef {
+                        account_anchor: root.clone(),
+                        device_id: entry.device_id.clone(),
+                        device_epoch: entry.device_epoch,
+                    },
+                    "sync",
+                    now,
+                )
+                .is_ok()
+    });
+    if !sibling || accepted_friend_link(client)? {
+        return Ok(());
+    }
+    status["networking"] = json!("networking_pending");
+    Ok(())
+}
+
+fn accepted_friend_link(client: &RamfluxClient) -> Result<bool, SdkError> {
+    Ok(client.friend_links()?.iter().any(|link| {
+        link.state == "accepted" && !link.blocked && link.capability_revoked_at.is_none()
+    }))
 }
 
 fn contacts(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError> {

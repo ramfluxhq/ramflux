@@ -124,6 +124,12 @@ pub struct ResolvedSurface {
     pub actions: Vec<ResolvedAction>,
     /// Definitions not reachable from `root` (admitted state never has any).
     pub pruned: Vec<String>,
+    /// String-catalog tag after fallback. Unknown locales use `en`.
+    pub locale: String,
+    /// CLDR locale used for numbers, dates and plurals.
+    pub format_locale: String,
+    /// `rtl` when the requested language is Arabic, otherwise `ltr`.
+    pub direction: String,
 }
 
 /// The shared core: graph, owned inputs and declared actions of one snapshot.
@@ -406,7 +412,9 @@ impl SurfaceSnapshot {
         self.resolve_display(drafts, None)
     }
 
-    /// Resolve local display values and check messages in a supported host locale.
+    /// Resolve local display values and check messages for `locale`.
+    ///
+    /// An unknown locale tag follows the launch fallback and does not fail here.
     /// # Errors
     /// Returns the same admission, expression and resource refusals as `resolve_with_drafts`.
     pub fn resolve_for_locale(
@@ -414,7 +422,7 @@ impl SurfaceSnapshot {
         drafts: &SurfaceDrafts,
         locale: super::DisplayLocale,
     ) -> Result<ResolvedSurface, Reject> {
-        self.resolve_display(drafts, Some(locale))
+        self.resolve_display(drafts, Some(locale.with_card_catalog(self)))
     }
 
     fn resolve_display(
@@ -479,7 +487,17 @@ impl SurfaceSnapshot {
             .filter(|name| !resolution.graph.reached.contains(*name))
             .map(str::to_owned)
             .collect();
-        Ok(ResolvedSurface { surface_id: self.surface_id.clone(), nodes, inputs, actions, pruned })
+        let (locale_tag, format_locale, direction) = reported_locale(locale);
+        Ok(ResolvedSurface {
+            surface_id: self.surface_id.clone(),
+            nodes,
+            inputs,
+            actions,
+            pruned,
+            locale: locale_tag,
+            format_locale,
+            direction,
+        })
     }
 }
 
@@ -735,6 +753,11 @@ impl ResolvedSurface {
     }
 }
 
+fn reported_locale(locale: Option<super::DisplayLocale>) -> (String, String, String) {
+    let locale = locale.unwrap_or_else(super::DisplayLocale::en);
+    let direction = if locale.is_rtl() { "rtl" } else { "ltr" };
+    (locale.catalog_tag().to_owned(), locale.format_tag().to_owned(), direction.to_owned())
+}
 fn check_messages(
     checks: Option<&Value>,
     model: &Value,
@@ -760,7 +783,7 @@ fn check_messages(
             {
                 let Some(message) = check.get("message") else {
                     errors.push(
-                        if locale == Some(super::DisplayLocale::ZhCn) {
+                        if locale.is_some_and(super::DisplayLocale::uses_zh_cn_copy) {
                             "值无效"
                         } else {
                             "Invalid value"

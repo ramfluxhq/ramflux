@@ -266,6 +266,15 @@
       "bridge_allowed": true,
       "capability": "account",
       "key_export": false,
+      "name": "account.remove_local",
+      "secret_input": true,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
       "name": "account.restore.install",
       "secret_input": true,
       "secret_output": false,
@@ -278,6 +287,15 @@
       "name": "account.restore.verify",
       "secret_input": true,
       "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "account.sign_out",
+      "secret_input": true,
+      "secret_output": true,
       "show_once": false
     },
     {
@@ -615,6 +633,87 @@
     },
     {
       "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.dispose",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.event",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.open",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.present",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.resume",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.slot",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.submit",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.suspend",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.update",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
       "capability": "contact",
       "key_export": false,
       "name": "contact.accept",
@@ -716,6 +815,15 @@
       "bridge_allowed": true,
       "capability": "contact",
       "key_export": false,
+      "name": "contact.requests.decline",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "contact",
+      "key_export": false,
       "name": "contact.requests.list",
       "secret_input": false,
       "secret_output": true,
@@ -771,9 +879,9 @@
       "capability": "contact.verify.cas",
       "contract": "CONTACT-VERIFY-CAS-01",
       "key_export": false,
-      "message_descriptor_blake3": "d18147ce9e60d3ed594f27edcd4322b0c12dea72914d72eb912005c94cc146d5",
+      "message_descriptor_blake3": "50108989877d6e1601743d5d242862d4e130155bf3bd1b3fd28b213426b42686",
       "name": "contact.verify",
-      "product_pin": "5d9281898913f2104e2a077865979059bc3e3c51",
+      "product_pin": "36cf7b76679c625c0bc9a31fe20d8ce95b35523f",
       "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
       "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,
@@ -1137,6 +1245,15 @@
       "key_export": false,
       "name": "group.invitations.list",
       "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "group",
+      "key_export": false,
+      "name": "group.leave",
+      "secret_input": true,
       "secret_output": true,
       "show_once": false
     },
@@ -1942,7 +2059,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "username",
       "key_export": false,
       "name": "username.mutate",
@@ -1951,7 +2068,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "username",
       "key_export": false,
       "name": "username.status",
@@ -1960,7 +2077,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "username",
       "key_export": false,
       "name": "username.resolve",
@@ -1969,7 +2086,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "username",
       "key_export": false,
       "name": "username.contact.add",
@@ -1978,7 +2095,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": false,
+      "bridge_allowed": true,
       "capability": "profile",
       "key_export": false,
       "name": "profile.update",

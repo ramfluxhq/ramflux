@@ -44,6 +44,7 @@ const KNOWN_CODES: &[&str] = &[
     "VaultUnavailable",
     "NotFound",
     "InvalidInput",
+    "UntrustedPeer",
     "LeaseExpired",
     "ChunkMismatch",
     "SchemaMismatch",

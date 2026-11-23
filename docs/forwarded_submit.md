@@ -28,6 +28,6 @@ an old-home retry from creating a second delivery while the first is uncertain.
 
 `home_node_migration_forward_count` is appended after sender signing and excluded
 from sender canonical bytes. The federation signature authenticates the marker
-in transit; sender fields and sender extensions remain signed. SDK builds before
-FU-BATCH-03 reject forwarded messages. The desktop SDK pin update DESK-PIN-01 has
-shipped; downstream clients must use that SDK version or later.
+in transit; sender fields and sender extensions remain signed. Clients require an
+SDK that supports this authenticated forwarding marker; a build that treats the
+marker as a signed sender extension rejects forwarded messages.

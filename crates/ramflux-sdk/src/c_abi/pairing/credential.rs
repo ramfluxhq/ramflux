@@ -11,7 +11,7 @@ use std::{
     ffi::c_void,
     path::PathBuf,
     sync::{
-        Condvar, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -31,7 +31,7 @@ pub type CredentialCallback = extern "C" fn(
     *mut usize,
     *mut c_void,
 ) -> i32;
-pub(super) struct CallbackProvider {
+pub(crate) struct CallbackProvider {
     root: PathBuf,
     callback: CredentialCallback,
     // The host's opaque pointer is never dereferenced by Rust. Its exposed provenance
@@ -54,7 +54,7 @@ fn invalid() -> SdkError {
     SdkError::PairingField("credential_callback")
 }
 impl CallbackProvider {
-    pub(super) fn new(root: PathBuf, callback: CredentialCallback, user_data: *mut c_void) -> Self {
+    pub(crate) fn new(root: PathBuf, callback: CredentialCallback, user_data: *mut c_void) -> Self {
         Self {
             root,
             callback,
@@ -65,7 +65,7 @@ impl CallbackProvider {
             serial: Mutex::new(()),
         }
     }
-    pub(super) fn stop_and_drain(&self) {
+    pub(crate) fn stop_and_drain(&self) {
         self.cancel();
         let mut active = self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         while *active != 0 {
@@ -79,6 +79,18 @@ impl CallbackProvider {
         }
         *active = active.checked_add(1).ok_or_else(invalid)?;
         Ok(Invocation(self))
+    }
+    /// Reserve the same lifetime as a credential callback without invoking it.
+    ///
+    /// # Errors
+    /// Returns when the provider is stopped or its use counter cannot grow.
+    pub(crate) fn hold_username_master(self: &Arc<Self>) -> Result<UsernameMasterHold, SdkError> {
+        let mut active = self.active.lock().map_err(|_| invalid())?;
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(SdkError::PairingCode("Retired"));
+        }
+        *active = active.checked_add(1).ok_or_else(invalid)?;
+        Ok(UsernameMasterHold { provider: Arc::clone(self) })
     }
     fn invoke(&self, request: &CredentialRequest) -> Result<CredentialOutcome, SdkError> {
         let metadata = request.to_wire_bytes().map_err(|_| invalid())?;
@@ -134,6 +146,23 @@ impl LocalCredentialProvider for CallbackProvider {
     }
     fn cancel(&self) {
         self.stopped.store(true, Ordering::Release);
+    }
+}
+/// Keeps provider shutdown waiting until the username ceremony drops this value.
+pub(crate) struct UsernameMasterHold {
+    provider: Arc<CallbackProvider>,
+}
+impl UsernameMasterHold {
+    pub(crate) fn retired(&self) -> bool {
+        self.provider.stopped.load(Ordering::Acquire)
+    }
+}
+impl Drop for UsernameMasterHold {
+    fn drop(&mut self) {
+        let mut active =
+            self.provider.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.saturating_sub(1);
+        self.provider.idle.notify_all();
     }
 }
 pub(super) struct Refuse;

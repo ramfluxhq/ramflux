@@ -139,6 +139,15 @@ enum RamfluxV2Status
    Event credit was exhausted. Re-read projections and reopen the subscription.
    */
   RAMFLUX_V2_STATUS_RESYNC_REQUIRED = 27,
+  /*
+   The client released its files. 28 and 29 belong to pairing on `RamfluxErrorCode`.
+   A refused call had no business effects. An admitted call reports effects `unknown`.
+   */
+  RAMFLUX_V2_STATUS_SUSPENDED = 30,
+  /*
+   Host custody is locked, including before the first device unlock. No client was opened.
+   */
+  RAMFLUX_V2_STATUS_VAULT_LOCKED = 31,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
@@ -298,6 +307,7 @@ int32_t ramflux_v2_negotiate(uint32_t major, uint32_t min_minor, struct RamfluxB
 
 /*
  Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?,allow_secret_exports?}`.
+ The host must supply an existing private directory; see the shared-root contract.
  This may block during startup; invoke off the UI thread. Output is zero on failure.
  */
 int32_t ramflux_v2_client_open(const uint8_t *config,
@@ -307,7 +317,8 @@ int32_t ramflux_v2_client_open(const uint8_t *config,
 /*
  Open with trusted host OS credential storage (provider ABI version 1).
  The table is borrowed only during this call; retained context lives through shutdown.
- Android M4 supplies non-synchronizing Keystore wrapping; iOS may supply Keychain storage.
+ Custody preflight runs before startup; locked custody returns `VaultLocked` (31).
+ Mobile providers must allow background use after the first device unlock.
  */
 int32_t ramflux_v2_client_open_with_custody(const uint8_t *config,
                                             size_t len,
@@ -356,6 +367,20 @@ int32_t ramflux_v2_operation_cancel(uint64_t handle, uint64_t id);
 int32_t ramflux_v2_operation_release(uint64_t handle, uint64_t id);
 
 /*
+ Authorize a username draft with the account master recovery phrase.
+ `phrase_bytes` is borrowed for this call and is not placed in JSON or logs.
+ Cancellation writes no signed output and does not submit. A lost submit reply
+ is reconciled with `username.status`; this function does not sign a replacement.
+ */
+int32_t ramflux_v2_username_authorize(uint64_t handle,
+                                      const uint8_t *public_request_json,
+                                      size_t public_request_len,
+                                      const uint8_t *phrase_bytes,
+                                      size_t phrase_len,
+                                      struct RamfluxBuffer **out_signed_json,
+                                      struct RamfluxBuffer **out_error_json);
+
+/*
  Poll one subscription event without blocking. Subscribe using execute(subscription.open/bus.subscribe).
  ResyncRequired=27 explicitly signals event overflow; terminal completions use separate credit.
  */
@@ -398,6 +423,34 @@ int32_t ramflux_v2_receipt_present(const uint8_t *input_json,
  The owned JSON output uses `ramflux_v2_buffer_free`; no account or renderer is opened.
  */
 int32_t ramflux_v2_card_trust_package(struct RamfluxBuffer **out);
+
+/*
+ Install or clear the in-process account-code callback.
+ Host output capacities are 1024 bytes; SDK storage is zeroized on every path.
+ Setup requires the code twice and the copies must match. Unlock and phrase take one copy.
+ A null callback unregisters and drains. The host must not reenter this client from the
+ callback. Close and replacement wait until the callback returns.
+ */
+int32_t ramflux_v2_set_credential_provider(uint64_t handle,
+                                           CredentialProviderCallback callback,
+                                           void *user_data);
+
+/*
+ Stop networking, flush databases, and close file descriptors.
+ Unlocked account state, including the database key, stays in memory.
+ Pending operations complete as `RAMFLUX_V2_STATUS_SUSPENDED` (30).
+ A second call while already suspended returns 0.
+ Call off the UI thread. A killed process is a cold start and must unlock again.
+ */
+int32_t ramflux_v2_client_suspend(uint64_t handle);
+
+/*
+ Reopen files and reconnect. Does not ask for the unlock code.
+ Returns 0 when the client was not suspended.
+ A data-root conflict leaves the client suspended.
+ Call off the UI thread.
+ */
+int32_t ramflux_v2_client_resume(uint64_t handle);
 
 /*
  Decode and re-encode a generated message request through the shared adapter core.

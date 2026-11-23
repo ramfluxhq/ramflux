@@ -41,6 +41,7 @@ fn context_and_complete_nullable_submit_have_stable_canonical_bytes() -> TestRes
     let serialized = serde_json::to_value(crate::CallSubmitCarrierRef {
         signed_request: &carrier.signed_request,
         envelope: &carrier.envelope,
+        target_node: None,
         call_intent: None,
         wake_id: None,
         call_ref: carrier.call_ref.as_deref(),

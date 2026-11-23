@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+use crate::mesh_auth::{AnonymousPermit, AuthLevel, HandshakePermit};
 use std::sync::Arc;
 
 use crate::{
@@ -158,7 +159,7 @@ pub(crate) fn serve_mesh_quic(
         .build()
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     let result = runtime.block_on(async move {
-        let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
+        let server = ramflux_transport::MeshQuicServer::bind_federation(
             listen_addr,
             tls,
             root_pems_provider,
@@ -170,18 +171,23 @@ pub(crate) fn serve_mesh_quic(
         loop {
             let connection = match tokio::select! {
                 () = shutdown.cancelled() => break,
-                connection = server.accept_connection() => connection,
+                connection = server.accept_federation_handshake(HandshakePermit::acquire) => connection,
             } {
                 Ok(connection) => connection,
+                Err(ramflux_transport::TransportError::NotAuthenticated) => continue,
                 Err(error) => {
                     context.observability.mark_quic_listener_error(&error.to_string());
-                    tracing::error!(%error, "federation mesh QUIC connection rejected");
+                    tracing::debug!(%error, "federation mesh QUIC connection rejected");
                     continue;
                 }
             };
             let context = context.clone();
             tokio::spawn(async move {
-                if let Err(error) = handle_mesh_quic_connection(connection, context).await {
+                let result = match connection.await {
+                    Ok(connection) => handle_mesh_quic_connection(connection, context).await,
+                    Err(error) => Err(mesh_transport_error(&error)),
+                };
+                if let Err(error) = result {
                     tracing::warn!(%error, "federation mesh QUIC connection failed");
                 }
             });
@@ -208,7 +214,7 @@ pub(crate) fn serve_mesh_compio_quic(
     let runtime = compio::runtime::Runtime::new()
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
     runtime.block_on(async move {
-        let server = ramflux_transport::CompioMeshQuicServer::bind_with_pem_roots_provider(
+        let server = ramflux_transport::CompioMeshQuicServer::bind_federation(
             listen_addr,
             tls,
             root_pems_provider,
@@ -219,17 +225,25 @@ pub(crate) fn serve_mesh_compio_quic(
         context.observability.mark_quic_listener_ready(local_addr.to_string());
         tracing::info!(addr = %local_addr, "federation mesh compio QUIC surface listening");
         loop {
-            let connection = match server.accept_connection().await {
-                Ok(connection) => connection,
-                Err(error) => {
-                    context.observability.mark_quic_listener_error(&error.to_string());
-                    tracing::error!(%error, "federation mesh compio QUIC connection rejected");
-                    continue;
-                }
-            };
+            let connection =
+                match server.accept_federation_handshake(HandshakePermit::acquire).await {
+                    Ok(connection) => connection,
+                    Err(ramflux_transport::TransportError::NotAuthenticated) => continue,
+                    Err(error) => {
+                        context.observability.mark_quic_listener_error(&error.to_string());
+                        tracing::debug!(%error, "federation mesh compio QUIC connection rejected");
+                        continue;
+                    }
+                };
             let context = context.clone();
             compio::runtime::spawn(async move {
-                if let Err(error) = handle_mesh_compio_quic_connection(connection, &context).await {
+                let result = match connection.await {
+                    Ok(connection) => {
+                        handle_mesh_compio_quic_connection(connection, &context).await
+                    }
+                    Err(error) => Err(mesh_transport_error(&error)),
+                };
+                if let Err(error) = result {
                     tracing::warn!(%error, "federation mesh compio QUIC connection failed");
                 }
             })
@@ -265,58 +279,18 @@ pub(crate) fn serve_mesh_mtls(
                 continue;
             }
         };
+        let Ok(ip) = socket.peer_addr().map(|addr| addr.ip()) else {
+            continue;
+        };
+        let Ok(handshake) = HandshakePermit::acquire(ip) else {
+            continue;
+        };
         match connections.spawn(
             socket,
-            (context.clone(), tls.clone()),
+            (context.clone(), tls.clone(), Some(handshake)),
             |socket, context, connection| {
-                let (context, tls) = context;
-                let accepted = (|| {
-                    let roots = context
-                        .state
-                        .snapshot()
-                        .map_err(|error| {
-                            ramflux_transport::TransportError::Http(error.to_string())
-                        })?
-                        .pinned_peer_ca_cert_pems();
-                    ramflux_transport::authenticate_tcp_stream_with_pem_roots(socket, tls, &roots)
-                })();
-                let accepted = match accepted {
-                    Ok(accepted) => accepted,
-                    Err(error) => {
-                        tracing::debug!(%error, "federation mesh TLS handshake ended");
-                        return;
-                    }
-                };
-                let peer_service_id = accepted
-                    .peer_spiffe_uri
-                    .as_deref()
-                    .and_then(|uri| ramflux_node_core::parse_mesh_spiffe_uri(uri).ok())
-                    .map(|peer| peer.service_id);
-                let mut stream = accepted.stream;
-                while !ramflux_node_core::service_shutdown_token().is_cancelled() {
-                    match handle_mesh_request(
-                        &mut stream,
-                        context,
-                        peer_service_id.as_deref(),
-                        accepted.peer_spiffe_uri.as_deref(),
-                        connection,
-                    ) {
-                        Ok(true) => {}
-                        Ok(false) => break,
-                        Err(error) => {
-                            if !ramflux_node_core::service_shutdown_token().is_cancelled() {
-                                let _ = ramflux_transport::write_mesh_text_response(
-                                    &mut stream,
-                                    "500 Internal Server Error",
-                                    &error.to_string(),
-                                );
-                            }
-                            tracing::debug!(%error, "federation mesh connection ended");
-                            break;
-                        }
-                    }
-                }
-                let _ = ramflux_transport::close_mesh_server_stream(&mut stream);
+                let (context, tls, handshake) = context;
+                handle_mesh_tcp_connection(socket, context, tls, handshake, connection);
             },
         ) {
             Ok(_) => backoff.success(),
@@ -325,31 +299,151 @@ pub(crate) fn serve_mesh_mtls(
     }
 }
 
+fn handle_mesh_tcp_connection(
+    socket: std::net::TcpStream,
+    context: &MeshServerContext,
+    tls: &ramflux_transport::MeshTlsConfig,
+    handshake: &mut Option<HandshakePermit>,
+    connection: &ramflux_node_core::ConnectionGuard,
+) {
+    let accepted = (|| {
+        let roots = context
+            .state
+            .snapshot()
+            .map_err(|error| ramflux_transport::TransportError::Http(error.to_string()))?
+            .pinned_peer_ca_cert_pems();
+        ramflux_transport::authenticate_federation_tcp_stream(socket, tls, roots)
+    })();
+    let accepted = match accepted {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            tracing::debug!(%error, "federation mesh TLS handshake ended");
+            return;
+        }
+    };
+    drop(handshake.take());
+    let auth = AuthLevel::from_uri(accepted.peer_spiffe_uri.as_deref());
+    let Ok(ip) = accepted.stream.sock.peer_addr().map(|addr| addr.ip()) else {
+        return;
+    };
+    let Ok(_anonymous) = AnonymousPermit::acquire(&auth, ip, true) else {
+        return;
+    };
+    let mut remaining = 4_usize;
+    let mut stream = accepted.stream;
+    while !ramflux_node_core::service_shutdown_token().is_cancelled() {
+        if auth.anonymous() {
+            if remaining == 0 {
+                break;
+            }
+            remaining = remaining.saturating_sub(1);
+        }
+        match handle_mesh_request(
+            &mut stream,
+            context,
+            &auth,
+            accepted.peer_spiffe_uri.as_deref(),
+            connection,
+        ) {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(error) => {
+                if !ramflux_node_core::service_shutdown_token().is_cancelled() {
+                    let _ = ramflux_transport::write_mesh_text_response(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        &error.to_string(),
+                    );
+                }
+                tracing::debug!(%error, "federation mesh connection ended");
+                break;
+            }
+        }
+    }
+    let _ = ramflux_transport::close_mesh_server_stream(&mut stream);
+}
+
 /// The body cap for a request, decided from its path before any body byte is read. The
-/// attachment renewal route is bounded at 16 KiB; everything else keeps the migration frame cap.
+/// attachment renewal and local forward routes have their own caps.
 pub(crate) fn mesh_body_cap(_method: &str, path: &str) -> usize {
-    if path == crate::attachment_renewal::PEER_PATH {
+    if path == crate::mesh_auth::ENVELOPE_PATH {
+        crate::mesh_auth::ENVELOPE_BODY_LIMIT
+    } else if path == crate::attachment_renewal::PEER_PATH {
         crate::attachment_renewal::MAX_BODY
+    } else if path == ramflux_node_core::HOME_SUBMIT_FORWARD_PATH {
+        ramflux_node_core::HOME_SUBMIT_FORWARD_MAX_BYTES
     } else {
         ramflux_protocol::home_migration::MAX_FRAME_BYTES
+    }
+}
+
+fn read_mesh_request(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    peer_spiffe_uri: Option<&str>,
+    context: &MeshServerContext,
+) -> Result<
+    Option<ramflux_transport::AdmittedMeshHttpRequest<AnonymousPermit>>,
+    ramflux_node_core::NodeCoreError,
+> {
+    let auth = AuthLevel::from_uri(peer_spiffe_uri);
+    let header_deadline = if auth.anonymous() {
+        Some(
+            ramflux_transport::mesh_request_deadline(
+                stream,
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .map_err(|error| mesh_transport_error(&error))?,
+        )
+    } else {
+        None
+    };
+    let request = ramflux_transport::read_bounded_mesh_http_request_with_admission(
+        stream,
+        &mesh_body_cap,
+        |stream, method, path, _, _| {
+            drop(header_deadline);
+            if !crate::mesh_auth::admit(&auth, method, path, &context.discovery.node_id) {
+                return Err(ramflux_transport::TransportError::NotAuthenticated);
+            }
+            let ip = stream.sock.peer_addr()?.ip();
+            AnonymousPermit::acquire(&auth, ip, false)
+                .map_err(|_| ramflux_transport::TransportError::NotAuthenticated)
+        },
+    );
+    match request {
+        Ok(request) => Ok(request),
+        Err(ramflux_transport::TransportError::NotAuthenticated) => {
+            ramflux_transport::write_mesh_text_response(
+                stream,
+                "403 Forbidden",
+                "mesh route requires verified peer",
+            )
+            .map_err(|error| mesh_transport_error(&error))?;
+            // The body remains unread. Close rather than interpreting it as another request.
+            Ok(None)
+        }
+        Err(error) => Err(mesh_transport_error(&error)),
     }
 }
 
 pub(crate) fn handle_mesh_request(
     stream: &mut ramflux_transport::MeshTlsServerStream,
     context: &MeshServerContext,
-    peer_service_id: Option<&str>,
+    auth: &AuthLevel,
     peer_spiffe_uri: Option<&str>,
     connection: &ramflux_node_core::ConnectionGuard,
 ) -> Result<bool, ramflux_node_core::NodeCoreError> {
     let received = std::time::Instant::now();
-    let _deadline = migration_request_deadline(stream, context, received)?;
-    let Some(request) =
-        ramflux_transport::read_bounded_mesh_http_request_by_path(stream, &mesh_body_cap)
-            .map_err(|error| mesh_transport_error(&error))?
-    else {
+    let _deadline = ramflux_transport::mesh_request_deadline(
+        stream,
+        received + std::time::Duration::from_secs(10),
+    )
+    .map_err(|error| mesh_transport_error(&error))?;
+    let Some(admitted) = read_mesh_request(stream, peer_spiffe_uri, context)? else {
         return Ok(false);
     };
+    let request = admitted.request();
+    let peer_service_id = auth.service();
     let Some(_request) = connection.begin_request() else {
         let _ = ramflux_transport::write_mesh_text_response(
             stream,
@@ -360,9 +454,6 @@ pub(crate) fn handle_mesh_request(
     };
     #[cfg(feature = "itest-http")]
     ramflux_node_core::shutdown_request_test_delay();
-    if refuse_retention_peer(stream, peer_service_id, &request.path)? {
-        return Ok(true);
-    }
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/healthz") => {
             ramflux_transport::write_mesh_json_response(
@@ -381,53 +472,25 @@ pub(crate) fn handle_mesh_request(
                 .map_err(|error| mesh_transport_error(&error))?;
         }
         ("POST", ramflux_node_core::MIGRATION_PEER_PATH) => {
-            handle_migration_peer_request(
-                stream,
-                context,
-                peer_service_id,
-                &request.body,
-                received,
-            )?;
+            handle_migration_peer_request(stream, context, auth, &request.body, received)?;
         }
         ("POST", crate::attachment_renewal::PEER_PATH) => {
             serve_attachment_peer(stream, context, peer_spiffe_uri, &request.body, received)?;
         }
         ("POST", "/s8/federation/envelope") => {
             context.observability.record_inbound_s8_envelope(MeshInboundTransport::Tcp);
-            handle_s8_inbound_envelope_request(stream, peer_service_id, &request.body, context)?;
+            handle_s8_inbound_envelope_request(
+                stream,
+                &request.body,
+                context,
+                received + std::time::Duration::from_secs(10),
+            )?;
+        }
+        ("POST", ramflux_node_core::HOME_SUBMIT_FORWARD_PATH) => {
+            handle_home_submit_forward(stream, &request.body, peer_spiffe_uri, context)?;
         }
         ("POST", RETENTION_GC_SWEEP_PATH) => {
-            if peer_service_id != Some("ramflux-retention") {
-                ramflux_transport::write_mesh_text_response(
-                    stream,
-                    "403 Forbidden",
-                    "gc_sweep requires ramflux-retention peer",
-                )
-                .map_err(|error| mesh_transport_error(&error))?;
-                return Ok(true);
-            }
-            let sweep: ramflux_node_core::RetentionGcSweepRequest =
-                serde_json::from_slice(&request.body).map_err(|source| {
-                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
-                })?;
-            if sweep.owner_service != "federation" {
-                return Err(ramflux_node_core::NodeCoreError::Unauthorized(
-                    "retention owner mismatch".into(),
-                ));
-            }
-            ramflux_transport::write_mesh_json_response(
-                stream,
-                "200 OK",
-                &sweep.response(
-                    u64::try_from(
-                        context
-                            .store
-                            .sweep_delivery_retention(sweep.effective_now(), sweep.dry_run)?,
-                    )
-                    .unwrap_or(u64::MAX),
-                ),
-            )
-            .map_err(|error| mesh_transport_error(&error))?;
+            serve_retention_sweep(stream, context, peer_service_id, &request.body)?;
         }
         _ => {
             ramflux_transport::write_mesh_text_response(stream, "404 Not Found", "not found")
@@ -437,6 +500,80 @@ pub(crate) fn handle_mesh_request(
     Ok(true)
 }
 
+fn serve_retention_sweep(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    context: &MeshServerContext,
+    peer_service_id: Option<&str>,
+    body: &[u8],
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    if peer_service_id != Some("ramflux-retention") {
+        ramflux_transport::write_mesh_text_response(
+            stream,
+            "403 Forbidden",
+            "gc_sweep requires ramflux-retention peer",
+        )
+        .map_err(|error| mesh_transport_error(&error))?;
+        return Ok(());
+    }
+    let sweep: ramflux_node_core::RetentionGcSweepRequest = serde_json::from_slice(body)
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
+    if sweep.owner_service != "federation" {
+        return Err(ramflux_node_core::NodeCoreError::Unauthorized(
+            "retention owner mismatch".into(),
+        ));
+    }
+    ramflux_transport::write_mesh_json_response(
+        stream,
+        "200 OK",
+        &sweep.response(
+            u64::try_from(
+                context.store.sweep_delivery_retention(sweep.effective_now(), sweep.dry_run)?,
+            )
+            .unwrap_or(u64::MAX),
+        ),
+    )
+    .map_err(|error| mesh_transport_error(&error))?;
+    Ok(())
+}
+
+fn handle_home_submit_forward(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    body: &[u8],
+    peer_spiffe_uri: Option<&str>,
+    context: &MeshServerContext,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let expected = format!("spiffe://{}/ramflux-router", context.discovery.node_id);
+    if peer_spiffe_uri != Some(expected.as_str()) {
+        return ramflux_transport::write_mesh_text_response(
+            stream,
+            "403 Forbidden",
+            "same-node router required",
+        )
+        .map_err(|error| mesh_transport_error(&error));
+    }
+    let request: ramflux_node_core::HomeSubmitForward = ramflux_protocol::parse_i_json(body)
+        .map_err(|error| ramflux_node_core::NodeCoreError::ItestJson(error.to_string()))?;
+    let forward = ramflux_node_core::FederatedEnvelopeForwardRequest {
+        migration_evidence: None,
+        signed: ramflux_node_core::default_federation_forward_signed_fields(),
+        admin_token: String::new(),
+        source_node_id: context.discovery.node_id.clone(),
+        target_node_id: request.target_node,
+        delivery_class: "opaque_event".into(),
+        required_capability: "opaque_delivery".into(),
+        envelope: request.envelope,
+    };
+    let response = crate::flow::handle_s8_forward_envelope(
+        &forward,
+        &context.state,
+        &context.store,
+        &context.router,
+        &context.discovery,
+    )?;
+    ramflux_transport::write_mesh_json_response(stream, "200 OK", &response)
+        .map_err(|error| mesh_transport_error(&error))
+}
+
 struct MeshQuicRequestContext<'a> {
     state: &'a crate::SharedFederationTrustState,
     store: &'a ramflux_node_core::FederationRedbStore,
@@ -444,36 +581,29 @@ struct MeshQuicRequestContext<'a> {
     discovery: &'a FederationDiscoverySurface,
     observability: &'a SharedMeshObservability,
     inbound_transport: MeshInboundTransport,
+    remote_ip: std::net::IpAddr,
+    deadline: std::time::Instant,
+}
+
+fn bounded_log(value: &str) -> String {
+    value.chars().take(96).flat_map(char::escape_default).collect()
 }
 
 fn handle_s8_inbound_envelope_request(
     stream: &mut ramflux_transport::MeshTlsServerStream,
-    peer_service_id: Option<&str>,
     body_bytes: &[u8],
     context: &MeshServerContext,
+    deadline: std::time::Instant,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    if peer_service_id == Some("ramflux-retention") {
-        ramflux_transport::write_mesh_text_response(
-            stream,
-            "403 Forbidden",
-            "retention peer cannot submit federation envelope",
-        )
-        .map_err(|error| mesh_transport_error(&error))?;
-        return Ok(());
-    }
     let body_len = body_bytes.len();
-    tracing::debug!(
-        body_len,
-        peer_service_id = peer_service_id.unwrap_or("<unknown>"),
-        "federation inbound envelope body read; decoding request"
-    );
+    tracing::debug!(body_len, "federation inbound envelope body read; decoding request");
     let request: ramflux_node_core::FederatedEnvelopeForwardRequest =
         match ramflux_protocol::parse_i_json(body_bytes) {
             Ok(request) => request,
             Err(source) => {
-                tracing::error!(
+                tracing::debug!(
                     body_len,
-                    error = %source,
+                    error = %bounded_log(&source.to_string()),
                     "federation inbound envelope request decode failed"
                 );
                 ramflux_transport::write_mesh_json_response(
@@ -486,26 +616,24 @@ fn handle_s8_inbound_envelope_request(
             }
         };
     tracing::debug!(
-        source_node_id = %request.source_node_id,
-        target_node_id = %request.target_node_id,
-        envelope_id = %request.envelope.envelope_id,
+        source_node_id = %bounded_log(&request.source_node_id),
+        target_node_id = %bounded_log(&request.target_node_id),
+        envelope_id = %bounded_log(&request.envelope.envelope_id),
         created_at = request.envelope.created_at,
         ttl = request.envelope.ttl,
         "federation inbound envelope request decoded"
     );
-    match handle_s8_receive_envelope(
-        &request,
-        context.state.as_ref(),
-        context.store.as_ref(),
-        context.router.as_ref(),
-        &context.discovery,
-        Some(context.observability.as_ref()),
-    ) {
+    let remote_ip = stream
+        .sock
+        .peer_addr()
+        .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?
+        .ip();
+    match receive_signed_envelope(&request, context, remote_ip, deadline) {
         Ok(response) => {
             tracing::debug!(
-                source_node_id = %request.source_node_id,
-                target_node_id = %request.target_node_id,
-                envelope_id = %request.envelope.envelope_id,
+                source_node_id = %bounded_log(&request.source_node_id),
+                target_node_id = %bounded_log(&request.target_node_id),
+                envelope_id = %bounded_log(&request.envelope.envelope_id),
                 outcome = %response.delivery.outcome,
                 "federation inbound envelope accepted"
             );
@@ -514,28 +642,16 @@ fn handle_s8_inbound_envelope_request(
         }
         Err(error) => {
             let body = error.to_string();
-            tracing::error!(
-                source_node_id = %request.source_node_id,
-                target_node_id = %request.target_node_id,
-                envelope_id = %request.envelope.envelope_id,
-                error = %body,
+            tracing::debug!(
+                source_node_id = %bounded_log(&request.source_node_id),
+                target_node_id = %bounded_log(&request.target_node_id),
+                envelope_id = %bounded_log(&request.envelope.envelope_id),
+                error = %bounded_log(&body),
                 "federation inbound envelope rejected"
             );
-            if matches!(error, ramflux_node_core::NodeCoreError::Capacity { .. }) {
-                ramflux_transport::write_mesh_json_response(
-                    stream,
-                    "429 Too Many Requests",
-                    &inbound_failure_response(&error).body,
-                )
+            let response = inbound_failure_response(&error);
+            ramflux_transport::write_mesh_json_response(stream, "403 Forbidden", &response.body)
                 .map_err(|error| mesh_transport_error(&error))?;
-            } else {
-                ramflux_transport::write_mesh_text_response(
-                    stream,
-                    "500 Internal Server Error",
-                    &body,
-                )
-                .map_err(|error| mesh_transport_error(&error))?;
-            }
         }
     }
     Ok(())
@@ -545,73 +661,63 @@ async fn handle_mesh_quic_connection(
     connection: ramflux_transport::MeshQuicConnection,
     context: MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
+    struct Close<'a>(&'a ramflux_transport::MeshQuicConnection);
+    impl Drop for Close<'_> {
+        fn drop(&mut self) {
+            self.0.close(0, b"ingress ended");
+        }
+    }
+    let _close = Close(&connection);
     let remote_address = connection.remote_address();
-    let peer_service_id = mesh_peer_service_id(connection.peer_spiffe_uri());
+    let auth = AuthLevel::from_uri(connection.peer_spiffe_uri());
+    let _anonymous = AnonymousPermit::acquire(&auth, remote_address.ip(), true)?;
+    let mut remaining = 4_usize;
     tracing::debug!(
         %remote_address,
-        peer_service_id = peer_service_id.as_deref().unwrap_or("<unknown>"),
+        peer_service_id = auth.service().unwrap_or("<anonymous>"),
         "federation mesh QUIC connection stream loop started"
     );
     loop {
-        let accepted = match ramflux_transport::MeshQuicServer::accept_request_on_connection(
-            &connection,
-        )
-        .await
-        {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                tracing::debug!(%remote_address, %error, "federation mesh QUIC connection stream loop ended");
+        if auth.anonymous() {
+            if remaining == 0 {
+                connection.close(0, b"request cap");
                 return Ok(());
             }
+            remaining = remaining.saturating_sub(1);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let permit = AnonymousPermit::acquire(&auth, remote_address.ip(), false)?;
+        let admission = |method: &str, path: &str| {
+            crate::mesh_auth::admit(&auth, method, path, &context.discovery.node_id)
         };
-        let context = context.clone();
-        let request_peer_service_id = peer_service_id.clone();
-        tokio::spawn(async move {
-            if let Err(error) =
-                handle_mesh_quic_request(accepted, request_peer_service_id.as_deref(), &context)
-                    .await
-            {
-                tracing::warn!(%remote_address, %error, "federation mesh QUIC request failed");
-            }
-        });
-    }
-}
-
-async fn handle_mesh_quic_request(
-    accepted: ramflux_transport::MeshQuicAcceptedRequest,
-    peer_service_id: Option<&str>,
-    context: &MeshServerContext,
-) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let Some(_request) = ramflux_node_core::begin_service_request() else {
-        return Ok(());
-    };
-    let response = handle_federation_mesh_quic_request(
-        &accepted.request,
-        peer_service_id,
-        &MeshQuicRequestContext {
-            state: context.state.as_ref(),
-            store: context.store.as_ref(),
-            router: context.router.as_ref(),
-            discovery: &context.discovery,
-            observability: &context.observability,
-            inbound_transport: MeshInboundTransport::Quic,
-        },
-    )?;
-    if (200..300).contains(&response.status)
-        || response.body["reason_code"] == "capacity"
-        || response.body["reason_code"] == "i_json_rejected"
-    {
-        accepted
-            .write_json_response(response.status, &response.body)
+        let accepted = ramflux_transport::MeshQuicServer::accept_admitted_request(
+            &connection,
+            &mesh_body_cap,
+            &admission,
+            deadline,
+        )
+        .await
+        .map_err(|error| mesh_transport_error(&error))?;
+        let receiver = dispatch_mesh_request(
+            accepted.request.clone(),
+            auth.clone(),
+            context.clone(),
+            remote_address.ip(),
+            deadline,
+            permit,
+        )?;
+        let response = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receiver)
             .await
-            .map_err(|error| mesh_transport_error(&error))?;
-    } else {
-        accepted
-            .write_text_response(response.status, response_error_text(&response.body))
-            .await
-            .map_err(|error| mesh_transport_error(&error))?;
+            .map_err(|_| crate::inbound_trust::refused())?
+            .map_err(|_| crate::inbound_trust::refused())??;
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            accepted.write_json_response(response.status, &response.body),
+        )
+        .await
+        .map_err(|_| crate::inbound_trust::refused())?
+        .map_err(|error| mesh_transport_error(&error))?;
     }
-    Ok(())
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
@@ -619,72 +725,112 @@ async fn handle_mesh_compio_quic_connection(
     connection: ramflux_transport::CompioMeshQuicConnection,
     context: &MeshServerContext,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let remote_address = connection.remote_address();
-    let peer_service_id = mesh_peer_service_id(connection.peer_spiffe_uri());
-    tracing::debug!(
-        %remote_address,
-        peer_service_id = peer_service_id.as_deref().unwrap_or("<unknown>"),
-        "federation mesh compio QUIC connection stream loop started"
-    );
+    struct Close<'a>(&'a ramflux_transport::CompioMeshQuicConnection);
+    impl Drop for Close<'_> {
+        fn drop(&mut self) {
+            self.0.close(0, b"ingress ended");
+        }
+    }
+    let _close = Close(&connection);
+    let ip = connection.remote_address().ip();
+    let auth = AuthLevel::from_uri(connection.peer_spiffe_uri());
+    let _anonymous = AnonymousPermit::acquire(&auth, ip, true)?;
+    let mut remaining = 4_usize;
     loop {
-        let accepted = match ramflux_transport::CompioMeshQuicServer::accept_request_on_connection(
-            &connection,
-        )
-        .await
-        {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                tracing::debug!(%remote_address, %error, "federation mesh compio QUIC connection stream loop ended");
+        if auth.anonymous() {
+            if remaining == 0 {
+                connection.close(0, b"request cap");
                 return Ok(());
             }
+            remaining = remaining.saturating_sub(1);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let permit = AnonymousPermit::acquire(&auth, ip, false)?;
+        let admission = |method: &str, path: &str| {
+            crate::mesh_auth::admit(&auth, method, path, &context.discovery.node_id)
         };
-        handle_mesh_compio_quic_request(accepted, peer_service_id.as_deref(), context).await?;
+        let accepted = ramflux_transport::CompioMeshQuicServer::accept_admitted_request(
+            &connection,
+            &mesh_body_cap,
+            &admission,
+            deadline,
+        )
+        .await
+        .map_err(|error| mesh_transport_error(&error))?;
+        let receiver = dispatch_mesh_request(
+            accepted.request.clone(),
+            auth.clone(),
+            context.clone(),
+            ip,
+            deadline,
+            permit,
+        )?;
+        let response = compio::time::timeout(
+            deadline.saturating_duration_since(std::time::Instant::now()),
+            receiver,
+        )
+        .await
+        .map_err(|_| crate::inbound_trust::refused())?
+        .map_err(|_| crate::inbound_trust::refused())??;
+        compio::time::timeout(
+            deadline.saturating_duration_since(std::time::Instant::now()),
+            accepted.write_json_response(response.status, &response.body),
+        )
+        .await
+        .map_err(|_| crate::inbound_trust::refused())?
+        .map_err(|error| mesh_transport_error(&error))?;
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
-async fn handle_mesh_compio_quic_request(
-    accepted: ramflux_transport::CompioMeshQuicAcceptedRequest,
-    peer_service_id: Option<&str>,
-    context: &MeshServerContext,
-) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let response = handle_federation_mesh_quic_request(
-        &accepted.request,
-        peer_service_id,
-        &MeshQuicRequestContext {
-            state: context.state.as_ref(),
-            store: context.store.as_ref(),
-            router: context.router.as_ref(),
-            discovery: &context.discovery,
-            observability: &context.observability,
-            inbound_transport: MeshInboundTransport::Quic,
-        },
-    )?;
-    if (200..300).contains(&response.status)
-        || response.body["reason_code"] == "capacity"
-        || response.body["reason_code"] == "i_json_rejected"
-    {
-        accepted
-            .write_json_response(response.status, &response.body)
-            .await
-            .map_err(|error| mesh_transport_error(&error))?;
-    } else {
-        accepted
-            .write_text_response(response.status, response_error_text(&response.body))
-            .await
-            .map_err(|error| mesh_transport_error(&error))?;
-    }
-    Ok(())
+fn dispatch_mesh_request(
+    request: ramflux_transport::GatewayQuicRequest,
+    auth: AuthLevel,
+    context: MeshServerContext,
+    remote_ip: std::net::IpAddr,
+    deadline: std::time::Instant,
+    anonymous: Option<AnonymousPermit>,
+) -> Result<
+    tokio::sync::oneshot::Receiver<
+        Result<ramflux_transport::GatewayQuicResponse, ramflux_node_core::NodeCoreError>,
+    >,
+    ramflux_node_core::NodeCoreError,
+> {
+    let worker = crate::mesh_auth::request_worker()?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("federation-request".into())
+        .spawn(move || {
+            let _worker = worker;
+            let _anonymous = anonymous;
+            let result = handle_federation_mesh_quic_request(
+                &request,
+                &auth,
+                &MeshQuicRequestContext {
+                    state: &context.state,
+                    store: &context.store,
+                    router: &context.router,
+                    discovery: &context.discovery,
+                    observability: &context.observability,
+                    inbound_transport: MeshInboundTransport::Quic,
+                    remote_ip,
+                    deadline,
+                },
+            );
+            let _ = sender.send(result);
+        })
+        .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
+    Ok(receiver)
 }
 
 fn handle_federation_mesh_quic_request(
     request: &ramflux_transport::GatewayQuicRequest,
-    peer_service_id: Option<&str>,
+    auth: &AuthLevel,
     context: &MeshQuicRequestContext<'_>,
 ) -> Result<ramflux_transport::GatewayQuicResponse, ramflux_node_core::NodeCoreError> {
-    if peer_service_id == Some("ramflux-retention") && request.path != RETENTION_GC_SWEEP_PATH {
-        return Ok(text_quic_response(403, "retention peer is only authorized for gc_sweep"));
+    if !crate::mesh_auth::admit(auth, &request.method, &request.path, &context.discovery.node_id) {
+        return Ok(text_quic_response(403, "mesh route requires verified peer"));
     }
+    let peer_service_id = auth.service();
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/healthz") => Ok(ramflux_transport::GatewayQuicResponse {
             status: 200,
@@ -700,25 +846,30 @@ fn handle_federation_mesh_quic_request(
             )?,
         }),
         ("POST", "/s8/federation/envelope") => {
-            if peer_service_id == Some("ramflux-retention") {
-                return Ok(text_quic_response(
-                    403,
-                    "retention peer cannot submit federation envelope",
-                ));
-            }
             context.observability.record_inbound_s8_envelope(context.inbound_transport);
             let forwarded: ramflux_node_core::FederatedEnvelopeForwardRequest =
                 serde_json::from_value(request.body.clone()).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
-            match handle_s8_receive_envelope(
+            match crate::inbound_trust::authenticate(
                 &forwarded,
                 context.state,
                 context.store,
-                context.router,
                 context.discovery,
-                Some(context.observability),
-            ) {
+                context.remote_ip,
+                context.deadline,
+            )
+            .and_then(|()| {
+                crate::ingress_limits::remember_verified(context.remote_ip);
+                handle_s8_receive_envelope(
+                    &forwarded,
+                    context.state,
+                    context.store,
+                    context.router,
+                    context.discovery,
+                    Some(context.observability),
+                )
+            }) {
                 Ok(response) => Ok(ramflux_transport::GatewayQuicResponse {
                     status: 200,
                     body: serde_json::to_value(response).map_err(|source| {
@@ -760,12 +911,6 @@ fn handle_federation_mesh_quic_request(
     }
 }
 
-fn mesh_peer_service_id(peer_spiffe_uri: Option<&str>) -> Option<String> {
-    peer_spiffe_uri
-        .and_then(|spiffe_uri| ramflux_node_core::parse_mesh_spiffe_uri(spiffe_uri).ok())
-        .map(|peer| peer.service_id)
-}
-
 fn inbound_failure_response(
     error: &ramflux_node_core::NodeCoreError,
 ) -> ramflux_transport::GatewayQuicResponse {
@@ -776,33 +921,11 @@ fn inbound_failure_response(
                 body: serde_json::json!({"error":"capacity","reason_code":"capacity","resource":resource}),
             }
         }
-        other => text_quic_response(500, &other.to_string()),
+        _ => text_quic_response(403, "federation request authentication failed"),
     }
 }
 fn text_quic_response(status: u16, body: &str) -> ramflux_transport::GatewayQuicResponse {
     ramflux_transport::GatewayQuicResponse { status, body: serde_json::json!({ "error": body }) }
-}
-
-fn response_error_text(body: &serde_json::Value) -> &str {
-    body.get("error").and_then(serde_json::Value::as_str).unwrap_or("mesh request failed")
-}
-
-/// The retention peer may only call `gc_sweep`; anything else is refused here.
-fn refuse_retention_peer(
-    stream: &mut ramflux_transport::MeshTlsServerStream,
-    peer_service_id: Option<&str>,
-    path: &str,
-) -> Result<bool, ramflux_node_core::NodeCoreError> {
-    if peer_service_id != Some("ramflux-retention") || path == RETENTION_GC_SWEEP_PATH {
-        return Ok(false);
-    }
-    ramflux_transport::write_mesh_text_response(
-        stream,
-        "403 Forbidden",
-        "retention peer is only authorized for gc_sweep",
-    )
-    .map_err(|error| mesh_transport_error(&error))?;
-    Ok(true)
 }
 
 fn serve_attachment_peer(
@@ -844,11 +967,11 @@ fn serve_attachment_peer(
 fn handle_migration_peer_request(
     stream: &mut ramflux_transport::MeshTlsServerStream,
     context: &MeshServerContext,
-    peer_service_id: Option<&str>,
+    auth: &AuthLevel,
     body: &[u8],
     received: std::time::Instant,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    if peer_service_id != Some("ramflux-federation") {
+    if auth.service() != Some("ramflux-federation") {
         ramflux_transport::write_mesh_text_response(
             stream,
             "403 Forbidden",
@@ -857,13 +980,23 @@ fn handle_migration_peer_request(
         .map_err(|error| mesh_transport_error(&error))?;
         return Ok(());
     }
-    let envelope = ramflux_protocol::home_migration::decode(
-        body,
-        ramflux_protocol::home_migration::MAX_FRAME_BYTES,
-    )
-    .map_err(|_| {
-        ramflux_node_core::NodeCoreError::ItestHttp("invalid migration peer frame".into())
-    })?;
+    let envelope: ramflux_node_core::MigrationPeerRequest =
+        ramflux_protocol::home_migration::decode(
+            body,
+            ramflux_protocol::home_migration::MAX_FRAME_BYTES,
+        )
+        .map_err(|_| {
+            ramflux_node_core::NodeCoreError::ItestHttp("invalid migration peer frame".into())
+        })?;
+    if !matches!(auth, AuthLevel::Peer(peer) if peer.node_id == envelope.call.claimed_peer()) {
+        ramflux_transport::write_mesh_text_response(
+            stream,
+            "403 Forbidden",
+            "migration peer node mismatch",
+        )
+        .map_err(|error| mesh_transport_error(&error))?;
+        return Ok(());
+    }
     let reply = crate::home_migration::inbound(
         envelope,
         &context.state,
@@ -876,34 +1009,34 @@ fn handle_migration_peer_request(
     Ok(())
 }
 
-fn migration_request_deadline(
-    stream: &ramflux_transport::MeshTlsServerStream,
+fn receive_signed_envelope(
+    request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
     context: &MeshServerContext,
-    received: std::time::Instant,
-) -> Result<Option<ramflux_transport::MeshRequestDeadline>, ramflux_node_core::NodeCoreError> {
-    Ok(
-        if context
-            .discovery
-            .node_capabilities
-            .iter()
-            .any(|cap| cap == ramflux_node_core::HOME_MIGRATION_CAPABILITY)
-            || context.discovery.attachment_authority.is_some()
-        {
-            Some(
-                ramflux_transport::mesh_request_deadline(
-                    stream,
-                    received + std::time::Duration::from_secs(10),
-                )
-                .map_err(|error| mesh_transport_error(&error))?,
-            )
-        } else {
-            None
-        },
+    remote_ip: std::net::IpAddr,
+    deadline: std::time::Instant,
+) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError> {
+    crate::inbound_trust::authenticate(
+        request,
+        &context.state,
+        &context.store,
+        &context.discovery,
+        remote_ip,
+        deadline,
+    )?;
+    crate::ingress_limits::remember_verified(remote_ip);
+    handle_s8_receive_envelope(
+        request,
+        &context.state,
+        &context.store,
+        &context.router,
+        &context.discovery,
+        Some(&context.observability),
     )
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::mesh_auth::AuthLevel;
     use crate::test_certificates::{issue_test_ca, issue_test_service_cert, temp_cert_root};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -960,20 +1093,19 @@ pub(crate) mod tests {
 
         let rejected = context.handle_quic_request(&request, Some("ramflux-gateway"))?;
         assert_eq!(rejected.status, 403);
-        assert_eq!(rejected.body["error"], "gc_sweep requires ramflux-retention peer");
+        assert_eq!(rejected.body["error"], "mesh route requires verified peer");
 
+        let mut unsigned = signed_forward_for_mesh([9; 32])?;
+        unsigned.signed.signature.clear();
         let envelope = ramflux_transport::GatewayQuicRequest {
             method: "POST".to_owned(),
             path: "/s8/federation/envelope".to_owned(),
-            body: serde_json::json!({}),
+            body: serde_json::to_value(unsigned)?,
         };
         let retention_blocked =
             context.handle_quic_request(&envelope, Some("ramflux-retention"))?;
         assert_eq!(retention_blocked.status, 403);
-        assert_eq!(
-            retention_blocked.body["error"],
-            "retention peer is only authorized for gc_sweep"
-        );
+        assert_eq!(retention_blocked.body["error"], "federation request authentication failed");
         Ok(())
     }
 
@@ -1010,8 +1142,13 @@ pub(crate) mod tests {
                 if request.path != "/s8/federation/envelope" {
                     return Err(format!("unexpected mesh path {}", request.path));
                 }
-                handle_s8_inbound_envelope_request(&mut stream, None, &request.body, &context)
-                    .map_err(|error| error.to_string())
+                handle_s8_inbound_envelope_request(
+                    &mut stream,
+                    &request.body,
+                    &context,
+                    std::time::Instant::now() + std::time::Duration::from_secs(10),
+                )
+                .map_err(|error| error.to_string())
             });
 
             let (status, body) = ramflux_transport::mesh_http_post_status_body(
@@ -1026,7 +1163,7 @@ pub(crate) mod tests {
                 assert_eq!(status, 400);
                 assert_eq!(body, EXPECTED_BODY);
             } else {
-                assert_eq!(status, 500);
+                assert_eq!(status, 403);
                 assert_ne!(body, EXPECTED_BODY);
             }
             assert_eq!(store.list_pending_outbound(100)?, pending_before);
@@ -1231,8 +1368,13 @@ pub(crate) mod tests {
                 let request = ramflux_transport::read_mesh_http_request(&mut stream)
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| "missing mesh request".to_owned())?;
-                handle_s8_inbound_envelope_request(&mut stream, None, &request.body, &context)
-                    .map_err(|error| error.to_string())
+                handle_s8_inbound_envelope_request(
+                    &mut stream,
+                    &request.body,
+                    &context,
+                    std::time::Instant::now() + std::time::Duration::from_secs(10),
+                )
+                .map_err(|error| error.to_string())
             });
             let raw = serde_json::value::RawValue::from_string(text)?;
             let (status, body) = ramflux_transport::mesh_http_post_status_body(
@@ -1281,14 +1423,13 @@ pub(crate) mod tests {
                     let reactor = compio::runtime::Runtime::new().map_err(|e| e.to_string())?;
                     reactor.block_on(async move {
                         let roots = Arc::new(move || Ok(vec![ca_pem.clone()]));
-                        let server =
-                            ramflux_transport::CompioMeshQuicServer::bind_with_pem_roots_provider(
-                                "127.0.0.1:0",
-                                &tls,
-                                roots,
-                            )
-                            .await
-                            .map_err(|error| error.to_string())?;
+                        let server = ramflux_transport::CompioMeshQuicServer::bind_federation(
+                            "127.0.0.1:0",
+                            &tls,
+                            roots,
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
                         let local = server.local_addr().map_err(|error| error.to_string())?;
                         let _sent = addr_tx.send(Ok(local.to_string()));
                         loop {
@@ -1537,22 +1678,26 @@ pub(crate) mod tests {
         ))
     }
 
+    fn test_peer_service_id(uri: Option<&str>) -> Option<String> {
+        AuthLevel::from_uri(uri).service().map(str::to_owned)
+    }
+
     #[test]
     fn federation_quic_peer_service_id_comes_from_spiffe_uri() {
         assert_eq!(
-            mesh_peer_service_id(Some("spiffe://node-a/ramflux-retention")).as_deref(),
+            test_peer_service_id(Some("spiffe://node-a/ramflux-retention")).as_deref(),
             Some("ramflux-retention")
         );
         assert_eq!(
-            mesh_peer_service_id(Some("spiffe://node-a/ramflux-gateway")).as_deref(),
+            test_peer_service_id(Some("spiffe://node-a/ramflux-gateway")).as_deref(),
             Some("ramflux-gateway")
         );
         assert_eq!(
-            mesh_peer_service_id(Some("spiffe://node-a/ramflux-gateway/gw-a")).as_deref(),
+            test_peer_service_id(Some("spiffe://node-a/ramflux-gateway/gw-a")).as_deref(),
             Some("ramflux-gateway")
         );
-        assert!(mesh_peer_service_id(None).is_none());
-        assert!(mesh_peer_service_id(Some("not-spiffe")).is_none());
+        assert!(test_peer_service_id(None).is_none());
+        assert!(test_peer_service_id(Some("not-spiffe")).is_none());
     }
 
     #[test]
@@ -1769,8 +1914,16 @@ pub(crate) mod tests {
                 discovery: &self.discovery,
                 observability: &self.observability,
                 inbound_transport: MeshInboundTransport::Quic,
+                remote_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
             };
-            handle_federation_mesh_quic_request(request, peer_service_id, &context)
+            handle_federation_mesh_quic_request(
+                request,
+                &AuthLevel::from_uri(
+                    peer_service_id.map(|service| format!("spiffe://node-a/{service}")).as_deref(),
+                ),
+                &context,
+            )
         }
     }
 
@@ -1791,7 +1944,7 @@ pub(crate) mod tests {
                     .map_err(|source| source.to_string())?;
                 runtime.block_on(async move {
                     let roots = Arc::new(move || Ok(vec![trusted_retention_ca.clone()]));
-                    let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
+                    let server = ramflux_transport::MeshQuicServer::bind_federation(
                         "127.0.0.1:0", &server_tls, roots,
                     ).map_err(|source| source.to_string())?;
                     endpoint_tx.send(server.local_addr().map(|addr| addr.to_string()).map_err(|source| source.to_string()))

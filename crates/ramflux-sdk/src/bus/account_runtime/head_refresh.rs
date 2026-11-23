@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-specific command demand. The fetch uses the network admission deadline.
-//! Work already queued for the writer is applied before that deadline refuses.
+//! A head already fetched for that demand is applied before other connection work.
 
 use super::AccountRuntime;
 use crate::SdkError;
@@ -161,11 +161,12 @@ impl AccountRuntime {
         command: &AccountCommand,
         admitted_at: Instant,
     ) -> Result<(), SdkError> {
+        self.refuse_ineligible_explicit_send(command)?;
         let network_deadline = admitted_at + self.timeouts.network_wait;
         // Every NEW send authorization needs an authority fetched after this command began.
         let since = std::time::Instant::now();
-        let mut enqueued = BTreeSet::new();
         let mut receive_prepared = false;
+        let mut demand = None;
         if command.request.method == "group.read"
             && let Some(account) = self.state.accounts.get_mut(&self.id)
         {
@@ -186,65 +187,108 @@ impl AccountRuntime {
                 account.client.account_db()?.due_inbox_retry_rows(i64::MAX)?.is_empty();
         }
         loop {
-            let Some(account) = self.state.accounts.get_mut(&self.id) else {
-                return Ok(());
+            let roots = {
+                let Some(account) = self.state.accounts.get_mut(&self.id) else {
+                    return Ok(());
+                };
+                stale_roots_since(account, &command.request, Some(since))?
             };
-            let roots = stale_roots_since(account, &command.request, Some(since))?;
             if roots.is_empty() {
                 let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(receive_prepared));
                 return Ok(());
             }
+            if let Some(error) = self.demanded_foreign(&roots, since) {
+                return Err(error);
+            }
             // A refresh only makes held entries ready; dispatch must replay them.
             receive_prepared = false;
-            // Leave the actor once the fetch budget ends. Staying here to wait for
-            // Apply holds the only reader of `connection_work`, so the refresh task
-            // cannot finish this Apply or start the next fetch.
+            if demand.is_none() {
+                demand = Some(super::head_demand::HeadDemand::arm(&self.command_waiting));
+            }
+            // Leave once the fetch budget ends. This select keeps reading both queues.
+            // A root stays demanded after a fetch that began before `since`: that
+            // observation cannot authorize this command, and enqueue is idempotent
+            // while a pass is already in flight.
             if Instant::now() >= network_deadline {
                 return self.refuse_or_apply_queued(command, since).await;
             }
-            for root in roots {
-                if enqueued.insert(root.clone()) && !account.head_refresh.enqueue(root) {
+            let Some(account) = self.state.accounts.get_mut(&self.id) else {
+                return Ok(());
+            };
+            for root in &roots {
+                if !account.head_refresh.enqueue(root.clone()) {
                     return Err(pending(account));
                 }
             }
             tokio::select! {
                 biased;
+                work = self.head_rx.recv() => {
+                    let Some(work) = work else { return Err(SdkError::NetworkingPending); };
+                    self.admit_during_head_demand(work).await?;
+                }
                 () = tokio::time::sleep_until(network_deadline) => {}
                 work = self.connection_work.recv() => {
                     let Some(work) = work else { return Err(SdkError::NetworkingPending); };
-                    self.apply_connection_work(work).await?;
+                    self.admit_during_head_demand(work).await?;
+                    if let Some(error) = self.demanded_foreign(&roots, since) {
+                        return Err(error);
+                    }
                 }
             }
         }
     }
 
-    /// The biased sleep above wins when the deadline and a queued item are both
-    /// ready. Apply what is already queued, then refuse if the head is still stale.
+    /// Apply a demanded head already in the completion slot or the shared queue,
+    /// then refuse if the authority is still stale.
     async fn refuse_or_apply_queued(
         &mut self,
         command: &AccountCommand,
         since: std::time::Instant,
     ) -> Result<(), SdkError> {
-        self.drain_queued_connection_work().await?;
+        self.prefer_demanded_head().await?;
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(());
         };
-        if stale_roots_since(account, &command.request, Some(since))?.is_empty() {
+        let roots = stale_roots_since(account, &command.request, Some(since))?;
+        if let Some(error) = account.head_refresh.take_demanded_foreign(&roots, since) {
+            return Err(error);
+        }
+        if roots.is_empty() {
             let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(false));
             return Ok(());
         }
         Err(pending(account))
     }
 
-    async fn drain_queued_connection_work(&mut self) -> Result<(), SdkError> {
-        for _ in 0..super::CONNECTION_WORK_QUEUE {
-            match self.connection_work.try_recv() {
-                Ok(work) => self.apply_connection_work(work).await?,
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    return Err(SdkError::NetworkingPending);
-                }
-            }
+    fn demanded_foreign(
+        &mut self,
+        roots: &BTreeSet<String>,
+        since: std::time::Instant,
+    ) -> Option<SdkError> {
+        self.state.accounts.get_mut(&self.id)?.head_refresh.take_demanded_foreign(roots, since)
+    }
+
+    /// An explicit send whose root is not this account, an accepted contact, or a
+    /// shared-group member fails before any fetch. A failed contact setup must not
+    /// wait out the head deadline.
+    fn refuse_ineligible_explicit_send(&self, command: &AccountCommand) -> Result<(), SdkError> {
+        let method = command.request.method.as_str();
+        if method != "message.submit" && method != "conversation.send" {
+            return Ok(());
+        }
+        let Some(account) = self.state.accounts.get(&self.id) else {
+            return Ok(());
+        };
+        if account.client.born_v3_account.is_none() {
+            return Ok(());
+        }
+        let roots = send_roots(account, &command.request)?;
+        if roots.is_empty() {
+            return Ok(());
+        }
+        let eligible = crate::bus::couriers::head_refresh::eligible_roots(account)?;
+        if roots.iter().any(|root| !eligible.contains(root)) {
+            return Err(crate::ContactReason::UnknownPrincipal.into());
         }
         Ok(())
     }

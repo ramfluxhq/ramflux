@@ -79,25 +79,30 @@ fn plan(
         .transpose()
 }
 async fn send(writer: &Writer, mut plan: Plan) -> Result<(), SdkError> {
-    let manifest = if let Some(root) = plan.request.root {
-        Some((
-            root.clone(),
-            crate::client::contact::fetch_verified_device_manifest(plan.session.config(), &root)
-                .await?,
-        ))
-    } else {
-        None
+    let root = plan.request.root.clone();
+    let origin = match root.as_deref() {
+        Some(root) => {
+            let owned = root.to_owned();
+            Some(writer.apply(move |account| account.client.pinned_manifest_origin(&owned)).await?)
+        }
+        None => None,
     };
-    let bundle =
-        if let Some(lookup) = plan.request.prekey {
-            Some(
-                plan.session.fetch_prekey_bundle(&lookup).await?.bundle.ok_or_else(|| {
-                    SdkError::InboundPending("recipient prekey unavailable".into())
-                })?,
+    let manifest = match (root.as_deref(), origin.clone()) {
+        (Some(root), Some(origin)) => Some((
+            root.to_owned(),
+            crate::client::foreign_manifest::fetch_sender_manifest(
+                plan.session.config(),
+                origin,
+                root,
             )
-        } else {
-            None
-        };
+            .await?,
+        )),
+        _ => None,
+    };
+    let bundle = match plan.request.prekey.clone() {
+        Some(lookup) => Some(reset_prekey(&mut plan, origin.as_ref(), &lookup).await?),
+        None => None,
+    };
     let sealing = plan.session.sealing_config()?;
     let (remote, kind) = (plan.draft.remote().clone(), plan.draft.kind());
     let submitted = plan.submitted.clone();
@@ -130,4 +135,31 @@ async fn send(writer: &Writer, mut plan: Plan) -> Result<(), SdkError> {
         }
     }
     Ok(())
+}
+
+async fn reset_prekey(
+    plan: &mut Plan,
+    origin: Option<&crate::client::foreign_manifest::SenderManifestOrigin>,
+    lookup: &str,
+) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
+    if let Some(crate::client::foreign_manifest::SenderManifestOrigin::Remote {
+        home,
+        fingerprint,
+    }) = origin
+    {
+        let base = crate::client::recipient_home::public_prekey_base(home, fingerprint).await?;
+        return crate::prekey::http_async::get::<crate::prekey::SdkPrekeyResponse>(
+            &base,
+            &format!("/mvp1/prekey/{lookup}"),
+            plan.session.config().timeout,
+        )
+        .await?
+        .bundle
+        .ok_or_else(|| SdkError::InboundPending("recipient prekey unavailable".into()));
+    }
+    plan.session
+        .fetch_prekey_bundle(lookup)
+        .await?
+        .bundle
+        .ok_or_else(|| SdkError::InboundPending("recipient prekey unavailable".into()))
 }

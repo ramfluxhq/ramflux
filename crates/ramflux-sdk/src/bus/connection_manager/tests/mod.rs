@@ -158,6 +158,7 @@ pub(crate) async fn ephemeral_fixture_for(
         limits,
         Arc::new(NegotiatedEphemeralConnector(Connector { sessions, frame })),
         None,
+        None,
     );
     let io = receive.recv().await.ok_or("connector did not enter")?;
     handle.require_live(Duration::from_secs(600)).await?;
@@ -174,6 +175,7 @@ pub(crate) fn reconnecting_fixture(
         None,
         limits,
         Arc::new(Connector { sessions, frame }),
+        None,
         None,
     );
     Ok((handle, receive))
@@ -256,6 +258,7 @@ pub(crate) fn seeded(
         Some(engine),
         limits,
         Arc::new(Connector { sessions, frame }),
+        None,
         None,
     );
     (handle, io)

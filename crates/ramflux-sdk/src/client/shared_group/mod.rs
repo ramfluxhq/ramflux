@@ -251,8 +251,9 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
         let root = self.group_actor_manifest_request(issuer, entry)?;
+        let origin = self.sender_manifest_origin(&entry.envelope, &root)?;
         let manifest =
-            crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?;
+            crate::client::foreign_manifest::fetch_sender_manifest(gateway, origin, &root).await?;
         self.accept_group_actor_manifest(issuer, entry, &manifest)
     }
 

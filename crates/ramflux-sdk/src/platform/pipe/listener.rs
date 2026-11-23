@@ -62,6 +62,11 @@ pub(crate) trait BusStream: Sized {
         false
     }
 
+    /// Socket clients can answer a credential prompt. The in-process carrier cannot.
+    fn accepts_credential_prompt(&self) -> bool {
+        true
+    }
+
     /// # Errors
     /// Returns [`SdkError::LocalBusPermissionDenied`] when the peer is not `expected`.
     fn matches_peer(&self, expected: PeerCred) -> Result<(), SdkError>;

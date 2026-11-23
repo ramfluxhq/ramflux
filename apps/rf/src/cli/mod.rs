@@ -5,6 +5,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) use crate::{DEFAULT_DATA_ROOT, DEFAULT_SOCKET};
 
 mod a2i;
@@ -65,6 +66,10 @@ pub(crate) use transfer::*;
     about = "Ramflux reference CLI over the local SDK bus"
 )]
 pub(crate) struct Cli {
+    #[cfg(target_os = "linux")]
+    #[arg(long, global = true)]
+    pub(crate) socket: Option<PathBuf>,
+    #[cfg(not(target_os = "linux"))]
     #[arg(long, global = true, default_value = DEFAULT_SOCKET)]
     pub(crate) socket: PathBuf,
     #[command(subcommand)]

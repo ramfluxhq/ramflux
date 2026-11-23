@@ -11,7 +11,10 @@ use ramflux_protocol::group_state::GroupStateActor;
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct GroupDirectoryRequest {
     pub root: String,
-    pub url: Option<String>,
+    /// Pinned home node id. `None` uses the session directory.
+    pub home: Option<String>,
+    /// Card node-key fingerprint. Required when `home` is set.
+    pub node_fingerprint: Option<String>,
 }
 pub(crate) struct GroupDirectoryPlan {
     pub actor_root: String,
@@ -27,21 +30,30 @@ impl GroupDirectoryRequest {
         self,
         gateway: &GatewaySessionConfig,
     ) -> Result<(Self, SdkDeviceManifestResponse), SdkError> {
-        let manifest = if let Some(url) = &self.url {
-            let started = std::time::Instant::now();
-            let manifest = crate::prekey::http_async::get::<Option<SdkDeviceManifestResponse>>(
-                url,
-                &format!("/mvp1/device-manifest/{}", self.root),
-                gateway.timeout,
-            )
-            .await?
-            .ok_or_else(|| SdkError::InboundPending("group manifest unavailable".into()))?
-            .fetched_from(started);
-            crate::client::contact::verify_device_manifest(&manifest, &self.root)?;
-            crate::client::identity_authority::ready_manifest(manifest, now_unix_timestamp())
-        } else {
-            crate::client::contact::fetch_verified_device_manifest(gateway, &self.root).await?
+        let origin = match &self.home {
+            Some(home) => {
+                let fingerprint =
+                    self.node_fingerprint.as_deref().filter(|value| !value.is_empty()).ok_or_else(
+                        || SdkError::LocalBus("pinned node fingerprint is required".into()),
+                    )?;
+                crate::client::foreign_manifest::SenderManifestOrigin::Remote {
+                    home: home.clone(),
+                    fingerprint: fingerprint.to_owned(),
+                }
+            }
+            None => crate::client::foreign_manifest::SenderManifestOrigin::Local,
         };
+        let manifest =
+            crate::client::foreign_manifest::fetch_sender_manifest(gateway, origin, &self.root)
+                .await
+                .map_err(|error| match error {
+                    SdkError::InboundRejected(reason)
+                        if self.home.is_some() && reason == "device manifest unavailable" =>
+                    {
+                        SdkError::InboundPending("group manifest unavailable".into())
+                    }
+                    other => other,
+                })?;
         Ok((self, manifest))
     }
 }
@@ -171,15 +183,15 @@ impl RamfluxClient {
             saved = self.shared_group_federation_route(group, root)?;
             saved.as_ref()
         };
-        let url = route
-            .map(|route| {
-                route
-                    .recipient_prekey_url
-                    .clone()
-                    .ok_or_else(|| super::invalid("federated addition requires prekey directory"))
-            })
-            .transpose()?;
-        Ok(GroupDirectoryRequest { root: root.to_owned(), url })
+        let caller = route.map(|route| route.target_node_id.as_str());
+        let pinned = crate::client::recipient_home::pin_choice(self, root, caller)?;
+        let own = self.account_db()?.load_actor_state::<String>("account/node-id")?;
+        let home = pinned.filter(|home| own.as_deref() != Some(home.as_str()));
+        let node_fingerprint = match &home {
+            Some(_) => Some(crate::client::recipient_home::pinned_node_fingerprint(self, root)?),
+            None => None,
+        };
+        Ok(GroupDirectoryRequest { root: root.to_owned(), home, node_fingerprint })
     }
     pub(super) fn prepared_group_addition_manifest(
         lookup: &GroupDirectoryRequest,
@@ -204,22 +216,7 @@ impl RamfluxClient {
         root: &str,
         federation: Option<&LocalBusFederationRoute>,
     ) -> Result<SdkDeviceManifestResponse, SdkError> {
-        if let Some(federation) = federation {
-            let url = federation
-                .recipient_prekey_url
-                .clone()
-                .ok_or_else(|| super::invalid("federated addition requires prekey directory"))?;
-            let expected = root.to_owned();
-            tokio::task::spawn_blocking(move || {
-                crate::client::contact::fetch_verified_device_manifest_from_url(&url, &expected)
-            })
-            .await
-            .map_err(|error| {
-                SdkError::InboundPending(format!("federation manifest worker: {error}"))
-            })?
-        } else {
-            self.shared_group_manifest(gateway, group, root).await
-        }
+        Ok(self.group_addition_directory_request(group, root, federation)?.fetch(gateway).await?.1)
     }
     pub(super) async fn verify_group_actor_directory(
         &self,

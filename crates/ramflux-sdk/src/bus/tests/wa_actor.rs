@@ -224,7 +224,7 @@ where
         tokio::select! {
             biased;
             result = &mut pass => return Ok(result??),
-            work = runtime.connection_work.recv() => {
+            work = runtime.recv_connection_work() => {
                 runtime.apply_connection_work(work.ok_or("closed")?).await?;
             }
             () = poll_spawned() => {}
@@ -502,7 +502,7 @@ async fn drive_pass_anchored(
                 result??;
                 break;
             }
-            work = runtime.connection_work.recv() => {
+            work = runtime.recv_connection_work() => {
                 runtime.apply_connection_work(work.ok_or("closed")?).await?;
             }
         }
@@ -527,7 +527,7 @@ async fn drain_ready(runtime: &mut super::super::AccountRuntime) -> Case<bool> {
     for _ in 0..64 {
         tokio::task::yield_now().await;
         let mut any = false;
-        while let Ok(work) = runtime.connection_work.try_recv() {
+        while let Ok(work) = runtime.try_recv_connection_work() {
             any = true;
             progressed = true;
             runtime.apply_connection_work(work).await?;
@@ -559,7 +559,7 @@ async fn wait_until_live(
         if handle.snapshot().state == NetworkingState::Live {
             return Ok(());
         }
-        match tokio::time::timeout(Duration::from_millis(20), runtime.connection_work.recv()).await
+        match tokio::time::timeout(Duration::from_millis(20), runtime.recv_connection_work()).await
         {
             Ok(Some(work)) => runtime.apply_connection_work(work).await?,
             Ok(None) => return Err("connection work closed".into()),
@@ -610,7 +610,7 @@ async fn pump_until(
         if done(runtime)? {
             return Ok(());
         }
-        match runtime.connection_work.try_recv() {
+        match runtime.try_recv_connection_work() {
             Ok(work) => runtime.apply_connection_work(work).await?,
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => tokio::task::yield_now().await,
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -654,7 +654,7 @@ async fn pump_anchored(
         if !live || busy || progressed {
             idle = 0;
             // Engine RPCs run on tokio::spawn; blocking recv() starves them under pause.
-            match runtime.connection_work.try_recv() {
+            match runtime.try_recv_connection_work() {
                 Ok(work) => runtime.apply_connection_work(work).await?,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                     tokio::task::yield_now().await;

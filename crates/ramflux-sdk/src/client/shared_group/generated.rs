@@ -93,12 +93,9 @@ pub(super) fn from_generated(value: &g::GroupStateControl) -> Result<GroupContro
         Some(g::group_control_body::Value::Request(value)) => GroupControlBody::Request {
             request: leaf(value.request.as_ref().map(|leaf| leaf.canonical.as_slice()))?,
             federation: value.federation.as_ref().map(|route| LocalBusFederationRoute {
-                federation_url: route.federation_url.clone(),
                 source_node_id: route.source_node_id.clone(),
                 target_node_id: route.target_node_id.clone(),
                 required_capability: route.required_capability.clone(),
-                admin_token: route.admin_token.clone(),
-                recipient_prekey_url: route.recipient_prekey_url.clone(),
             }),
         },
         Some(g::group_control_body::Value::Result(value)) => GroupControlBody::Result {

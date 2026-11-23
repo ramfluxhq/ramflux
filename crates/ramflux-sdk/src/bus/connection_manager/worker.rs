@@ -262,7 +262,7 @@ async fn run_account(
         };
         retire_resident(handle, &resident, reason, generation);
         let why = resident.terminal_why.clone();
-        drop(resident);
+        resident.shutdown_transport().await;
         if matches!(reason, DisconnectReason::Stop | DisconnectReason::Lock) {
             break;
         }

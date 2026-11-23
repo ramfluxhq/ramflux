@@ -614,6 +614,14 @@ impl BornAccount {
     pub(crate) fn primary_vault_ref(&self) -> &str {
         &self.stored.primary_vault_ref
     }
+    /// Vault reference of a headless participant's one-use data passphrase, when one was stored.
+    #[must_use]
+    pub(crate) fn provisioning_vault_ref(&self) -> Option<&str> {
+        self.stored
+            .agent_provisioning_vault_ref
+            .as_deref()
+            .filter(|reference| !reference.is_empty())
+    }
     #[must_use]
     pub(crate) fn publication(&self) -> ramflux_protocol::custody::Publication {
         ramflux_protocol::custody::Publication {
@@ -726,6 +734,37 @@ pub(crate) fn custody_vault_reference(
         ]
         .concat(),
     ))
+}
+
+/// Removes `custody_accounts/{id}`. A symlink at the directory or any child is refused.
+///
+/// # Errors
+/// `Storage(Integrity("account erase symlink"))` when the path or a child is a symlink
+/// or the path is not a directory. A missing directory succeeds.
+pub(crate) fn remove_custody_tree(root: &Path, id: &str) -> Result<(), SdkError> {
+    let dir = directory(root, id)?;
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+            return Err(erase_symlink());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_symlink() {
+            return Err(erase_symlink());
+        }
+    }
+    match fs::remove_dir_all(&dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other.map_err(SdkError::from),
+    }
+}
+
+fn erase_symlink() -> SdkError {
+    SdkError::Storage(ramflux_storage::StorageError::Integrity("account erase symlink"))
 }
 
 pub(crate) fn account_exists(root: &Path, id: &str) -> Result<bool, SdkError> {

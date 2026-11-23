@@ -71,12 +71,12 @@ impl GroupControlPacket {
                         canonical: ramflux_protocol::canonical_json_bytes(request)?,
                     }),
                     federation: federation.as_ref().map(|value| g::LocalBusFederationRoute {
-                        federation_url: value.federation_url.clone(),
+                        federation_url: String::new(),
                         source_node_id: value.source_node_id.clone(),
                         target_node_id: value.target_node_id.clone(),
                         required_capability: value.required_capability.clone(),
-                        admin_token: value.admin_token.clone(),
-                        recipient_prekey_url: value.recipient_prekey_url.clone(),
+                        admin_token: None,
+                        recipient_prekey_url: None,
                     }),
                 })
             }

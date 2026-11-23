@@ -28,6 +28,8 @@ pub struct LocalBusConfig {
     pub builtin_nodes: Vec<NodeProfile>,
     pub socket_path: PathBuf,
     pub data_root: PathBuf,
+    /// Shared by every actor of this process. True while files are released for the background.
+    pub(crate) background: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Test-only custody retry budget for this daemon's thread (production is always 90 s).
     #[cfg(test)]
     pub test_retry_budget: Option<std::time::Duration>,
@@ -42,6 +44,8 @@ pub struct LocalBusConfig {
     #[cfg(any(test, feature = "itest-restore-state"))]
     #[doc(hidden)]
     pub startup_restore_gate: Option<LocalBusStartupRestoreGate>,
+    /// Loopback PRX client. Absent means agent limits, history erase and purge are skipped.
+    pub(crate) prx: Option<std::sync::Arc<ramflux_prx_client::PrxClient>>,
 }
 
 #[cfg(any(test, feature = "itest-restore-state"))]
@@ -414,14 +418,9 @@ pub struct LocalBusMessageAttachmentInput {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusFederationRoute {
-    pub federation_url: String,
     pub source_node_id: String,
     pub target_node_id: String,
     pub required_capability: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub admin_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recipient_prekey_url: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -1097,6 +1096,7 @@ impl LocalBusConfig {
             builtin_nodes: Vec::new(),
             socket_path: socket_path.into(),
             data_root: data_root.into(),
+            background: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             test_retry_budget: None,
             #[cfg(test)]
@@ -1107,7 +1107,25 @@ impl LocalBusConfig {
             test_network_command_gate: None,
             #[cfg(any(test, feature = "itest-restore-state"))]
             startup_restore_gate: None,
+            prx: None,
         }
+    }
+
+    /// Attach a loopback PRX client. Both the URL and the token file are required.
+    /// The URL must be `http://127.0.0.1` or `http://[::1]`, and the token file mode must be `0600`.
+    ///
+    /// # Errors
+    /// Returns `PrxCall("prx_rejected")` when the URL or the token file is refused. Nothing is sent.
+    pub fn with_prx(
+        mut self,
+        base_url: &str,
+        token_file: &std::path::Path,
+    ) -> Result<Self, crate::SdkError> {
+        let settings = ramflux_prx_client::ClientConfig::new(base_url, token_file);
+        let client = ramflux_prx_client::PrxClient::new(&settings)
+            .map_err(|_| crate::SdkError::PrxCall("prx_rejected"))?;
+        self.prx = Some(std::sync::Arc::new(client));
+        Ok(self)
     }
 
     #[cfg(any(test, feature = "itest-restore-state"))]
