@@ -291,7 +291,7 @@ pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
 pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
     "50108989877d6e1601743d5d242862d4e130155bf3bd1b3fd28b213426b42686";
 /// Immutable product commit whose tree contains this CAS policy and descriptor.
-pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "17bee343a32fad1a5da59fb23c1fdb6cc1910b0e";
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "36cf7b76679c625c0bc9a31fe20d8ce95b35523f";
 
 pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
     let mut rows = METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify");
