@@ -5,7 +5,7 @@ use ramflux_sdk::{LocalBusClient, LocalBusFrame};
 use serde_json::Value;
 use std::{
     future::Future,
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,6 +24,8 @@ pub trait AgentBus {
 }
 pub struct RfdBus {
     client: LocalBusClient,
+    subscription: Option<LocalBusClient>,
+    socket: PathBuf,
     account: String,
     next: u64,
     /// A human owner account must not be checked with the headless identity call.
@@ -35,6 +37,8 @@ impl RfdBus {
     pub async fn connect(socket: &Path, account: &str) -> Result<Self> {
         Ok(Self {
             client: LocalBusClient::connect(socket).await.map_err(|_| Error::Bus)?,
+            subscription: None,
+            socket: socket.to_owned(),
             account: account.into(),
             next: 0,
             confirm_identity: true,
@@ -69,7 +73,7 @@ impl AgentBus for RfdBus {
         );
         frame.operation_id = operation.map(str::to_owned);
         frame.deadline_ms = Some(now_ms().saturating_add(30_000));
-        let response = match self.client.request_frame_response(frame).await {
+        let response = match self.request_frame(method, frame).await {
             Ok(response) => response,
             Err(error) => {
                 eprintln!("prx bus {method} failed: {error}");
@@ -122,7 +126,29 @@ impl AgentBus for RfdBus {
         Ok(response.body)
     }
     async fn next_event(&mut self) -> Result<LocalBusFrame> {
-        self.client.next_event().await.map_err(|_| Error::Bus)
+        self.subscription.as_mut().ok_or(Error::Bus)?.next_event().await.map_err(|_| Error::Bus)
+    }
+}
+impl RfdBus {
+    async fn request_frame(
+        &mut self,
+        method: &str,
+        frame: LocalBusFrame,
+    ) -> std::result::Result<LocalBusFrame, ramflux_sdk::SdkError> {
+        // A lagged subscription must not cancel the RPCs needed to apply its queued prefix.
+        // Both SDK connections retain their bounded queues; the applied cursor owns replay.
+        if method == "bus.subscribe" {
+            if self.subscription.is_none() {
+                self.subscription = Some(LocalBusClient::connect(&self.socket).await?);
+            }
+            return self
+                .subscription
+                .as_ref()
+                .ok_or_else(|| ramflux_sdk::SdkError::LocalBus("subscription unavailable".into()))?
+                .request_frame_response(frame)
+                .await;
+        }
+        self.client.request_frame_response(frame).await
     }
 }
 pub(crate) fn now_ms() -> u64 {

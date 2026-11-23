@@ -192,7 +192,9 @@ An idle mapping can be evicted and reopened using the same deterministic caller 
 PRX retains the conversation history. If every slot has active work, the host returns
 `engine_busy` and queues no additional turn.
 Config is capped at 64 KiB, rules at 64, input/reply text at 16 KiB, and checkpoint at
-512 KiB. The SDK bounds individual wire frames and its event queue.
+512 KiB. The SDK bounds individual wire frames and its event queue. RPCs and event
+subscriptions use separate bounded SDK connections, so a lagged event stream does not
+cancel the RPCs needed to apply its queued prefix before cursor replay.
 
 `EngineProvider` receives approved conversation text and returns typed `Intent`s:
 `ReplyText`, `CreateSurface`, `StreamAppend`, `PatchSurface`, and `CloseSurface`.
