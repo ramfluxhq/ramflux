@@ -48,8 +48,8 @@ cargo run -p ramflux-agent-host -- \
 
 The first successful import stores the data passphrase in the operator Mac Keychain,
 removes the bundle, and unlocks the rfd account. Later starts need only `--config`.
-For an sd001 demo, run rfd and the agent host on the operator Mac, configure rfd with
-the signed sd001 node profile, create and unlock the human owner first, then run:
+Run rfd and the agent host on the operator Mac with the signed profile for the
+chosen node. Create and unlock the human owner first, then run:
 
 ```sh
 rf account create --display-name "Demo agent" --kind headless_ai --custodian "$OWNER_ACCOUNT"
