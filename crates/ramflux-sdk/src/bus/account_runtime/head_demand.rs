@@ -172,7 +172,7 @@ impl AccountRuntime {
         recv(&mut self.deferred, &mut self.head_rx, &mut self.connection_work).await
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(crate) fn try_recv_connection_work(
         &mut self,
     ) -> Result<AccountWork, tokio::sync::mpsc::error::TryRecvError> {
