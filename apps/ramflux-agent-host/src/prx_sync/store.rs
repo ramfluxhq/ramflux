@@ -280,23 +280,18 @@ impl Mirror {
         self.seen.iter().any(|id| id == event_id)
     }
 
-    /// Keeps a decided row over a pending one. Drops one pending key, else the smallest key.
+    /// Keeps a decided row over a later pending one. A decided frame that omits the preview
+    /// keeps the preview, tool, and expiry already stored. Drops one pending key, else the smallest.
     pub(super) fn remember_approval(&mut self, copy: &ApprovalCopy) {
-        let row = ApprovalRow {
-            session: copy.session.clone(),
-            agent: copy.agent.clone(),
-            run_id: copy.run_id.clone(),
-            tool: copy.tool.clone(),
-            preview: copy.preview.clone(),
-            expires_at: copy.expires_at.clone(),
-            status: copy.status.clone(),
-            decision: copy.decision.clone(),
-            cause: copy.cause.clone(),
-        };
-        if self.approvals.contains_key(&copy.approval_id) {
+        if let Some(existing) = self.approvals.get(&copy.approval_id) {
+            if existing.status == "decided" && copy.status == "pending" {
+                return;
+            }
+            let row = merged_approval(existing, copy);
             self.approvals.insert(copy.approval_id.clone(), row);
             return;
         }
+        let row = fresh_approval(copy);
         while self.approvals.len() >= MAX_APPROVALS {
             let pending = self
                 .approvals
@@ -327,6 +322,54 @@ impl Mirror {
         *self = next;
         Ok(())
     }
+}
+
+fn fresh_approval(copy: &ApprovalCopy) -> ApprovalRow {
+    let mut cause = copy.cause.clone();
+    if copy.decision.as_deref() == Some("expired") && cause.is_none() {
+        cause = Some("expired".to_owned());
+    }
+    ApprovalRow {
+        session: copy.session.clone(),
+        agent: copy.agent.clone(),
+        run_id: copy.run_id.clone(),
+        tool: copy.tool.clone(),
+        preview: copy.preview.clone(),
+        expires_at: copy.expires_at.clone(),
+        status: copy.status.clone(),
+        decision: copy.decision.clone(),
+        cause,
+    }
+}
+
+/// A later frame keeps the earlier preview when its own copy of that field is empty.
+fn merged_approval(existing: &ApprovalRow, copy: &ApprovalCopy) -> ApprovalRow {
+    let mut row = fresh_approval(copy);
+    if row.session.is_empty() {
+        row.session.clone_from(&existing.session);
+    }
+    if row.agent.is_empty() {
+        row.agent.clone_from(&existing.agent);
+    }
+    if row.tool.is_empty() {
+        row.tool.clone_from(&existing.tool);
+    }
+    if row.preview.is_empty() {
+        row.preview.clone_from(&existing.preview);
+    }
+    if row.expires_at.is_empty() {
+        row.expires_at.clone_from(&existing.expires_at);
+    }
+    if row.run_id.is_none() {
+        row.run_id.clone_from(&existing.run_id);
+    }
+    if row.decision.is_none() {
+        row.decision.clone_from(&existing.decision);
+    }
+    if row.cause.is_none() {
+        row.cause.clone_from(&existing.cause);
+    }
+    row
 }
 
 impl MirrorStore {

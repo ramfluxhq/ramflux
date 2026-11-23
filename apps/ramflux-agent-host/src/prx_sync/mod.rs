@@ -341,8 +341,8 @@ async fn on_welcome_frame(
         Ok(ServerFrame::Resync) => Err(mark_resync(mirror, store)),
         Ok(ServerFrame::Event(_)) => Err(Flow::Retry),
         Ok(ServerFrame::Live(_) | ServerFrame::Ignored) => Ok(false),
-        Err(_) => {
-            eprintln!("prx sync frame rejected");
+        Err(error) => {
+            eprintln!("prx sync frame rejected: {error}");
             Err(Flow::Retry)
         }
     }
@@ -409,8 +409,8 @@ async fn on_text(
         Ok(ServerFrame::Resync) => Some(mark_resync(mirror, store)),
         Ok(ServerFrame::Welcome { .. }) => Some(Flow::Live),
         Ok(ServerFrame::Event(event)) => on_event(sock, store, mirror, publisher, &event).await,
-        Err(_) => {
-            eprintln!("prx sync frame rejected");
+        Err(error) => {
+            eprintln!("prx sync frame rejected: {error}");
             Some(Flow::Live)
         }
     }

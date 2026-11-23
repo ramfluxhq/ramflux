@@ -11,6 +11,8 @@ use serde_json::json;
 
 pub struct AgentHost<E> {
     pub(crate) config: Config,
+    /// Human account that owns this agent, when `account.status` names a different custodian.
+    owner_account: Option<String>,
     pub(crate) engine: E,
     pub(crate) store: CheckpointStore,
     pub(crate) state: Checkpoint,
@@ -55,7 +57,7 @@ impl<E: EngineProvider> AgentHost<E> {
         {
             return Err(Error::State);
         }
-        Ok(Self { config, engine, store, state })
+        Ok(Self { config, owner_account: None, engine, store, state })
     }
     pub(crate) fn save_state(&mut self) -> Result<()> {
         self.state.engine = self.engine.checkpoint()?;
@@ -74,11 +76,18 @@ impl<E: EngineProvider> AgentHost<E> {
         &self.state
     }
 
+    /// The human custodian, when this agent account names one.
+    #[must_use]
+    pub fn owner_account(&self) -> Option<&str> {
+        self.owner_account.as_deref()
+    }
+
     /// Bind the headless identity and replay from the last durably applied cursor.
     /// # Errors
     /// Rejects revoked/human accounts, unavailable snapshots, stream gaps and state I/O failures.
     pub async fn start(&mut self, bus: &mut impl AgentBus) -> Result<()> {
-        participant::identity(bus, &mut self.state, &self.config.account_id).await?;
+        self.owner_account =
+            participant::identity(bus, &mut self.state, &self.config.account_id).await?;
         self.engine.publish_limits().await?;
         self.normalize_deferred()?;
         let topics = json!([
@@ -493,6 +502,19 @@ impl<E: EngineProvider> AgentHost<E> {
     /// # Errors
     /// Returns on stream loss/revocation so the caller can reconnect or stop without acting.
     pub async fn run(&mut self, bus: &mut impl AgentBus) -> Result<()> {
+        self.run_paired(bus, &mut None::<crate::RfdBus>).await
+    }
+
+    /// Same loop as [`Self::run`], plus the human owner's approval journal.
+    /// An owner decision is posted on `bus` (the agent), not on the owner socket.
+    ///
+    /// # Errors
+    /// Returns on stream loss or revocation so the caller can reconnect or stop.
+    pub async fn run_paired<O: AgentBus>(
+        &mut self,
+        bus: &mut impl AgentBus,
+        owner: &mut Option<O>,
+    ) -> Result<()> {
         let mut tick =
             tokio::time::interval(std::time::Duration::from_millis(self.config.poll_interval_ms));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -500,9 +522,46 @@ impl<E: EngineProvider> AgentHost<E> {
         tick.tick().await;
         loop {
             tokio::select! {
-                event=bus.next_event()=>self.apply(bus,event?,crate::bus::now_ms()).await?,
-                _=tick.tick()=>self.poll(bus, crate::bus::now_ms()).await?,
+                event = bus.next_event() => {
+                    self.apply(bus, event?, crate::bus::now_ms()).await?;
+                }
+                event = owner_event(owner) => {
+                    if let Some(frame) = event {
+                        let frame = frame?;
+                        if frame.kind == LocalBusFrameKind::Event && frame.method == "stream.lagged"
+                        {
+                            return Err(Error::Resync);
+                        }
+                        crate::runner_run_approval::forward(bus, &mut self.engine, &frame).await?;
+                    }
+                }
+                _ = tick.tick() => self.poll(bus, crate::bus::now_ms()).await?,
             }
         }
+    }
+}
+
+/// Tails the owner journal from the start so a decision made before this socket attached is posted.
+///
+/// # Errors
+/// Returns a bus failure. A pruned cursor resubscribes at the current head.
+pub async fn subscribe_owner(owner: &mut impl AgentBus) -> Result<()> {
+    let topics = json!(["agent.approval"]);
+    match owner.request("bus.subscribe", json!({"topics": topics, "since_seq": 0}), None).await {
+        Ok(_) => Ok(()),
+        Err(Error::Resync) => {
+            owner.request("bus.subscribe", json!({"topics": topics}), None).await?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn owner_event<O: AgentBus>(owner: &mut Option<O>) -> Option<Result<LocalBusFrame>> {
+    if let Some(owner) = owner.as_mut() {
+        Some(owner.next_event().await)
+    } else {
+        std::future::pending::<()>().await;
+        None
     }
 }

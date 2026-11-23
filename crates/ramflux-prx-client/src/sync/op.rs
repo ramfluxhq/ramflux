@@ -71,7 +71,7 @@ pub struct ApprovalCopy {
     pub expires_at: String,
     /// `pending` or `decided`.
     pub status: String,
-    /// `approved` or `denied` once decided.
+    /// `approved`, `denied`, or `expired` once decided.
     pub decision: Option<String>,
     /// Denial cause when PRX sent one.
     pub cause: Option<String>,
@@ -172,15 +172,8 @@ fn approval_op(
     payload: &Value,
 ) -> Result<MirrorOp, PrxError> {
     let approval_id = req_id(payload, "approval_id")?;
-    let decision = if pending {
-        None
-    } else {
-        let decision = req_id(payload, "decision")?;
-        if decision != "approved" && decision != "denied" {
-            return Err(protocol("sync payload field is invalid"));
-        }
-        Some(decision)
-    };
+    let (decision, cause) =
+        if pending { (None, opt_cause(payload)?) } else { decided_fields(payload)? };
     Ok(MirrorOp::Approval(ApprovalCopy {
         approval_id,
         session: approval_session(payload, session)?,
@@ -191,8 +184,21 @@ fn approval_op(
         expires_at: bounded_text(payload, "expires_at", 64)?,
         status: if pending { "pending" } else { "decided" }.to_owned(),
         decision,
-        cause: opt_cause(payload)?,
+        cause,
     }))
+}
+
+/// A terminal PRX decision. `expired` carries that cause when the payload omits one.
+fn decided_fields(payload: &Value) -> Result<(Option<String>, Option<String>), PrxError> {
+    let decision = req_id(payload, "decision")?;
+    if !matches!(decision.as_str(), "approved" | "denied" | "expired") {
+        return Err(protocol("sync payload field is invalid"));
+    }
+    let mut cause = opt_cause(payload)?;
+    if decision == "expired" && cause.is_none() {
+        cause = Some("expired".to_owned());
+    }
+    Ok((Some(decision), cause))
 }
 
 fn approval_session(payload: &Value, fallback: &str) -> Result<String, PrxError> {

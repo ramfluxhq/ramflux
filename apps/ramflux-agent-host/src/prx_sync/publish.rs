@@ -100,7 +100,8 @@ fn approval_body(copy: &ApprovalCopy) -> Option<Value> {
     if copy.status != "pending" && copy.status != "decided" {
         return None;
     }
-    if copy.status == "decided" && !matches!(copy.decision.as_deref(), Some("approved" | "denied"))
+    if copy.status == "decided"
+        && !matches!(copy.decision.as_deref(), Some("approved" | "denied" | "expired"))
     {
         return None;
     }
