@@ -145,16 +145,12 @@ The local bus surface is `username.mutate`, `username.status`, `username.resolve
 manifest entries. They never enter executable C ABI discovery or native execution.
 The descriptor, executable native method set and CAS product pin remain unchanged.
 
-Development verification builds real binaries and drives scratch-script runs through
-rf daemons, real services and product reads: same-node set/resolve/contact add, rename
-hold/exact match, and two-node lookup through one centre. Restart and lost-reply cases
-also require captured direct-run evidence. The unpublished candidate has completed
-set/resolve, original-request contact acceptance and both default conversations,
-rename/exact-match/hold, and two-home lookup with the foreign contact barrier.
-Additional runs cover visibility/release/delete, uncertain committed operations,
-protected-store restart and exact signed-state recovery after ordinary-home loss.
-Final PR CI remains required for acceptance. Public deployment additionally requires
-the operator and abuse-policy decisions described above.
+Deployment verification covers set/resolve/contact add through real daemons and
+services, original-request contact acceptance, default conversations, rename holds,
+exact matching, two-home lookup and the foreign contact barrier. It also covers
+visibility/release/delete, uncertain committed operations, protected-store restart,
+lost replies and exact signed-state recovery after ordinary-home loss. Public
+deployment requires the operator and abuse-policy decisions described above.
 
 An account owns at most one reusable native directory transport. Every reuse rechecks
 local pairing admission, current native authority, branch credentials and capacity;
@@ -204,8 +200,8 @@ the primary and `--username-initialize` or `--username-recovery` at the witness.
 Missing witness state is never silently recreated. These operator recovery actions
 do not bypass peer credentials, semantic admission or the exact primary fsync gate.
 
-The release gate remains false. A private candidate has completed a real set and
-second-account exact resolve. The complete acceptance flow remains unfinished.
+The release gate remains false; explicit provisioning does not enable general
+public directory service.
 
 ## Home reconciliation and profile publication
 

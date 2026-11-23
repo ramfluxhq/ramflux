@@ -22,8 +22,8 @@ dev-only graphs are not shipped in product artifacts.
 `vendor/quic-provenance.json` records the registry archive URL/SHA-256, every
 original file SHA-256, checked-in file SHA-256 and local delta reason. Added
 files have no upstream hash. MIT and Apache-2.0 license texts and copyrights
-remain unchanged. Rust files carry upstream SPDX. r2 restores upstream Rust
-formatting/import ordering instead of applying product formatting to ~70 files.
+remain unchanged. Rust files carry upstream SPDX and retain upstream Rust formatting/import ordering
+instead of applying product formatting to the vendored sources.
 The initial import changed only SPDX, idle-timeout extraction/no-growth and strict
 lint adaptations. The subsequent opt-in packet/control changes are listed below;
 no runtime certificate or activation follows.
@@ -42,11 +42,10 @@ The dedicated PR CI job runs archive verification and the dependency libraries.
 
 Product formatting command: `cargo +1.99.0 fmt --all`, with pinned toolchain
 1.99.0 and `rustfmt 1.10.0-stable (b940084d7e 2026-09-28)`. Excluded vendor
-sources are not bulk formatted. To reproduce r2 vendor source, extract the
+sources are not bulk formatted. To reproduce the vendored source, extract the
 verified upstream archive, prepend `// SPDX-License-Identifier: MIT OR Apache-2.0`
 to Quinn Rust sources (MIT alone for Bytes), then apply each declared delta. Scoped later formatting commands and upstream
-import/whitespace restoration are recorded in the provenance file. The provenance record also retains r1's exact
-`cargo fmt --all` (pinned toolchain 1.99.0) command/config history, superseded by this restoration.
+import/whitespace restoration are recorded in the provenance file. The provenance record retains historical formatting commands for reproducibility.
 Do not run rustfmt on vendor sources. `vendor/rustfmt.toml` was removed because
 its edition setting reintroduced import churn. Root `cargo fmt --all` excludes
 these packages. Preserve pinned upstream formatting by hand; historical formatter
@@ -59,8 +58,8 @@ run source/resolution/archive guards, scoped checks and named tests. Full
 dependency suites run in PR CI. Invalidate affected source/config/layout
 certificates. Census line citations refer to immutable upstream source, before
 SPDX/extraction shifts. Missing runtime bounds continue to refuse activation.
-The controller owns upstream reproducer/benchmark/issues/PR publication and
-removes patches only after an audited upstream version reproduces all bounds.
+Maintainers publish upstream reproducers, benchmarks, issues and patches. Remove
+a local patch only after verifying that an upstream version reproduces all bounds.
 
 
 ## Dormant packet-control hooks
@@ -81,7 +80,7 @@ The named dependency tests run real Quinn endpoint/connection drivers over a
 bounded deterministic datagram socket, with driver and consumer barriers. They
 cover independent owner/source/endpoint byte and item ceilings, pool-independent
 copy/delivery counts, retained backing, sparse handle mapping and typed capacity
-refusal. The card-named control test also runs the complete real-driver matrix
+refusal. The bounded control test also runs the complete real-driver matrix
 with binding 4096-byte/4-item limits: discarded head/valid tail, committed heads
 with one parked tail and one credit wake, independent directional drain, full
 forward/reverse credit, raw-input pause, duplicate/later retransmission, concurrent
@@ -113,8 +112,8 @@ The single-wake test exposed a stale waiter on successful retry; consumed waiter
 are disarmed, failed retries re-arm under the credit mutex and generation races
 schedule a new poll after releasing that mutex.
 
-The r3 review set adds the upstream migration and oversized-datagram path-change
-tests. An unbound routed handle is an `InvalidOwner` invariant refusal, distinct
+The dependency tests include upstream migration and oversized-datagram path-change
+coverage. An unbound routed handle is an `InvalidOwner` invariant refusal, distinct
 from an exhausted owner-slot arena. RETIRE retransmission/duplicate checks wait
 for consumer drain and assert that local CID issuance remains unchanged.
 
@@ -134,9 +133,9 @@ A pre-sized ring and one active datagram retain typed proto permits through sock
 completion, send error or cancellation plus buffer drop. There is no response
 spawn or unbounded completion list. The exported sender handle supports cancel,
 join and queued/active/task diagnostics; endpoint close/destruction cancels it.
-Join witnesses destruction of sender-owned responses. R4 still owns the enclosing
-service scope and racing synchronous producers; no full teardown certificate or
-activation is supplied here.
+Join witnesses destruction of sender-owned responses. Enclosing service-scope
+teardown and racing synchronous producers require separate verification; no full
+teardown certificate or activation is supplied here.
 
 The exact stateless response test blocks the real socket write/poller with zero
 accepted connections, separately floods negotiation, Retry and refusal, and binds
@@ -151,14 +150,14 @@ A parked migrating head now carries its uncredited datagram length in PendingPac
 Only resume after path selection charges those bytes; repeated shortage transfers
 the length without accounting, and already-counted tails carry zero. The bounded
 migration regression asserts new-path anti-amplification credit and exactly-once
-accounting. The final requested upstream blank line in tests/mod.rs is restored;
+accounting. The upstream blank line in tests/mod.rs is preserved;
 its sole added line over upstream is the mandatory SPDX header.
 
 
 Sender cancellation seals response construction. Requests received during endpoint
 drain are counted as `stateless_response_closed`, separately from capacity-full
 drops. Whether teardown should suppress responses or retain drain-time refusals
-is an R4 service-scope policy decision; this hook exposes the distinction without
+is a service-scope policy decision; this hook exposes the distinction without
 changing that policy. The response test also counts actual delivered wire datagrams
 independently of response permits and requires exactly the reserved capacity after
 unblocking each negotiation/Retry/refusal case.
@@ -196,7 +195,7 @@ tree's union/order and check both range sets sharing one credit and actual capac
 Three receive classes remain unimplemented: STREAM receive assemblers, CRYPTO
 receive assemblers and unordered receive history. Full receive per-packet preflight,
 mixed exhaustion/waiter matrix, production writer, supported envelope and allocation
-certificates belong to the next PR. Production metadata configuration remains absent;
+certificates require separate verification. Production metadata configuration remains absent;
 only the rejected-from-product `__control-test` feature instantiates these dormant
 hooks. No startup certificate, activation or profile arithmetic changes.
 
@@ -218,7 +217,7 @@ box layout, source/destination overlap and owned iterator release. Protocol test
 cover all three packet-space builder boundaries and transfers, key discard, a real
 Retry handshake and peer APPLICATION_ERROR conversion without ordinary CRYPTO.
 The original `metadata_credit_exhaustion_propagates_resource_limit` remains the
-next PR's complete twelve-class receive/mixed/handshake/waiter matrix ownership.
+complete twelve-class receive/mixed/handshake/waiter matrix requirement.
 
 
 ### Send-metadata fixture ordering and committed ownership
@@ -249,7 +248,7 @@ actual retained owners and completed prefix bytes/records independently of credi
 counters. The earlier loss/retransmit module relocations are cohesive responsibility
 extractions; their upstream source/deltas remain explicitly recorded.
 
-### Partial receive payload backing (PR1B-2a)
+### Partial receive payload backing
 
 Dormant metadata mode admits an exact-capacity copy of decrypted packet payload
 before allocating it. Only packets with nonempty STREAM or CRYPTO data use this
@@ -317,7 +316,7 @@ removes early-refund retirement overlap; this does not establish zero allocator
 excess. Unknown source/layout/runtime/target/allocator identities refuse certificates.
 
 
-### Partial receive owner envelope (PR1B-2b)
+### Partial receive owner envelope
 
 Dormant payload copies use `Bytes::try_from_owner_with_guard` with a separately
 reserved AllocationCharge for the constructor's actual wrapper Layout. The guard
@@ -342,7 +341,7 @@ owner-component evidence; it is not a receive-class,
 allocator-profile or envelope certificate, and enables no production capability.
 
 
-### Partial receive assembler allocation hooks (PR1B-2c)
+### Partial receive assembler allocation hooks
 
 Dormant STREAM and all three CRYPTO packet-space assemblers reserve actual receive
 heap capacity before fallible allocation/growth. Replacement heaps retain old and
@@ -370,7 +369,7 @@ executable profiles and allocator certificates remain later obligations. This
 component enables no production profile or activation.
 
 
-### Partial unordered receipt history hooks (PR1B-2d)
+### Partial unordered receipt history hooks
 
 Dormant unordered receive history uses the existing fallible charged ArrayRangeSet;
 the default path keeps the upstream B-tree and its intersection iterator. Storage
