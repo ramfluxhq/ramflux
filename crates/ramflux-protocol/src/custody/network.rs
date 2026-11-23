@@ -398,6 +398,12 @@ pub enum CustodyMeshRequest {
         request: Box<crate::SignedRequest>,
         action: CustodySessionAction,
     },
+    /// Re-admit the live native session grant. The gateway keeps the connection id
+    /// from the original proof; this is not a new proof and not a new session id.
+    RenewNativeSession {
+        session_id: String,
+        connection_id: String,
+    },
 }
 
 impl CustodyRefusal {

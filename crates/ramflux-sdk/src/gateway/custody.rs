@@ -149,6 +149,7 @@ where
     let mut retry = crate::custody::retry::AdmissionRetry::default();
     let (transport, connection) =
         Box::pin(CustodyConnection::connect_with(network, vault, &mut retry, open)).await?;
+    let grant_expires_at = connection.session().map(|session| session.expires_at);
     let (stream, account, reference, credentials) = connection.into_gateway_parts().await?;
     let source = ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(
         account.verified(),
@@ -171,6 +172,7 @@ where
     config.device_branch = Some(Arc::new(credentials.signing));
     config.source_identity = Some(source);
     config.custody_networking_pending = false;
+    config.native_grant_expires_at = grant_expires_at;
     Ok((transport, Box::new(NativeSessionStream(stream))))
 }
 
