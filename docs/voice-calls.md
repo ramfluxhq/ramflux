@@ -92,7 +92,11 @@ The media profile is Opus 48 kHz mono, 20 ms, minimal RTP with payload type 111.
 [SFrame RFC 9605](https://www.rfc-editor.org/rfc/rfc9605.html) suite 5 is
 `AES_256_GCM_SHA512_128`; the RTP header is authenticated metadata. KIDs are 0 for
 caller-to-callee and 1 for the reverse direction; counters begin at zero per fresh
-key and the receive replay window has 128 counters.
+key and the receive replay window has 128 counters
+(`ramflux_crypto::SFRAME_REPLAY_WINDOW`, also used by `crates/ramflux-media`).
+That crate is the platform-independent engine: the host implements `Capture`
+and `Playback` for one 20 ms mono PCM frame (`[i16; 960]` at 48 kHz). It does
+not open a microphone or a speaker.
 
 Key handoff is once per call, excluded from generic operation-response caching.
 Each SFrame key starts exactly once at counter zero. An engine restart or lost
