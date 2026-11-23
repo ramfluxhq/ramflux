@@ -33,9 +33,14 @@ export class PresentationRegistry {
     this.locales.set(locale,{direction,strings:Object.freeze({...data}) as Strings});
   }
   resolve(locale:string,theme:string,systemDark:boolean):HostPresentation {
-    const language=this.locales.get(locale),tokens=this.themes.get(theme==="system"?(systemDark?"dark":"light"):theme);
-    if(!language||!tokens)throw Error("presentation_selection");
-    return {locale,direction:language.direction,strings:language.strings,tokens};
+    const tokens=this.themes.get(theme==="system"?(systemDark?"dark":"light"):theme);
+    const exact=this.locales.get(locale);
+    if(!tokens)throw Error("presentation_selection");
+    if(exact)return {locale,direction:exact.direction,strings:exact.strings,tokens};
+    const language=this.locales.get(catalogTag(locale))??this.locales.get("en");
+    if(!language)throw Error("presentation_selection");
+    const head=locale.split("-")[0]?.toLowerCase();
+    return {locale,direction:head==="ar"?"rtl":"ltr",strings:language.strings,tokens};
   }
 }
 export class HostSettings {
@@ -52,6 +57,9 @@ export class HostSettings {
   subscribe(listener:(presentation:HostPresentation)=>void):()=>void{this.listeners.add(listener);listener(this.current());return()=>this.listeners.delete(listener)}
   dispose():void{this.system.removeEventListener("change",this.changed);this.listeners.clear()}
   private publish():void{const value=this.current();for(const listener of this.listeners)listener(value)}
+}
+function catalogTag(locale:string):string{
+  return locale.split("-")[0]?.toLowerCase()==="zh"?"zh-CN":"en";
 }
 export function contrast(a:string,b:string):number{
   const luminance=(color:string)=>{const values=[1,3,5].map(index=>parseInt(color.slice(index,index+2),16)/255).map(v=>v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4);return (values[0]??0)*0.2126+(values[1]??0)*0.7152+(values[2]??0)*0.0722};
