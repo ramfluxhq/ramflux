@@ -112,8 +112,12 @@ impl AgentBus for RfdBus {
                 };
             }
             return Err(match error.code.as_str() {
-                "Unavailable" | "Busy" | "DeadlineExceeded" | "Unauthenticated"
-                | "NotAuthenticated" => Error::Bus,
+                "Unavailable"
+                | "Busy"
+                | "DeadlineExceeded"
+                | "Unauthenticated"
+                | "NotAuthenticated"
+                | "account_command_backpressure" => Error::Bus,
                 "AccountNotOpen" | "AccountLocked" | "AccountNotFound" => Error::IdentityLost,
                 "AccountRestorePending" => Error::AccountRestorePending,
                 "AccountRestoreFailed" => Error::AccountRestoreFailed,
