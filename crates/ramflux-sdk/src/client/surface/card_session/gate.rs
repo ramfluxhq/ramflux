@@ -15,7 +15,10 @@ pub(super) enum Admission {
 
 pub(super) fn admit(client: &RamfluxClient, surface_ref: &str) -> Result<Admission, SdkError> {
     let Some((stored, state)) = client.surface_state_ref(surface_ref)? else {
-        return Ok(Admission::Missing);
+        return match client.foreign_card_fallback(surface_ref)? {
+            Some(fallback) => Ok(Admission::Foreign { fallback }),
+            None => Ok(Admission::Missing),
+        };
     };
     let fallback = state.content().map(|content| content.fallback_text.clone()).unwrap_or_default();
     if !client.surface_author_is_own_agent(&stored.author_principal_id)? {

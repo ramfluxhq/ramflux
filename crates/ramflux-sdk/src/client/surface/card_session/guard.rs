@@ -3,6 +3,7 @@
 
 //! Recheck authority on every call and destroy the session when it is lost.
 use super::super::StoredSurface;
+use super::super::foreign_refusal::FOREIGN_CARD_REASON;
 use super::gate::{Admission, admit, refused};
 use super::store;
 use crate::{RamfluxClient, SdkError};
@@ -32,7 +33,7 @@ pub(super) fn keep(client: &RamfluxClient, account: &str, session: u64) -> Resul
         }
         Admission::Foreign { fallback } => {
             store::remove(account, session)?;
-            Ok(Kept::Stopped(refused("card_session_foreign", &fallback)))
+            Ok(Kept::Stopped(refused(FOREIGN_CARD_REASON, &fallback)))
         }
         Admission::Closed { fallback } => {
             store::remove(account, session)?;

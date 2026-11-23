@@ -248,12 +248,7 @@ fn open_subscription(
     connection: &mut LocalBusConnectionState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: LocalBusSubscriptionOpenRequest = serde_json::from_value(request.body.clone())?;
-    if request
-        .body
-        .get("attended_frontend")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
+    if request.body.get("attended_frontend").and_then(serde_json::Value::as_bool).unwrap_or(false) {
         let account_id = request_account_id(request)?.to_owned();
         state.attended_accounts.insert(account_id.clone());
         connection.attended_account_id = Some(account_id);

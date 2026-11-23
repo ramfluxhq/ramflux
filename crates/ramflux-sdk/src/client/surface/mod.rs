@@ -20,6 +20,7 @@ pub(crate) use own_checkpoint::OwnedSurfaceCheckpoint;
 pub(crate) use own_history::SurfaceHistoryExport;
 mod delivery;
 mod fallback;
+mod foreign_refusal;
 mod origin;
 mod own_delivery;
 pub(crate) use own_delivery::OwnContextDelivery;

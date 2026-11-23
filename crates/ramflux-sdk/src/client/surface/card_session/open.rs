@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Open one session from the current publication of a surface reference.
+use super::super::foreign_refusal::FOREIGN_CARD_REASON;
 use super::body::{self, OpenBody};
 use super::gate::{Admission, admit, card_err, refused};
 use super::package;
@@ -17,7 +18,7 @@ pub(super) fn open(client: &RamfluxClient, account: &str, body: &Value) -> Resul
     let (locale, dark) = body::presentation(parsed.locale.as_deref(), parsed.dark);
     match admit(client, &parsed.surface_ref)? {
         Admission::Missing => Ok(refused("card_session_refused", "")),
-        Admission::Foreign { fallback } => Ok(refused("card_session_foreign", &fallback)),
+        Admission::Foreign { fallback } => Ok(refused(FOREIGN_CARD_REASON, &fallback)),
         Admission::Closed { fallback } => Ok(refused("card_session_inactive", &fallback)),
         Admission::Ready { stored, state } => {
             let fallback =
