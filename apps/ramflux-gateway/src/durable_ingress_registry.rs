@@ -37,6 +37,42 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
     ("session/submission.rs:handle_gateway_submit", Class::Edge),
     ("session/submission.rs:handle_gateway_own_device_fanout", Class::Edge),
     (
+        "session/submission.rs:attach_franking_node_tag",
+        Class::NonIngress(
+            "stamps the franking node tag on an envelope already admitted by handle_gateway_submit; no persist",
+        ),
+    ),
+    (
+        "session/submission.rs:committed_fanout_entry",
+        Class::NonIngress(
+            "derives the committed entry for an own-device fanout after handle_gateway_own_device_fanout admitted it; no persist",
+        ),
+    ),
+    (
+        "session/submission.rs:committed_submit_entry",
+        Class::NonIngress(
+            "derives the committed entry from the router response after handle_gateway_submit admitted it; no persist",
+        ),
+    ),
+    (
+        "session/submission.rs:deliver_own_device_fanout_entry",
+        Class::NonIngress(
+            "delivers an already committed own-device fanout entry; envelope was admitted and persisted upstream",
+        ),
+    ),
+    (
+        "session/submission.rs:deliver_submitted_to_peer",
+        Class::NonIngress(
+            "delivers an already committed submit to the peer session; envelope was admitted and persisted upstream",
+        ),
+    ),
+    (
+        "session/submission.rs:reply_and_deliver_submitted",
+        Class::NonIngress(
+            "replies and delivers after handle_gateway_submit committed; no new persist",
+        ),
+    ),
+    (
         "session/submission.rs:dispatch_offline_wake",
         Class::NonIngress("offline wake via spawn_blocking; no envelope persist"),
     ),
@@ -67,7 +103,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
     let edge_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Edge).count();
-    assert_eq!((non_ingress_count, edge_count), (6, 4));
+    assert_eq!((non_ingress_count, edge_count), (12, 4));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");
