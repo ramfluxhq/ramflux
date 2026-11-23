@@ -243,12 +243,15 @@ pub(crate) fn guard_code_attempt(index: &AccountIndex, account_id: &str) -> Resu
         let ready_at = attempts.last_attempt_at.unwrap_or(0).saturating_add(wait);
         if now < ready_at {
             let retry_after_secs = ready_at.saturating_sub(now);
+            let retry_after_ms =
+                u64::try_from(retry_after_secs).map_or(0, |wait| wait.saturating_mul(1_000));
             return Err(refusal(
                 "UnlockRetryLater",
                 "too many wrong account codes; wait before the next try",
                 serde_json::json!({
                     "reason_code": "unlock_retry_later",
                     "retry_after_secs": retry_after_secs,
+                    "retry_after_ms": retry_after_ms,
                 }),
             ));
         }

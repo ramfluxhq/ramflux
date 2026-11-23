@@ -52,6 +52,15 @@ body; it is not a second business schema. Message ProtoJSON retains its own
 schema's presence and decimal string rules. The bridge never generates an
 operation key, retries a mutation or turns a lost response into success.
 
+## Attended account code
+
+`ramflux_v2_set_credential_provider` installs the callback that answers
+`device.credential.request` on the in-process connection. Setup requires the
+code twice and the copies must match. Unlock and phrase take one copy and an
+empty confirmation. A null callback unregisters and drains. The host must not
+reenter the client from the callback. Close and replacement wait until the
+callback returns. `account.passphrase.rotate` stays in the wiped request body.
+
 ## Generated method policy
 
 `crates/ramflux-sdk/include/ramflux_sdk_methods.json` is the machine-readable
@@ -157,7 +166,10 @@ from that snapshot's journal cursor. Reset does not fetch data or restore a
 subscription by itself.
 
 
-Open a subscription via `execute` using `subscription.open` or `bus.subscribe`.
+Open the account journal via `execute` using `bus.subscribe`. `subscription.open`
+remains the ephemeral, backup, pairing, and attended-frontend opener. A journal
+topic, including `*`, is refused on an open account. Phones do not use it to
+tail the journal.
 `event_poll` consumes one frame without blocking. It returns Pending (24),
 Closed (26) with a null buffer. ResyncRequired (27) includes an owned, generation-tagged gap event. Event
 credit is bounded to 64 frames and 4 MiB; a single frame is at most 1 MiB.
@@ -172,7 +184,9 @@ Immediate statuses use existing numeric `RamfluxErrorCode` values 0–23,
 including AccountBusy=18 and SchemaResetRequired=23. V2 adds Pending=24,
 Cancelled=25, Closed=26 and ResyncRequired=27 without changing v1. Unknown
 business error names map to Internal=16 while preserving the full typed SDK
-error frame. Native code must inspect numeric codes, not diagnostic prose.
+error frame. Attachment refusals, including `authority_unavailable`, map to
+InvalidArgument (1); the error frame still carries the stable code string.
+Native code must inspect numeric codes, not diagnostic prose.
 
 Host pointers must be aligned and valid for their documented lengths. Null,
 invalid lengths, duplicate I-JSON members and invalid handles are rejected.

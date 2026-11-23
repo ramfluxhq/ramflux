@@ -4,6 +4,8 @@
 mod cli;
 mod handlers;
 mod keychain;
+#[cfg(target_os = "linux")]
+mod linux_paths;
 mod logging;
 #[cfg(unix)]
 mod prx;
@@ -14,7 +16,9 @@ mod windows_paths;
 use clap::Parser;
 use cli::{Cli, Command};
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) const DEFAULT_SOCKET: &str = "/tmp/ramflux/rfd.sock";
+#[cfg(not(target_os = "linux"))]
 pub(crate) const DEFAULT_DATA_ROOT: &str = "/tmp/ramflux/rfd-data";
 
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +61,22 @@ async fn run() -> Result<(), RfError> {
     let cli = Cli::parse();
     #[cfg(windows)]
     let cli = windows_paths::with_defaults(cli)?;
+    #[cfg(target_os = "linux")]
+    {
+        linux_paths::require_resolved(
+            &cli.socket,
+            "XDG_RUNTIME_DIR is unset, empty, or not absolute",
+        )?;
+        if let Command::Daemon(ref command) = cli.command
+            && let cli::DaemonAction::Start(ref start) = command.action
+        {
+            linux_paths::require_resolved(
+                &start.data_root,
+                "the data directory is unset or not absolute",
+            )?;
+            let _ = linux_paths::state_dir()?;
+        }
+    }
     match cli.command {
         Command::Vault(command) => handlers::vault::handle(command).await,
         Command::Node(command) => handlers::node::handle_node(cli.socket, command).await,
