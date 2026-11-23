@@ -1,29 +1,22 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Own-agent publication gate. A snapshot alone is not authorization.
+//! Authenticated publication gate. A snapshot alone is not authorization.
 use super::super::{StoredSurface, invalid};
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::SurfaceState;
 
 pub(super) enum Admission {
     Missing,
-    Foreign { fallback: String },
     Closed { fallback: String },
     Ready { stored: StoredSurface, state: Box<SurfaceState> },
 }
 
 pub(super) fn admit(client: &RamfluxClient, surface_ref: &str) -> Result<Admission, SdkError> {
     let Some((stored, state)) = client.surface_state_ref(surface_ref)? else {
-        return match client.foreign_card_fallback(surface_ref)? {
-            Some(fallback) => Ok(Admission::Foreign { fallback }),
-            None => Ok(Admission::Missing),
-        };
+        return Ok(Admission::Missing);
     };
     let fallback = state.content().map(|content| content.fallback_text.clone()).unwrap_or_default();
-    if !client.surface_author_is_own_agent(&stored.author_principal_id)? {
-        return Ok(Admission::Foreign { fallback });
-    }
     if state.is_closed()
         || state.version() == 0
         || state.hash().is_none()

@@ -136,6 +136,18 @@ impl AgentCreationStore {
         &self.root
     }
 
+    /// Local human account id this store was opened for.
+    ///
+    /// # Errors
+    /// `CustodySetupInvalid` when the directory is not under an account id.
+    pub(crate) fn human_account_id(&self) -> Result<&str, SdkError> {
+        self.dir
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .ok_or(SdkError::CustodySetupInvalid)
+    }
+
     /// The record that publishes the agent account with this local id: the publishing record (state
     /// `publication_pending`, `publication_unknown` or `complete`) with the highest master range, so
     /// a committed rebind (stage D4) replaces the creation record it rebinds. Scans this directory

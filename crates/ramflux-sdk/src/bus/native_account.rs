@@ -172,6 +172,7 @@ pub(super) fn locked_status(
     status["account_id"] = id.into();
     status["state"] = "locked".into();
     status["networking"] = serde_json::to_value(native.state())?;
+    super::host_branch::overlay_status(&mut status, root, id);
     Ok(status)
 }
 
@@ -188,8 +189,8 @@ pub(super) fn status_at(
     now: u64,
 ) -> Result<serde_json::Value, SdkError> {
     let native = account.client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
-    let current =
-        crate::custody::load_data_account(account.client.account_index()?.root(), account_id, now)?;
+    let root = account.client.account_index()?.root().to_path_buf();
+    let current = crate::custody::load_data_account(&root, account_id, now)?;
     let authorized = !current.authority_blocked()
         && !current.branch_pending()
         && current
@@ -236,6 +237,7 @@ pub(super) fn status_at(
     {
         status["networking_hint"] = crate::custody::capacity_hint::message(hint).into();
     }
+    super::host_branch::overlay_status(&mut status, &root, account_id);
     Ok(status)
 }
 
@@ -301,6 +303,28 @@ pub(super) async fn finish_connection(account: &mut LocalBusAccountState) -> Res
     Ok(())
 }
 
+fn fetched_directory_revokes(
+    root: &std::path::Path,
+    account_id: &str,
+    local: &crate::custody::BornAccount,
+    manifest: &crate::prekey::SdkDeviceManifestResponse,
+) -> Result<bool, SdkError> {
+    let Some(custody) = manifest.custody.as_ref() else {
+        return Ok(false);
+    };
+    let now = crate::custody::network_now()?;
+    let verified = ramflux_crypto::custody::verify_publication(
+        &ramflux_protocol::custody::CustodyAuthority {
+            publication: custody.publication.clone(),
+            custodian_publication: custody.custodian_publication.clone(),
+        },
+        now,
+    )?;
+    crate::custody::agent_creation::note_if_verified_revokes(
+        root, account_id, local, &verified, now,
+    )
+}
+
 pub(super) async fn refresh_public_authority(
     account: &mut LocalBusAccountState,
 ) -> Result<(), SdkError> {
@@ -334,6 +358,9 @@ pub(super) async fn refresh_public_authority(
         if let Some(manifest) = manifest.map(|manifest| manifest.fetched_from(started)) {
             if manifest.principal_commitment != anchor || manifest.custody.is_none() {
                 return Err(SdkError::CustodyModeDowngrade);
+            }
+            if fetched_directory_revokes(root, id, &native, &manifest)? {
+                return Err(SdkError::PairingCode("PublicationPending"));
             }
             account.client.persist_fetched_identity_directory(&manifest)?;
         } else if native.state() == crate::custody::CreationState::Live {

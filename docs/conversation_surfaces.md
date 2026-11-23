@@ -61,12 +61,12 @@ Decision identity includes the source instance; receipts bind the original signe
 action carrier. Actions travel to the author through authenticated pair controls,
 including when their conversation is a group.
 
-The SDK's renderer gate resolves a headless agent from the user's verified local
-creator registry and matches its authenticated account root. Peer-supplied actor
-labels grant no authority. Other agents and human authors have plain fallback
-presentation only: no card session, link request or RPC processing. Explicit
-content reads expose `render_allowed`; the author can still read its own state
-for planning. Local device metadata advertises static per-release capabilities
+The SDK authenticates the conversation and the author. Any person or agent in
+that conversation renders and acts under the same signature, schema and trust
+checks. A bad signature or a malicious schema is a typed refusal. Peer-supplied
+actor labels grant no authority. Explicit content reads expose `render_allowed`
+from the stored open snapshot. The author can still read its own state for
+planning. Local device metadata advertises static per-release capabilities
 under the upstream `a2uiRendererCapabilities` transport key.
 
 ## RPC and errors
@@ -77,19 +77,19 @@ optional `knownHash` describe sender context and never consume a surface version
 `~rpc` denotes a call without a surface. Frame bounds are 4 KiB; call identifiers
 are printable ASCII of 1–128 bytes.
 
-Only calls from the user's own agents are processed. No function is callable by
-an agent: a well-formed call gets `INVALID_FUNCTION_CALL`; a malformed inner call
-with a usable frame identifier gets the pinned malformed-call error. Invalid
-frames and non-own authors get no response. Processing is capped at eight calls
-per author per minute.
+Calls from any authenticated author in the conversation are processed. No
+function is callable by an agent: a well-formed call gets `INVALID_FUNCTION_CALL`;
+a malformed inner call with a usable frame identifier gets the pinned
+malformed-call error. Invalid frames get no response. Processing is capped at
+eight calls per author per minute.
 
 The replay ledger retains at most 256 entries per author for 24 hours. An entry
 holds the exact original request fingerprint, authenticated scope and exact
 response frame bytes. An exact bound retry in a fresh carrier reuses those bytes,
 including their original known version/hash. Changed scope or inner bytes under
 the same key are refused and cannot replace or rebind the entry. Calls, replies,
-retries and refusals do not mutate surface state. Error reports go only to own
-agents, at most once per surface and rejected event version. Reports and response
+retries and refusals do not mutate surface state. Error reports go to the card
+author, at most once per surface and rejected event version. Reports and response
 queues are bounded; courier backpressure cannot grow an unbounded control queue.
 
 ## Local transport and retries

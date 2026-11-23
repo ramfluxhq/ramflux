@@ -261,7 +261,7 @@ async fn colliding_peer_names_do_not_block_the_original_surface_signer() -> Test
 }
 
 #[tokio::test]
-async fn third_party_authors_have_only_quoted_fallback_and_never_rpc_or_card_state() -> TestResult {
+async fn peer_authored_cards_render_and_outsiders_cannot_call_rpc() -> TestResult {
     let f = Fixture::new().await?;
     let outsider_fixture = Box::pin(crate::client::native_test_support::Fixture::with_principal(
         "outsider",
@@ -274,21 +274,25 @@ async fn third_party_authors_have_only_quoted_fallback_and_never_rpc_or_card_sta
     let event = signed_in(outsider, "outsider", "thread", "foreign-create", "Plain fallback")?;
     assert!(
         project(&f.human, &event, "foreign")?.accepted,
-        "authenticated foreign authors retain their plain fallback"
+        "an authenticated peer card is projected"
     );
     assert!(
         !f.human.surface_author_is_own_agent("outsider")?,
         "a verified peer root is not creator-registry authority"
     );
-    assert_eq!(
-        f.human.surface_list("thread", "", 100)?["surfaces"],
-        json!([]),
-        "foreign cards cannot create renderer state"
+    let view = f.human.surface_get("s", 0, None)?;
+    assert_eq!(view["render_allowed"], json!(true), "a verified peer card renders");
+    assert!(view["snapshot"].is_object(), "a verified peer snapshot is readable");
+    assert!(
+        f.human.surface_list("thread", "", 100)?["surfaces"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "a verified peer card is renderer state"
     );
     assert_eq!(
         f.human.surface_message_fallback("foreign")?.ok_or("fallback")?.1,
         super::super::fallback::render("outsider", "Plain fallback"),
-        "foreign fallback uses the same terminal-safe quoting"
+        "peer fallback uses the same terminal-safe quoting"
     );
     let frame = ramflux_protocol::RpcFrame {
         schema: ramflux_protocol::RPC_SCHEMA.into(),
@@ -314,11 +318,17 @@ async fn third_party_authors_have_only_quoted_fallback_and_never_rpc_or_card_sta
         signature: String::new(),
         ..event.clone()
     })?;
-    assert!(!project(&f.human, &call, "foreign-call")?.accepted, "foreign calls must be dropped");
+    let refused = project(&f.human, &call, "foreign-call");
+    assert!(
+        refused.is_err_and(|error| {
+            error.to_string().contains("surface direct conversation membership mismatch")
+        }),
+        "a caller outside the conversation is refused by the membership gate"
+    );
     assert_eq!(
         f.human.account_db()?.actor_state_usage("surface/rpc-response/")?.0,
         0,
-        "foreign authors cannot trigger RPC responses or error reports"
+        "an unbound call does not queue a response"
     );
     Ok(())
 }

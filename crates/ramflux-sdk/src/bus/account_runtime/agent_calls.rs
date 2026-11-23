@@ -6,7 +6,8 @@
 use super::AccountRuntime;
 use crate::SdkError;
 use crate::custody::agent_creation::{
-    AgentCreationRecord, AgentCreationStore, AgentStep, commit_approved,
+    AgentCreationRecord, AgentCreationStore, AgentStep, commit_approved, fresh_plan_ready,
+    rebind_awaits_owner,
 };
 
 /// `AgentRecord.cleanup` after this call's node retirement succeeded.
@@ -30,6 +31,41 @@ impl AccountRuntime {
         let Ok(now) = super::super::custody_setup::now() else { return };
         if let Err(error) = account.client.broadcast_own_agent_records(dir, now) {
             tracing::debug!(%error, "agent record broadcast deferred");
+        }
+    }
+
+    /// Send a frozen rebind again. Unlock runs the advance once; a directory that does not yet
+    /// name the new primary leaves the copy unqueued. Later ticks retry until `stage_to` keeps
+    /// the row. The own-device attempt cap then bounds delivery. A request that is already
+    /// staged, decided, or not waiting on the owner is left alone.
+    pub(super) fn maintain_pending_rebinds(&self) {
+        let root = self.state.config.data_root.clone();
+        let directory = root.join("custody_accounts").join(&self.id).join("agent_creation");
+        if !directory.is_dir() {
+            return;
+        }
+        let Ok(now) = super::super::custody_setup::now() else {
+            return;
+        };
+        let Ok(store) = AgentCreationStore::open(root.clone(), &self.id) else {
+            return;
+        };
+        let Ok(entries) = store.rebind_entries() else {
+            return;
+        };
+        for entry in entries.into_iter().take(256) {
+            if entry.request_id.is_none() {
+                continue;
+            }
+            let ready = fresh_plan_ready(&root, &store, &entry.agent_account_id);
+            let waiting = rebind_awaits_owner(&store, &entry);
+            if ready.ok() != Some(true) || waiting.ok() != Some(true) {
+                continue;
+            }
+            let _ = self.agent_creation_step(AgentStep::SendRebind {
+                agent_account_id: entry.agent_account_id,
+                now,
+            });
         }
     }
     pub(super) fn agent_creation_step(
@@ -65,7 +101,7 @@ impl AccountRuntime {
     }
 
     /// Runs one agent command of this runtime; a closed reply channel skips the work.
-    pub(super) fn apply_agent(&self, command: super::super::actor::AgentPrivate) {
+    pub(super) fn apply_agent(&mut self, command: super::super::actor::AgentPrivate) {
         use super::super::actor::AgentPrivate;
         match command {
             AgentPrivate::Creation { step, reply } => {
@@ -75,7 +111,17 @@ impl AccountRuntime {
             }
             AgentPrivate::Call { call, reply } => self.reply_agent_call(call, reply),
             AgentPrivate::HomeNode { reply } => self.reply_agent_home_node(reply),
+            AgentPrivate::Gateway { reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.agent_gateway());
+                }
+            }
             AgentPrivate::Admission { reply } => self.reply_pairing_admission(reply),
+            AgentPrivate::SettleAdmission { reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.settle_primary_admission());
+                }
+            }
         }
     }
 
@@ -196,6 +242,15 @@ impl AccountRuntime {
         Ok(result)
     }
 
+    /// Gateway config of this unlocked account. `None` before a native account is loaded.
+    fn agent_gateway(&self) -> Result<Option<crate::gateway::GatewaySessionConfig>, SdkError> {
+        let account = self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
+        if account.client.born_v3_account.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(account.gateway_config.clone()))
+    }
+
     /// The home node of this human account: the value `native_account::unlock` persists as
     /// `account/node-id`. `None` when the account has none yet.
     pub(super) fn agent_home_node(&self) -> Result<Option<String>, SdkError> {
@@ -231,6 +286,41 @@ impl AccountRuntime {
         let reader = std::sync::Arc::new(db.pairing_admission_reader());
         Ok(reader.is_open().then_some(reader))
     }
+
+    /// Complete or drop an authority-refresh marker left by a device-revoke observation.
+    /// A primary stays fenced until the next unlock unless this runs first.
+    /// # Errors
+    /// Storage or installation errors leave the marker for a retry.
+    fn settle_primary_admission(&mut self) -> Result<(), SdkError> {
+        let Some(account) = self.state.accounts.get(&self.id) else {
+            return Err(SdkError::AccountDbNotUnlocked);
+        };
+        let Some(custody) = account.gateway_config.custody.as_ref() else {
+            return Ok(());
+        };
+        let root = custody.account_root.clone();
+        let id = custody.account_id.clone();
+        let vault = std::sync::Arc::clone(&custody.vault);
+        let now = crate::custody::network_now()?;
+        let account =
+            self.state.accounts.get_mut(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
+        let repaired = {
+            let db = account.client.account_db()?;
+            crate::custody::pairing::activate::settle_interrupted_refresh(
+                &root,
+                db,
+                vault.as_ref(),
+                &id,
+                now,
+            )?
+        };
+        if repaired {
+            let index_root = account.client.account_index()?.root().to_path_buf();
+            account.client.born_v3_account =
+                Some(Box::new(crate::custody::load_account(&index_root, &id, now)?));
+        }
+        Ok(())
+    }
 }
 
 fn deleted_record(
@@ -250,10 +340,47 @@ fn retired_record(
     mutation: &ramflux_protocol::message::AgentMutation,
     now: u64,
 ) -> Result<ramflux_protocol::message::AgentConfigResult, SdkError> {
-    let current = client.agent_record_get(&mutation.agent_anchor)?;
-    let record =
-        client.agent_retire(&mutation.agent_anchor, &current.identity, mutation.confirmed, now)?;
-    Ok(record_result(&record))
+    match client.agent_record_get(&mutation.agent_anchor) {
+        Ok(current) => {
+            let record = client.agent_retire(
+                &mutation.agent_anchor,
+                &current.identity,
+                mutation.confirmed,
+                now,
+            )?;
+            Ok(record_result(&record))
+        }
+        Err(SdkError::AgentCreationRefused("agent_not_found")) => {
+            node_only_retired(client, mutation)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The node already accepted retirement and this phone has no local file to rewrite.
+fn node_only_retired(
+    client: &crate::RamfluxClient,
+    mutation: &ramflux_protocol::message::AgentMutation,
+) -> Result<ramflux_protocol::message::AgentConfigResult, SdkError> {
+    use ramflux_protocol::message as g;
+    if mutation.confirmed != Some(true) {
+        return Err(SdkError::AgentCreationRefused("agent_not_found"));
+    }
+    let record = g::AgentRecord {
+        agent_anchor: mutation.agent_anchor.clone(),
+        custodian_anchor: client.own_account_anchor()?,
+        persona: None,
+        host: None,
+        config: None,
+        revision: None,
+        lifecycle: crate::agent_record::LIFECYCLE_RETIRED.to_owned(),
+        observation: String::new(),
+        cleanup: NODE_RETIRED.to_owned(),
+        access: None,
+        role: String::new(),
+        base: None,
+    };
+    Ok(g::AgentConfigResult { value: Some(g::agent_config_result::Value::Record(record)) })
 }
 
 fn record_result(

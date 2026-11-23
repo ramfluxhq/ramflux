@@ -584,6 +584,9 @@ impl AccountRuntime {
         self.maintain_agent_owner_contact().await;
         self.service_waiting_commands().await?;
         let activity = self.record_local_maintenance().await?;
+        // The local pass may have adopted the new primary. A rebind staged before that
+        // adoption stays unqueued; this tick sends it, and later ticks retry until it is.
+        self.maintain_pending_rebinds();
         // Native admission may have completed on this sync pass after a local-only unlock.
         self.start_courier();
         let request = LocalBusFrame::request(

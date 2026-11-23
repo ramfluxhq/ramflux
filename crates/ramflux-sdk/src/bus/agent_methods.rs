@@ -97,6 +97,10 @@ async fn apply(
         "agent.access.set" => AgentCall::AccessSet(Box::new(decode(body)?)),
         _ => return Err(SdkError::CustodySetupInvalid),
     };
+    let list_limit = match &call {
+        AgentCall::List(list) => Some(list.limit),
+        _ => None,
+    };
     let read_id = match &call {
         AgentCall::Get(id) => Some(id.clone()),
         _ => None,
@@ -120,6 +124,7 @@ async fn apply(
         &result,
     )
     .await?;
+    let result = super::agent_directory::attach_hosted(&actor, list_limit, result).await?;
     match read_id {
         Some(id) if advances_on_read(&result) => {
             // A failed advance leaves the request where it was; the reread reports that state.
