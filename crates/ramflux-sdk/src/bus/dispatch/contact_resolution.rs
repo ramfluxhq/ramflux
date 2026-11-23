@@ -69,6 +69,7 @@ pub(in crate::bus) async fn add_username(
                 requester_is_peer: false,
                 replace_provisional_root: None,
                 verification: None,
+                directory_base: None,
             },
             &mut engine,
         )

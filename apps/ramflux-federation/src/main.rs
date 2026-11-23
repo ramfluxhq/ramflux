@@ -33,6 +33,7 @@ mod pairing_scratch;
 mod peer_pin;
 mod public_http;
 mod public_source_limits;
+mod source_home;
 mod state;
 #[cfg(test)]
 mod test_certificates;

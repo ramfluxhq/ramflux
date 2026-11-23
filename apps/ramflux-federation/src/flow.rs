@@ -577,7 +577,20 @@ pub(crate) fn handle_s8_receive_envelope(
     if let Err(error) = verify_inbound_federated_forward(request, state, now, observability) {
         return receive_verify_refusal(request, error);
     }
-    admit_authenticated_receive(request, store, router, observability, now, total_started)
+    let home = crate::source_home::from_pin(state, &request.source_node_id)?;
+    admit_authenticated_receive(
+        request,
+        store,
+        router,
+        observability,
+        AuthenticatedReceive { now, total_started, home },
+    )
+}
+
+struct AuthenticatedReceive {
+    now: u64,
+    total_started: std::time::Instant,
+    home: Option<crate::source_home::VerifiedSourceHome>,
 }
 
 fn admit_authenticated_receive(
@@ -585,8 +598,7 @@ fn admit_authenticated_receive(
     store: &ramflux_node_core::FederationRedbStore,
     router: &RouterMeshClient,
     observability: Option<&FederationMeshObservability>,
-    now: u64,
-    total_started: std::time::Instant,
+    delivery: AuthenticatedReceive,
 ) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError> {
     let bytes = match inbound_json_len(&request.envelope) {
         Ok(bytes) => bytes,
@@ -602,6 +614,7 @@ fn admit_authenticated_receive(
     // precede this peek, because the replay key is the authenticated device. The
     // attempt and delivery charges run in `deliver_reserved`, after the seen-table
     // lease, so an in-flight duplicate is not charged either.
+    let AuthenticatedReceive { now, total_started, home } = delivery;
     if request.migration_evidence.is_none()
         && store.inbound_forward_committed(&source, request, now)?
     {
@@ -615,7 +628,7 @@ fn admit_authenticated_receive(
         store,
         observability,
         InboundForwardTiming { now, total_started, attempt_lease_seconds },
-        || deliver_reserved(request, router, &tuple, bytes, now),
+        || deliver_reserved(request, router, &tuple, bytes, now, home.as_ref()),
     )
 }
 
@@ -625,6 +638,7 @@ fn deliver_reserved(
     tuple: &str,
     bytes: u64,
     now: u64,
+    home: Option<&crate::source_home::VerifiedSourceHome>,
 ) -> Result<ramflux_node_core::EnvelopeSubmitResponse, ramflux_node_core::NodeCoreError> {
     // A tuple reserved this hour is a retry of a charge that already succeeded.
     // Do not spend another attempt, and do not turn that retry into `rejected_limit`.
@@ -642,10 +656,12 @@ fn deliver_reserved(
     ) {
         return Ok(refused_submit(&request.envelope.target_delivery_id, outcome));
     }
+    let mut posted = request.clone();
+    crate::source_home::apply(&mut posted.envelope, home);
     classify_router_delivery(
         &request.envelope.target_delivery_id,
         post_inbound_to_router(
-            request,
+            &posted,
             ramflux_node_core::home_migration_enabled()?,
             |path, body| router_post_json(router, path, body),
         ),

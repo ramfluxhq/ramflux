@@ -145,8 +145,11 @@ impl RamfluxClient {
         let manifest = if let Some(candidate) = candidate {
             candidate
         } else {
-            fetched =
-                crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?;
+            fetched = {
+                let origin = self.sender_manifest_origin(&entry.envelope, &root)?;
+                crate::client::foreign_manifest::fetch_sender_manifest(gateway, origin, &root)
+                    .await?
+            };
             &fetched
         };
         let history = self.native_contact_history_request(entry, route, bytes, manifest)?;

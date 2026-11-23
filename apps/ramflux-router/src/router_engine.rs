@@ -243,7 +243,7 @@ fn prepare_submission(
     }
     record_decoded(&envelope);
     let (source, mut source_lease) =
-        match authenticate_submission(state, store, &envelope, ingress)? {
+        match authenticate_submission(state, store, &mut envelope, ingress)? {
             SourceAdmission::Admitted(source, lease) => (source, lease),
             SourceAdmission::Refused(response) => return Ok(complete_response(*response)),
         };
@@ -344,10 +344,13 @@ enum SourceAdmission {
 fn authenticate_submission(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
-    envelope: &ramflux_protocol::Envelope,
+    envelope: &mut ramflux_protocol::Envelope,
     ingress: SubmitIngress<'_>,
 ) -> anyhow::Result<SourceAdmission> {
     let origin = ingress.origin;
+    if origin != ramflux_node_core::RouterEnvelopeOrigin::Federation {
+        envelope.ext.ext.remove(ramflux_protocol::VERIFIED_SOURCE_HOME);
+    }
     let source = match state.authenticated_envelope_source_with_peer(
         envelope,
         Some(store),

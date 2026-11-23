@@ -26,7 +26,13 @@ pub(super) async fn prepare(
     let Some(plan) = plan else {
         return Ok(None);
     };
-    let actor = super::fetch_inbound_manifest(config, &plan.actor_root).await?;
+    let root = plan.actor_root.clone();
+    let envelope = entry.envelope.clone();
+    let origin_root = root.clone();
+    let origin = writer
+        .apply(move |account| account.client.sender_manifest_origin(&envelope, &origin_root))
+        .await?;
+    let actor = super::fetch_sender_manifest(config, super::Query { root, origin }).await?;
     // A fresh, active transport actor is required before it can cause an addition lookup.
     // Local membership and the selected route may also have changed during that request.
     let (addition, actor) = writer
