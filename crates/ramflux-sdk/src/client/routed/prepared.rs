@@ -148,12 +148,6 @@ impl RamfluxClient {
         if inner.kind == 12 {
             Self::require_self_sync_floor_bootstrap()?;
         }
-        if inner.kind == 8
-            && g::Control::decode(inner.body.as_slice())
-                .is_ok_and(|control| control.operation == 11)
-        {
-            Self::require_a2i_binding_authority()?;
-        }
         self.account_db()?.write_transaction(|| {
             let (mut session, header, bundle) = self.prepared_send_pair(
                 config,

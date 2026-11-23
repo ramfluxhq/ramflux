@@ -330,18 +330,17 @@ fn assert_tampered_absent(
 mod tests {
     use super::*;
 
-    fn expect_a2i_authority_refusal(daemon: &Daemon, args: &[&str]) -> e2e::Result<()> {
+    fn expect_a2i_content_refusal(daemon: &Daemon, args: &[&str]) -> e2e::Result<()> {
         let error = match rf_json(&daemon.socket, args) {
-            Ok(value) => return Err(format!("B9 approval unexpectedly succeeded: {value}").into()),
+            Ok(value) => return Err(format!("B9 request unexpectedly succeeded: {value}").into()),
             Err(error) => error.to_string(),
         };
-        assert!(error.contains("generated_authority"), "typed Authority reason missing: {error}");
+        assert!(error.contains("generated_content"), "typed Content reason missing: {error}");
         assert!(error.contains("exit status: 1"), "refusal must be a normal CLI exit: {error}");
-        eprintln!("B9 expected Control 11 Authority refusal: {error}");
         Ok(())
     }
 
-    #[ignore = "real-process Demo B B9 Authority refusal; explicit CLI e2e gate"]
+    #[ignore = "real-process Demo B B9 content refusal; explicit CLI e2e gate"]
     #[test]
     fn b9_a2i_approval_is_typed_refused_and_never_actionable_after_restart() -> e2e::Result<()> {
         let stack = boot_stack()?;
@@ -349,7 +348,7 @@ mod tests {
         configure_node(&daemon, &stack.discovery_url)?;
         let account = create_account(&daemon, "B9 Authority Refusal")?;
         let event = unique("b9-no-grant");
-        expect_a2i_authority_refusal(
+        expect_a2i_content_refusal(
             &daemon,
             &[
                 "a2i",
@@ -372,12 +371,16 @@ mod tests {
                 "demo-b-no-grant",
             ],
         )?;
-        for args in [
-            vec!["a2i", "list", "--account", &account.id],
-            vec!["a2i", "ack", "--account", &account.id, "--event", &event],
-        ] {
-            expect_a2i_authority_refusal(&daemon, &args)?;
-        }
+        let listed = rf_json(&daemon.socket, &["a2i", "list", "--account", &account.id])?;
+        assert!(
+            listed.get("events").and_then(Value::as_array).is_some()
+                || listed.pointer("/events").is_some(),
+            "pending list must be readable: {listed}"
+        );
+        expect_a2i_content_refusal(
+            &daemon,
+            &["a2i", "ack", "--account", &account.id, "--event", &event],
+        )?;
         let status = rf_json(&daemon.socket, &["account", "status", "--account", &account.id])?;
         assert_eq!(
             status.get("principal_id").and_then(Value::as_str),
@@ -387,12 +390,15 @@ mod tests {
         let (socket, root) = e2e::shutdown_daemon(daemon)?;
         let daemon = start_daemon_at(socket, root)?;
         unlock_account_with_timeout(&daemon, &account, Duration::from_secs(20))?;
-        for args in [
-            vec!["a2i", "list", "--account", &account.id],
-            vec!["a2i", "ack", "--account", &account.id, "--event", &event],
-        ] {
-            expect_a2i_authority_refusal(&daemon, &args)?;
-        }
+        let listed = rf_json(&daemon.socket, &["a2i", "list", "--account", &account.id])?;
+        assert!(
+            listed.get("events").and_then(Value::as_array).is_some(),
+            "list after restart: {listed}"
+        );
+        expect_a2i_content_refusal(
+            &daemon,
+            &["a2i", "ack", "--account", &account.id, "--event", &event],
+        )?;
         let status = rf_json(&daemon.socket, &["account", "status", "--account", &account.id])?;
         assert_eq!(
             status.get("principal_id").and_then(Value::as_str),

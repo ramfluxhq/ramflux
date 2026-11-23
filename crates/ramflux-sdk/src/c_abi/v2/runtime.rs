@@ -406,6 +406,15 @@ async fn read_responses(
             Err(_) if *shutdown.borrow() => break Ok(()),
             Err(error) => break Err(error),
         };
+        let mut frame: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(frame) => frame,
+            Err(error) => break Err(SdkError::from(error)),
+        };
+        if super::host_key::answer(&frame, shared, &replies).await? {
+            crate::bus::inprocess::erase_value(&mut frame);
+            continue;
+        }
+        crate::bus::inprocess::erase_value(&mut frame);
         if handle_public(shared, &bytes)? {
             break Ok(());
         }

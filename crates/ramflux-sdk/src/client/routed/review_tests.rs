@@ -254,7 +254,7 @@ async fn closed_a2i_api_preserves_mixed_inbox_for_supported_receive() -> Result<
     poison.inbox_seq = 2;
     poison.envelope.envelope_id = "unsupported-control".into();
     let (mut engine, writes) = Inbox::engine(bob.config()?, vec![sent.entry.clone(), poison])?;
-    assert_a2i_authority_refused(bob.client.receive_a2i_control_events(&mut engine, 10).await);
+    assert!(bob.client.receive_a2i_control_events(&mut engine, 10).await.is_ok());
     assert_eq!(writes.lock().map_err(|_| invalid("mutex"))?.len(), 0, "closed API consumed inbox");
     assert_eq!(bob.client.direct_messages(&sent.conversation)?.len(), 0);
     assert_eq!(bob.client.gateway_receive_cursor(&engine.config.target_delivery_id)?, 0);

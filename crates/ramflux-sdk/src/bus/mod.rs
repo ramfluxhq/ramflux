@@ -49,6 +49,7 @@ mod generated_typing;
 pub(crate) mod group_conversation;
 mod group_delivery;
 mod host_branch;
+mod host_manage;
 pub mod io;
 mod journal;
 mod lifecycle;

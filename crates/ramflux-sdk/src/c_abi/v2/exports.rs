@@ -692,6 +692,17 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "target_deleted"
         | "edit_conflict"
         | "field_invalid"
+        | "confirmation_required"
+        | "model_capabilities_unknown"
+        | "prx_command"
+        | "home_missing"
+        | "memory_missing"
+        | "provider_missing"
+        | "runtime_invalid"
+        | "runtime_mode"
+        | "input_invalid"
+        | "input_missing"
+        | "prx_spawn"
         | "approval_decided"
         | "approval_unknown"
         | "approval_expired"
@@ -718,14 +729,17 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "retirement_pending"
         | "large_attachments" => E::InvalidArgument as i32,
         "InvalidCanonicalJson" => E::InvalidCanonicalJson as i32,
-        "UnsupportedVersion" | "AccountSchemaTooNew" | "peer_upgrade_required" => {
-            E::UnsupportedVersion as i32
-        }
+        "UnsupportedVersion"
+        | "AccountSchemaTooNew"
+        | "peer_upgrade_required"
+        | "manifest_unavailable"
+        | "unsupported_platform" => E::UnsupportedVersion as i32,
         "AuthFailed"
         | "AccountLocked"
         | "Unauthenticated"
         | "TransportSecurity"
-        | "CustodyConfirmationFailed" => E::AuthFailed as i32,
+        | "CustodyConfirmationFailed"
+        | "credential_unavailable" => E::AuthFailed as i32,
         "CapabilityRejected" => E::CapabilityRejected as i32,
         "ReplayRejected" | "ReplayMismatch" => E::ReplayRejected as i32,
         "McpGrantRejected" => E::McpGrantRejected as i32,
@@ -740,11 +754,16 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "Unavailable"
         | "NoNodeSelected"
         | "not_connected"
-        | "ephemeral_unavailable" => E::TransportUnavailable as i32,
+        | "ephemeral_unavailable"
+        | "runtime_missing"
+        | "prx_missing"
+        | "runtime_stale" => E::TransportUnavailable as i32,
         "Timeout" | "DeadlineExceeded" => E::Timeout as i32,
-        "PermissionDenied" | "authorization_rejected" | "not_authorized" => {
-            E::PermissionDenied as i32
-        }
+        "PermissionDenied"
+        | "authorization_rejected"
+        | "not_authorized"
+        | "desktop_required"
+        | "ancestor_rejected" => E::PermissionDenied as i32,
         "RateLimited" | "rate_limited" | "Busy" | "quota_exceeded" => E::RateLimited as i32,
         "AccountBusy" | "DataRootInUse" | "account_busy" => E::AccountBusy as i32,
         "ObjectErased" | "attachment_deleted" => E::ObjectErased as i32,
@@ -915,4 +934,24 @@ impl super::input::Decode for Request {
             value.as_object_mut().and_then(|map| map.remove("body")).ok_or_else(i::invalid)?;
         Ok(result)
     }
+}
+
+/// Install or clear the provider-key callback for `agent.host.credential`.
+/// The callback receives the provider id and writes the key into `out`. Return 0 when provided
+/// and 1 when refused. A null callback clears the slot. The key is never placed in JSON.
+#[unsafe(no_mangle)]
+#[must_use]
+pub extern "C" fn ramflux_v2_set_host_credential_provider(
+    handle: u64,
+    callback: Option<
+        extern "C" fn(*const u8, usize, *mut u8, usize, *mut usize, *mut std::ffi::c_void) -> i32,
+    >,
+    user: *mut std::ffi::c_void,
+) -> i32 {
+    call(|| {
+        let client = client(handle)?;
+        let mut slot = client.shared.host_key.lock().map_err(|_| internal())?;
+        *slot = callback.map(|call| super::state::HostKeyFn { call, user: user as usize });
+        Ok(())
+    })
 }
