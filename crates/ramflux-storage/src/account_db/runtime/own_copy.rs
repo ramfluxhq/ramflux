@@ -5,7 +5,7 @@
 use super::super::AccountDb;
 use crate::StorageError;
 use rusqlite::params;
-mod schema;
+pub(super) mod schema;
 #[cfg(test)]
 mod tests;
 

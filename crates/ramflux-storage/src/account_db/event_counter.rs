@@ -2,14 +2,13 @@
 // Copyright (c) 2026 Span Brain
 
 //! Independent local signing progress survives removal of per-message event copies.
-use super::AccountDb;
 use crate::StorageError;
 
-impl AccountDb {
-    pub(super) fn install_event_counter_schema(&self) -> Result<(), StorageError> {
-        self.connection.execute_batch(SCHEMA)?;
-        Ok(())
-    }
+pub(super) fn install_event_counter_tables(
+    connection: &crate::database::Connection,
+) -> Result<(), StorageError> {
+    connection.execute_batch(SCHEMA)?;
+    Ok(())
 }
 
 pub(super) const SCHEMA:&str="CREATE TABLE IF NOT EXISTS local_event_counter(actor_device_id TEXT PRIMARY KEY,counter INTEGER NOT NULL);

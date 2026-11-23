@@ -115,9 +115,10 @@ fn valid_progress(input: &HomeMigrationWrite<'_>) -> Result<Vec<u8>, StorageErro
     Ok(bytes)
 }
 
-impl AccountDb {
-    pub(super) fn install_home_migration_schema(&self) -> Result<(), StorageError> {
-        self.connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_home_migration_job(
+pub(super) fn install_home_migration_tables(
+    connection: &crate::database::Connection,
+) -> Result<(), StorageError> {
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_home_migration_job(
             operation_id TEXT PRIMARY KEY, account_anchor TEXT NOT NULL, intent_hash TEXT NOT NULL,
             revision INTEGER NOT NULL CHECK(revision>0 AND revision<=9007199254740991),
             active INTEGER NOT NULL CHECK(active IN(0,1)),
@@ -131,8 +132,10 @@ impl AccountDb {
             CREATE TRIGGER IF NOT EXISTS runtime_home_migration_progress_insert AFTER INSERT ON runtime_home_migration_transition
             BEGIN INSERT INTO runtime_outbox(table_name,change_kind,row_id,keys_json)
               VALUES('home_migration_progress','insert',NEW.id,json_object('operation_id',NEW.operation_id,'seq',NEW.revision)); END;")?;
-        Ok(())
-    }
+    Ok(())
+}
+
+impl AccountDb {
     /// Read an opaque private job; callers must validate its version and account binding.
     /// # Errors
     /// Returns SQL or stored metadata decoding errors.

@@ -8,12 +8,14 @@ use rusqlite::params;
 const AGE: i64 = 30 * 24 * 60 * 60;
 const PREFIXES: [&str; 2] = ["delivery-receipt/status/", "delivery-receipt/outbound/"];
 const CURSOR: &str = "delivery-receipt/retention-cursor";
-impl AccountDb {
-    pub(super) fn install_receipt_retention_schema(&self) -> Result<(), StorageError> {
-        self.connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_receipt_retention (state_kind TEXT PRIMARY KEY, at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS runtime_receipt_retention_age ON runtime_receipt_retention(at,state_kind);")?;
-        Ok(())
-    }
+pub(super) fn install_receipt_retention_tables(
+    connection: &crate::database::Connection,
+) -> Result<(), StorageError> {
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_receipt_retention (state_kind TEXT PRIMARY KEY, at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS runtime_receipt_retention_age ON runtime_receipt_retention(at,state_kind);")?;
+    Ok(())
+}
 
+impl AccountDb {
     /// Stores receipt metadata with a separate retention timestamp, preserving its JSON shape.
     /// # Errors
     /// Rejects unrelated namespaces and reports serialization or transaction errors.

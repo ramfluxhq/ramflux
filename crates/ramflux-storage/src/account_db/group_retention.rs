@@ -5,9 +5,10 @@
 use super::AccountDb;
 use crate::StorageError;
 use rusqlite::{OptionalExtension, params};
-impl AccountDb {
-    pub(super) fn install_group_message_retention_schema(&self) -> Result<(), StorageError> {
-        self.connection.execute_batch("             INSERT OR IGNORE INTO runtime_actor_state(state_kind,state_json)
+pub(super) fn install_group_message_retention_tables(
+    connection: &crate::database::Connection,
+) -> Result<(), StorageError> {
+    connection.execute_batch("             INSERT OR IGNORE INTO runtime_actor_state(state_kind,state_json)
                 VALUES('group-message/upgrade-start',CAST(unixepoch() AS BLOB));
              UPDATE runtime_actor_state SET state_json=CAST(state_json AS BLOB)
                 WHERE state_kind='group-message/upgrade-start' AND typeof(state_json)='text';
@@ -16,7 +17,13 @@ impl AccountDb {
              CREATE TRIGGER IF NOT EXISTS group_alias_redact AFTER UPDATE OF deleted ON direct_message_projection
                 WHEN NEW.deleted=1 BEGIN DELETE FROM runtime_actor_state WHERE state_kind='group-message/alias/'||NEW.message_id; END;
 ")?;
-        Ok(())
+    Ok(())
+}
+
+impl AccountDb {
+    #[cfg(test)]
+    pub(super) fn install_group_message_retention_schema(&self) -> Result<(), StorageError> {
+        install_group_message_retention_tables(&self.connection)
     }
 
     /// Remove expired uncommitted message aliases; committed aliases live exactly

@@ -7,10 +7,12 @@ use super::super::AccountDb;
 use crate::StorageError;
 use rusqlite::params;
 
-impl AccountDb {
-    pub(super) fn install_runtime_schema(&self) -> Result<(), StorageError> {
-        let transaction = self.connection.immediate_transaction()?;
-        self.connection.execute_batch(
+pub(super) fn install_runtime_tables(
+    connection: &crate::database::Connection,
+    principal: Option<&str>,
+) -> Result<(), StorageError> {
+    let transaction = connection.immediate_transaction()?;
+    connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS runtime_outbox (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 table_name TEXT NOT NULL,
@@ -47,203 +49,217 @@ impl AccountDb {
              );
              CREATE TABLE IF NOT EXISTS group_service_body_fence (message_id TEXT PRIMARY KEY, body_hash BLOB NOT NULL);",
         )?;
-        let operation_kind: i64 = self.connection.query_row(
-            "SELECT count(*) FROM pragma_table_info('runtime_operation') WHERE name='operation_kind'",
-            [],
-            |row| row.get(0),
-        )?;
-        if operation_kind == 0 {
-            self.connection
-                .execute_batch("ALTER TABLE runtime_operation ADD COLUMN operation_kind TEXT")?;
-        }
-        // This value comes from the supervisor account record, never from a contact directory.
-        self.connection.execute(
-            "INSERT INTO runtime_account_identity VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET principal_commitment=excluded.principal_commitment WHERE principal_commitment<>excluded.principal_commitment",
-            params![self.principal_commitment],
-        )?;
-        self.install_event_counter_schema()?;
-        self.install_group_message_retention_schema()?;
-        let columns: i64 = self.connection.query_row(
-            "SELECT count(*) FROM pragma_table_info('runtime_outbox') WHERE name='keys_json'",
-            [],
-            |row| row.get(0),
-        )?;
-        if columns == 0 {
-            self.connection
-                .execute_batch("ALTER TABLE runtime_outbox ADD COLUMN keys_json TEXT")?;
-        }
-        let actor_columns: i64 = self.connection.query_row(
-            "SELECT count(*) FROM pragma_table_xinfo('runtime_outbox')
-             WHERE name='actor_state_kind'",
-            [],
-            |row| row.get(0),
-        )?;
-        if actor_columns == 0 {
-            self.connection.execute_batch(
-                "ALTER TABLE runtime_outbox ADD COLUMN actor_state_kind TEXT
-                 GENERATED ALWAYS AS (
-                    CASE WHEN table_name='runtime_actor_state'
-                         THEN json_extract(keys_json,'$.state_kind') END) VIRTUAL",
+    let operation_kind: i64 = connection.query_row(
+        "SELECT count(*) FROM pragma_table_info('runtime_operation') WHERE name='operation_kind'",
+        [],
+        |row| row.get(0),
+    )?;
+    if operation_kind == 0 {
+        connection.execute_batch("ALTER TABLE runtime_operation ADD COLUMN operation_kind TEXT")?;
+    }
+    // The live opener records the account principal. A backup passes none and copies the source row.
+    if let Some(principal) = principal {
+        connection.execute(
+                "INSERT INTO runtime_account_identity VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET principal_commitment=excluded.principal_commitment WHERE principal_commitment<>excluded.principal_commitment",
+                params![principal],
             )?;
-        }
-        self.connection.execute_batch(
-            "CREATE INDEX IF NOT EXISTS runtime_outbox_source
-                 ON runtime_outbox(table_name,row_id);
-             CREATE INDEX IF NOT EXISTS runtime_outbox_actor_kind
-                 ON runtime_outbox(actor_state_kind,table_name,change_kind);",
-        )?;
-        self.connection.execute_batch(crate::schema_large_segments::RETIREMENT_SCHEMA)?;
-        self.install_attachment_retirement_schema()?;
-        self.connection.execute_batch("INSERT OR IGNORE INTO object_segment_reference_veto SELECT reference_id FROM runtime_attachment_reference WHERE sealed=1;
+    }
+    super::super::event_counter::install_event_counter_tables(connection)?;
+    super::super::group_retention::install_group_message_retention_tables(connection)?;
+    align_outbox_columns(connection)?;
+    connection.execute_batch(crate::schema_large_segments::RETIREMENT_SCHEMA)?;
+    super::super::attachment_retirement::install_attachment_retirement_tables(connection)?;
+    connection.execute_batch("INSERT OR IGNORE INTO object_segment_reference_veto SELECT reference_id FROM runtime_attachment_reference WHERE sealed=1;
 CREATE TRIGGER IF NOT EXISTS segment_reference_sealed AFTER UPDATE OF sealed ON runtime_attachment_reference WHEN NEW.sealed=1 BEGIN INSERT OR IGNORE INTO object_segment_reference_veto VALUES(NEW.reference_id); END;
 CREATE TRIGGER IF NOT EXISTS segment_reference_restored_sealed AFTER INSERT ON runtime_attachment_reference WHEN NEW.sealed=1 BEGIN INSERT OR IGNORE INTO object_segment_reference_veto VALUES(NEW.reference_id); END;")?;
-        self.install_home_migration_schema()?;
-        self.install_receipt_retention_schema()?;
-        self.remove_consent_bookkeeping_triggers()?;
-        self.install_domain_change_triggers()?;
-        self.install_inbox_recovery_schema()?;
-        self.connection.call(|db| super::super::message_footprint::install(db))?;
-        self.install_own_copy_schema()?;
-        transaction.commit()?;
-        Ok(())
-    }
+    super::super::home_migration::install_home_migration_tables(connection)?;
+    super::receipt_retention::install_receipt_retention_tables(connection)?;
+    remove_consent_bookkeeping_triggers(connection)?;
+    install_domain_change_triggers(connection)?;
+    super::recovery::install_inbox_recovery_tables(connection)?;
+    connection.call(|db| super::super::message_footprint::install(db))?;
+    super::own_copy::schema::install_own_copy_tables(connection)?;
+    transaction.commit()?;
+    Ok(())
+}
 
-    fn remove_local_bookkeeping_triggers(&self) -> Result<(), StorageError> {
-        // Ledger transitions publish through their own W paths. These composite-key
-        // tables have no rowid and must never acquire generic domain triggers.
-        for table in [
-            "gateway_receive_receipt",
-            "gateway_receive_work",
-            "gateway_ack_intent",
-            "gateway_inbox_loss",
-            "gateway_receive_epoch",
-            // Footprint migration bookkeeping must never publish domain invalidations.
-            "message_footprint_migration",
-            "receive_erased_input",
-            "pairing_floor",
-            "pairing_live",
-            "pairing_head",
-            "pairing_terminal",
-            "pairing_adoption",
-            "pairing_full_tail",
-            "pairing_source_cleanup",
-            "pairing_full_tail_apply",
-            "pairing_full_tail_dependency",
-            "pairing_full_completion",
-            "pairing_own_sync",
-            // Data-only source-qualified MAC verifiers have no domain rowid.
-            "full_imported_mac_bundle",
-        ] {
-            for operation in ["insert", "update", "delete"] {
-                self.connection.execute_batch(&format!(
-                    "DROP TRIGGER IF EXISTS runtime_{table}_{operation}"
-                ))?;
-            }
+impl AccountDb {
+    pub(super) fn install_runtime_schema(&self) -> Result<(), StorageError> {
+        install_runtime_tables(&self.connection, Some(self.principal_commitment.as_str()))
+    }
+}
+
+fn align_outbox_columns(connection: &crate::database::Connection) -> Result<(), StorageError> {
+    let columns: i64 = connection.query_row(
+        "SELECT count(*) FROM pragma_table_info('runtime_outbox') WHERE name='keys_json'",
+        [],
+        |row| row.get(0),
+    )?;
+    if columns == 0 {
+        connection.execute_batch("ALTER TABLE runtime_outbox ADD COLUMN keys_json TEXT")?;
+    }
+    let actor_columns: i64 = connection.query_row(
+        "SELECT count(*) FROM pragma_table_xinfo('runtime_outbox')
+         WHERE name='actor_state_kind'",
+        [],
+        |row| row.get(0),
+    )?;
+    if actor_columns == 0 {
+        connection.execute_batch(
+            "ALTER TABLE runtime_outbox ADD COLUMN actor_state_kind TEXT
+             GENERATED ALWAYS AS (
+                CASE WHEN table_name='runtime_actor_state'
+                     THEN json_extract(keys_json,'$.state_kind') END) VIRTUAL",
+        )?;
+    }
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS runtime_outbox_source
+             ON runtime_outbox(table_name,row_id);
+         CREATE INDEX IF NOT EXISTS runtime_outbox_actor_kind
+             ON runtime_outbox(actor_state_kind,table_name,change_kind);",
+    )?;
+    Ok(())
+}
+
+fn remove_local_bookkeeping_triggers(
+    connection: &crate::database::Connection,
+) -> Result<(), StorageError> {
+    // Ledger transitions publish through their own W paths. These composite-key
+    // tables have no rowid and must never acquire generic domain triggers.
+    for table in [
+        "gateway_receive_receipt",
+        "gateway_receive_work",
+        "gateway_ack_intent",
+        "gateway_inbox_loss",
+        "gateway_receive_epoch",
+        // Footprint migration bookkeeping must never publish domain invalidations.
+        "message_footprint_migration",
+        "receive_erased_input",
+        "pairing_floor",
+        "pairing_live",
+        "pairing_head",
+        "pairing_terminal",
+        "pairing_adoption",
+        "pairing_full_tail",
+        "pairing_source_cleanup",
+        "pairing_full_tail_apply",
+        "pairing_full_tail_dependency",
+        "pairing_full_completion",
+        "pairing_own_sync",
+        // Data-only source-qualified MAC verifiers have no domain rowid.
+        "full_imported_mac_bundle",
+    ] {
+        for operation in ["insert", "update", "delete"] {
+            connection
+                .execute_batch(&format!("DROP TRIGGER IF EXISTS runtime_{table}_{operation}"))?;
         }
-        Ok(())
     }
+    Ok(())
+}
 
-    fn install_domain_change_triggers(&self) -> Result<(), StorageError> {
-        self.remove_local_bookkeeping_triggers()?;
-        let mut statement = self.connection.prepare(
+fn install_domain_change_triggers(
+    connection: &crate::database::Connection,
+) -> Result<(), StorageError> {
+    remove_local_bookkeeping_triggers(connection)?;
+    let mut statement = connection.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
              AND name NOT IN ('gateway_receive_receipt','gateway_receive_work','gateway_ack_intent','gateway_inbox_loss','gateway_receive_epoch','message_footprint_migration','receive_erased_input','raw_inner_owner','raw_inner_copy','raw_inner_evidence','pairing_floor','pairing_live','pairing_head','pairing_terminal','pairing_adoption','pairing_full_tail','pairing_source_cleanup','pairing_full_tail_apply','pairing_full_tail_dependency','pairing_full_completion','pairing_own_sync','full_imported_mac_bundle') AND lower(name) NOT GLOB 'local_search_*' AND name NOT LIKE 'account_mac_%' AND name NOT LIKE 'object_segment_%' AND name NOT LIKE 'object_retention_%' AND name NOT LIKE 'object_erasure_%' AND name NOT LIKE 'object_reference_%' AND name NOT LIKE 'object_legacy_%' AND name NOT LIKE 'object_identity_%' AND name NOT LIKE 'object_payload_%' AND name NOT LIKE 'object_transport_%' AND name NOT IN ('object_message_reference','object_runtime_response','account_erasure_generation') AND name NOT LIKE 'backup_archived_%' AND name NOT LIKE 'runtime_attachment_%' AND name NOT LIKE 'runtime_home_migration_%' AND name NOT LIKE 'runtime_own_copy_%' AND name NOT IN ('local_event_counter','message_footprint','message_copy_binding','message_footprint_actor_stage','message_footprint_outbox_stage','message_footprint_journal_stage','runtime_account_identity','runtime_privacy_maintenance','runtime_outbox','runtime_receipt_retention','runtime_operation','schema_migration','account_key_check','runtime_journal','runtime_journal_bounds','runtime_unrouted','runtime_message_content','runtime_inbox_dead_letter','runtime_inbox_retry','runtime_inbox_recovery','runtime_inbox_policy','runtime_inbox_changes','contact_request_decision','contact_link_decision','contact_message_fence_retention')"
         )?;
-        let tables = statement
-            .query_map([], |row| row.get::<_, String>(0))?
+    let tables = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // AFTER triggers execute in the domain statement's transaction, including all rollback paths.
+    // Events contain invalidation keys only; no encrypted business payload or key is published.
+    for table in tables {
+        let quoted = table.replace('"', "\"\"");
+        let literal = table.replace('\'', "''");
+        let mut columns = connection.prepare("SELECT name FROM pragma_table_info(?1)")?;
+        let names = columns
+            .query_map(params![table], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        // AFTER triggers execute in the domain statement's transaction, including all rollback paths.
-        // Events contain invalidation keys only; no encrypted business payload or key is published.
-        for table in tables {
-            let quoted = table.replace('"', "\"\"");
-            let literal = table.replace('\'', "''");
-            let mut columns = self.connection.prepare("SELECT name FROM pragma_table_info(?1)")?;
-            let names = columns
-                .query_map(params![table], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let changed = names
+        let changed = names
+            .iter()
+            .map(|column| {
+                let column = column.replace('"', "\"\"");
+                format!("OLD.\"{column}\" IS NOT NEW.\"{column}\"")
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        for (operation, source) in [("insert", "NEW"), ("update", "NEW"), ("delete", "OLD")] {
+            // A privacy fence can erase an inserted/updated copy in an earlier AFTER
+            // trigger. Do not publish its original identity-bearing keys afterward.
+            let present = format!("EXISTS(SELECT 1 FROM \"{quoted}\" WHERE rowid=NEW.rowid)");
+            // Private pair crypto state is never a product update. In particular,
+            // Typing may persist only the ratchet/allowance, without an outbox trail.
+            let private_pair = if table == "runtime_actor_state" {
+                format!(
+                    "{source}.state_kind NOT LIKE 'dm-pair/session/%' AND {source}.state_kind NOT LIKE 'dm-pair/ephemeral-seals/%'"
+                )
+            } else {
+                "1".to_owned()
+            };
+            let guard = match operation {
+                "insert" => format!("WHEN {present} AND ({private_pair})"),
+                "update" => format!("WHEN {present} AND ({changed}) AND ({private_pair})"),
+                _ => format!("WHEN {private_pair}"),
+            };
+            let fields = names
                 .iter()
-                .map(|column| {
-                    let column = column.replace('"', "\"\"");
-                    format!("OLD.\"{column}\" IS NOT NEW.\"{column}\"")
-                })
-                .collect::<Vec<_>>()
-                .join(" OR ");
-            for (operation, source) in [("insert", "NEW"), ("update", "NEW"), ("delete", "OLD")] {
-                // A privacy fence can erase an inserted/updated copy in an earlier AFTER
-                // trigger. Do not publish its original identity-bearing keys afterward.
-                let present = format!("EXISTS(SELECT 1 FROM \"{quoted}\" WHERE rowid=NEW.rowid)");
-                // Private pair crypto state is never a product update. In particular,
-                // Typing may persist only the ratchet/allowance, without an outbox trail.
-                let private_pair = if table == "runtime_actor_state" {
-                    format!(
-                        "{source}.state_kind NOT LIKE 'dm-pair/session/%' AND {source}.state_kind NOT LIKE 'dm-pair/ephemeral-seals/%'"
+                .filter(|name| {
+                    matches!(
+                        name.as_str(),
+                        "conversation_id"
+                            | "message_id"
+                            | "sender_id"
+                            | "object_id"
+                            | "group_id"
+                            | "member_principal_id"
+                            | "link_id"
+                            | "requester_id"
+                            | "target_id"
+                            | "state_kind"
+                            | "contact_identity_commitment"
+                            | "identity_commitment"
+                            | "transfer_id"
+                            | "envelope_id"
+                            | "receiver_device_id"
+                            | "receipt_id"
+                            | "server_id"
                     )
-                } else {
-                    "1".to_owned()
-                };
-                let guard = match operation {
-                    "insert" => format!("WHEN {present} AND ({private_pair})"),
-                    "update" => format!("WHEN {present} AND ({changed}) AND ({private_pair})"),
-                    _ => format!("WHEN {private_pair}"),
-                };
-                let fields = names
-                    .iter()
-                    .filter(|name| {
-                        matches!(
-                            name.as_str(),
-                            "conversation_id"
-                                | "message_id"
-                                | "sender_id"
-                                | "object_id"
-                                | "group_id"
-                                | "member_principal_id"
-                                | "link_id"
-                                | "requester_id"
-                                | "target_id"
-                                | "state_kind"
-                                | "contact_identity_commitment"
-                                | "identity_commitment"
-                                | "transfer_id"
-                                | "envelope_id"
-                                | "receiver_device_id"
-                                | "receipt_id"
-                                | "server_id"
-                        )
-                    })
-                    .map(|name| format!("'{name}',{source}.\"{name}\""))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let keys = if fields.is_empty() {
-                    "'{}'".to_owned()
-                } else {
-                    format!("json_object({fields})")
-                };
-                self.connection.execute_batch(&format!(
-                    "DROP TRIGGER IF EXISTS \"runtime_{quoted}_{operation}\""
-                ))?;
-                self.connection.execute_batch(&format!(
+                })
+                .map(|name| format!("'{name}',{source}.\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(",");
+            let keys = if fields.is_empty() {
+                "'{}'".to_owned()
+            } else {
+                format!("json_object({fields})")
+            };
+            connection.execute_batch(&format!(
+                "DROP TRIGGER IF EXISTS \"runtime_{quoted}_{operation}\""
+            ))?;
+            connection.execute_batch(&format!(
                     "CREATE TRIGGER IF NOT EXISTS \"runtime_{quoted}_{operation}\" AFTER {operation} ON \"{quoted}\" {guard}
                      BEGIN INSERT INTO runtime_outbox(table_name,change_kind,row_id,keys_json)
                      VALUES('{literal}','{operation}',{source}.rowid,{keys}); END;"
                 ))?;
-            }
         }
-        Ok(())
     }
+    Ok(())
+}
 
-    fn remove_consent_bookkeeping_triggers(&self) -> Result<(), StorageError> {
-        // Decision clocks and expiry bookkeeping are not domain projections. Existing domain
-        // rows still generate their ordinary invalidations in the same transaction.
-        for table in
-            ["contact_request_decision", "contact_link_decision", "contact_message_fence_retention"]
-        {
-            for operation in ["insert", "update", "delete"] {
-                self.connection.execute_batch(&format!(
-                    "DROP TRIGGER IF EXISTS runtime_{table}_{operation}"
-                ))?;
-            }
+fn remove_consent_bookkeeping_triggers(
+    connection: &crate::database::Connection,
+) -> Result<(), StorageError> {
+    // Decision clocks and expiry bookkeeping are not domain projections. Existing domain
+    // rows still generate their ordinary invalidations in the same transaction.
+    for table in
+        ["contact_request_decision", "contact_link_decision", "contact_message_fence_retention"]
+    {
+        for operation in ["insert", "update", "delete"] {
+            connection
+                .execute_batch(&format!("DROP TRIGGER IF EXISTS runtime_{table}_{operation}"))?;
         }
-        Ok(())
     }
+    Ok(())
 }

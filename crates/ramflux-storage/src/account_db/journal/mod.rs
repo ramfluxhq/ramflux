@@ -38,10 +38,11 @@ pub struct JournalBounds {
 const LATEST_TOPIC_EVENT_SQL: &str =
     "SELECT seq,at,topic,body_json FROM runtime_journal WHERE topic=?1 ORDER BY seq DESC LIMIT 1";
 
-impl AccountDb {
-    pub(super) fn install_journal_schema(&self) -> Result<(), StorageError> {
-        let transaction = self.connection.immediate_transaction()?;
-        self.connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_journal(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,topic TEXT NOT NULL,body_json BLOB NOT NULL,source_key TEXT NOT NULL UNIQUE,sticky INTEGER NOT NULL DEFAULT 0,acknowledged INTEGER NOT NULL DEFAULT 0,subject TEXT);
+pub(super) fn install_journal_tables(
+    connection: &crate::database::Connection,
+) -> Result<(), StorageError> {
+    let transaction = connection.immediate_transaction()?;
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_journal(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,topic TEXT NOT NULL,body_json BLOB NOT NULL,source_key TEXT NOT NULL UNIQUE,sticky INTEGER NOT NULL DEFAULT 0,acknowledged INTEGER NOT NULL DEFAULT 0,subject TEXT);
         CREATE TABLE IF NOT EXISTS runtime_journal_bounds(singleton INTEGER PRIMARY KEY CHECK(singleton=1),head_seq INTEGER NOT NULL,pruned_through INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS runtime_journal_topic_seq ON runtime_journal(topic,seq);
         DROP INDEX IF EXISTS runtime_journal_topic;
@@ -58,11 +59,16 @@ impl AccountDb {
         CREATE TABLE IF NOT EXISTS runtime_message_sequence(message_id TEXT PRIMARY KEY,seq INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS runtime_message_content(message_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,body BLOB NOT NULL);
         CREATE INDEX IF NOT EXISTS runtime_message_content_conversation ON runtime_message_content(conversation_id,message_id);")?;
-        self.connection.execute_batch("CREATE TRIGGER IF NOT EXISTS runtime_content_deleted AFTER UPDATE OF deleted ON direct_message_projection WHEN NEW.deleted=1 BEGIN DELETE FROM runtime_message_content WHERE message_id=NEW.message_id; END;
+    connection.execute_batch("CREATE TRIGGER IF NOT EXISTS runtime_content_deleted AFTER UPDATE OF deleted ON direct_message_projection WHEN NEW.deleted=1 BEGIN DELETE FROM runtime_message_content WHERE message_id=NEW.message_id; END;
             CREATE TRIGGER IF NOT EXISTS runtime_content_removed AFTER DELETE ON direct_message_projection BEGIN DELETE FROM runtime_message_content WHERE message_id=OLD.message_id; END;
             CREATE TRIGGER IF NOT EXISTS runtime_message_sequence_removed AFTER DELETE ON direct_message_projection BEGIN DELETE FROM runtime_message_sequence WHERE message_id=OLD.message_id; END;")?;
-        transaction.commit()?;
-        Ok(())
+    transaction.commit()?;
+    Ok(())
+}
+
+impl AccountDb {
+    pub(super) fn install_journal_schema(&self) -> Result<(), StorageError> {
+        install_journal_tables(&self.connection)
     }
 
     /// Returns the newest retained transition for a topic, for older snapshot upgrades.

@@ -31,9 +31,10 @@ fn id(bytes: &[u8; 32]) -> String {
     }
     out
 }
-impl AccountDb {
-    pub(super) fn install_attachment_retirement_schema(&self) -> Result<(), StorageError> {
-        self.connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_attachment_reference(
+pub(super) fn install_attachment_retirement_tables(
+    connection: &crate::database::Connection,
+) -> Result<(), StorageError> {
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_attachment_reference(
           reference_id BLOB PRIMARY KEY CHECK(length(reference_id)=32), message_id TEXT NOT NULL, reference_hash TEXT NOT NULL,
           sealed INTEGER NOT NULL DEFAULT 0 CHECK(sealed IN(0,1)), grants INTEGER NOT NULL DEFAULT 0 CHECK(grants BETWEEN 0 AND 64));
           CREATE TABLE IF NOT EXISTS runtime_attachment_grant(
@@ -49,9 +50,11 @@ impl AccountDb {
           INSERT OR IGNORE INTO runtime_attachment_budget VALUES(1,0);
           CREATE TABLE IF NOT EXISTS runtime_attachment_expiry(grant_id BLOB PRIMARY KEY,expires INTEGER NOT NULL);
           CREATE INDEX IF NOT EXISTS runtime_attachment_expiry_due ON runtime_attachment_expiry(expires,grant_id);")?;
-        self.connection.call(|db| Ok(recount_archive(db).and_then(|()| backfill_expiry(db))))??;
-        Ok(())
-    }
+    connection.call(|db| Ok(recount_archive(db).and_then(|()| backfill_expiry(db))))??;
+    Ok(())
+}
+
+impl AccountDb {
     /// Bind only after authenticating and persisting the exact message reference.
     /// The account DB namespace plus message id and reference hash qualify this association.
     /// # Errors

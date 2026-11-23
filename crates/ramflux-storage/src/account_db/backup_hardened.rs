@@ -89,6 +89,9 @@ fn migrate_clean(path: &Path, key: &AccountDbKey) -> Result<(), StorageError> {
     let connection = crate::database::Connection::open(path)?;
     crate::encryption::apply_key(&connection, key)?;
     crate::schema::migrate_account_db(&connection)?;
+    // Runtime tables are not migrations. Install the product definitions before the
+    // copy list is read so their rows, including runtime_actor_state, move into this file.
+    super::runtime::install_backup_schema(&connection)?;
     // This file is a new database. The generation is the schema just installed.
     // The source header is not copied, so a clean export would otherwise stay at 0.
     connection.execute_batch(&format!(
