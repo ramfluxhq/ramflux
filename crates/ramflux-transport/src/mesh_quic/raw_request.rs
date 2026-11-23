@@ -34,6 +34,21 @@ fn deadline_error() -> TransportError {
     TransportError::Quic("mesh request deadline exceeded".into())
 }
 
+fn wait_until_raw_finished(mut finished: tokio::sync::oneshot::Receiver<()>) {
+    let limit = Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match finished.try_recv() {
+            Ok(()) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => return,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                if Instant::now() >= limit {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+}
+
 pub(crate) fn mesh_quic_post_raw_with_deadline_sync<T: serde::Serialize>(
     post: MeshQuicRawPost<'_, T>,
 ) -> Result<Vec<u8>, TransportError> {
@@ -75,8 +90,10 @@ pub(crate) fn mesh_quic_post_raw_with_deadline_sync<T: serde::Serialize>(
     let inbound = receiver.recv_timeout(remaining);
     // The worker forgets a silent peer before acknowledging. Wait for that, including
     // when this deadline wins the race, so the caller's next post cannot reuse it.
+    // std sleep: this function is already blocking, and a runtime worker cannot park
+    // through `blocking_recv`.
     drop(receiver);
-    let _terminated = finished.blocking_recv();
+    wait_until_raw_finished(finished);
     match inbound.map_err(|_| deadline_error())?? {
         MeshQuicClientResponsePayload::RawJson(bytes) => Ok(bytes),
         _ => Err(crate::quic_errors::wire("unexpected raw mesh response kind")),
