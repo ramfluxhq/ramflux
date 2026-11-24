@@ -155,6 +155,8 @@ impl Decode for Config {
                 "allow_raw_messages",
                 "allow_secret_exports",
                 "session_lease",
+                "username_directory",
+                "diag",
             ],
         )?;
         let root = i::string(v, "data_root")?;
@@ -167,7 +169,10 @@ impl Decode for Config {
             }
             _ => return Err(i::invalid()),
         };
+        let username_directory = read_directory(v)?;
         Ok(Config {
+            diag: read_diag(v)?,
+            username_directory,
             session_lease: read_session_lease(v)?,
             allow_raw_messages: raw,
             allow_secret_exports: secret,
@@ -191,4 +196,29 @@ fn read_session_lease(v: &Value) -> Result<Option<(crate::SessionLeasePriority, 
         Some(value) => value.as_u64().filter(|wait| *wait <= 5_000).ok_or_else(i::invalid)?,
     };
     Ok(Some((priority, wait_ms)))
+}
+
+fn read_directory(
+    v: &Value,
+) -> Result<Option<ramflux_protocol::username_directory::NativeDirectoryPin>, CAbiError> {
+    let Some(pin) = v.get("username_directory") else { return Ok(None) };
+    i::object(pin, &["url", "id", "public_key", "generation"])?;
+    let pin = ramflux_protocol::username_directory::NativeDirectoryPin {
+        url: i::string(pin, "url")?.into(),
+        id: i::string(pin, "id")?.into(),
+        public_key: i::string(pin, "public_key")?.into(),
+        generation: pin.get("generation").and_then(Value::as_u64).ok_or_else(i::invalid)?,
+    };
+    crate::username_directory::validate_center(&pin)
+        .map_err(|e| super::super::map_sdk_error(&e))?;
+    Ok(Some(pin))
+}
+
+fn read_diag(v: &Value) -> Result<crate::diag::DiagnosticConfig, CAbiError> {
+    let diag = v.get("diag").map_or_else(
+        || Ok(crate::diag::DiagnosticConfig::default()),
+        |v| serde_json::from_value(v.clone()).map_err(|_| i::invalid()),
+    )?;
+    diag.validate(true).map_err(|_| i::invalid())?;
+    Ok(diag)
 }

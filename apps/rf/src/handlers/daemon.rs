@@ -32,6 +32,8 @@ pub(crate) async fn handle_daemon(socket: PathBuf, command: DaemonCommand) -> Re
                 ));
             }
             let mut config = LocalBusConfig::new(socket, start.data_root);
+            // Environment provisioning is a CLI concern; native clients pass their own pin.
+            config.username_directory = ramflux_sdk::username_directory::configured_center().ok();
             if let (Some(url), Some(path)) = (&start.prx_base_url, &start.prx_token_file) {
                 config = config.with_prx(url, path)?;
             }
