@@ -441,8 +441,20 @@ impl BornAccount {
         vault: &dyn PrimaryVault,
         host: Option<&VerifiedRecord>,
     ) -> Result<super::PrimarySigningLease, SdkError> {
-        group_participant::admit(self, host)?;
+        self.refuse_hosted_agent(host)?;
         self.primary_lease(vault, self.hosts_agent_locally()?)
+    }
+    /// Same hosted-agent admission as [`Self::group_operation_signer`], without a
+    /// signing lease. Call invites use it so a retired agent, or a host desktop the
+    /// directory no longer lists as active, is refused before a call row exists.
+    ///
+    /// # Errors
+    /// `AgentCreationRefused("agent_retired")` when the hosted agent must not publish.
+    pub(crate) fn refuse_hosted_agent(
+        &self,
+        host: Option<&ramflux_crypto::custody::VerifiedRecord>,
+    ) -> Result<(), SdkError> {
+        group_participant::admit(self, host)
     }
     /// Account anchor of the custodian when this device hosts the agent.
     pub(crate) fn hosted_human_anchor(&self) -> Result<Option<String>, SdkError> {
