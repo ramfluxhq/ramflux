@@ -39,6 +39,17 @@ impl AccountDb {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Returns the last outbox row that must be journaled for a completed command.
+    /// # Errors
+    /// Returns an error when the outbox watermark cannot be read.
+    pub fn pending_outbox_head(&self) -> Result<Option<i64>, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT max(sequence) FROM runtime_outbox WHERE published=0",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Finds the newest unpublished change for one actor-state key.
     /// # Errors
     /// Returns an error when the outbox cannot be read.

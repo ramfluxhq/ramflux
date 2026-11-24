@@ -55,6 +55,7 @@ fn runtime(
             head_rx,
             deferred: std::collections::VecDeque::new(),
             ledger: None,
+            publications: std::collections::VecDeque::new(),
             resume_receive_until: None,
             pairing: super::super::pairing_calls::Calls::default(),
             username: super::super::username_calls::Calls::default(),

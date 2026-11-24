@@ -32,6 +32,7 @@ pub(super) mod fetches;
 mod head_demand;
 pub(crate) mod head_refresh;
 pub(crate) mod lifecycle_fence;
+mod publication_complete;
 mod publication_park;
 mod readers;
 pub(crate) mod session_thread;
@@ -92,6 +93,7 @@ struct AccountRuntime {
     /// Generic connection work skipped so a demanded head can be applied first.
     deferred: std::collections::VecDeque<super::connection_manager::AccountWork>,
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
+    publications: std::collections::VecDeque<publication_complete::Completion>,
     /// After resume, redrive receive until this instant so a peer reply is not stuck behind
     /// the push safety sweep.
     resume_receive_until: Option<tokio::time::Instant>,
@@ -183,6 +185,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         head_rx,
         deferred: std::collections::VecDeque::new(),
         ledger: None,
+        publications: std::collections::VecDeque::new(),
         resume_receive_until: None,
         transient: TransientHost::default(),
         pairing: pairing_calls::Calls::default(),
@@ -586,6 +589,11 @@ impl AccountRuntime {
                     None => return Ok(false),
                 }
             },
+            () = std::future::ready(()), if !self.publications.is_empty() => {
+                self.advance_publications()?;
+                tokio::task::yield_now().await;
+                return Ok(false);
+            },
             checkpoint=self.transfers.receive.recv()=>{*checkpoints += 1;if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}return Ok(false);},
             work = recv(&mut self.deferred, &mut self.head_rx, &mut self.connection_work) => {
                 *checkpoints += 1;
@@ -616,7 +624,7 @@ impl AccountRuntime {
             } => { self.start_username_delivery(); return Ok(false); },
             completion = self.pairing.receive() => {
                 if let Some(completion) = completion
-                    && self.finish_pairing_begin(completion).await? { return Ok(true); }
+                    && self.finish_pairing_begin(completion)? { return Ok(true); }
                 return Ok(false);
             },
             () = wait_pairing_signal(pairing) => {

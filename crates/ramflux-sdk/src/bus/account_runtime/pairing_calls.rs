@@ -118,7 +118,7 @@ impl AccountRuntime {
         }
         Ok(staged)
     }
-    pub(super) async fn finish_pairing_begin(
+    pub(super) fn finish_pairing_begin(
         &mut self,
         completion: Completion,
     ) -> Result<bool, SdkError> {
@@ -129,7 +129,7 @@ impl AccountRuntime {
                 super::super::read_model::capture(account, &command.request, &response.body)?;
             }
         }
-        self.complete_command(&command, result, reply).await
+        self.complete_command(&command, result, reply)
     }
 }
 

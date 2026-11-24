@@ -326,7 +326,7 @@ impl AccountRuntime {
                 Ok(false)
             }
             Dispatch::Park { .. } => Ok(false),
-            Dispatch::Done(result) => self.complete_command(&command, result, reply).await,
+            Dispatch::Done(result) => self.complete_command(&command, result, reply),
         }
     }
 
@@ -384,7 +384,7 @@ impl AccountRuntime {
         }
     }
 
-    pub(super) async fn complete_command(
+    pub(super) fn complete_command(
         &mut self,
         command: &AccountCommand,
         result: Result<super::super::actor::ActorResponse, SdkError>,
@@ -411,22 +411,11 @@ impl AccountRuntime {
         {
             connection.wake_couriers();
         }
-        let result = match self.publish_yielding(&command.request).await {
-            Ok(()) => result,
-            // The progress row is already committed. A later outbox wake can fail
-            // with the writer pause, which the bus reports as ValidationFailed.
-            // The host does not retry that code, so the owner copy must still go out.
-            Err(error) if result.is_ok() && command.request.method == "agent.progress" => {
-                tracing::warn!(
-                    account_id = %self.id,
-                    %error,
-                    "agent progress publication deferred; owner copy remains"
-                );
-                result
-            }
-            Err(error) => Err(error),
-        };
-        let _ = reply.send(result);
+        if self.state.accounts.contains_key(&self.id) {
+            self.park_completion(&command.request, result, reply);
+        } else {
+            let _ = reply.send(result);
+        }
         Ok(matches!(command.request.method.as_str(), "account.lock" | "account.sign_out")
             && self.state.accounts.is_empty())
     }

@@ -188,7 +188,7 @@ impl AccountRuntime {
                     owner_copy: None,
                 })
             });
-            self.complete_command(&command, result, reply).await
+            self.complete_command(&command, result, reply)
         } else {
             if let Ok(result) = result {
                 match adapter::delivery_retry(&self.state, &self.id, &result.response_body) {

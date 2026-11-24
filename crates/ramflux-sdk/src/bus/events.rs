@@ -99,7 +99,7 @@ fn lagged(subscriber: &LocalBusSubscriber, event: &LocalBusFrame) {
 
 enum PageEnd {
     Drained,
-    Page,
+    Page(i64),
     Paused,
 }
 
@@ -115,11 +115,26 @@ pub(super) async fn publish(
     client.expire_surface_pending()?;
     let db = client.account_db()?;
     loop {
-        match publish_one_page(client, account_id, request, networking_expiry, sender, db)? {
+        match publish_one_page(client, account_id, request, networking_expiry, sender, db, 256)? {
             PageEnd::Drained => return Ok(()),
             PageEnd::Paused => return Err(SdkError::WriterPause),
-            PageEnd::Page => {}
+            PageEnd::Page(sequence) => finish_published_page(db, request, sequence)?,
         }
+    }
+}
+
+/// Journals at most one outbox entry; the actor polls its mailbox before the next entry.
+pub(super) fn publish_slice(
+    client: &RamfluxClient,
+    account_id: &str,
+    request: &LocalBusFrame,
+    networking_expiry: Option<(i64, &LocalBusFrame)>,
+    sender: &mpsc::Sender<EventBatch>,
+) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    match publish_one_page(client, account_id, request, networking_expiry, sender, db, 1)? {
+        PageEnd::Paused => Err(SdkError::WriterPause),
+        PageEnd::Drained | PageEnd::Page(_) => Ok(()),
     }
 }
 
@@ -130,8 +145,9 @@ fn publish_one_page(
     networking_expiry: Option<(i64, &LocalBusFrame)>,
     sender: &mpsc::Sender<EventBatch>,
     db: &ramflux_storage::AccountDb,
+    limit: u32,
 ) -> Result<PageEnd, SdkError> {
-    let entries = db.pending_outbox(256)?;
+    let entries = db.pending_outbox(limit)?;
     let Some(last) = entries.last() else {
         return Ok(PageEnd::Drained);
     };
@@ -153,8 +169,7 @@ fn publish_one_page(
     if paused {
         return Ok(PageEnd::Paused);
     }
-    finish_published_page(db, request, last_sequence)?;
-    Ok(PageEnd::Page)
+    Ok(PageEnd::Page(last_sequence))
 }
 
 fn journal_entries(
