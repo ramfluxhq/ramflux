@@ -365,12 +365,23 @@ fn a2i_domains_and_group_native() -> TestResult {
         federation: None,
     }))?;
     RamfluxClient::validate_generated_control(&no_route)?;
-    let incomplete_route =
+    let empty_url = group_state(group_control_body::Value::Request(GroupControlBodyRequest {
+        request: Some(NativeGroupChangeRequest { canonical: canonical("req") }),
+        federation: Some(LocalBusFederationRoute { federation_url: String::new(), ..route() }),
+    }))?;
+    RamfluxClient::validate_generated_control(&empty_url)?;
+    let missing_source =
         group_state(group_control_body::Value::Request(GroupControlBodyRequest {
             request: Some(NativeGroupChangeRequest { canonical: canonical("req") }),
-            federation: Some(LocalBusFederationRoute { federation_url: String::new(), ..route() }),
+            federation: Some(LocalBusFederationRoute { source_node_id: String::new(), ..route() }),
         }))?;
-    assert!(RamfluxClient::validate_generated_control(&incomplete_route).is_err());
+    assert!(RamfluxClient::validate_generated_control(&missing_source).is_err());
+    let missing_target =
+        group_state(group_control_body::Value::Request(GroupControlBodyRequest {
+            request: Some(NativeGroupChangeRequest { canonical: canonical("req") }),
+            federation: Some(LocalBusFederationRoute { target_node_id: String::new(), ..route() }),
+        }))?;
+    assert!(RamfluxClient::validate_generated_control(&missing_target).is_err());
     RamfluxClient::validate_generated_control(&group_state(group_control_body::Value::Result(
         GroupControlBodyResult {
             result: Some(NativeGroupChangeResult { canonical: canonical("res") }),
