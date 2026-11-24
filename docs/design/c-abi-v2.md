@@ -620,13 +620,30 @@ background decryption. No plaintext key persistence or file-vault fallback.
 
 ### Ownership and acceptance boundary
 
-Shared storage does not grant concurrent writer/session access. The existing
-whole-root lease and same-process registry still apply. A second app/extension
-open must receive `AccountBusy` until ownership is released. This contract adds
-no extension-safe wake-fetch entry point, shared-reader mode or session handoff.
-Optional app lock is separate: a presence-gated wrap must not be silently
-replaced by the background wrap when app lock is enabled; this card does not
-implement that policy.
+One process owns mutation of a shared root. `ramflux_v2_client_open` and
+`ramflux_v2_client_open_with_custody` still take the whole-root lease and the
+same-process registry. A second open returns `AccountBusy` (18) and starts no
+supervisor. Account database writes take the per-account writer lock and fail
+immediately with that same status when another process holds it. A receive that
+loses the lock returns before any acknowledgement. An uncommitted write rolls
+back with the process. Journal mode and synchronous settings are unchanged.
+
+`ramflux_v2_shared_snapshot(config, config_len, provider, out)` is the
+extension read. Config is `{data_root, account_id}`. `provider` is the same ABI v1
+OS custody table used by `ramflux_v2_client_open_with_custody`, pointing at the
+shared after-first-unlock device secret. It is retained only for this synchronous
+call and released before return. Locked custody returns `VaultLocked` (31).
+The SDK combines that secret with the existing file secret and opens the device
+wrap; it never checks a code, creates a secret, or reinstates a cleared wrap.
+App lock or explicit account lock removing that wrap returns `AccountCodeRequired`;
+the host must use ordinary account unlock. Missing custody fails closed.
+It does not take the whole-root lease or the writer lock, and it does not start a
+supervisor. One deferred read transaction returns
+`{account_id, direct_message_ids, message_ids}` from the last commit. Output uses
+`ramflux_v2_buffer_free`. Session handoff after suspension is out of scope.
+`rf root snapshot` and `rf root commit` use the same platform custody binding;
+fixture builds require explicit `--itest-memory-vault` selection to share the
+fixture daemon's custody. There is no code-only or file-secret-only fallback.
 
 A scratch host can verify root admission, the real supervisor's account read,
 provider preflight/locked refusal and retain/release balance. Platform acceptance

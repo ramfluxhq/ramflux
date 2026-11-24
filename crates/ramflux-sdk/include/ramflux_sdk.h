@@ -450,6 +450,20 @@ int32_t ramflux_v2_set_host_credential_provider(uint64_t handle,
                                                 void *user);
 
 /*
+ Read one committed account snapshot. Does not start a supervisor or take a writer lease.
+
+ Config is `{data_root, account_id}`. The host supplies the shared OS custody provider.
+ A locked account requires ordinary unlock; this call never checks an account code.
+ Output JSON is `{account_id, direct_message_ids, message_ids}` and uses `ramflux_v2_buffer_free`.
+ A root owned by another daemon is still readable. A second `ramflux_v2_client_open` of that
+ root remains `AccountBusy`.
+ */
+int32_t ramflux_v2_shared_snapshot(const uint8_t *config,
+                                   size_t config_len,
+                                   const struct RamfluxV2CustodyProvider *provider,
+                                   struct RamfluxBuffer **out);
+
+/*
  Stop networking, flush databases, and close file descriptors.
  Unlocked account state, including the database key, stays in memory.
  Pending operations complete as `RAMFLUX_V2_STATUS_SUSPENDED` (30).

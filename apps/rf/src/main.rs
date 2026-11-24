@@ -103,6 +103,7 @@ async fn run() -> Result<(), RfError> {
         Command::Task(command) => handlers::task::handle_task(socket, command).await,
         Command::Admin(command) => handlers::admin::handle_admin(command),
         Command::Diag(command) => handlers::diag::handle(socket, command).await,
+        Command::Root(command) => handlers::root::handle(&command),
         Command::Attachment(command) => handlers::attachment::handle(socket, command).await,
     }
 }
