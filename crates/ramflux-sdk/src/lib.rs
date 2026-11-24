@@ -141,8 +141,8 @@ pub use bus::{
     LocalBusObjectRevokeRequest, LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
     LocalBusObjectTransferStatusRequest, LocalBusPendingCreation, LocalBusPendingRecovery,
     LocalBusRecoveryClient, LocalBusSubscriptionOpenRequest, LocalMcpGrantSigningBody,
-    LocalMcpStandingApprovalSigningBody, TaskApprovalBinding, serve_local_bus,
-    serve_local_bus_until,
+    LocalMcpStandingApprovalSigningBody, SessionLeasePriority, TaskApprovalBinding,
+    serve_local_bus, serve_local_bus_until,
 };
 #[cfg(feature = "itest-restore-state")]
 #[doc(hidden)]

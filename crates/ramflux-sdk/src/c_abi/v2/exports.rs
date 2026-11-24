@@ -41,6 +41,8 @@ static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registr
 
 #[derive(zeroize::ZeroizeOnDrop)]
 pub(super) struct Config {
+    #[zeroize(skip)]
+    pub(super) session_lease: Option<(crate::SessionLeasePriority, u64)>,
     pub(super) allow_raw_messages: bool,
     pub(super) allow_secret_exports: bool,
     pub(super) data_root: String,
@@ -215,7 +217,7 @@ pub extern "C" fn ramflux_v2_negotiate(
     })
 }
 
-/// Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?,allow_secret_exports?}`.
+/// Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?,allow_secret_exports?,session_lease?}`.
 /// The host must supply an existing private directory; see the shared-root contract.
 /// This may block during startup; invoke off the UI thread. Output is zero on failure.
 #[unsafe(no_mangle)]
@@ -307,6 +309,9 @@ fn open_inner(
     let _opening = Opening(candidate_root);
     let mut bus =
         LocalBusConfig::new(std::path::PathBuf::new(), std::mem::take(&mut config.data_root));
+    if let Some((priority, wait_ms)) = config.session_lease {
+        bus = bus.with_session_lease(priority, std::time::Duration::from_millis(wait_ms));
+    }
     bus.builtin_nodes = std::mem::take(&mut config.builtin_nodes)
         .into_iter()
         .map(|mut profile| profile.take_node())
@@ -765,7 +770,9 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "desktop_required"
         | "ancestor_rejected" => E::PermissionDenied as i32,
         "RateLimited" | "rate_limited" | "Busy" | "quota_exceeded" => E::RateLimited as i32,
-        "AccountBusy" | "DataRootInUse" | "account_busy" => E::AccountBusy as i32,
+        "AccountBusy" | "DataRootInUse" | "account_busy" | "SessionLeaseBusy" => {
+            E::AccountBusy as i32
+        }
         "ObjectErased" | "attachment_deleted" => E::ObjectErased as i32,
         "ObjectIdentityConflict" => E::ObjectIdentityConflict as i32,
         "ObjectOwnershipUnverified" => E::ObjectOwnershipUnverified as i32,

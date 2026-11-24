@@ -15,6 +15,18 @@ const PREVIOUS_HOLDER_WAIT: std::time::Duration = std::time::Duration::from_mill
 const PREVIOUS_HOLDER_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
 impl DataRootLock {
+    pub(super) fn try_acquire(root: &Path) -> Result<Arc<Self>, SdkError> {
+        let file = crate::platform::fs::open_owner_only_read_write(&root.join("daemon.lock"))?;
+        crate::platform::fs::try_lock_exclusive(&file).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                SdkError::DataRootInUse
+            } else {
+                SdkError::Io(error)
+            }
+        })?;
+        Ok(Arc::new(Self { _file: file }))
+    }
+
     pub(crate) fn acquire(root: &Path) -> Result<Arc<Self>, SdkError> {
         // Never unlink this file: all daemon instances must lock the same inode.
         let path = root.join("daemon.lock");

@@ -48,21 +48,13 @@ pub(crate) struct LifecycleRequest {
 pub(crate) async fn serve(
     config: LocalBusConfig,
     stream: DuplexStream,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: (watch::Receiver<bool>, watch::Sender<bool>),
     mut lifecycle: tokio::sync::mpsc::Receiver<LifecycleRequest>,
     ready: oneshot::Sender<Result<(), SdkError>>,
     #[cfg(test)] gate: Option<ShutdownGate>,
 ) -> Result<(), SdkError> {
-    let initialized = (|| {
-        std::fs::create_dir_all(&config.data_root)?;
-        super::daemon::set_owner_only_dir_permissions(&config.data_root)?;
-        let lease = super::data_root_lock::DataRootLock::acquire(&config.data_root)?;
-        crate::custody::reconcile_incomplete_markers(&config.data_root, &lease)?;
-        let supervisor = Supervisor::new(config)?;
-        *supervisor.root_lease.borrow_mut() = Some(lease);
-        Ok::<_, SdkError>(supervisor)
-    })();
-    let supervisor = match initialized {
+    let (mut shutdown, handoff_stop) = shutdown;
+    let supervisor = match initialize(config).await {
         Ok(supervisor) => supervisor,
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -86,8 +78,22 @@ pub(crate) async fn serve(
     let mut stopping = supervisor.stop_requested();
     let mut connection_finished = false;
     let mut lifecycle_open = true;
+    let mut lease_error = None;
+    let mut lease_poll = tokio::time::interval(super::session_lease::POLL);
+    lease_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = lease_poll.tick(), if supervisor.config.session_lease.is_some() => {
+                match super::session_lease::handoff_requested(&supervisor.config.data_root) {
+                    Ok(false) => {},
+                    Ok(true) => {
+                        // Tell the carrier this EOF is an intentional shutdown before closing it.
+                        handoff_stop.send_replace(true);
+                        break;
+                    },
+                    Err(error) => { lease_error = Some(error); break; },
+                }
+            }
             _ = shutdown.changed() => break,
             _ = stopping.changed() => break,
             _ = &mut connection => { connection_finished = true; break; },
@@ -129,7 +135,21 @@ pub(crate) async fn serve(
     background.abort_all();
     while background.join_next().await.is_some() {}
     supervisor.shutdown().await?;
-    stop_result
+    stop_result?;
+    lease_error.map_or(Ok(()), Err)
+}
+
+async fn initialize(config: LocalBusConfig) -> Result<std::rc::Rc<Supervisor>, SdkError> {
+    std::fs::create_dir_all(&config.data_root)?;
+    super::daemon::set_owner_only_dir_permissions(&config.data_root)?;
+    let lease = match config.session_lease {
+        Some(lease) => super::session_lease::acquire(&config.data_root, lease).await?,
+        None => super::data_root_lock::DataRootLock::acquire(&config.data_root)?,
+    };
+    crate::custody::reconcile_incomplete_markers(&config.data_root, &lease)?;
+    let supervisor = Supervisor::new(config)?;
+    *supervisor.root_lease.borrow_mut() = Some(lease);
+    Ok(supervisor)
 }
 
 async fn drive_lifecycle(
