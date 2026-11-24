@@ -443,7 +443,15 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
                     account.client.account_db()?.remove_actor_state(&id)?;
                 }
             }
-            Err(error) => tracing::debug!(%error,"contact control delivery deferred"),
+            Err(error) => {
+                let reason_code =
+                    if crate::client::recipient_home::pinned_fingerprint_required(&error) {
+                        crate::client::recipient_home::PINNED_FINGERPRINT_CODE
+                    } else {
+                        "contact_delivery_deferred"
+                    };
+                tracing::debug!(reason_code, %error,"contact control delivery deferred");
+            }
         }
     }
     Ok(sent)

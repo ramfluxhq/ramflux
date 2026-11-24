@@ -47,7 +47,7 @@ pub(in crate::bus) async fn add_username(
         if contact["root_commitment"].as_str() != Some(&resolved.root_commitment) {
             return Err(ContactReason::RootConflict.into());
         }
-        account.client.pin_contact_home(&resolved.principal_id, &resolved.node)?;
+        pin_username_home(&account.client, &resolved.principal_id, &home)?;
         return Ok(local_bus_ok(contact_response(account, &contact, None)?));
     }
     let mut engine = account.live_session_client().map_err(lookup_failure)?;
@@ -76,11 +76,26 @@ pub(in crate::bus) async fn add_username(
         .await;
     account.apply_session_metadata(engine);
     let contact = result?;
-    account.client.pin_contact_home(&resolved.principal_id, &resolved.node)?;
+    pin_username_home(&account.client, &resolved.principal_id, &home)?;
     if let Some(handle) = &account.connection {
         handle.wake_couriers();
     }
     Ok(local_bus_ok(contact_response(account, &contact, None)?))
+}
+
+fn pin_username_home(
+    client: &RamfluxClient,
+    principal: &str,
+    home: &crate::NodeProfile,
+) -> Result<(), SdkError> {
+    // Same-home resolution is checked above. Use the trusted home profile's key,
+    // rather than the directory centre's key or a caller-supplied fingerprint.
+    client.pin_verified_card_home(
+        principal,
+        &home.node_id,
+        &home.discovery_origin()?,
+        &crate::contact_node_fingerprint(&home.node_public_key)?,
+    )
 }
 
 #[allow(clippy::too_many_lines)]
