@@ -54,3 +54,5 @@ pub use exports::{
 pub use snapshot::ramflux_v2_shared_snapshot;
 pub use suspend::{ramflux_v2_client_resume, ramflux_v2_client_suspend};
 pub use wake_fetch::ramflux_v2_wake_fetch;
+
+pub use exports::ramflux_v2_diag_support_key;

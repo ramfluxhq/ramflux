@@ -450,6 +450,12 @@ int32_t ramflux_v2_set_host_credential_provider(uint64_t handle,
                                                 void *user);
 
 /*
+ Return the build-pinned diagnostic support public key catalog, without opening an account.
+ An unprovisioned build returns available=false. Free output with `ramflux_v2_buffer_free`.
+ */
+int32_t ramflux_v2_diag_support_key(struct RamfluxBuffer **out);
+
+/*
  Read one committed account snapshot. Does not start a supervisor or take a writer lease.
 
  Config is `{data_root, account_id}`. The host supplies the shared OS custody provider.
