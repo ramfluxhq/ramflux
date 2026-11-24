@@ -281,7 +281,7 @@ policies! {
 // Search and daemon shutdown stay unavailable. Username methods and the
 // profile alias are executable. The master phrase is not a bus field.
 pub(super) const DENIED_METHODS: &[&str] = &[
-// Generic media-key export is refused before admission, regardless of export permission.
+    // Generic media-key export is refused before admission, regardless of export permission.
     "call.media.session",
     "daemon.stop",
     "search.cancel",
