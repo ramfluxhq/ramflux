@@ -2554,7 +2554,7 @@ async fn k_op2_storage_refusal_when_user_messages_are_not_recorded() {
 
 #[tokio::test]
 #[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
-async fn k_op1_agent_put_with_custom_endpoint_answers_428() {
+async fn k_op1_agent_put_with_custom_endpoint_accepts_without_confirmation() {
     bounded(async {
         let stub = ModelStub::start(Duration::ZERO).await;
         let mut daemon = Daemon::prepare_with_provider("openrouter", &priced(&stub.provider(), ""));
@@ -2567,19 +2567,11 @@ async fn k_op1_agent_put_with_custom_endpoint_answers_428() {
         let cfg = config(&stub.provider(), "stub-model", None, Tools::All, true);
         let rev = list_revision(&client, &caps).await;
 
-        // Open point 1: a PUT that points an agent at a custom endpoint, without confirmation.
-        let refused = client.put(&caps, &name, &cfg, &rev, false).await;
-        eprintln!("ROW K-OP1-1 PUT custom endpoint without confirmation: {refused:?}");
-        let revision = match &refused {
-            Err(PrxError::Api {
-                status: 428,
-                code: ApiCode::ConfirmationRequired,
-                revision,
-                ..
-            }) => revision.clone().expect("K-OP1-1: 428 carries the revision"),
-            other => panic!("K-OP1-1: must be 428 confirmation_required, got {other:?}"),
-        };
-        // The raw answer, for the report (the reason text PRX gives).
+        // Agent management accepts custom endpoints without high-risk confirmation.
+        let created = client.put(&caps, &name, &cfg, &rev, false).await;
+        eprintln!("ROW K-OP1-1 PUT custom endpoint without confirmation: {created:?}");
+        let created = created.expect("K-OP1-1: unconfirmed agent PUT succeeds");
+        assert_eq!(created.kind, PutKind::Created, "K-OP1-1: first PUT creates the agent");
         let raw_body = serde_json::json!({
             "provider": cfg.provider, "model": "stub-model", "autonomy": "full",
             "tools": ["*"], "enabled": true
@@ -2588,26 +2580,27 @@ async fn k_op1_agent_put_with_custom_endpoint_answers_428() {
             .raw_authorized(
                 reqwest::Method::PUT,
                 &format!("/api/agents/{}", name.as_str()),
-                Some(rev.as_str()),
+                Some(created.readback.revision.as_str()),
                 Some(raw_body),
             )
             .await;
         eprintln!("ROW K-OP1-1 raw answer: {status} {text}");
-        assert_eq!(status, 428, "K-OP1-1 raw");
+        assert_eq!(status, 200, "K-OP1-1: raw unconfirmed replacement succeeds");
         report("K-OP1-1");
 
-        // K-OP1-2: the apply helper turns the same 428 into NeedsConfirmation with the revision.
+        // The apply helper succeeds directly for agent changes.
         match client.apply_agent(&caps, &name, &cfg, None).await {
-            Ok(ApplyOutcome::NeedsConfirmation { revision: got }) => {
-                assert_eq!(got, revision, "K-OP1-2: the revision PRX reported");
+            Ok(ApplyOutcome::Applied(outcome)) => {
+                assert_eq!(outcome.readback.config, cfg, "K-OP1-2: intended config is stored");
             }
-            other => panic!("K-OP1-2: apply must report NeedsConfirmation, got {other:?}"),
+            other => panic!("K-OP1-2: apply must succeed without confirmation, got {other:?}"),
         }
         report("K-OP1-2");
 
-        // K-OP1-3: confirming with that revision applies the change.
+        // The optional confirmation flag remains accepted for agent changes.
+        let revision = list_revision(&client, &caps).await;
         let applied = client.put(&caps, &name, &cfg, &revision, true).await;
-        assert!(applied.is_ok(), "K-OP1-3: confirmed PUT applies: {applied:?}");
+        assert!(applied.is_ok(), "K-OP1-3: confirmed agent PUT also applies: {applied:?}");
         report("K-OP1-3");
         daemon.stop();
     })
