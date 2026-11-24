@@ -20,6 +20,7 @@ mod import_job;
 #[cfg(test)]
 mod listener;
 mod meta;
+mod metadata;
 mod owner_wire;
 mod path_admit;
 mod plane;

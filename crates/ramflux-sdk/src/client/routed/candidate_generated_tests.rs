@@ -1092,6 +1092,10 @@ fn edit_media_reference(target: &Fixture, index: u8) -> Result<g::MediaRef, SdkE
         retention_class: "relay_retained.v1".into(),
     };
     let reference = large::MediaRef {
+        width: None,
+        height: None,
+        duration_ms: None,
+        animated: None,
         mime_type: "image/jpeg".into(),
         file_name: Some(format!("old-media-{index}-canary")),
         inline_thumbnail: Some(large::Thumbnail {

@@ -117,7 +117,11 @@ pub(super) fn accept(store: &Store, operation: &str, bytes: &[u8]) -> super::met
             &row.prepare_id,
             row.generation,
             len,
-            super::thumbnail::Finished { digest, thumbnail: None },
+            super::metadata::Finished {
+                digest,
+                thumbnail: None,
+                metadata: super::metadata::Metadata::default(),
+            },
             NOW,
         )
         .unwrap()
@@ -268,7 +272,11 @@ fn digest_mismatch_fences_and_deletes_the_snapshot() {
             &row.prepare_id,
             1,
             5,
-            super::thumbnail::Finished { digest: [9; 32], thumbnail: None },
+            super::metadata::Finished {
+                digest: [9; 32],
+                thumbnail: None,
+                metadata: super::metadata::Metadata::default(),
+            },
             NOW,
         )
         .unwrap_err();

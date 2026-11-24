@@ -279,6 +279,18 @@ The SDK derives the sender from its authenticated device. A group send passes
 submission use the existing SDK delivery paths. DM and group media use the same
 generated Message contract.
 
+Finish also accepts optional `width`, `height`, `duration_ms`, and `animated`.
+Width and height must appear together, each in 1–32768 pixels. Duration is an
+unsigned u64 millisecond count: use an exact decimal string (safe JSON integers
+are also accepted). Zero duration and `animated:false` retain explicit presence;
+absent values mean unknown. Accepted metadata and poster are immutable on replay.
+These are client-supplied hints; the SDK neither decodes nor transcodes the body.
+The encrypted layer-5 `MediaRef` carries fields 9–12 in that order, preserving
+`inline_thumbnail` as the M1 poster. Message reads expose ProtoJSON `width`,
+`height`, `durationMs` (decimal string), and `animated` after reopen. No metadata
+is published to the relay. Bindings must pin the new descriptor. Unknown media fields are never silently
+dropped by the canonical scanner.
+
 The call returns the usual asynchronous operation handle. Its completion body has
 `message_id`, `conversation_id`, `delivery_state` (`submitted` or `failed`), and
 per-target `deliveries` with stable error codes on failure. Submitted means gateway
@@ -419,12 +431,10 @@ A local delete applies the shared local-account deletion and returns
 `delivery_state:"local"` with an empty deliveries list; it never fans out to peers.
 
 These structural operations obey the existing message-schema activation gate.
-Negotiation reports `message_schema_generation`. Main currently has storage generation **0**: they return the typed
-`peer_upgrade_required` refusal before allocating a counter, payload, ratchet or
-outbox. This bridge does not activate generation 1 or substitute legacy text for
-a structural operation. Existing generation-zero send and local `message.delete`
-behavior remains available. Generation-enabled tests exercise real native
-identity, reference derivation, authorization, exact retries and payload encoding.
+Negotiation reports `message_schema_generation`. Storage generation remains **1**;
+media metadata advances the wire application layer to **5** and changes the
+descriptor fingerprint. Generation-zero stores are refused with
+`SchemaResetRequired`; no migration is performed.
 
 Generated API errors remain in the owned completion JSON body as
 `{code,name,message,details}` (including target-not-found/deleted, edit-conflict,

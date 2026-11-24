@@ -143,6 +143,22 @@ fn message_limits(
     if matches!(descriptor.name(), "Task" | "Surface") && bytes.len() > 30_720 {
         return Err(ValidationError::Limit);
     }
+    if descriptor.name() == "MediaRef" {
+        let (mut width, mut height) = (None, None);
+        let mut input = bytes;
+        while !input.is_empty() {
+            let field = wire::field(&mut input)?;
+            if matches!(field.tag, 9 | 10) {
+                let value = u32::try_from(field.scalar).map_err(|_| ValidationError::Content)?;
+                if field.tag == 9 {
+                    width = Some(value);
+                } else {
+                    height = Some(value);
+                }
+            }
+        }
+        super::media_metadata::validate_dimensions(width, height)?;
+    }
     if descriptor.name() == "GroupKeyDistribution" && bytes.len() > 4096 {
         return Err(ValidationError::Limit);
     }

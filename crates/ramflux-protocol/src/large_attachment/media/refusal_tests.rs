@@ -35,6 +35,10 @@ fn media_nested_messages_refuse_unknown_duplicate_and_oversized_fields() {
     let reference = MediaRef {
         object_id: case["object_id_base64url"].as_str().unwrap().into(),
         manifest_digest: manifest.hash().unwrap(),
+        width: None,
+        height: None,
+        duration_ms: None,
+        animated: None,
         mime_type: "application/octet-stream".into(),
         size: manifest.plaintext_length,
         key_slots: manifest.key_slots.clone(),

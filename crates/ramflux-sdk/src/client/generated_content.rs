@@ -118,17 +118,14 @@ impl RamfluxClient {
         let binding =
             registry::kind_binding(kind).ok_or_else(|| invalid("unsupported generated kind"))?;
         let floor = registry::PROFILE_FLOOR.max(binding.first_layer);
-        if validation::scan_message(binding.body, &body, floor).map_err(content_error)?
-            == ScanOutcome::Supported
-        {
-            return Ok(floor);
+        for layer in floor..=COMPILED_LAYER {
+            if validation::scan_message(binding.body, &body, layer).map_err(content_error)?
+                == ScanOutcome::Supported
+            {
+                return Ok(layer);
+            }
         }
-        if validation::scan_message(binding.body, &body, COMPILED_LAYER).map_err(content_error)?
-            != ScanOutcome::Supported
-        {
-            return Err(invalid("unsupported generated fields"));
-        }
-        Ok(COMPILED_LAYER)
+        Err(invalid("unsupported generated fields"))
     }
 
     pub(crate) fn encode_generated_inner_at_layer(

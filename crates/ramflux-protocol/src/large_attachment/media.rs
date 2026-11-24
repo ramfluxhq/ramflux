@@ -261,6 +261,10 @@ pub struct MediaRef {
     pub mime_type: String,
     pub file_name: Option<String>,
     pub inline_thumbnail: Option<Thumbnail>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub duration_ms: Option<u64>,
+    pub animated: Option<bool>,
     pub object_id: String,
     pub manifest_digest: [u8; 32],
     pub size: u64,
@@ -275,10 +279,12 @@ pub enum PeerMedia<'a> {
 }
 
 impl MediaRef {
-    /// Canonical S0 `MediaRef` fields 1 through 8 for a large attachment.
+    /// Canonical `MediaRef` fields 1 through 12 for a large attachment.
     /// # Errors
     /// Rejects invalid inner/thumbnail fields or encoded length above the cap.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, FormatError> {
+        crate::message::media_metadata::validate_dimensions(self.width, self.height)
+            .map_err(|_| FormatError("media dimensions"))?;
         if self.size != self.large_manifest.plaintext_length
             || self.key_slots != self.large_manifest.key_slots
             || self.manifest_digest != self.large_manifest.hash()?
@@ -310,6 +316,18 @@ impl MediaRef {
             bytes(&mut out, 7, &t.encode()?);
         }
         bytes(&mut out, 8, &self.large_manifest.canonical_bytes()?);
+        for (tag, value) in [
+            (9, self.width.map(u64::from)),
+            (10, self.height.map(u64::from)),
+            (11, self.duration_ms),
+            (12, self.animated.map(u64::from)),
+        ] {
+            if let Some(value) = value {
+                // Optional scalars retain explicit zero/false presence.
+                varint(&mut out, tag << 3);
+                varint(&mut out, value);
+            }
+        }
         if out.len() > MAX_MANIFEST_BYTES {
             return Err(FormatError("reference cap"));
         }
@@ -327,6 +345,10 @@ impl MediaRef {
             key_slots: Vec::new(),
             file_name: None,
             inline_thumbnail: None,
+            width: None,
+            height: None,
+            duration_ms: None,
+            animated: None,
             large_manifest: MediaManifest::default(),
         };
         for field in fields(input)? {
@@ -340,6 +362,16 @@ impl MediaRef {
                 6 => r.file_name = Some(string(f.data()?)?),
                 7 => r.inline_thumbnail = Some(Thumbnail::decode(f.data()?)?),
                 8 => r.large_manifest = MediaManifest::decode(f.data()?)?,
+                9 => r.width = Some(narrow(f.number()?)?),
+                10 => r.height = Some(narrow(f.number()?)?),
+                11 => r.duration_ms = Some(f.number()?),
+                12 => {
+                    r.animated = Some(match f.number()? {
+                        0 => false,
+                        1 => true,
+                        _ => return Err(FormatError("media animated boolean")),
+                    });
+                }
                 _ => return Err(FormatError("unknown reference field")),
             }
         }
@@ -370,10 +402,19 @@ impl MediaRef {
     /// Pure representation policy; no capability or partial manifest in fallback.
     #[must_use]
     pub fn for_peer<'a>(&'a self, layer: u32, caption: &'a str) -> PeerMedia<'a> {
-        if layer >= 4 {
+        let required_layer = if self.width.is_some()
+            || self.height.is_some()
+            || self.duration_ms.is_some()
+            || self.animated.is_some()
+        {
+            5
+        } else {
+            4
+        };
+        if layer >= required_layer {
             PeerMedia::Large(self)
         } else {
-            PeerMedia::CaptionWithUpgradeRequired { caption, required_layer: 4 }
+            PeerMedia::CaptionWithUpgradeRequired { caption, required_layer }
         }
     }
 }

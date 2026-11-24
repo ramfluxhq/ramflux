@@ -25,6 +25,10 @@ fn manifests(case: &Value) -> (MediaRef, VerifiedContentManifest) {
     let reference = MediaRef {
         object_id: case["object_id_base64url"].as_str().unwrap().into(),
         manifest_digest: inner.hash().unwrap(),
+        width: None,
+        height: None,
+        duration_ms: None,
+        animated: None,
         mime_type: "application/octet-stream".into(),
         size: inner.plaintext_length,
         key_slots: inner.key_slots.clone(),

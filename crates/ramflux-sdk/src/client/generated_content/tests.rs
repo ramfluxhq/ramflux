@@ -94,6 +94,10 @@ fn prepared_media() -> Result<MediaRef, Box<dyn std::error::Error>> {
     let reference = large::MediaRef {
         object_id: "obj-1".into(),
         manifest_digest: manifest.hash()?,
+        width: None,
+        height: None,
+        duration_ms: None,
+        animated: None,
         mime_type: "image/png".into(),
         size: manifest.plaintext_length,
         key_slots: manifest.key_slots.clone(),
