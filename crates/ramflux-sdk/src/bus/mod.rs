@@ -72,6 +72,8 @@ mod shared_group_sync;
 pub use session_lease::SessionLeasePriority;
 pub mod shared_snapshot;
 mod username_directory;
+#[cfg(feature = "c-abi")]
+pub(crate) mod wake_fetch;
 pub(crate) use shared_group_sync::enqueue as enqueue_shared_group;
 pub(crate) mod push_receiver;
 mod socket;

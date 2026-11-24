@@ -35,6 +35,7 @@ mod suspend;
 #[cfg(test)]
 mod tests;
 mod username;
+mod wake_fetch;
 
 pub use custody::{RamfluxV2CustodyOperation, RamfluxV2CustodyProvider, RamfluxV2CustodyRequest};
 pub use exports::ramflux_v2_client_open_with_custody;
@@ -52,3 +53,4 @@ pub use exports::{
 };
 pub use snapshot::ramflux_v2_shared_snapshot;
 pub use suspend::{ramflux_v2_client_resume, ramflux_v2_client_suspend};
+pub use wake_fetch::ramflux_v2_wake_fetch;
