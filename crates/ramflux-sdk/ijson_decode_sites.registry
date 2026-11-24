@@ -409,3 +409,4 @@ crates/ramflux-sdk/src/custody/agent_creation/reassociate.rs | load_journal | 1 
 crates/ramflux-sdk/src/prekey.rs | policy_gateway_exchange | 1 | A | strict=parse_i_json; admission=original native directory response bytes over gateway policy transport
 crates/ramflux-sdk/src/prekey.rs | quic_gateway_exchange | 1 | A | strict=parse_i_json; admission=original native directory response bytes over QUIC or TCP gateway exchange
 crates/ramflux-sdk/src/prx_host/runtime.rs | read_runtime | 1 | E | excluded=bounded private PRX runtime locator DTO; no signed envelope admission
+crates/ramflux-sdk/src/client/surface/card_session/approval.rs | component_hints | 1 | E | excluded=task binding hint from an already admitted card snapshot; not signed Envelope/Ack/Nack ingress

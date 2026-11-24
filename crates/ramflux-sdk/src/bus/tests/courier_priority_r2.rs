@@ -233,9 +233,22 @@ async fn call_signaling_delivers_within_resolution_window_without_retiring_the_s
                 "the call allowance must survive an eight-second reply inside the resolution window"
             );
             assert!(sent?, "the correlated control was not admitted");
-            let call = account.client.voice_calls.get(&id).ok_or("test: outgoing call missing")?;
-            assert!(call.pending.is_empty(), "the accepted control remained queued");
-            assert!(call.media_held, "the scheduling peer's correlated refusal released media");
+            // The fixture resolves Cancelled: retain the public result, not a live media call.
+            let row = account
+                .client
+                .account_db()?
+                .load_actor_state::<ramflux_protocol::CallRow>(&format!("voice/public/{id}"))?
+                .ok_or("test: cancelled call row missing")?;
+            assert_eq!(row.state, "ended", "the correlated cancellation did not end the call");
+            assert_eq!(
+                row.end_reason.as_deref(),
+                Some("cancelled"),
+                "the correlated refusal did not persist the caller's cancelled outcome"
+            );
+            assert!(
+                !account.client.voice_calls.contains_key(&id),
+                "the cancelled call retained live media or pending controls"
+            );
             assert!(account.has_pooled_engine(), "a valid slow submit must not force a reconnect");
             assert_eq!(
                 gateway.lock().map_err(|_| "gateway")?.sessions,
