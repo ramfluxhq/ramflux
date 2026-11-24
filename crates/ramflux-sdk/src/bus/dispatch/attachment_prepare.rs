@@ -181,8 +181,9 @@ pub(in crate::bus) fn note_admitted(
     message_id: &str,
 ) -> Result<(), SdkError> {
     let store = open_store(client, account_id)?;
-    store.admit_granted(prepares, message_id)?;
-    crate::attachment_send::remember_sent(client, message_id, prepares)
+    // Persist the sender's import binding before admission authorizes plaintext removal.
+    crate::attachment_send::remember_sent(client, message_id, prepares)?;
+    store.admit_granted(prepares, message_id).map_err(SdkError::from)
 }
 
 async fn blocking<T, F>(work: F) -> Result<T, SdkError>

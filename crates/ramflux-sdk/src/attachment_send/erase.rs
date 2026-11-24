@@ -36,6 +36,25 @@ fn zero_then_remove(path: &Path) -> Result<(), Refusal> {
 }
 
 impl Store {
+    /// Removes the SDK-owned plaintext only after durable message admission. The streaming
+    /// and anchored-path inputs both use plain.bin directly, with no plaintext temp file.
+    /// Keep the sealed key, manifest, segments and grants for sender import and recovery.
+    /// # Errors
+    /// Returns `seal_failed` if removal or its directory sync fails. Missing is idempotent;
+    /// recovery retries the cleanup from the durable Admitted row.
+    pub(super) fn remove_admitted_plaintext(&self, row: &Row) -> Result<(), Refusal> {
+        if row.phase != Phase::Admitted {
+            return Err(Refusal::new(CODE_SEAL_FAILED));
+        }
+        let dir = self.dir(&row.prepare_id);
+        match fs::remove_file(dir.join("plain.bin")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(Refusal::new(CODE_SEAL_FAILED)),
+        }
+        super::store::sync_dir(&dir)
+    }
+
     /// Fences the prepare (Cleaning unless already Cleaning or Fenced), makes that record
     /// durable, then removes the key, snapshot and segments. Idempotent.
     /// # Errors
