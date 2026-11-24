@@ -331,7 +331,15 @@ fn disk_full_leaves_the_log_unchanged_and_a_retry_succeeds_once_space_returns() 
     // The ciphertext, workspace and margin do not fit in what is left.
     budget::force_free_bytes(dir.path(), 64);
     let digest = *blake3::hash(b"hello attachment").as_bytes();
-    let refused = store.finish(&begun.prepare_id, 1, 16, digest, NOW).unwrap_err();
+    let refused = store
+        .finish(
+            &begun.prepare_id,
+            1,
+            16,
+            super::thumbnail::Finished { digest, thumbnail: None },
+            NOW,
+        )
+        .unwrap_err();
     assert_eq!(refused.code, CODE_DISK_FULL);
     assert_eq!(
         store.load(&begun.prepare_id).unwrap().phase,
@@ -339,7 +347,15 @@ fn disk_full_leaves_the_log_unchanged_and_a_retry_succeeds_once_space_returns() 
         "the row stays open so the same finish can be retried"
     );
     budget::force_free_bytes(dir.path(), 1 << 30);
-    let done = store.finish(&begun.prepare_id, 1, 16, digest, NOW).unwrap();
+    let done = store
+        .finish(
+            &begun.prepare_id,
+            1,
+            16,
+            super::thumbnail::Finished { digest, thumbnail: None },
+            NOW,
+        )
+        .unwrap();
     assert_eq!(done.phase, Phase::Accepted);
     assert!(done.charged > 32, "snapshot, ciphertext, workspace and margin are all reserved");
 }
