@@ -48,7 +48,11 @@ fn progress(
     }
     let run_id = required(body, "run_id")?;
     let idx = body.get("idx").and_then(Value::as_u64).ok_or_else(|| field_invalid("idx"))?;
-    let conversation_id = required(body, "conversation_id")?;
+    let conversation_id = body
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .filter(|value| agent_activity::conversation_ok(value))
+        .ok_or_else(|| field_invalid("conversation_id"))?;
     let mut record = json!({
         "conversation_id": conversation_id,
         "session": optional(body, "session").unwrap_or(conversation_id),
@@ -286,7 +290,11 @@ fn approval_record(body: &Value, source: &str) -> Result<Value, SdkError> {
         return Err(field_invalid("decision"));
     }
     let approval_id = required(body, "approval_id")?;
-    let conversation_id = required(body, "conversation_id")?;
+    let conversation_id = body
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .filter(|value| agent_activity::conversation_ok(value))
+        .ok_or_else(|| field_invalid("conversation_id"))?;
     let mut record = json!({
         "approval_id": approval_id,
         "conversation_id": conversation_id,

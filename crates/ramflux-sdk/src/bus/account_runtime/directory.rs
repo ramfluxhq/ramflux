@@ -53,7 +53,11 @@ impl AccountRuntime {
         let generation = connection.generation();
         match work {
             DirectoryWork::HeadRefresh(work) => {
-                crate::bus::couriers::head_refresh::apply_work(account, work)?;
+                let result = crate::bus::couriers::head_refresh::apply_work(account, work);
+                if let Some(connection) = &account.connection {
+                    connection.note_command_readiness();
+                }
+                result?;
             }
             DirectoryWork::PrepareBackfill { generation: requested, reply } => {
                 if requested != generation || reply.is_closed() {
