@@ -53,6 +53,10 @@ pub(super) struct AccountReaders {
 }
 
 impl AccountReaders {
+    pub(super) fn same_pool(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.next, &other.next)
+    }
+
     pub(super) fn generation_path(&self) -> &std::path::Path {
         &self.generation_path
     }
