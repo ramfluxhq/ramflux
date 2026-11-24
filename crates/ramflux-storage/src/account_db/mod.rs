@@ -123,6 +123,9 @@ pub struct AccountDb {
     search_incarnation: local_search::SearchAccountIncarnation,
     pub(crate) connection: Connection,
     erasure_authority: Option<Connection>,
+    /// Connection-local increments produced by message scrubbing, never external erasures.
+    message_erasure_increments: std::cell::Cell<i64>,
+    receive_message_projection: std::cell::Cell<bool>,
     volatile_typing: RefCell<BTreeMap<(String, String), TypingStateRecord>>,
     segment_reconciled: std::cell::OnceCell<()>,
     volatile_presence: RefCell<BTreeMap<String, ContactPresenceRecord>>,
@@ -187,6 +190,8 @@ impl AccountDb {
                 || index.search_owner_admitted(local_account_id)?,
             connection,
             erasure_authority: None,
+            message_erasure_increments: std::cell::Cell::new(0),
+            receive_message_projection: std::cell::Cell::new(false),
             volatile_typing: RefCell::new(BTreeMap::new()),
             segment_reconciled: std::cell::OnceCell::new(),
             volatile_presence: RefCell::new(BTreeMap::new()),

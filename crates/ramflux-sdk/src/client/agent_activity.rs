@@ -272,7 +272,7 @@ fn text(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
-fn conversation_ok(value: &str) -> bool {
+pub(crate) fn conversation_ok(value: &str) -> bool {
     if id_ok(value) {
         return true;
     }

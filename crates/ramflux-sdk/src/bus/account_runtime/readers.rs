@@ -67,4 +67,24 @@ impl AccountRuntime {
         }
         Ok(())
     }
+
+    pub(super) fn publish_queued(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
+        if let Some(account) = self.state.accounts.get(&self.id) {
+            if let Some(pool) = self.readers.lock().map_err(|_| stopped())?.as_ref() {
+                pool.set_identity(account.client.owned_device_identity().ok())?;
+                pool.set_account_view(&self.state, &self.id)?;
+            }
+            let expiry = self
+                .networking_expiry_pending
+                .map(|sequence| (sequence, self.networking_expiry_request()));
+            super::super::events::publish_queued(
+                &account.client,
+                &self.id,
+                request,
+                expiry.as_ref().map(|(sequence, frame)| (*sequence, frame)),
+                &self.events,
+            )?;
+        }
+        Ok(())
+    }
 }

@@ -854,7 +854,7 @@ impl RamfluxClient {
         context: Commit<'_>,
     ) -> Result<RoutedW1Persist, SdkError> {
         tx.require_open_input(sequence)?;
-        self.persist_routed_projection(context)
+        tx.project_message(|| self.persist_routed_projection(context))
     }
 
     fn persist_routed_projection(&self, context: Commit<'_>) -> Result<RoutedW1Persist, SdkError> {

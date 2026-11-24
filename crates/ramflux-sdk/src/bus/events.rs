@@ -3,8 +3,34 @@
 
 //! Commit-first handoff from account outboxes to the subscription router.
 
+use std::cell::Cell;
+
 use crate::prelude::*;
 use tokio::sync::oneshot;
+
+thread_local! {
+    static OUTBOX_YIELD: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Background outbox drains yield between commits while this guard is alive.
+pub(super) struct OutboxYield;
+
+impl OutboxYield {
+    pub(super) fn enter() -> Self {
+        OUTBOX_YIELD.with(|cell| cell.set(cell.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for OutboxYield {
+    fn drop(&mut self) {
+        OUTBOX_YIELD.with(|cell| cell.set(cell.get().saturating_sub(1)));
+    }
+}
+
+fn outbox_yield_enabled() -> bool {
+    OUTBOX_YIELD.with(Cell::get) > 0
+}
 
 pub(super) struct EventBatch {
     pub events: Vec<LocalBusFrame>,
@@ -71,6 +97,12 @@ fn lagged(subscriber: &LocalBusSubscriber, event: &LocalBusFrame) {
     let _ = subscriber.outbound.try_send(frame);
 }
 
+enum PageEnd {
+    Drained,
+    Page(i64, Option<oneshot::Receiver<()>>),
+    Paused(Option<oneshot::Receiver<()>>),
+}
+
 pub(super) async fn publish(
     client: &RamfluxClient,
     account_id: &str,
@@ -81,65 +113,219 @@ pub(super) async fn publish(
     client.expire_surface_pending()?;
     let db = client.account_db()?;
     loop {
-        let entries = db.pending_outbox(256)?;
-        let Some(last) = entries.last() else {
-            return Ok(());
-        };
-        let last_sequence = last.sequence;
-        let mut events = Vec::with_capacity(entries.len());
-        for entry in entries {
-            if entry.table_name == "direct_message_projection"
-                && let (Some(conversation), Some(message)) =
-                    (entry.keys["conversation_id"].as_str(), entry.keys["message_id"].as_str())
-            {
-                client.project_deferred_surface(conversation, message)?;
+        match publish_one_page(client, account_id, request, networking_expiry, sender, 256)? {
+            PageEnd::Drained => return Ok(()),
+            PageEnd::Paused(accepted) => {
+                confirm_handoff(accepted).await?;
+                return Err(SdkError::WriterPause);
             }
-            let projected = super::journal::project(client, &entry)?;
-            db.journal_outbox(entry.sequence, &projected, now_unix_timestamp())?;
-            // Expiry retries keep runtime correlation without changing command acknowledgements.
-            let attribution = if let Some((_, expiry)) =
-                networking_expiry.filter(|(sequence, _)| *sequence == entry.sequence)
-            {
-                expiry
-            } else {
-                request
-            };
-            let mut frame = local_bus_event(
-                attribution,
-                account_id,
-                "account",
-                "state.changed",
-                serde_json::to_value(&entry)?,
-            );
-            frame.frame_id = format!("outbox_{}", entry.sequence);
-            events.push(frame);
+            PageEnd::Page(sequence, accepted) => {
+                confirm_handoff(accepted).await?;
+                finish_published_page(db, request, sequence)?;
+            }
         }
-        let (accepted, done) = oneshot::channel();
-        sender.send(EventBatch { events, accepted }).await.map_err(|_| closed())?;
-        done.await.map_err(|_| closed())?;
-        db.mark_outbox_published(last_sequence)?;
-        if matches!(request.method.as_str(), "contact.verify" | "grant.approve" | "grant.deny")
-            && let Some(subject) = request
-                .body
-                .get("contact_identity_commitment")
-                .or_else(|| request.body.get("approval_id"))
-                .or_else(|| {
-                    request.body.get("expected").and_then(|expected| {
-                        expected
-                            .get("contactIdentityCommitment")
-                            .or_else(|| expected.get("contact_identity_commitment"))
-                    })
-                })
-                .and_then(serde_json::Value::as_str)
-        {
-            db.acknowledge_journal_subject(subject)?;
-        }
-        super::journal::retention(db)?;
     }
+}
+
+/// Queues durably journaled output without waiting for router acceptance.
+pub(super) fn publish_queued(
+    client: &RamfluxClient,
+    account_id: &str,
+    request: &LocalBusFrame,
+    networking_expiry: Option<(i64, &LocalBusFrame)>,
+    sender: &mpsc::Sender<EventBatch>,
+) -> Result<(), SdkError> {
+    client.expire_surface_pending()?;
+    let db = client.account_db()?;
+    loop {
+        match publish_one_page(client, account_id, request, networking_expiry, sender, 256)? {
+            PageEnd::Drained => return Ok(()),
+            PageEnd::Paused(_) => return Err(SdkError::WriterPause),
+            PageEnd::Page(sequence, _) => finish_published_page(db, request, sequence)?,
+        }
+    }
+}
+
+async fn confirm_handoff(accepted: Option<oneshot::Receiver<()>>) -> Result<(), SdkError> {
+    if let Some(accepted) = accepted {
+        accepted.await.map_err(|_| closed())?;
+    }
+    Ok(())
+}
+
+/// Journals at most one outbox entry; the actor polls its mailbox before the next entry.
+pub(super) fn publish_slice(
+    client: &RamfluxClient,
+    account_id: &str,
+    request: &LocalBusFrame,
+    networking_expiry: Option<(i64, &LocalBusFrame)>,
+    sender: &mpsc::Sender<EventBatch>,
+) -> Result<(), SdkError> {
+    match publish_one_page(client, account_id, request, networking_expiry, sender, 1)? {
+        PageEnd::Paused(_) => Err(SdkError::WriterPause),
+        PageEnd::Drained | PageEnd::Page(_, _) => Ok(()),
+    }
+}
+
+fn publish_one_page(
+    client: &RamfluxClient,
+    account_id: &str,
+    request: &LocalBusFrame,
+    networking_expiry: Option<(i64, &LocalBusFrame)>,
+    sender: &mpsc::Sender<EventBatch>,
+    limit: u32,
+) -> Result<PageEnd, SdkError> {
+    let db = client.account_db()?;
+    let entries = db.pending_outbox(limit)?;
+    let Some(last) = entries.last() else {
+        return Ok(PageEnd::Drained);
+    };
+    let last_sequence = last.sequence;
+    let page_started = tokio::time::Instant::now();
+    let (events, paused) =
+        journal_entries(client, db, account_id, request, networking_expiry, &entries)?;
+    let durable_ms = elapsed_ms(page_started);
+    let (deferred, accepted) = if events.is_empty() {
+        (false, None)
+    } else {
+        let (deferred, accepted) = handoff(sender, events)?;
+        (deferred, Some(accepted))
+    };
+    tracing::debug!(
+        phase = "outbox_publish",
+        method = %request.method,
+        durable_ms,
+        handoff_ms = elapsed_ms(page_started).saturating_sub(durable_ms),
+        deferred,
+        paused,
+        "account command phase"
+    );
+    if paused {
+        return Ok(PageEnd::Paused(accepted));
+    }
+    Ok(PageEnd::Page(last_sequence, accepted))
+}
+
+fn journal_entries(
+    client: &RamfluxClient,
+    db: &ramflux_storage::AccountDb,
+    account_id: &str,
+    request: &LocalBusFrame,
+    networking_expiry: Option<(i64, &LocalBusFrame)>,
+    entries: &[ramflux_storage::AccountOutboxEntry],
+) -> Result<(Vec<LocalBusFrame>, bool), SdkError> {
+    let mut events = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match journal_entry(client, db, account_id, request, networking_expiry, entry) {
+            Ok(frame) => events.push(frame),
+            Err(SdkError::WriterPause) => return Ok((events, true)),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((events, false))
+}
+
+fn journal_entry(
+    client: &RamfluxClient,
+    db: &ramflux_storage::AccountDb,
+    account_id: &str,
+    request: &LocalBusFrame,
+    networking_expiry: Option<(i64, &LocalBusFrame)>,
+    entry: &ramflux_storage::AccountOutboxEntry,
+) -> Result<LocalBusFrame, SdkError> {
+    let _pause = outbox_yield_enabled().then(ramflux_storage::writer_budget::PauseScope::enter);
+    if entry.table_name == "direct_message_projection"
+        && let (Some(conversation), Some(message)) =
+            (entry.keys["conversation_id"].as_str(), entry.keys["message_id"].as_str())
+    {
+        client.project_deferred_surface(conversation, message)?;
+    }
+    let projected = super::journal::project(client, entry)?;
+    db.journal_outbox(entry.sequence, &projected, now_unix_timestamp())?;
+    // Expiry retries keep runtime correlation without changing command acknowledgements.
+    let attribution = if let Some((_, expiry)) =
+        networking_expiry.filter(|(sequence, _)| *sequence == entry.sequence)
+    {
+        expiry
+    } else {
+        request
+    };
+    let mut frame = local_bus_event(
+        attribution,
+        account_id,
+        "account",
+        "state.changed",
+        serde_json::to_value(entry)?,
+    );
+    frame.frame_id = format!("outbox_{}", entry.sequence);
+    Ok(frame)
+}
+
+fn finish_published_page(
+    db: &ramflux_storage::AccountDb,
+    request: &LocalBusFrame,
+    last_sequence: i64,
+) -> Result<(), SdkError> {
+    db.mark_outbox_published(last_sequence)?;
+    acknowledge_decision(db, request)?;
+    super::journal::retention(db)?;
+    Ok(())
+}
+
+pub(super) fn acknowledge_decision(
+    db: &ramflux_storage::AccountDb,
+    request: &LocalBusFrame,
+) -> Result<(), SdkError> {
+    let Some(subject) = decision_subject(request) else {
+        return Ok(());
+    };
+    db.acknowledge_journal_subject(subject)?;
+    Ok(())
+}
+
+fn decision_subject(request: &LocalBusFrame) -> Option<&str> {
+    if !matches!(request.method.as_str(), "contact.verify" | "grant.approve" | "grant.deny") {
+        return None;
+    }
+    request
+        .body
+        .get("contact_identity_commitment")
+        .or_else(|| request.body.get("approval_id"))
+        .or_else(|| {
+            request.body.get("expected").and_then(|expected| {
+                expected
+                    .get("contactIdentityCommitment")
+                    .or_else(|| expected.get("contact_identity_commitment"))
+            })
+        })
+        .and_then(serde_json::Value::as_str)
 }
 
 fn closed() -> SdkError {
     SdkError::LocalBus("subscription router stopped before outbox acceptance".to_owned())
+}
+
+/// Queues a durable outbox page for the subscription router without waiting for it.
+fn handoff(
+    sender: &mpsc::Sender<EventBatch>,
+    events: Vec<LocalBusFrame>,
+) -> Result<(bool, oneshot::Receiver<()>), SdkError> {
+    let (accepted, done) = oneshot::channel();
+    match sender.try_send(EventBatch { events, accepted }) {
+        Ok(()) => Ok((false, done)),
+        Err(mpsc::error::TrySendError::Full(batch)) => {
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                let _ = sender.send(batch).await;
+            });
+            Ok((true, done))
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(closed()),
+    }
+}
+
+fn elapsed_ms(started: tokio::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

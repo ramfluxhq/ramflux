@@ -22,6 +22,7 @@ struct NativeError {
     code: Code,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    reason: String,
     details: Details,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason_code: Option<String>,
@@ -101,16 +102,22 @@ fn project(value: &mut Value) {
         .map(Code::Number)
         .or_else(|| value.get("code").and_then(token).map(Code::Name))
         .unwrap_or(Code::Number(16));
+    let name = value.get("name").and_then(token).unwrap_or_else(|| match &code {
+        Code::Name(name) => name.clone(),
+        Code::Number(code) => status_name(*code).to_owned(),
+    });
+    let reason = reason(value).unwrap_or_else(|| default_reason(&name));
     let error = NativeError {
         details: details(value, &code),
         code,
-        name: value.get("name").and_then(token),
-        reason_code: value.get("reason_code").and_then(token),
+        name: Some(name),
+        reason: reason.clone(),
+        reason_code: Some(reason),
         retry_after_ms: retry_ms(value),
         state: (value.get("state").and_then(Value::as_str) == Some("error")).then_some("error"),
     };
     let replacement =
-        serde_json::to_value(error).unwrap_or_else(|_| serde_json::json!({"code":16}));
+        serde_json::to_value(error).unwrap_or_else(|_| serde_json::json!({"code":16,"name":"Internal","reason":"internal_error","reason_code":"internal_error"}));
     let mut old = std::mem::replace(value, replacement);
     crate::bus::inprocess::erase_value(&mut old);
 }
@@ -189,5 +196,88 @@ pub(super) fn completion(value: &mut Value) {
         if let Some(response) = map.get_mut("response") {
             frame(response);
         }
+        if let Some(code) = map.get("code").and_then(Value::as_i64).filter(|code| *code != 0) {
+            let nested = map.get("response").and_then(|response| {
+                response
+                    .get("error")
+                    .filter(|v| !v.is_null())
+                    .or_else(|| {
+                        response
+                            .get("result")
+                            .filter(|v| v.get("state").and_then(Value::as_str) == Some("error"))
+                    })
+                    .or_else(|| {
+                        response.get("body").filter(|_| {
+                            response.get("kind").and_then(Value::as_str) == Some("error")
+                        })
+                    })
+            });
+            let name = nested
+                .and_then(|e| e.get("name"))
+                .and_then(token)
+                .or_else(|| map.get("name").and_then(token))
+                .unwrap_or_else(|| status_name(code).into());
+            let reason = nested
+                .and_then(reason)
+                .or_else(|| map.get("reason_code").and_then(token))
+                .or_else(|| map.get("reason").and_then(token))
+                .unwrap_or_else(|| default_reason(&name));
+            map.insert("name".into(), Value::String(name));
+            map.insert("reason".into(), Value::String(reason.clone()));
+            map.insert("reason_code".into(), Value::String(reason));
+        }
+    }
+}
+
+fn reason(value: &Value) -> Option<String> {
+    value
+        .get("reason_code")
+        .and_then(token)
+        .or_else(|| value.get("reason").and_then(token))
+        .or_else(|| value.pointer("/details/reason").and_then(token))
+        .or_else(|| value.get("directory").and_then(token))
+}
+fn default_reason(name: &str) -> String {
+    match name {
+        "InvalidArgument" | "ValidationFailed" => "invalid_argument".into(),
+        "Internal" => "internal_error".into(),
+        "Cancelled" => "cancelled".into(),
+        _ => name.into(),
+    }
+}
+pub(super) fn status_name(code: i64) -> &'static str {
+    match code {
+        0 => "Ok",
+        1 => "InvalidArgument",
+        2 => "InvalidCanonicalJson",
+        3 => "UnsupportedVersion",
+        4 => "CapabilityRejected",
+        5 => "AuthFailed",
+        6 => "DeviceRevoked",
+        7 => "CryptoFailed",
+        8 => "StorageFailed",
+        9 => "TransportUnavailable",
+        10 => "Timeout",
+        11 => "ReplayRejected",
+        12 => "PermissionDenied",
+        13 => "McpGrantRejected",
+        14 => "ObjectTransferFailed",
+        15 => "RateLimited",
+        17 => "PanicAborted",
+        18 => "AccountBusy",
+        19 => "ObjectErased",
+        20 => "ObjectIdentityConflict",
+        21 => "ObjectOwnershipUnverified",
+        22 => "CustodyForkFenced",
+        23 => "SchemaResetRequired",
+        24 => "Pending",
+        25 => "Cancelled",
+        26 => "Closed",
+        27 => "ResyncRequired",
+        28 => "PairingRefused",
+        29 => "PairingStale",
+        30 => "Suspended",
+        31 => "VaultLocked",
+        _ => "Internal",
     }
 }

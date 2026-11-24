@@ -33,6 +33,8 @@ impl Command {
 }
 
 pub(super) struct Client {
+    pub diagnostics: Option<Arc<crate::diag::Session>>,
+    pub username_directory: Option<ramflux_protocol::username_directory::NativeDirectoryPin>,
     pub commands: mpsc::Sender<Command>,
     pub shared: Arc<Shared>,
     lifecycle: mpsc::Sender<crate::bus::inprocess::LifecycleRequest>,
@@ -40,6 +42,7 @@ pub(super) struct Client {
     done: Mutex<CloseCompletion>,
     close_wait: Duration,
     pub closing: AtomicBool,
+    pub(super) lifecycle_gate: Mutex<()>,
     pub data_root: std::path::PathBuf,
 }
 
@@ -106,9 +109,13 @@ struct Worker {
 }
 
 impl Client {
-    pub fn start(config: LocalBusConfig) -> Result<Arc<Self>, SdkError> {
+    pub fn start_with_diagnostics(
+        config: LocalBusConfig,
+        diagnostics: Arc<crate::diag::Session>,
+    ) -> Result<Arc<Self>, SdkError> {
         Self::start_inner(
             config,
+            Some(diagnostics),
             Duration::from_secs(10),
             #[cfg(test)]
             None,
@@ -116,19 +123,26 @@ impl Client {
     }
 
     #[cfg(test)]
+    pub fn start(config: LocalBusConfig) -> Result<Arc<Self>, SdkError> {
+        Self::start_inner(config, None, Duration::from_secs(10), None)
+    }
+
+    #[cfg(test)]
     pub fn start_delayed(
         config: LocalBusConfig,
         gate: ShutdownGate,
     ) -> Result<Arc<Self>, SdkError> {
-        Self::start_inner(config, Duration::ZERO, Some(gate))
+        Self::start_inner(config, None, Duration::ZERO, Some(gate))
     }
 
     fn start_inner(
         config: LocalBusConfig,
+        diagnostics: Option<Arc<crate::diag::Session>>,
         close_wait: Duration,
         #[cfg(test)] gate: Option<ShutdownGate>,
     ) -> Result<Arc<Self>, SdkError> {
         let data_root = config.data_root.clone();
+        let username_directory = config.username_directory.clone();
         let (commands, receiver) = mpsc::channel(MAX_OPERATIONS);
         let (lifecycle, lifecycle_rx) = mpsc::channel(4);
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -139,6 +153,9 @@ impl Client {
         let worker_shutdown = shutdown.clone();
         std::thread::Builder::new().name("ramflux-c-abi-v2".into()).spawn(move || {
             let result = (|| {
+                use tracing_subscriber::prelude::*;
+                let subscriber = tracing_subscriber::registry().with(crate::diag::DiagnosticLayer);
+                let _dispatch = tracing::subscriber::set_default(subscriber);
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
                 tokio::task::LocalSet::new().block_on(&runtime, async {
                     run(Worker {
@@ -172,6 +189,9 @@ impl Client {
             }
         };
         Ok(Arc::new(Self {
+            diagnostics,
+            lifecycle_gate: Mutex::new(()),
+            username_directory,
             data_root,
             commands,
             shared,
@@ -210,17 +230,25 @@ impl Client {
 
     pub(super) fn drive_lifecycle(&self, resume: bool, wait: Duration) -> Result<(), DriveError> {
         let (reply, response) = std::sync::mpsc::sync_channel(1);
-        let request = crate::bus::inprocess::LifecycleRequest { resume, reply };
+        let shared = Arc::clone(&self.shared);
+        let request = crate::bus::inprocess::LifecycleRequest {
+            resume,
+            complete: Box::new(move |suspended, succeeded| {
+                if !resume && succeeded {
+                    shared.finish_suspend();
+                }
+                shared.suspended.store(suspended, Ordering::Release);
+            }),
+            reply,
+        };
         if self.lifecycle.blocking_send(request).is_err() {
-            return Err(DriveError::Failed(SdkError::LocalBus("lifecycle channel closed".into())));
+            return Err(DriveError::Unavailable);
         }
         match response.recv_timeout(wait) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(DriveError::Failed(error)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(DriveError::TimedOut),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(DriveError::Failed(SdkError::LocalBus("lifecycle reply lost".into())))
-            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(DriveError::Unavailable),
         }
     }
 
@@ -299,6 +327,7 @@ enum WriteAction {
 }
 
 pub(super) enum DriveError {
+    Unavailable,
     TimedOut,
     Failed(SdkError),
 }
@@ -422,35 +451,6 @@ async fn read_responses(
     }
 }
 
-fn refusal_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-}
-
-/// Code 16 is the unmapped class. Keep the bus refusal string as `name` so a client can
-/// tell Replay from an unrelated internal failure without a new numeric status.
-fn name_unmapped_refusal(frame: &mut serde_json::Value, code: i32) {
-    if code != super::super::RamfluxErrorCode::Internal as i32 {
-        return;
-    }
-    for key in ["error", "result"] {
-        let Some(object) = frame.get_mut(key).and_then(serde_json::Value::as_object_mut) else {
-            continue;
-        };
-        if object.get("name").and_then(serde_json::Value::as_str).is_some_and(refusal_token) {
-            continue;
-        }
-        let Some(bus) = object.get("code").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if !refusal_token(bus) {
-            continue;
-        }
-        object.insert("name".to_owned(), serde_json::Value::String(bus.to_owned()));
-    }
-}
-
 fn handle_public(shared: &Shared, bytes: &[u8]) -> Result<bool, SdkError> {
     // The authenticated in-process server emits both ordinary bus and compatibility
     // custody envelopes. Preserve either representation, including unknown business data.
@@ -487,7 +487,6 @@ fn handle_public(shared: &Shared, bytes: &[u8]) -> Result<bool, SdkError> {
             let code = error
                 .and_then(serde_json::Value::as_str)
                 .map_or(if failed { 16 } else { 0 }, super::error_code);
-            name_unmapped_refusal(&mut frame, code);
             stop_requested = code == 0
                 && frame.get("method").and_then(serde_json::Value::as_str) == Some("daemon.stop");
             if code == 0

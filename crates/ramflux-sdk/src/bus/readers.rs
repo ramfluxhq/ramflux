@@ -50,9 +50,23 @@ pub(super) struct AccountReaders {
     view: Arc<RwLock<Arc<local::AccountView>>>,
     senders: Vec<mpsc::Sender<ReadCommand>>,
     next: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    suspended: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AccountReaders {
+    #[cfg(feature = "c-abi")]
+    pub(super) fn mark_suspend(&self) {
+        self.suspended.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(super) fn retired_for_suspend(&self) -> bool {
+        self.suspended.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(super) fn same_pool(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.next, &other.next)
+    }
+
     pub(super) fn generation_path(&self) -> &std::path::Path {
         &self.generation_path
     }
@@ -177,6 +191,7 @@ impl AccountReaders {
             view,
             senders,
             next: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            suspended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 

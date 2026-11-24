@@ -31,6 +31,7 @@ pub(super) struct Method {
 pub(super) enum NetworkCondition {
     Always,
     RelaySelected,
+    AuthorityFromNode,
 }
 
 macro_rules! methods {
@@ -53,6 +54,7 @@ methods! {
     LocalMutation(Always) => Actor: ["search.index.rebuild"];
     LocalRead(Always) => Actor: ["account.config.get", "diag.residue"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
+    NeedsNetwork(AuthorityFromNode) => Actor: ["attachment.enable"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin", "username.mutate", "profile.update"];
     LocalRead(Always) => Actor: ["a2i.list_pending", "agent.approval.list", "agent.job.list", "agent.job.sessions", "device.pair.status", "device.transfer.status"];
     LocalMutation(Always) => Actor: [
@@ -65,7 +67,6 @@ methods! {
         "agent.job.resume",
         "agent.job.session",
         "agent.progress",
-        "attachment.enable",
         "attachment.import.begin",
         "attachment.import.cancel",
         "attachment.import.finish",
@@ -286,6 +287,9 @@ pub(super) fn requires_network(
     }
     match entry.network {
         NetworkCondition::Always => true,
+        NetworkCondition::AuthorityFromNode => {
+            params.get("from_node").and_then(serde_json::Value::as_bool).unwrap_or(false)
+        }
         NetworkCondition::RelaySelected if method == "object.put.finish" => {
             spool_has_relay.unwrap_or(false) || account_has_relay
         }
@@ -300,6 +304,9 @@ pub(super) fn account_requires_network(
     request: &crate::LocalBusFrame,
     account: &super::state::LocalBusAccountState,
 ) -> bool {
+    if request.method == "attachment.enable" && account.client.attachment_plane.is_some() {
+        return false;
+    }
     let spool = request
         .body
         .get("operation_id")

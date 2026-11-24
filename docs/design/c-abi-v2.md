@@ -693,3 +693,93 @@ Platform references: [Apple background Keychain accessibility](https://developer
 [Apple shared containers](https://developer.apple.com/documentation/foundation/filemanager/containerurl(forsecurityapplicationgroupidentifier:)),
 [Android Direct Boot storage](https://developer.android.com/privacy-and-security/direct-boot),
 [Android Keystore parameters](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder).
+
+### Phone provisioning and process diagnostics
+
+Both open entrypoints accept an optional `username_directory` object containing
+`url` (canonical HTTPS origin), `id`, `public_key` (base64url Ed25519) and
+`generation` (positive safe JSON integer). This is an independently provisioned
+trust pin, never learned from an unverified reply. Each client's supervisor and
+private username authorization ceremony use that same pin. Native clients do
+not consult username environment variables. An omitted pin yields
+`UsernameDirectoryRefused` / `directory_unavailable`. The `rf daemon` CLI alone
+can provision the pin from its `RAMFLUX_USERNAME_CENTER_*` and
+`RAMFLUX_USERNAME_TRUST_GENERATION` environment settings.
+
+Both open entrypoints also accept the optional strict object:
+
+```json
+{"diag":{"level":"info","process":"app","build_class":"release",
+         "max_file_bytes":1048576,"max_files":5,"max_age_days":7}}
+```
+
+These are the defaults. Native process values are `app`, `nse`, `fgs`; build
+classes are `release`, `beta`, `realrun`; levels are `error`, `warn`, `info`,
+`debug`, `trace`. Unknown keys and invalid values are refused. Limits can be
+lowered to 4096 bytes / 1 file / 1 day, never raised above the defaults. Without
+the explicit `diag-realrun` library feature, `realrun` becomes `release` and
+`debug`/`trace` become `info`. Phase 0 never records free-text error messages,
+even in real-run builds. Later diagnostic calls and verbose windows are separate.
+
+One SDK-owned writer thread serves the process. The first opened data root owns
+`diag/<process>.<epoch_ms>.ndjson`; simultaneous clients share this sink when using its configuration or the default
+policy. Default callers join the active process policy without changing it;
+this also permits a host to embed a socket supervisor and a native client. A
+conflicting explicit process configuration is refused.
+After the last client closes, a later open may choose a new root. Each file is
+UTF-8 NDJSON with schema `ramflux.diag.v1`, wall and monotonic times, process
+sequence, severity, layer, component, event and typed fields. Each line is at
+most 2048 bytes; oversized fields are omitted and `trunc:true` is set. Rotation
+includes the current file in the file-count budget; age pruning runs at open
+and rotation. Files have private permissions. `rf daemon` writes the same
+format with process `daemon`, independently of the stderr `RUST_LOG` filter.
+
+Producers use a bounded 2048-record queue and never wait for the writer. Overflow
+is reported as `diag.dropped` when another event can be queued. Warning/error
+records request immediate flush; other records flush at 16 KiB. Client close
+and suspend flush the writer. A hard kill may lose queued or unsynced records;
+readers must skip a torn final line. Hosts with a Rust tracing subscriber can
+compose `ramflux_sdk::diag::DiagnosticLayer`; the native SDK worker installs its
+own scoped layer. Existing SDK trace locations are `trace.<source-line>` events;
+free text is discarded or replaced with its length. Only known numeric,
+boolean and token fields survive. Account, principal, device, conversation,
+group, contact, username, message, envelope, object, operation, node, session
+and delivery identifiers become `h:` plus ten lowercase hex characters of
+HMAC-SHA-256(key, class || NUL || value). Never log message bodies, file names,
+passcodes, recovery words, keys, tokens or contact card payloads at any level.
+
+`diag.key_file` may name an existing host-owned private file outside the data
+root containing exactly 32 random bytes (Unix owner and mode 0600 required;
+symlinks refused). Provision it in private, non-backed-up app storage and rotate
+it every 30 days or when deleting diagnostics. If omitted, the SDK creates a
+random process key which is never persisted or exported. Hashes then correlate
+only within that writer's lifetime. Durable cross-process key storage remains
+an open host contract for DIAGNOSTIC-LOGGING-01 C-3/Q5; Phase 0 introduces no
+Keychain or Keystore provisioning API. The file header carries a key epoch,
+never the key. Clients must collect `diag/` after a run and scan for secret
+canaries before sharing it.
+
+Every nonzero asynchronous completion now has a nonempty typed `name`, `reason`
+and `reason_code` at the completion root as well as its error envelope. Existing
+business reason tokens survive; errors without finer typed context use their
+status name (or `invalid_argument`, `internal_error`, `cancelled`). English
+`message` text remains internal. Diagnostic refusal records carry code, name,
+reason, effect and variant. Immediate synchronous admission calls still return
+an integer according to their existing C signature; the diagnostic sink records
+the named admission refusal. A group `message.focus` returns the typed
+`unsupported_for_group` refusal; group typing is outside the beta scope.
+
+
+### Suspend failure recovery
+
+`ramflux_v2_client_suspend` rolls back a failed release by reopening parked files
+before returning `StorageFailed` (8). The existing event subscription stays active
+when rollback succeeds; pending operations may already have completed as Suspended.
+The diagnostic writer records `client.suspend.failed`, name `SuspendFailed`, and
+reason `suspend_release_failed`. If reopening also fails, admission stays fenced
+and the reason is `suspend_rollback_failed`; no new work is admitted into partially
+reopened owners. Call `ramflux_v2_client_resume` after any failed suspend (including
+a timeout), check its result, and reopen the event subscription from the last cursor.
+Resume needs no unlock prompt. The worker publishes the completed lifecycle state
+even if the synchronous caller times out. Normal successful suspend still cancels
+the subscription, releases files and stops networking; resume reopens them.

@@ -16,14 +16,23 @@ pub async fn serve_local_bus_until(
     config: LocalBusConfig,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), SdkError> {
+    std::fs::create_dir_all(&config.data_root)?;
+    set_owner_only_dir_permissions(&config.data_root)?;
+    let diagnostic_config = crate::diag::DiagnosticConfig {
+        process: "daemon".into(),
+        ..crate::diag::DiagnosticConfig::default()
+    };
+    let diagnostics = crate::diag::start(&config.data_root, diagnostic_config)?;
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     std::thread::Builder::new().name("ramflux-local-bus".to_owned()).spawn(move || {
         let result = run_local_bus_thread(config, shutdown);
         let _ = result_tx.send(result);
     })?;
-    result_rx.await.map_err(|error| {
+    let result = result_rx.await.map_err(|error| {
         SdkError::LocalBus(format!("local bus thread exited without result: {error}"))
-    })?
+    })?;
+    diagnostics.flush();
+    result
 }
 
 fn run_local_bus_thread(

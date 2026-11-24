@@ -9,6 +9,7 @@ use crate::bus::actor::AccountCommand;
 use crate::bus::connection_manager::{ReceiveEntry, ReceiveTurn};
 use crate::bus::contact_backpressure::Backpressure;
 use crate::client::routed::PreparedInbound;
+use crate::prelude::LocalBusFrame;
 use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 
@@ -57,8 +58,9 @@ impl AccountRuntime {
             .inspect(|_| {
                 self.preempt.borrow_and_update();
             })
-            .or_else(|_| self.receiver.try_recv())
-            .ok();
+            .ok()
+            .or_else(|| self.ready_commands.take())
+            .or_else(|| self.receiver.try_recv().ok());
         if command.is_some() {
             self.note_command_taken();
         }
@@ -66,7 +68,7 @@ impl AccountRuntime {
     }
 
     pub(super) async fn service_one_command(&mut self) -> Result<(), SdkError> {
-        if self.command_waiting.load(Ordering::Acquire) == 0 {
+        if self.command_waiting.load(Ordering::Acquire) == 0 && self.ready_commands.is_empty() {
             return Ok(());
         }
         let Some(_guard) = ramflux_storage::writer_budget::ServiceGuard::enter() else {
@@ -77,14 +79,70 @@ impl AccountRuntime {
         };
         // Boxed so a page or directory attempt can service this command without
         // an infinitely sized future.
+        super::command_park::set_final(false);
         Box::pin(self.apply(command)).await.map(|_| ())
+    }
+
+    /// Drains the outbox, but returns to queued commands between commits.
+    ///
+    /// The caller resumes until the outbox is durable. A reply stays unsent
+    /// across that pause, so acknowledgement still follows durability.
+    pub(super) async fn publish_yielding(
+        &mut self,
+        request: &LocalBusFrame,
+    ) -> Result<(), SdkError> {
+        self.publish_with_yields(request, true).await
+    }
+
+    /// A command's durable output must not wait for a router acknowledgement.
+    pub(super) async fn publish_queued_yielding(
+        &mut self,
+        request: &LocalBusFrame,
+    ) -> Result<(), SdkError> {
+        self.publish_with_yields(request, false).await
+    }
+
+    async fn publish_with_yields(
+        &mut self,
+        request: &LocalBusFrame,
+        confirm_router: bool,
+    ) -> Result<(), SdkError> {
+        let mut yielded = false;
+        loop {
+            ramflux_storage::writer_budget::begin_attempt();
+            let result = {
+                let _yield = super::super::events::OutboxYield::enter();
+                if confirm_router {
+                    self.publish(request).await
+                } else {
+                    self.publish_queued(request)
+                }
+            };
+            match result {
+                Err(error) if is_writer_pause(&error) => {
+                    yielded = true;
+                    self.service_waiting_commands().await?;
+                }
+                Ok(()) if yielded => return self.acknowledge_yielded_decision(request),
+                other => return other,
+            }
+        }
+    }
+
+    /// A nested drain can finish this command's rows under another method.
+    /// The decision acknowledgement still belongs to this request.
+    fn acknowledge_yielded_decision(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
+        let Some(account) = self.state.accounts.get(&self.id) else {
+            return Ok(());
+        };
+        super::super::events::acknowledge_decision(account.client.account_db()?, request)
     }
 
     /// Applies each command that was queued before this call. A command that
     /// arrives while one is running waits for the next slice.
     pub(super) async fn service_waiting_commands(&mut self) -> Result<(), SdkError> {
         let mut stalled = 0_u8;
-        while self.command_waiting.load(Ordering::Acquire) > 0 {
+        while self.command_waiting.load(Ordering::Acquire) > 0 || !self.ready_commands.is_empty() {
             let before = self.command_waiting.load(Ordering::Acquire);
             self.service_one_command().await?;
             if self.command_waiting.load(Ordering::Acquire) >= before {

@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Snapshot-based journal replay and bounded live tailing independent of the account writer.
-use super::readers::AccountReaders;
+mod lifecycle;
 use crate::prelude::*;
+pub(super) use lifecycle::StreamReaders;
 use ramflux_storage::{JournalBounds, JournalEvent};
 
 #[derive(serde::Deserialize)]
@@ -30,7 +31,7 @@ pub(super) fn read(db: &AccountDb, request: &LocalBusFrame) -> Result<serde_json
 }
 
 pub(super) async fn start(
-    readers: AccountReaders,
+    readers: StreamReaders,
     request: LocalBusFrame,
     outbound: super::outbound::LocalBusOutbound,
 ) -> Result<Option<tokio::task::JoinHandle<()>>, SdkError> {
@@ -62,7 +63,7 @@ pub(super) async fn start(
 }
 
 pub(super) struct JournalFollow {
-    readers: AccountReaders,
+    readers: StreamReaders,
     query: LocalBusFrame,
     request: LocalBusFrame,
     outbound: super::outbound::LocalBusOutbound,
@@ -73,7 +74,7 @@ pub(super) struct JournalFollow {
 /// Journal cursor for an opener that sends its own acknowledgement.
 /// `None` means `resync_required` was already sent.
 pub(super) async fn prepare_follow(
-    readers: AccountReaders,
+    readers: StreamReaders,
     request: &LocalBusFrame,
     outbound: &super::outbound::LocalBusOutbound,
 ) -> Result<Option<JournalFollow>, SdkError> {
@@ -127,7 +128,7 @@ fn resync(request: &LocalBusFrame, bounds: &JournalBounds) -> LocalBusFrame {
 }
 
 async fn tail(
-    readers: AccountReaders,
+    readers: StreamReaders,
     mut query: LocalBusFrame,
     request: LocalBusFrame,
     outbound: super::outbound::LocalBusOutbound,

@@ -80,4 +80,22 @@ impl RamfluxClient {
         }
         Ok(())
     }
+
+    /// Whether the pair-reset policy lets this entry's authenticated sender trigger a reset.
+    /// An entry whose sender cannot be authenticated, or whom the policy excludes (removed,
+    /// blocked, unknown), is answered with a recorded refusal instead of key churn.
+    pub(crate) fn pair_recovery_permitted(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<bool, SdkError> {
+        let local = self.owned_device_identity()?;
+        let remote = match self.authenticated_device_identity(HeadUse::NewAuthorization, entry) {
+            Ok(remote) => remote,
+            Err(error) if crate::client::inbox_failure::deterministic(&error).is_some() => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        self.pair_recovery_allowed(&local, &remote)
+    }
 }

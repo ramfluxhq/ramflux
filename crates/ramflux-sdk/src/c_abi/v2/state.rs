@@ -84,10 +84,11 @@ pub(super) struct HostKeyFn {
 impl Shared {
     pub fn complete(&self, id: u64, mut value: serde_json::Value) {
         super::native_error::completion(&mut value);
+        crate::diag::logging::refusal(&value);
         let success = value.get("code").and_then(serde_json::Value::as_i64) == Some(0);
         let encoded = Zeroizing::new(
             serde_json::to_vec(&value)
-                .unwrap_or_else(|_| br#"{"code":16,"effects":"unknown"}"#.to_vec()),
+                .unwrap_or_else(|_| br#"{"code":16,"name":"Internal","reason":"internal_error","reason_code":"internal_error","effects":"unknown"}"#.to_vec()),
         );
         crate::bus::inprocess::erase_value(&mut value);
         let Ok(mut operations) = self.operations.lock() else { return };
@@ -171,10 +172,6 @@ impl Shared {
     pub fn cancel_for_suspend(&self) {
         self.suspended.store(true, std::sync::atomic::Ordering::Release);
         let Ok(operations) = self.operations.lock() else { return };
-        if let Ok(mut subscription) = self.subscription.lock() {
-            *subscription = None;
-        }
-        self.deactivate_generation();
         for operation in operations.values() {
             let Ok(mut state) = operation.state.lock() else { continue };
             if state.result.is_some() {
@@ -184,6 +181,13 @@ impl Shared {
             state.slot = ResultSlot::Frozen;
             state.result = Some(suspended_bytes(effects));
         }
+    }
+
+    pub(super) fn finish_suspend(&self) {
+        if let Ok(mut subscription) = self.subscription.lock() {
+            *subscription = None;
+        }
+        self.deactivate_generation();
     }
 
     pub fn close(&self) {

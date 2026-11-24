@@ -3,7 +3,7 @@
 
 //! Daemon diagnostics are opt-in and always kept off the CLI's JSON output stream.
 use crate::RfError;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, prelude::*};
 
 pub(crate) fn init() -> Result<(), RfError> {
     let filter = match EnvFilter::try_from_env("RUST_LOG") {
@@ -15,10 +15,14 @@ pub(crate) fn init() -> Result<(), RfError> {
             EnvFilter::new("off")
         }
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
+    tracing_subscriber::registry()
+        .with(ramflux_sdk::diag::DiagnosticLayer)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
+                .with_filter(filter),
+        )
         .try_init()
         .map_err(|error| RfError::Message(format!("could not initialize daemon logging: {error}")))
 }

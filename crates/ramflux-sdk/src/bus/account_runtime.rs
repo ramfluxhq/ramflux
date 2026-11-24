@@ -11,8 +11,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as RoutingMutex};
 
 mod background;
+mod command_phase;
 mod commands;
+mod initial_receive;
 mod maintenance;
+mod network_prepare;
 use maintenance::Maintenance;
 mod transient;
 pub(super) use transient::TransientHost;
@@ -27,12 +30,15 @@ mod username_calls;
 pub(crate) use connection::apply_ack_flush;
 #[cfg(test)]
 pub(crate) use connection::settle_retained;
+mod command_park;
 mod directory;
 pub(super) mod fetches;
 mod head_demand;
 pub(crate) mod head_refresh;
 pub(crate) mod lifecycle_fence;
+mod publication_complete;
 mod readers;
+mod ready_commands;
 pub(crate) mod session_thread;
 pub(super) mod uploads;
 pub(super) mod writer_slice;
@@ -91,6 +97,8 @@ struct AccountRuntime {
     /// Generic connection work skipped so a demanded head can be applied first.
     deferred: std::collections::VecDeque<super::connection_manager::AccountWork>,
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
+    publications: std::collections::VecDeque<publication_complete::Completion>,
+    ready_commands: ready_commands::Queue,
     /// After resume, redrive receive until this instant so a peer reply is not stuck behind
     /// the push safety sweep.
     resume_receive_until: Option<tokio::time::Instant>,
@@ -182,6 +190,8 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         head_rx,
         deferred: std::collections::VecDeque::new(),
         ledger: None,
+        publications: std::collections::VecDeque::new(),
+        ready_commands: ready_commands::Queue::default(),
         resume_receive_until: None,
         transient: TransientHost::default(),
         pairing: pairing_calls::Calls::default(),
@@ -192,30 +202,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         courier_events: None,
     };
     let result = Box::pin(account.serve(ready)).await;
-    account.username.stop().await;
-    account.pairing.stop().await;
-    account.ledger = None;
-    account.transfers.stop().await;
-    if let Some(state) = account.state.accounts.get(&account.id) {
-        let _ = state.client.recover_received_attachment_fetches();
-    }
-    account.stop_courier().await;
-    account.stop_connection().await;
-    let request = LocalBusFrame::request(
-        "shutdown",
-        Some(account.id.clone()),
-        "account",
-        "account.flush",
-        serde_json::json!({}),
-    );
-    let flushed = flush_if_open(&account, &request).await;
-    account.close_readers().await;
-    let pairing = crate::custody::pairing::remove_actor_and_drain(
-        &account.state.config.data_root,
-        &account.id,
-    )
-    .await;
-    result.and(flushed).and(pairing)
+    result.and(account.close_actor().await)
 }
 
 #[cfg(not(test))]
@@ -224,6 +211,31 @@ type WriterBudget = ramflux_storage::writer_budget::Armed;
 type WriterBudget = ();
 
 impl AccountRuntime {
+    async fn close_actor(&mut self) -> Result<(), SdkError> {
+        self.username.stop().await;
+        self.pairing.stop().await;
+        self.ledger = None;
+        self.transfers.stop().await;
+        if let Some(state) = self.state.accounts.get(&self.id) {
+            let _ = state.client.recover_received_attachment_fetches();
+        }
+        self.stop_courier().await;
+        self.stop_connection().await;
+        let request = LocalBusFrame::request(
+            "shutdown",
+            Some(self.id.clone()),
+            "account",
+            "account.flush",
+            serde_json::json!({}),
+        );
+        let flushed = flush_if_open(self, &request).await;
+        self.close_readers().await;
+        let pairing =
+            crate::custody::pairing::remove_actor_and_drain(&self.state.config.data_root, &self.id)
+                .await;
+        flushed.and(pairing)
+    }
+
     fn networking_expiry_request(&self) -> LocalBusFrame {
         LocalBusFrame::request(
             "networking-expiry",
@@ -235,7 +247,12 @@ impl AccountRuntime {
     }
 
     async fn refresh_networking_expiry(&mut self) {
-        match self.publish_networking_expiry().await {
+        let result = self.publish_networking_expiry().await;
+        self.note_networking_expiry(result);
+    }
+
+    fn note_networking_expiry(&mut self, result: Result<bool, SdkError>) {
+        match result {
             Ok(_) => self.networking_expiry_warned = false,
             Err(error) => {
                 if !self.networking_expiry_warned {
@@ -248,14 +265,18 @@ impl AccountRuntime {
         }
     }
 
-    async fn publish_networking_expiry(&mut self) -> Result<bool, SdkError> {
+    fn stage_networking_expiry(&mut self) -> Result<bool, SdkError> {
         if let Some(account) = self.state.accounts.get(&self.id)
             && super::networking_events::refresh_expired(account)?
         {
             self.networking_expiry_pending =
                 account.client.account_db()?.pending_actor_state_sequence("account/networking")?;
         }
-        if self.networking_expiry_pending.is_none() {
+        Ok(self.networking_expiry_pending.is_some())
+    }
+
+    async fn publish_networking_expiry(&mut self) -> Result<bool, SdkError> {
+        if !self.stage_networking_expiry()? {
             return Ok(false);
         }
         // Project expiry before another attempt can replace the actor-state snapshot.
@@ -266,6 +287,8 @@ impl AccountRuntime {
             "sync.run",
             serde_json::json!({}),
         );
+        // The maintenance caller races this confirmed handoff against commands
+        // and its sync deadline. Command completions use the nonblocking slice.
         self.publish(&request).await?;
         self.networking_expiry_pending = None;
         Ok(true)
@@ -347,24 +370,44 @@ impl AccountRuntime {
     }
 
     fn queued_command(&mut self, checkpoints: &mut u8) -> Option<AccountCommand> {
+        // A mailbox command is claimed before a parked publication wait. The
+        // parked command is not in this mailbox, and it must not delay one that is.
+        // A claimed entry must run without requiring another mailbox arrival.
+        let waiting =
+            self.command_waiting.load(Ordering::Acquire) > 0 || !self.ready_commands.is_empty();
+        if waiting && let Some(command) = self.try_mailbox() {
+            return Some(command);
+        }
+        if head_demand::demand_active() && !self.head_rx.is_empty() {
+            return None;
+        }
+        if let Some(command) = command_park::take_ready(&self.id) {
+            let _ = command_park::take_skip_note();
+            return Some(command);
+        }
         // A waiting command skips the eight-checkpoint gate. Its residence
         // budget is five seconds; a page can wait.
-        let waiting = self.command_waiting.load(Ordering::Acquire) > 0;
         if !waiting {
             if *checkpoints < 8 {
                 return None;
             }
             *checkpoints = 0;
         }
+        self.try_mailbox()
+    }
+
+    fn try_mailbox(&mut self) -> Option<AccountCommand> {
         let command = self
             .lifecycle
             .try_recv()
             .inspect(|_| {
                 self.preempt.borrow_and_update();
             })
-            .or_else(|_| self.receiver.try_recv())
-            .ok();
+            .ok()
+            .or_else(|| self.ready_commands.take())
+            .or_else(|| self.receiver.try_recv().ok());
         if command.is_some() {
+            command_park::set_final(false);
             self.note_command_taken();
         }
         command
@@ -374,6 +417,9 @@ impl AccountRuntime {
         &mut self,
         ready: std::sync::mpsc::SyncSender<()>,
     ) -> Result<bool, SdkError> {
+        if let Err(error) = self.stage_networking_expiry() {
+            self.note_networking_expiry(Err(error));
+        }
         self.initialize_readers()?;
         self.start_connection_or_defer();
         self.start_courier();
@@ -388,7 +434,7 @@ impl AccountRuntime {
         let mut shutdown = self.shutdown.clone();
         tokio::select! {
             _ = shutdown.changed() => return Ok(false),
-            result = self.publish(&restore) => result?,
+            result = self.publish_queued_yielding(&restore) => result?,
         }
         Ok(true)
     }
@@ -468,6 +514,35 @@ impl AccountRuntime {
         Ok((transient, username))
     }
 
+    /// Preparation can replace readers and session ownership across awaits. Keep its
+    /// future alive while claiming ordinary commands into a separate bounded queue.
+    async fn prepare_until_command(&mut self) -> Result<Option<PrepareDeadlines>, SdkError> {
+        if background::files_released() {
+            return self.background_or_prepare().await;
+        }
+        let (_standin_sender, standin) = mpsc::channel(1);
+        let mut mailbox = std::mem::replace(&mut self.receiver, standin);
+        let ready = self.ready_commands.sender();
+        let mut shutdown = self.shutdown.clone();
+        let result = {
+            let prepared = Box::pin(self.background_or_prepare());
+            tokio::pin!(prepared);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.changed() => break Ok(None),
+                    command = ready_commands::receive(&ready, &mut mailbox) => match command {
+                        Some((permit, command)) => ready_commands::retain(permit, command),
+                        None => break Ok(None),
+                    },
+                    result = &mut prepared => break result,
+                }
+            }
+        };
+        self.receiver = mailbox;
+        result
+    }
+
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         if !self.initialize_actor(ready).await? {
             return Ok(());
@@ -475,7 +550,7 @@ impl AccountRuntime {
         let (_writer_budget, mut schedule, mut next) = self.serve_setup();
         let mut checkpoints = 0_u8;
         loop {
-            let prepared = self.background_or_prepare().await?;
+            let prepared = Box::pin(self.prepare_until_command()).await?;
             let Some((transient_deadline, username_deadline)) = prepared else { break };
             if let Some(command) = self.queued_command(&mut checkpoints) {
                 if Box::pin(self.apply(command)).await? {
@@ -483,89 +558,152 @@ impl AccountRuntime {
                 }
                 continue;
             }
-            self.reap_transfer_jobs();
-            let pairing =
-                crate::custody::pairing::work_signal(&self.state.config.data_root, &self.id);
-            let command = tokio::select! {
-                biased;
-                _ = self.shutdown.changed() => break,
-                command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
-                checkpoint=self.transfers.receive.recv()=>{checkpoints += 1;if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}continue;},
-                work = recv(&mut self.deferred, &mut self.head_rx, &mut self.connection_work) => {
-                    checkpoints += 1;
-                    if let Some(work)=work {
-                        let mut shutdown=self.shutdown.clone();let mut preempt=self.preempt.clone();
-                        tokio::select! {biased;_=shutdown.changed()=>break,_=preempt.changed()=>{},result=self.finish_connection_work(work)=>result?}
-                    }
-                    continue;
-                },
-                frame = self.transient.next(&self.state, &self.id) => {
-                    self.apply_transient_frame(frame);
-                    continue;
-                },
-                () = async {
-                    match transient_deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline).await,
-                        None => std::future::pending().await,
-                    }
-                } => { self.publish_transient_updates(); continue; },
-                completion = self.username.receive() => {
-                    if let Some(completion) = completion && Box::pin(self.finish_username(completion)).await? { break; }
-                    continue;
-                },
-                () = async {
-                    match username_deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline).await,
-                        None => std::future::pending().await,
-                    }
-                } => { self.start_username_delivery(); continue; },
-                completion = self.pairing.receive() => {
-                    if let Some(completion) = completion
-                        && self.finish_pairing_begin(completion).await? { break; }
-                    continue;
-                },
-                command = self.receiver.recv() => command,
-                () = wait_pairing_signal(pairing) => {
-                    Box::pin(self.service_pairing_data()).await;
-                    continue;
-                },
-                outcome = async {
-                    match self.courier.as_mut() {
-                        Some(courier) => courier.recv().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    self.service_courier_outcome(outcome).await?;
-                    continue;
-                },
-                () = tokio::time::sleep_until(next), if !self.state.accounts.is_empty() => {
-                    self.maintain_expired_object_holds();
-                    match Box::pin(self.maintain_until_command()).await {
-                        Maintenance::Stopped => break,
-                        Maintenance::Interrupted => continue,
-                        Maintenance::Command(command) => Some(*command),
-                        Maintenance::Username(completion) => {
-                            if Box::pin(self.finish_username(*completion)).await? { break; }
-                            continue;
-                        }
-                        Maintenance::Completed(active) => {
-                            schedule.completed(active);
-                            next = tokio::time::Instant::now() + schedule.interval;
-                            continue;
-                        }
-                    }
-                },
-            };
-            checkpoints = 0;
-            let Some(command) = command else {
-                break;
-            };
-            self.note_command_taken();
-            if Box::pin(self.apply(command)).await? {
+            if Box::pin(self.poll_turn(
+                &mut schedule,
+                &mut next,
+                &mut checkpoints,
+                transient_deadline,
+                username_deadline,
+            ))
+            .await?
+            {
                 break;
             }
         }
+        command_park::cancel(&self.id, || SdkError::NetworkingPending)?;
         Ok(())
+    }
+
+    async fn poll_turn(
+        &mut self,
+        schedule: &mut super::sync_driver::Schedule,
+        next: &mut tokio::time::Instant,
+        checkpoints: &mut u8,
+        transient_deadline: Option<tokio::time::Instant>,
+        username_deadline: Option<tokio::time::Instant>,
+    ) -> Result<bool, SdkError> {
+        self.reap_transfer_jobs();
+        let pairing = crate::custody::pairing::work_signal(&self.state.config.data_root, &self.id);
+        let command = tokio::select! {
+            biased;
+            _ = self.shutdown.changed() => return Ok(true),
+            command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
+            command = self.receiver.recv() => command,
+            () = std::future::ready(()), if head_demand::demand_active() && !self.head_rx.is_empty() => {
+                if let Ok(work) = self.head_rx.try_recv() {
+                    *checkpoints += 1;
+                    return Box::pin(self.drive_connection_work(work, checkpoints)).await;
+                }
+                return Ok(false);
+            },
+            () = command_park::until_ready(&self.id), if command_park::pending(&self.id) => {
+                match command_park::take_ready(&self.id) {
+                    Some(command) => Some(command),
+                    None => return Ok(false),
+                }
+            },
+            () = std::future::ready(()), if !self.publications.is_empty() => {
+                self.advance_publications()?;
+                tokio::task::yield_now().await;
+                return Ok(false);
+            },
+            checkpoint=self.transfers.receive.recv()=>{*checkpoints += 1;if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}return Ok(false);},
+            work = recv(&mut self.deferred, &mut self.head_rx, &mut self.connection_work) => {
+                *checkpoints += 1;
+                if let Some(work)=work {
+                    return Box::pin(self.drive_connection_work(work, checkpoints)).await;
+                }
+                return Ok(false);
+            },
+            frame = self.transient.next(&self.state, &self.id) => {
+                self.apply_transient_frame(frame);
+                return Ok(false);
+            },
+            () = async {
+                match transient_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => { self.publish_transient_updates(); return Ok(false); },
+            completion = self.username.receive() => {
+                if let Some(completion) = completion && Box::pin(self.finish_username(completion)).await? { return Ok(true); }
+                return Ok(false);
+            },
+            () = async {
+                match username_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => { self.start_username_delivery(); return Ok(false); },
+            completion = self.pairing.receive() => {
+                if let Some(completion) = completion
+                    && self.finish_pairing_begin(completion)? { return Ok(true); }
+                return Ok(false);
+            },
+            () = wait_pairing_signal(pairing) => {
+                Box::pin(self.service_pairing_data()).await;
+                return Ok(false);
+            },
+            outcome = async {
+                match self.courier.as_mut() {
+                    Some(courier) => courier.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                self.service_courier_outcome(outcome).await?;
+                return Ok(false);
+            },
+            () = tokio::time::sleep_until(*next), if !self.state.accounts.is_empty() => {
+                self.maintain_expired_object_holds();
+                match self.maintenance_turn(schedule, next).await? {
+                    MaintenancePoll::Stop => return Ok(true),
+                    MaintenancePoll::Again => return Ok(false),
+                    MaintenancePoll::Command(command) => Some(*command),
+                }
+            },
+        };
+        self.finish_polled_command(checkpoints, command).await
+    }
+
+    async fn maintenance_turn(
+        &mut self,
+        schedule: &mut super::sync_driver::Schedule,
+        next: &mut tokio::time::Instant,
+    ) -> Result<MaintenancePoll, SdkError> {
+        match Box::pin(self.maintain_until_command()).await {
+            Maintenance::Stopped => Ok(MaintenancePoll::Stop),
+            Maintenance::Interrupted => Ok(MaintenancePoll::Again),
+            Maintenance::Command(command) => Ok(MaintenancePoll::Command(command)),
+            Maintenance::Username(completion) => {
+                if Box::pin(self.finish_username(*completion)).await? {
+                    Ok(MaintenancePoll::Stop)
+                } else {
+                    Ok(MaintenancePoll::Again)
+                }
+            }
+            Maintenance::Completed(active) => {
+                schedule.completed(active);
+                *next = tokio::time::Instant::now() + schedule.interval;
+                Ok(MaintenancePoll::Again)
+            }
+        }
+    }
+
+    async fn finish_polled_command(
+        &mut self,
+        checkpoints: &mut u8,
+        command: Option<AccountCommand>,
+    ) -> Result<bool, SdkError> {
+        *checkpoints = 0;
+        let Some(command) = command else {
+            return Ok(true);
+        };
+        let resumed = command_park::take_skip_note();
+        if !resumed {
+            command_park::set_final(false);
+            self.note_command_taken();
+        }
+        self.apply(command).await
     }
 
     async fn sync(&mut self) -> Result<bool, SdkError> {
@@ -601,10 +739,10 @@ impl AccountRuntime {
             "sync.run",
             serde_json::json!({}),
         );
-        self.publish(&request).await?;
+        self.publish_yielding(&request).await?;
         // Publish message receipt before spending any transfer budget on its deferred objects.
         let fetched = self.start_next_fetch()?;
-        self.publish(&request).await?;
+        self.publish_yielding(&request).await?;
         Ok(activity || fetched)
     }
 
@@ -648,6 +786,14 @@ impl AccountRuntime {
         }
     }
 }
+
+enum MaintenancePoll {
+    Stop,
+    Again,
+    Command(Box<AccountCommand>),
+}
+
+type PrepareDeadlines = (Option<tokio::time::Instant>, Option<tokio::time::Instant>);
 
 async fn flush_if_open(account: &AccountRuntime, request: &LocalBusFrame) -> Result<(), SdkError> {
     if background::files_released() { Ok(()) } else { account.publish(request).await }

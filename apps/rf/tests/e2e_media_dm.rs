@@ -88,8 +88,9 @@ fn media_dm_between_two_current_accounts_needs_no_seeded_rows() -> e2e::Result<(
                 value["layer_declaration"]["state"] == "fresh"
             })?;
         assert_eq!(
-            status["layer_declaration"]["max_layer"], 4,
-            "the published declaration must be layer 4: {status}"
+            status["layer_declaration"]["max_layer"],
+            ramflux_protocol::message::registry::COMPILED_LAYER,
+            "the published declaration must be the compiled layer: {status}"
         );
     }
     Ok(())
