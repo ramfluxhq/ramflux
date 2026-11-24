@@ -39,6 +39,9 @@ pub(crate) async fn dispatch(
         return media(account, id);
     }
     let _: LocalBusCallHangupRequest = serde_json::from_value(request.body.clone())?;
+    if request.method == "call.answer" {
+        account.client.reserve_call_audio(id)?;
+    }
     let mut next =
         account.client.voice_calls.get(id).cloned().ok_or_else(|| invalid("call not live"))?;
     match request.method.as_str() {
@@ -58,6 +61,7 @@ pub(crate) async fn dispatch(
     account.client.account_db()?.write_transaction(|| account.client.persist_live_call(&next))?;
     let row = next.row.clone();
     account.client.voice_calls.insert(id.into(), next);
+    crate::bus::media::reconcile(account);
     if let Some(handle) = &account.connection {
         handle.wake_couriers();
     }
@@ -123,6 +127,7 @@ async fn invite(
         })
         .collect();
     let id = new_call_id()?;
+    account.client.reserve_call_audio(&id)?;
     let mut call = LiveCall::outgoing(
         id.clone(),
         conversation.into(),

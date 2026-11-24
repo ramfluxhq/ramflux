@@ -13,7 +13,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 /// Non-secret result of a completed in-process handoff.
 /// The session stays in the account writer and is not returned.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[must_use]
 pub struct InProcessMediaReceipt {
     pub call_id: String,
@@ -109,10 +109,13 @@ impl RamfluxClient {
         now: i64,
     ) -> Result<InProcessMediaReceipt, SdkError> {
         self.admit_in_process_handoff(call_id, now)?;
+        self.reserve_call_audio(call_id)?;
         // extract consumes the keys. A later assembly failure must not put them back.
         let moved = self.extract_in_process_media(call_id)?;
         let (session, receipt) = assemble_session(moved)?;
-        self.in_process_media = Some(Box::new(session));
+        let call = self.voice_calls.get(call_id).ok_or_else(fresh_call)?;
+        self.in_process_media =
+            Some(Box::new(super::media_owner::OwnedMedia::new(session, receipt.clone(), call)));
         Ok(receipt)
     }
 
@@ -120,7 +123,13 @@ impl RamfluxClient {
         if self.media_ownership != MediaOwnership::InProcess {
             return Err(SdkError::LocalBusPermissionDenied);
         }
-        if self.in_process_media.is_some() {
+        if self.in_process_media.as_ref().is_some_and(|owned| owned.receipt.call_id == call_id)
+            || self.in_process_media.as_ref().is_some_and(|owned| {
+                self.voice_calls
+                    .get(&owned.receipt.call_id)
+                    .is_some_and(|call| call.row.state != "ended")
+            })
+        {
             return Err(SdkError::LocalBusPermissionDenied);
         }
         let (local, generation, expires_at, hard_expires_at, has_receive) = {
@@ -146,11 +155,13 @@ impl RamfluxClient {
                 call.receive_key.is_some(),
             )
         };
+        let call = self.voice_calls.get(call_id).ok_or_else(fresh_call)?;
+        self.current_call_media_authority(call)?;
         let verified = self.call_local_endpoint()?;
         if local != verified {
             return Err(SdkError::LocalBusPermissionDenied);
         }
-        if generation.is_none() {
+        if generation.is_none() || generation != *self.media_connection_generation.borrow() {
             return Err(unavailable("call resolution missing"));
         }
         let (Some(expires_at), Some(hard_expires_at)) = (expires_at, hard_expires_at) else {
@@ -188,6 +199,7 @@ impl RamfluxClient {
         let call_id = call.row.call_id.clone();
         let send_key = std::mem::replace(&mut call.send_key, Zeroizing::new([0; 32]));
         if let Some(allocation) = call.allocation.as_mut() {
+            call.allocation_credentials = Some(super::lease::credentials_commitment(allocation));
             allocation.token.zeroize();
             allocation.rebind_key.zeroize();
         }

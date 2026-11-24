@@ -138,7 +138,9 @@ pub struct RamfluxClient {
     pub(crate) media_ownership_bound: bool,
     /// The one in-process media session for this account writer. Boxed so an empty
     /// account does not carry the session in every moved client future.
-    pub(crate) in_process_media: Option<Box<ramflux_media::MediaSession>>,
+    pub(crate) in_process_media: Option<Box<call::media_owner::OwnedMedia>>,
+    pub(crate) media_connection_generation: std::cell::RefCell<Option<String>>,
+    pub(crate) media_reservation: call::media_owner::AudioReservation,
     // One account-owned plan crosses the synchronous receive transaction's commit boundary.
     // It is never shared across accounts, held over an await, or serialized with media secrets.
     pub(crate) voice_transition: std::cell::RefCell<Option<(String, Box<call::state::LiveCall>)>>,
@@ -187,6 +189,8 @@ impl Default for RamfluxClient {
             media_ownership: crate::bus::protocol::MediaOwnership::External,
             media_ownership_bound: false,
             in_process_media: None,
+            media_reservation: std::cell::RefCell::default(),
+            media_connection_generation: std::cell::RefCell::default(),
             voice_transition: std::cell::RefCell::new(None),
             node_relay_options: None,
             profile_read_cache: std::cell::RefCell::new(None),

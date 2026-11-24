@@ -308,7 +308,9 @@ impl RamfluxClient {
                 .ok_or_else(|| invalid("peer signing key missing"))?
                 .to_owned();
             incoming.pin_peer(c.sender.clone(), key)?;
-            if self.voice_calls.values().any(|call| call.row.state != "ended") {
+            if self.voice_calls.values().any(|call| call.row.state != "ended")
+                || self.reserve_call_audio(&c.call_id).is_err()
+            {
                 incoming.busy(now)?;
             }
             Ok(incoming)
@@ -478,6 +480,7 @@ impl RamfluxClient {
             && key == transition_key(body)
         {
             self.voice_calls.insert(c.call_id.clone(), *next);
+            self.reconcile_in_process_media();
             return Ok(true);
         }
         // An already committed delivery can be retried after an ACK failure. Its cache refresh

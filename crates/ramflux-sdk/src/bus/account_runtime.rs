@@ -192,36 +192,43 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         courier_events: None,
     };
     let result = Box::pin(account.serve(ready)).await;
-    account.username.stop().await;
-    account.pairing.stop().await;
-    account.ledger = None;
-    account.transfers.stop().await;
-    if let Some(state) = account.state.accounts.get(&account.id) {
-        let _ = state.client.recover_received_attachment_fetches();
-    }
-    account.stop_courier().await;
-    account.stop_connection().await;
-    let request = LocalBusFrame::request(
-        "shutdown",
-        Some(account.id.clone()),
-        "account",
-        "account.flush",
-        serde_json::json!({}),
-    );
-    let flushed = flush_if_open(&account, &request).await;
-    account.close_readers().await;
-    let pairing = crate::custody::pairing::remove_actor_and_drain(
-        &account.state.config.data_root,
-        &account.id,
-    )
-    .await;
-    result.and(flushed).and(pairing)
+    account.finish_actor(result).await
 }
 
 #[cfg(not(test))]
 type WriterBudget = ramflux_storage::writer_budget::Armed;
 #[cfg(test)]
 type WriterBudget = ();
+
+impl AccountRuntime {
+    async fn finish_actor(&mut self, result: Result<(), SdkError>) -> Result<(), SdkError> {
+        if let Some(state) = self.state.accounts.get(&self.id) {
+            state.client.stop_in_process_media(ramflux_media::authorization::GateReason::Terminal);
+        }
+        self.username.stop().await;
+        self.pairing.stop().await;
+        self.ledger = None;
+        self.transfers.stop().await;
+        if let Some(state) = self.state.accounts.get(&self.id) {
+            let _ = state.client.recover_received_attachment_fetches();
+        }
+        self.stop_courier().await;
+        self.stop_connection().await;
+        let request = LocalBusFrame::request(
+            "shutdown",
+            Some(self.id.clone()),
+            "account",
+            "account.flush",
+            serde_json::json!({}),
+        );
+        let flushed = flush_if_open(self, &request).await;
+        self.close_readers().await;
+        let pairing =
+            crate::custody::pairing::remove_actor_and_drain(&self.state.config.data_root, &self.id)
+                .await;
+        result.and(flushed).and(pairing)
+    }
+}
 
 impl AccountRuntime {
     fn networking_expiry_request(&self) -> LocalBusFrame {
@@ -460,6 +467,9 @@ impl AccountRuntime {
     async fn prepare_receive_turn(
         &mut self,
     ) -> Result<(Option<tokio::time::Instant>, Option<tokio::time::Instant>), SdkError> {
+        if let Some(account) = self.state.accounts.get(&self.id) {
+            super::media::reconcile(account);
+        }
         self.refresh_transient_host().await;
         self.publish_transient_updates();
         let transient = self.transient_deadline();

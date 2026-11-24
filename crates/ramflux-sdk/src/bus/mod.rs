@@ -134,3 +134,5 @@ mod search_tests;
 #[cfg(feature = "c-abi")]
 pub(crate) mod inprocess;
 mod search_dispatch;
+
+pub mod media;

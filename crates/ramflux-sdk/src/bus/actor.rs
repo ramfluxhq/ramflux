@@ -44,6 +44,10 @@ pub(super) enum AgentPrivate {
 }
 
 pub(super) enum PrivateCommand {
+    Media {
+        command: super::media::MediaCommand,
+        reply: oneshot::Sender<Result<crate::client::call::InProcessMediaStatus, SdkError>>,
+    },
     SearchRebuild {
         owner: u64,
         job: String,
@@ -238,6 +242,8 @@ impl AccountActor {
         let (finished, done) = watch::channel(ActorExit::Running);
         let readers = Arc::new(RoutingMutex::new(None));
         let command_waiting = Arc::new(AtomicUsize::new(0));
+        let media_registration =
+            config.media_control.clone().map(|control| (control, account_id.clone()));
         let bootstrap = super::account_runtime::Bootstrap {
             timeouts: timeouts.clone(),
             account_id,
@@ -268,6 +274,9 @@ impl AccountActor {
             #[cfg(test)]
             backup_captures: Arc::default(),
         };
+        if let Some((control, account)) = media_registration {
+            control.register(&account, actor.clone());
+        }
         ActorLaunch { actor, bootstrap, initialized, finished, wait_for_initial }
     }
 
@@ -456,7 +465,7 @@ impl AccountActor {
     ) -> Result<super::backup_jobs::MissingAttachments, SdkError> {
         self.reader_pool()?.backup_missing_references().await
     }
-    fn send_private(&self, backup: PrivateCommand) -> Result<(), SdkError> {
+    pub(super) fn send_private(&self, backup: PrivateCommand) -> Result<(), SdkError> {
         let (outbound, _events) = mpsc::channel(1);
         let lifecycle = is_lifecycle_private(&backup);
         self.enqueue(

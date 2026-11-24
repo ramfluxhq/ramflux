@@ -49,6 +49,7 @@ impl AccountRuntime {
 
     pub(super) async fn publish(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
         if let Some(account) = self.state.accounts.get(&self.id) {
+            super::super::media::reconcile(account);
             if let Some(pool) = self.readers.lock().map_err(|_| stopped())?.as_ref() {
                 pool.set_identity(account.client.owned_device_identity().ok())?;
                 pool.set_account_view(&self.state, &self.id)?;

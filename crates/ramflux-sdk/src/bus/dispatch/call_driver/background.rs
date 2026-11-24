@@ -195,6 +195,7 @@ fn install(account: &mut LocalBusAccountState, mut next: LiveCall) -> Result<(),
             .write_transaction(|| account.client.persist_live_call(&next))?;
     }
     account.client.voice_calls.insert(next.row.call_id.clone(), next);
+    crate::bus::media::reconcile(account);
     Ok(())
 }
 fn prepare_lease(
@@ -235,9 +236,18 @@ fn prepare_lease(
         }
     };
     let peer = if next.local == next.caller { &next.callee } else { &next.caller };
-    let record = account
-        .client
-        .trusted_device(HeadUse::NewAuthorization, &account.client.call_device_identity(peer)?)?;
+    let record =
+        match account.client.call_device_identity(peer).and_then(|identity| {
+            account.client.trusted_device(HeadUse::NewAuthorization, &identity)
+        }) {
+            Ok(record) => record,
+            Err(error) if crate::error_policy::approval_retryable(&error) => return Err(error),
+            Err(_) => {
+                next.fail(VoiceCallFailureReason::AuthorityRefused, now)?;
+                install(account, next)?;
+                return Ok(None);
+            }
+        };
     if !targets.iter().any(|target| target.device == peer.device_id)
         || !record["signing_public_key"]
             .as_str()

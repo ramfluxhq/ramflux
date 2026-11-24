@@ -23,6 +23,7 @@
 //! deterministically.
 
 use std::collections::BTreeMap;
+use zeroize::Zeroize;
 
 use crate::codec::{FRAME_MS, FRAME_SAMPLES};
 
@@ -93,6 +94,14 @@ pub struct JitterBuffer {
     last_transit: Option<i64>,
     target: usize,
     stats: JitterStats,
+}
+
+impl Drop for JitterBuffer {
+    fn drop(&mut self) {
+        for packet in self.packets.values_mut() {
+            packet.zeroize();
+        }
+    }
 }
 
 impl Default for JitterBuffer {
