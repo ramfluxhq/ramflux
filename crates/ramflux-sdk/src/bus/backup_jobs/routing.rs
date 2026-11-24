@@ -184,6 +184,9 @@ impl Supervisor {
         request: &LocalBusFrame,
     ) -> Result<serde_json::Value, SdkError> {
         if let Some(id) = request.body.get("job_id").and_then(serde_json::Value::as_str) {
+            if !self.backup_jobs.app_job_visible(id, &self.app_fences)? {
+                return Err(refused("unknown_job"));
+            }
             self.backup_jobs
                 .missing_page(
                     id,
@@ -195,7 +198,7 @@ impl Supervisor {
                 )
                 .await
         } else {
-            self.backup_jobs.jobs()
+            self.backup_jobs.app_visible_jobs(&self.app_fences)
         }
     }
     async fn restart_backup_actor(

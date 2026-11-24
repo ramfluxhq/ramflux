@@ -292,3 +292,18 @@ pub(super) fn status_name(code: i64) -> &'static str {
         _ => "Internal",
     }
 }
+
+/// App lock uses the existing authentication status and preserves its precise reason token.
+pub(super) fn auth_failure(name: &str) -> bool {
+    matches!(
+        name,
+        "AuthFailed"
+            | "app_locked"
+            | "app_lock_disabled"
+            | "AccountLocked"
+            | "Unauthenticated"
+            | "TransportSecurity"
+            | "CustodyConfirmationFailed"
+            | "credential_unavailable"
+    )
+}

@@ -70,7 +70,13 @@ impl RamfluxClient {
         &self,
         state: &VerifiedGroupState,
     ) -> Result<Vec<Value>, SdkError> {
-        let own = self.owned_device_identity()?;
+        // A read-only metadata reader holds no private root; it cannot name its own device,
+        // so only the creator and recorded confirmations count as joined for it.
+        let own = match self.owned_device_identity() {
+            Ok(own) => Some(own),
+            Err(SdkError::IdentityRootMissing) => None,
+            Err(error) => return Err(error),
+        };
         let genesis_hash = state.genesis_hash()?;
         let rows: Vec<Confirmation> =
             self.account_db()?.load_actor_state(&key(&state.view().group_id))?.unwrap_or_default();
@@ -80,9 +86,10 @@ impl RamfluxClient {
             .iter()
             .map(|member| {
                 let identity = &member.identity;
-                let joined = (identity.root_commitment == own.root_commitment()
-                    && identity.device_id == own.device_id())
-                    || *identity == state.creator().identity
+                let joined = own.as_ref().is_some_and(|own| {
+                    identity.root_commitment == own.root_commitment()
+                        && identity.device_id == own.device_id()
+                }) || *identity == state.creator().identity
                     || rows.iter().any(|row| matches(row, &genesis_hash, member));
                 json!({
                     "root_commitment": identity.root_commitment,

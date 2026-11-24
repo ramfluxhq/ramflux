@@ -64,6 +64,9 @@ impl AccountRuntime {
     }
 
     async fn preempt_network_tasks(&mut self) -> Result<(), SdkError> {
+        if let Some(account) = self.state.accounts.get(&self.id) {
+            account.client.stop_in_process_media(ramflux_media::authorization::GateReason::Locked);
+        }
         super::command_park::cancel(&self.id, || self.preemption_error())?;
         self.username.stop().await;
         self.pairing.stop().await;
@@ -130,6 +133,17 @@ impl AccountRuntime {
         request: &LocalBusFrame,
     ) -> Result<(), SdkError> {
         match backup {
+            super::super::actor::PrivateCommand::Media { command, reply } => {
+                if !reply.is_closed() {
+                    let result = self
+                        .state
+                        .accounts
+                        .get_mut(&self.id)
+                        .ok_or_else(|| SdkError::AccountNotOpen(self.id.clone()))
+                        .and_then(|account| super::super::media::apply(account, command));
+                    let _ = reply.send(result);
+                }
+            }
             #[cfg(test)]
             super::super::actor::PrivateCommand::HoldLocalMutation { entered, release } => {
                 let _ = entered.send(tokio::time::Instant::now());

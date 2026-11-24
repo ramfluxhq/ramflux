@@ -30,6 +30,7 @@ pub(super) struct State {
     pub events: VecDeque<(u64, BackupJob)>,
     pub head: u64,
     pub cancelling: std::collections::BTreeSet<String>,
+    pub accounts: std::collections::BTreeMap<String, String>,
     progress: std::collections::BTreeMap<String, ProgressMark>,
 }
 #[derive(Clone)]
@@ -40,6 +41,7 @@ pub(crate) struct BackupJobs {
     pub(super) index: ramflux_storage::AccountIndex,
     pub(super) generations: super::generation_lock::GenerationLocks,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    pub(super) exports: Arc<Mutex<Vec<super::app_lock::Export>>>,
     next_cleanup: Arc<Mutex<std::time::Instant>>,
     pub(super) diagnostics: super::attachments::Diagnostics,
     #[cfg(test)]
@@ -73,6 +75,7 @@ impl BackupJobs {
                 events: VecDeque::new(),
                 head: 0,
                 cancelling: std::collections::BTreeSet::default(),
+                accounts: std::collections::BTreeMap::default(),
                 progress: std::collections::BTreeMap::default(),
             })),
             root,
@@ -80,6 +83,7 @@ impl BackupJobs {
             index,
             generations,
             tasks: Arc::default(),
+            exports: Arc::default(),
             next_cleanup: Arc::new(Mutex::new(std::time::Instant::now())),
             diagnostics: Arc::default(),
             #[cfg(test)]
@@ -150,6 +154,7 @@ impl BackupJobs {
         };
         self.fail(id, failure);
     }
+    #[cfg(test)]
     pub(crate) fn jobs(&self) -> Result<serde_json::Value, SdkError> {
         let state = self.state.lock().map_err(|_| refused("interrupted"))?;
         Ok(serde_json::json!({"jobs":state.registry.jobs()}))
@@ -180,9 +185,19 @@ impl BackupJobs {
         allow_missing_attachments: bool,
     ) -> Result<BackupJob, SdkError> {
         let row = self.start(BackupJobKind::Backup, path)?;
+        self.bind_app_account(&row.job_id, actor.account_id())?;
+        let (finished, done) = tokio::sync::watch::channel(false);
+        self.exports.lock().map_err(|_| refused("interrupted"))?.push(super::app_lock::Export {
+            account: actor.account_id().to_owned(),
+            job: row.job_id.clone(),
+            cancel: self.cancellation(&row.job_id)?,
+            done,
+        });
+        let finished = super::app_lock::ExportDone(finished);
         let job = row.clone();
         let service = self.clone();
         self.task(tokio::task::spawn_local(async move {
+            let _finished = finished;
             let id = job.job_id.clone();
             match service.fetch_before_capture(&actor, &job).await {
                 Ok(captured) => {

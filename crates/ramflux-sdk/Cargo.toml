@@ -57,6 +57,7 @@ prost.workspace = true
 prost-reflect = "=0.16.5"
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-protocol = { workspace = true }
+ramflux-media = { workspace = true }
 ramflux-prx-client = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-crypto = { workspace = true }
@@ -87,7 +88,7 @@ tracing-subscriber = { workspace = true }
 zeroize = { version = "1.8", features = ["serde", "derive"] }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1", features = ["fs", "process"] }
+rustix = { version = "1.1", features = ["fs", "process", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust", "vendored"] }
@@ -108,6 +109,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Com",
     "Win32_System_Pipes",
     "Win32_System_Threading",
+    "Win32_System_SystemInformation",
     "Win32_UI_Shell",
 ] }
 

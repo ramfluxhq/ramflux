@@ -195,6 +195,7 @@ fn install(account: &mut LocalBusAccountState, mut next: LiveCall) -> Result<(),
             .write_transaction(|| account.client.persist_live_call(&next))?;
     }
     account.client.voice_calls.insert(next.row.call_id.clone(), next);
+    crate::bus::media::reconcile(account);
     Ok(())
 }
 fn prepare_lease(
@@ -235,9 +236,18 @@ fn prepare_lease(
         }
     };
     let peer = if next.local == next.caller { &next.callee } else { &next.caller };
-    let record = account
-        .client
-        .trusted_device(HeadUse::NewAuthorization, &account.client.call_device_identity(peer)?)?;
+    let record =
+        match account.client.call_device_identity(peer).and_then(|identity| {
+            account.client.trusted_device(HeadUse::NewAuthorization, &identity)
+        }) {
+            Ok(record) => record,
+            Err(error) if crate::error_policy::approval_retryable(&error) => return Err(error),
+            Err(_) => {
+                next.fail(VoiceCallFailureReason::AuthorityRefused, now)?;
+                install(account, next)?;
+                return Ok(None);
+            }
+        };
     if !targets.iter().any(|target| target.device == peer.device_id)
         || !record["signing_public_key"]
             .as_str()
@@ -379,7 +389,7 @@ async fn send_controls(
             .map(|(_, _, resolutions)| resolutions.clone())
             .unwrap_or_default(),
     };
-    writer.apply(move |account| note_control_result(account, plan, &outcome)).await?;
+    writer.apply(move |account| note_control_result(account, &plan, &outcome)).await?;
     result.map(|(sent, _, _)| sent)
 }
 
@@ -418,6 +428,10 @@ async fn deliver_control(
     let Some(envelope) = envelope else {
         return Ok(Delivered::Unsealed);
     };
+    tracing::debug!(
+        remaining_ms = deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis(),
+        "call control prepared for submit"
+    );
     if route.is_some() {
         let route = federation::pinned_submit_route(writer, input_root, route).await?;
         federation::submit_until(context, envelope, route, context.call_deadline(), true).await?;
@@ -455,10 +469,10 @@ async fn submit_home_control(
 
 fn note_control_result(
     account: &mut LocalBusAccountState,
-    plan: Plan,
+    plan: &Plan,
     outcome: &ControlOutcome,
 ) -> Result<(), SdkError> {
-    if !current(account, &plan)? {
+    if !current_control_result(account, plan, outcome)? {
         return Ok(());
     }
     let now = now_unix_timestamp();
@@ -468,21 +482,20 @@ fn note_control_result(
         .iter()
         .map(crate::gateway::call_resolution::CallOperationAction::from_control)
         .collect::<std::collections::BTreeSet<_>>();
-    let mut next = plan.original;
-    if account
+    let mut next = account
         .client
         .voice_calls
-        .get(&next.row.call_id)
-        .is_some_and(|live| live.held_answer == call::state::HeldAnswer::Requested)
-    {
-        next.held_answer = call::state::HeldAnswer::Requested;
-    }
+        .get(&plan.original.row.call_id)
+        .cloned()
+        .ok_or_else(|| invalid("call completion lost its live owner"))?;
     #[cfg(feature = "test-support")]
     {
         next.last_control_error.clone_from(&outcome.error);
     }
     if outcome.success && outcome.sent {
-        next.pending.clear();
+        // Receiving Ringing or Answer may advance the caller while this submit
+        // completes. Keep that state and any controls queued after this batch.
+        next.pending.retain(|control| !plan.original.pending.contains(control));
         next.retry_attempts = 0;
         next.retry_at = 0;
         if outcome.acknowledged.is_some() {
@@ -503,6 +516,42 @@ fn note_control_result(
     }
     next.queue_requested_answer(now)?;
     install(account, next)
+}
+
+fn current_control_result(
+    account: &LocalBusAccountState,
+    plan: &Plan,
+    outcome: &ControlOutcome,
+) -> Result<bool, SdkError> {
+    if current(account, plan)? {
+        return Ok(true);
+    }
+    let Some(live) = account.client.voice_calls.get(&plan.original.row.call_id) else {
+        return Ok(false);
+    };
+    // Only a delivered caller batch can merge across received peer controls.
+    // A changed authority generation, terminal call, invitation roster, local
+    // media loss, conversation or pending batch still invalidates completion.
+    let applies = outcome.success
+        && outcome.sent
+        && plan.original.local == plan.original.caller
+        && plan.original.row.state != "ended"
+        && live.row.state != "ended"
+        && live.local_generation == plan.original.local_generation
+        && live.gateway_generation == plan.original.gateway_generation
+        && live.invited == plan.original.invited
+        && live.media_lost() == plan.original.media_lost()
+        && plan.original.pending.iter().all(|control| live.pending.contains(control))
+        && account
+            .client
+            .account_db()?
+            .client_record("conversation", &plan.original.row.conversation_id)?
+            .as_ref()
+            == Some(&plan.thread);
+    if applies {
+        tracing::debug!("call completion retained received peer controls");
+    }
+    Ok(applies)
 }
 
 struct BoundStart {
@@ -583,6 +632,9 @@ fn apply_one_resolution(
         };
         return next.finish(reason, now);
     }
+    // New calls are created after the connection is installed. Bind only the
+    // authenticated, current operation's generation before releasing media.
+    next.bind_gateway_generation(Some(&resolved.context.session_generation))?;
     let allowed = resolved.permits_media();
     next.apply_media_for(
         bound.peer.clone(),

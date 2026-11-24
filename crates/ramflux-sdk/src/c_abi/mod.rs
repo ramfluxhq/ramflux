@@ -958,6 +958,7 @@ macro_rules! sdk_invalid_argument {
 }
 
 // `Search` stays unsupported: legacy entrypoints do not expose local search.
+
 fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
     match error {
         SdkError::CustodyConfirmRejected(reason) => confirm_abi_code(*reason),

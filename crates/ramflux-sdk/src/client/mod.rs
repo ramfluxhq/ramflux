@@ -132,6 +132,15 @@ pub struct RamfluxClient {
     // Fetched compare material. Preview keeps it here; only a successful CAS commit stores it.
     pub(crate) held_manifests: HeldManifests,
     pub(crate) voice_calls: BTreeMap<String, call::state::LiveCall>,
+    /// Process-fixed media owner. External until the daemon config or
+    /// [`Self::fix_in_process_media_ownership`] binds it. Never serialized.
+    pub(crate) media_ownership: crate::bus::protocol::MediaOwnership,
+    pub(crate) media_ownership_bound: bool,
+    /// The one in-process media session for this account writer. Boxed so an empty
+    /// account does not carry the session in every moved client future.
+    pub(crate) in_process_media: Option<Box<call::media_owner::OwnedMedia>>,
+    pub(crate) media_connection_generation: std::cell::RefCell<Option<String>>,
+    pub(crate) media_reservation: call::media_owner::AudioReservation,
     // One account-owned plan crosses the synchronous receive transaction's commit boundary.
     // It is never shared across accounts, held over an await, or serialized with media secrets.
     pub(crate) voice_transition: std::cell::RefCell<Option<(String, Box<call::state::LiveCall>)>>,
@@ -177,6 +186,11 @@ impl Default for RamfluxClient {
             born_v3_vault: None,
             held_manifests: std::cell::RefCell::new(BTreeMap::new()),
             voice_calls: BTreeMap::new(),
+            media_ownership: crate::bus::protocol::MediaOwnership::External,
+            media_ownership_bound: false,
+            in_process_media: None,
+            media_reservation: std::cell::RefCell::default(),
+            media_connection_generation: std::cell::RefCell::default(),
             voice_transition: std::cell::RefCell::new(None),
             node_relay_options: None,
             profile_read_cache: std::cell::RefCell::new(None),

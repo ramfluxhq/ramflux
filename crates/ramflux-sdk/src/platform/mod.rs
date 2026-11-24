@@ -19,4 +19,5 @@ pub(crate) use pipe::listener;
 #[cfg(any(windows, test))]
 pub(crate) mod server_token;
 
+pub(crate) mod app_lock_clock;
 pub(crate) mod network;

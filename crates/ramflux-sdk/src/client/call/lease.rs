@@ -7,6 +7,7 @@ use crate::SdkError;
 use ramflux_protocol::{
     CallAction, VoiceAllocation, VoiceAllocationRequest, VoiceLeaseConsent, VoicePeerAllocation,
 };
+use zeroize::Zeroize;
 impl LiveCall {
     pub(crate) fn lease_scope(&self) -> VoiceAllocationRequest {
         VoiceAllocationRequest {
@@ -65,8 +66,11 @@ impl LiveCall {
         }
         if self.allocation.as_ref().is_some_and(|old| {
             old.lease_id != allocation.lease_id
-                || old.token != allocation.token
-                || old.rebind_key != allocation.rebind_key
+                || (if self.media_taken {
+                    self.allocation_credentials != Some(credentials_commitment(allocation))
+                } else {
+                    old.token != allocation.token || old.rebind_key != allocation.rebind_key
+                })
                 || old.endpoint != allocation.endpoint
                 || old.hard_expires_at != allocation.hard_expires_at
                 || old.expires_at > allocation.expires_at
@@ -94,7 +98,7 @@ impl LiveCall {
     }
     pub(crate) fn accept_lease(
         &mut self,
-        allocation: VoiceAllocation,
+        mut allocation: VoiceAllocation,
         consent: VoiceLeaseConsent,
         now: i64,
     ) -> Result<(), SdkError> {
@@ -122,6 +126,10 @@ impl LiveCall {
             self.pending.push(ready);
         }
         self.lease_consent = Some(consent);
+        if self.media_taken {
+            allocation.token.zeroize();
+            allocation.rebind_key.zeroize();
+        }
         self.allocation = Some(allocation);
         self.next_lease_refresh = now.saturating_add(20);
         if self.row.state == "connecting" {
@@ -143,4 +151,12 @@ impl LiveCall {
         self.lease_consent = Some(consent.clone());
         Ok(())
     }
+}
+
+pub(super) fn credentials_commitment(allocation: &VoiceAllocation) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new_derive_key("ramflux voice allocation credentials v1");
+    hash.update(allocation.token.as_bytes());
+    hash.update(&[0]);
+    hash.update(allocation.rebind_key.as_bytes());
+    *hash.finalize().as_bytes()
 }

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Daemon-owned background backup jobs with account-ordered snapshot capture.
+mod app_lock;
 mod attachments;
 mod format;
 pub(crate) mod full_generation;

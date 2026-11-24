@@ -39,6 +39,9 @@ pub(crate) async fn dispatch(
         return media(account, id);
     }
     let _: LocalBusCallHangupRequest = serde_json::from_value(request.body.clone())?;
+    if request.method == "call.answer" {
+        account.client.reserve_call_audio(id)?;
+    }
     let mut next =
         account.client.voice_calls.get(id).cloned().ok_or_else(|| invalid("call not live"))?;
     match request.method.as_str() {
@@ -58,6 +61,7 @@ pub(crate) async fn dispatch(
     account.client.account_db()?.write_transaction(|| account.client.persist_live_call(&next))?;
     let row = next.row.clone();
     account.client.voice_calls.insert(id.into(), next);
+    crate::bus::media::reconcile(account);
     if let Some(handle) = &account.connection {
         handle.wake_couriers();
     }
@@ -123,6 +127,7 @@ async fn invite(
         })
         .collect();
     let id = new_call_id()?;
+    account.client.reserve_call_audio(&id)?;
     let mut call = LiveCall::outgoing(
         id.clone(),
         conversation.into(),
@@ -178,6 +183,12 @@ pub(crate) fn recover(account: &mut LocalBusAccountState) -> Result<(), SdkError
     Ok(())
 }
 fn media(account: &mut LocalBusAccountState, id: &str) -> Result<LocalBusDispatchResult, SdkError> {
+    // In-process ownership refuses generic export before admission work, key
+    // reads, JSON, or the one-shot cache. Direct and compatibility dispatch
+    // both reach this function, including a socket that skipped the C ABI.
+    if account.client.media_ownership == crate::bus::protocol::MediaOwnership::InProcess {
+        return Err(SdkError::LocalBusPermissionDenied);
+    }
     account.client.require_native_operation(
         &account.client.owned_device_identity()?,
         NativeOperation::Call,

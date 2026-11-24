@@ -16,8 +16,15 @@ pub async fn serve_local_bus_until(
     config: LocalBusConfig,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), SdkError> {
-    std::fs::create_dir_all(&config.data_root)?;
-    set_owner_only_dir_permissions(&config.data_root)?;
+    // Windows must create the root itself with the owner-only descriptor: a plain
+    // `create_dir_all` leaves the Administrators group as owner on an elevated token.
+    #[cfg(windows)]
+    crate::platform::fs::ensure_data_root(&config.data_root)?;
+    #[cfg(not(windows))]
+    {
+        std::fs::create_dir_all(&config.data_root)?;
+        set_owner_only_dir_permissions(&config.data_root)?;
+    }
     let diagnostic_config = crate::diag::DiagnosticConfig {
         process: "daemon".into(),
         #[cfg(feature = "diag-realrun")]
@@ -233,6 +240,7 @@ async fn restore_local_bus_account_impl(
     // crash resumes from the durable offset instead of re-uploading from zero (replaces the blanket
     // startup sweep). Fail-closed per pair; never re-commits an object A2 already owns.
     rehydrate_object_put_spools(&mut account, &state.config.data_root, &manifest.local_account_id)?;
+    account.client.bind_process_media_ownership(state.config.media_ownership())?;
     state.accounts.insert(manifest.local_account_id.clone(), account);
     let managed = state.account_index.is_some();
     let account = local_bus_account_mut(state, &manifest.local_account_id)?;

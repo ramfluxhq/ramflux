@@ -36,6 +36,7 @@ pub(crate) struct AccountAppLockCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum AccountAppLockAction {
+    Lock(AccountSelector),
     State(AccountSelector),
     Set(AccountAppLockSet),
 }
