@@ -124,6 +124,17 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
     // does not wait on the 1s age rule (courier ACK hold, first-page catch-up).
     flush_acks(handle, work, generation, trigger != ReceiveTrigger::Tick || active, call_timeout)
         .await?;
+    // Deliver can stage ahead of this page while its gap is still open. Covering the gap
+    // makes those refs contiguous, so neither a gap timer nor a new Deliver will drain them.
+    // A successful pull must redrive their durable W0 inputs before going idle.
+    if !paused && !handle.reorder().peek_contiguous().is_empty() {
+        tracing::info!(
+            cursor = turn.cursor,
+            reason_code = "receive_buffered_after_catch_up",
+            "catch-up left contiguous staged deliveries"
+        );
+        handle.redrive_receive();
+    }
     Ok(LedgerCatchUp { active, paused, backpressure })
 }
 

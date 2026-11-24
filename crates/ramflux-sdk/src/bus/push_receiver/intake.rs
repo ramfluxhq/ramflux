@@ -68,9 +68,6 @@ async fn run_session(
                 if let Err(error) = Box::pin(handle_event(handle, work, &mut pending, event)).await
                 {
                     tracing::debug!(%error, "deliver intake deferred");
-                    // W0 may already be durable. Recover from the committed cursor rather
-                    // than waiting for another Deliver or the safety sweep.
-                    handle.redrive_receive();
                 }
             }
         }
@@ -196,13 +193,12 @@ async fn apply_ready(
     mut turn: ReceiveTurn,
     seq: u64,
 ) -> Result<(), SdkError> {
-    if apply_one(handle, work, pending, &mut turn, seq).await? {
-        let contiguous = handle.reorder().peek_contiguous();
-        for next in contiguous {
-            if !apply_one(handle, work, pending, &mut turn, next).await? {
-                break;
-            }
-        }
+    apply_one(handle, work, pending, &turn, seq).await?;
+    turn.cursor = seq;
+    let contiguous = handle.reorder().peek_contiguous();
+    for next in contiguous {
+        apply_one(handle, work, pending, &turn, next).await?;
+        turn.cursor = next;
     }
     // Live Deliver with a ledger writes WA in ApplyPage and skips ack_prepared.
     // run_anchored then waits on planner/gap/receive_wake and never ticks the 1s
@@ -222,42 +218,26 @@ async fn apply_one(
     handle: &ConnectionHandle,
     work: &mpsc::Sender<AccountWork>,
     pending: &mut BTreeMap<u64, GatewayInboxEntry>,
-    turn: &mut ReceiveTurn,
+    turn: &ReceiveTurn,
     seq: u64,
-) -> Result<bool, SdkError> {
+) -> Result<(), SdkError> {
     let Some(entry) = pending.remove(&seq) else {
-        return Ok(false);
+        return Ok(());
     };
-    let generation = handle.generation();
     let _ = crate::bus::connection_manager::receive::apply_entry(
         handle,
         work,
-        generation,
+        handle.generation(),
         ReceiveEntry { entry, retry_key: None, replay: false, turn: Some(turn.clone()) },
         handle.call_timeout(),
         Box::default(),
     )
     .await?;
-    // ApplyPage can successfully defer an entry. Only durable coverage grants RAM progress.
-    let target = turn.target.clone();
-    let cursor = crate::bus::couriers::writer::Writer::new(work.clone(), generation)
-        .apply(move |account| super::apply_w1::read_cursor(account.client.account_db()?, &target))
-        .await?;
     handle
         .reorder()
-        .advance_cursor(handle.receive_now_ms(), cursor)
+        .applied(handle.receive_now_ms(), seq)
         .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
-    turn.cursor = cursor;
-    if cursor < seq {
-        tracing::info!(
-            inbox_seq = seq,
-            cursor,
-            reason_code = "receive_coverage_pending",
-            "live delivery awaits durable coverage"
-        );
-        handle.redrive_receive();
-    }
-    Ok(cursor >= seq)
+    Ok(())
 }
 
 /// Actor-side W0 stage. Pause/erase produce no witness; conflict is a typed refusal.
