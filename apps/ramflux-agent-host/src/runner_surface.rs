@@ -12,7 +12,6 @@ impl<E: EngineProvider> AgentHost<E> {
         bus: &mut impl AgentBus,
         event: &LocalBusFrame,
         seq: u64,
-        now_ms: u64,
     ) -> Result<()> {
         if event.body["author_principal_id"] != self.state.principal_id
             || event.body["executor_device_id"] != self.state.device_id
@@ -21,7 +20,7 @@ impl<E: EngineProvider> AgentHost<E> {
             return Ok(());
         }
         if event.body["out_of_sync"] == true && event.body["last_action_id"].as_str().is_none() {
-            return self.resync_owned_surface(bus, event, seq, now_ms).await;
+            return self.resync_owned_surface(bus, event, seq).await;
         }
         let Some(action) = event.body["last_action_id"].as_str() else {
             return Ok(());
@@ -33,25 +32,11 @@ impl<E: EngineProvider> AgentHost<E> {
             return Ok(());
         }
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
-        if participant::conversation(bus, &self.state, conversation, self.config.max_conversations)
-            .await?
-            .is_none()
-        {
+        if participant::conversation(bus, &self.state, conversation).await?.is_none() {
             return Ok(());
-        }
-        let ready_at =
-            self.state.last_reply_ms.get(conversation).map_or(now_ms, |last| {
-                last.saturating_add(self.config.per_conversation_interval_ms)
-            });
-        if now_ms < ready_at {
-            return self.defer_surface(event, seq, ready_at);
         }
         let work =
             ActionWork { surface_ref: reference.into(), action_id: action.into(), attempts: 0 };
-        if !self.rate_history_has_capacity(conversation) {
-            return Err(Error::Limit);
-        }
-        self.state.last_reply_ms.insert(conversation.into(), now_ms);
         let original = Pending {
             seq,
             conversation_id: conversation.into(),
@@ -93,23 +78,12 @@ impl<E: EngineProvider> AgentHost<E> {
         bus: &mut impl AgentBus,
         event: &LocalBusFrame,
         seq: u64,
-        now_ms: u64,
     ) -> Result<()> {
         let reference = participant::field(&event.body, "surface_ref")?;
         let conversation = participant::field(&event.body, "conversation_id")?;
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
-        if participant::conversation(bus, &self.state, conversation, self.config.max_conversations)
-            .await?
-            .is_none()
-        {
+        if participant::conversation(bus, &self.state, conversation).await?.is_none() {
             return Ok(());
-        }
-        let ready =
-            self.state.last_reply_ms.get(conversation).map_or(now_ms, |last| {
-                last.saturating_add(self.config.per_conversation_interval_ms)
-            });
-        if now_ms < ready {
-            return self.defer_surface(event, seq, ready);
         }
         let id = ramflux_sdk::new_surface_message_id().map_err(|_| Error::State)?;
         let pending = Pending {
@@ -127,10 +101,6 @@ impl<E: EngineProvider> AgentHost<E> {
         if view["out_of_sync"] != true {
             return Ok(());
         }
-        if !self.rate_history_has_capacity(conversation) {
-            return Err(Error::Limit);
-        }
-        self.state.last_reply_ms.insert(conversation.into(), now_ms);
         self.state.pending = Some(pending);
         self.store.save(&self.state)?;
         self.recover_pending(bus).await

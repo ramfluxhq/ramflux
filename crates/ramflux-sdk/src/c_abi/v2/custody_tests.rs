@@ -109,7 +109,7 @@ fn table(host: &Host) -> RamfluxV2CustodyProvider {
 #[test]
 fn host_custody_preflight_drives_real_creation_and_releases_after_close() {
     let host = Arc::new(Host::default());
-    let root = tempfile::tempdir().expect("test: isolated account root");
+    let root = super::tests::private_tempdir();
     let config = serde_json::to_vec(&json!({"data_root":root.path(),"allow_secret_exports":true}))
         .expect("test: config");
     let mut client = 0;

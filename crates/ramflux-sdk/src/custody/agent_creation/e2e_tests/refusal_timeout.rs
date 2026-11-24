@@ -263,7 +263,14 @@ async fn lost_reply_case(pair: &mut Pair) -> TestResult {
     let store = store_of(&laptop_root, &laptop_id)?;
     let agent_id = record.account_id.clone().ok_or("test: the request reserves its account")?;
     let node = TestNode::start(4, Some(ReplyFault::DropAgentPublished)).await?;
-    node.publish_current(&phone_root, &phone_id, &phone_device, phone_vault).await?;
+    node.publish_current(
+        &phone_root,
+        &phone_id,
+        &phone_device,
+        phone_vault,
+        pair.phone.client.account_db()?,
+    )
+    .await?;
     let mut steps = DesktopSteps {
         node: &node,
         root: &laptop_root,

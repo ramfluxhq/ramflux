@@ -352,7 +352,14 @@ async fn node_case(pair: &mut Pair) -> TestResult {
     let agent_id = record.account_id.clone().ok_or("test: the request reserves its account")?;
     let plan = decode_register_plan(&record.plan_bytes()?)?;
     let node = TestNode::start(2, None).await?;
-    node.publish_current(&phone_root, &phone_id, &phone_device, phone_vault).await?;
+    node.publish_current(
+        &phone_root,
+        &phone_id,
+        &phone_device,
+        phone_vault,
+        pair.phone.client.account_db()?,
+    )
+    .await?;
     commit_approved(
         &desk_store(pair)?,
         vault.as_ref(),

@@ -19,6 +19,12 @@ impl Root {
     pub(crate) fn new() -> Result<Self> {
         let root = ramflux_test_support::TestPath::new()?.child("custody");
         std::fs::create_dir(&root)?;
+        // Private whatever the process umask is: the C ABI refuses group/other-accessible roots.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+        }
         Ok(Self(root))
     }
 }

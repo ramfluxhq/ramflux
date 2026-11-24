@@ -204,12 +204,29 @@ async fn native_group_primary(
     let Some(native) = account.client.born_v3_account.as_deref().cloned() else {
         return Ok(None);
     };
+    if session_agent_retired(account) {
+        return Err(SdkError::AgentCreationRefused("agent_retired"));
+    }
+    let host =
+        super::couriers::primary::custodian_directory(&native, &account.gateway_config).await?;
     let setup = account.native_setup.as_ref().ok_or(SdkError::CustodyVaultUnavailable)?;
     let vault = super::custody_setup::primary_provider(setup);
-    tokio::task::spawn_blocking(move || native.group_primary(vault.as_ref()))
-        .await
-        .map_err(|_| SdkError::CustodyVaultUnavailable)?
-        .map(Some)
+    tokio::task::spawn_blocking(move || {
+        native.group_operation_signer(vault.as_ref(), host.as_ref())
+    })
+    .await
+    .map_err(|_| SdkError::CustodyVaultUnavailable)?
+    .map(Some)
+}
+
+fn session_agent_retired(account: &LocalBusAccountState) -> bool {
+    account.connection.as_ref().is_some_and(|connection| {
+        connection
+            .snapshot()
+            .cause
+            .as_ref()
+            .is_some_and(crate::AccountNetworkingReason::agent_retired)
+    })
 }
 fn selected_change(
     previous: &ramflux_crypto::VerifiedGroupState,

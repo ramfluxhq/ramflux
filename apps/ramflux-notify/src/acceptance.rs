@@ -48,6 +48,7 @@ fn input<'a>(
         wake_id: id,
         collapse_key: key,
         token: token_topic.0,
+        route_tag: "AAAAAAAAAAAAAAAAAAAAAA",
         topic: token_topic.1,
         expires_at: window.0,
         now: window.1,
@@ -278,7 +279,10 @@ fn all_provider_payloads_and_headers_exclude_message_identifiers() -> Result<(),
         (2_000, 1_000),
         ProviderWireMode::ApnsVoip,
     ))?;
-    assert_exact_keys(&parse(&voip)?, &["aps", "class", "wake_id"]);
+    assert_exact_keys(
+        &parse(&voip)?,
+        &["aps", "class", "rf", "rf.c", "rf.t", "rf.v", "rf.w", "wake_id"],
+    );
     let fcm = build_provider_parts(&input(
         WakeClass::CallWake,
         &id,
@@ -343,6 +347,9 @@ fn apns_push(
             registered_at: 1_000,
             expires_at: 9_000,
             route_generation: 1,
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: ramflux_node_core::PushRouteEnvironment::Production,
+            capability: ramflux_node_core::DevicePushRoute::capability_for(&provider),
         },
         credential: ramflux_node_core::ProviderCredential::Apns(
             ramflux_node_core::ApnsProviderCredential {

@@ -261,9 +261,9 @@ impl<'ast> Visit<'ast> for ReadCalls {
     }
 }
 
-/// The unverified stored-agent read has exactly one production caller, the commit of a rebind.
+/// Raw reads are limited to rebind commit and reassociation authority-byte equality.
 #[test]
-fn stored_agent_read_has_one_production_caller() -> TestResult {
+fn stored_agent_read_has_only_registered_production_callers() -> TestResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize()?;
     let mut files = Vec::new();
     collect(&root.join("crates"), 0, &mut files)?;
@@ -282,10 +282,14 @@ fn stored_agent_read_has_one_production_caller() -> TestResult {
             callers.push(relative.clone());
         }
     }
+    callers.sort();
     assert_eq!(
         callers,
-        vec![STORED_AGENT_READER.to_owned()],
-        "the unverified stored-agent read must be called from rebind_commit only"
+        vec![
+            "crates/ramflux-sdk/src/custody/agent_creation/reassociate.rs".to_owned(),
+            STORED_AGENT_READER.to_owned(),
+        ],
+        "raw reads must stay inside rebind commit and reassociation authority equality"
     );
     Ok(())
 }

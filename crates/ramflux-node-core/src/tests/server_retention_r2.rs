@@ -268,8 +268,7 @@ fn revocation_sweep_bounds_authority_lookups_per_pass() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn new_device_owner_discards_unverified_and_previous_owner_routes()
--> Result<(), Box<dyn std::error::Error>> {
+fn foreign_device_owner_cannot_replace_the_bound_route() -> Result<(), Box<dyn std::error::Error>> {
     let live = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let store = authorized_store("server_retention_owner_transition", &live)?;
     let now = now_unix_seconds();
@@ -282,11 +281,13 @@ fn new_device_owner_discards_unverified_and_previous_owner_routes()
     previous_route.provider = PushProviderKind::Fcm;
     previous_route.token = "previous-epoch-token".into();
     store.register_authenticated_push_route(&previous, &previous_route)?;
-    // The mailbox now belongs to a different root-qualified device.
+    // A different root-qualified device cannot take the bound delivery id.
     let current = device_owner("tablet", "delivery")?;
-    store.register_authenticated_push_route(&current, &route_for("delivery", now))?;
+    let refused = store.register_authenticated_push_route(&current, &route_for("delivery", now));
+    assert!(matches!(refused, Err(NodeCoreError::PushRouteOwnerMismatch)));
     let routes = store.load_state()?.unwrap_or_default().push_routes("delivery", now);
-    assert_eq!(routes.len(), 1, "only the current owner's route may remain: {routes:?}");
-    assert_eq!(routes[0].provider, PushProviderKind::WebPush);
+    assert_eq!(routes.len(), 1, "the bound owner's route stays: {routes:?}");
+    assert_eq!(routes[0].provider, PushProviderKind::Fcm);
+    assert_eq!(routes[0].token, "previous-epoch-token");
     Ok(())
 }

@@ -221,7 +221,9 @@ async fn answer(bytes: &[u8], bridge: &Bridge) -> Result<Option<Zeroizing<Vec<u8
     if !bytes.windows(PROMPT_METHOD.len()).any(|window| window == PROMPT_METHOD.as_bytes()) {
         return Ok(None);
     }
-    let mut frame: crate::LocalBusFrame = match serde_json::from_slice(bytes) {
+    // Same predicate as the socket reader: a prompt is an original local-bus frame.
+    // A frame that is not I-JSON is not a prompt and stays on the public path.
+    let mut frame: crate::LocalBusFrame = match ramflux_protocol::parse_i_json_secret(bytes) {
         Ok(frame) => frame,
         Err(_) => return Ok(None),
     };

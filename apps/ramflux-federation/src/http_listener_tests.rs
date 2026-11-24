@@ -382,14 +382,14 @@ fn check_internal_home_node_forward() -> TestResult {
     let local = issue_test_service_cert(&ca, "node-a", "ramflux-federation")?;
     let peer_cert = issue_test_service_cert(&ca, "node-b.test", "ramflux-federation")?;
     let router = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &router_cert.tls)?;
-    let peer = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &peer_cert.tls)?;
+    let peer = std::net::TcpListener::bind("127.0.0.1:0")?;
     let mut admin = context(&root)?;
     Arc::make_mut(&mut admin.router).endpoint = router.local_addr()?.to_string();
     Arc::make_mut(&mut admin.router).tls = local.tls;
     let mut peer_discovery = admin.discovery.clone();
     peer_discovery.node_id = "node-b.test".into();
     peer_discovery.public_endpoint = peer.local_addr()?.to_string();
-    peer_discovery.node_ca_cert_pem = peer_cert.ca_pem;
+    peer_discovery.node_ca_cert_pem = peer_cert.ca_pem.clone();
     admit_peer(&admin, &peer_discovery)?;
     let endpoints = std::env::var_os("RAMFLUX_TEST_NODE_ENDPOINTS_FILE")
         .ok_or("test: endpoints path missing")?;
@@ -411,9 +411,16 @@ fn check_internal_home_node_forward() -> TestResult {
             ramflux_transport::write_mesh_json_response(&mut stream, "200 OK", &body)?;
             Ok(())
         });
+    let source_public_key = admin.discovery.node_public_key.clone();
     let peer_worker = std::thread::spawn(
         move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            let mut stream = peer.accept()?;
+            let (socket, _) = peer.accept()?;
+            let mut stream = ramflux_transport::authenticate_federation_tcp_stream(
+                socket,
+                &peer_cert.tls,
+                vec![peer_cert.ca_pem.clone()],
+            )?
+            .stream;
             let request =
                 ramflux_transport::read_mesh_http_request(&mut stream)?.ok_or("missing request")?;
             assert_eq!(request.path, "/s8/federation/envelope");
@@ -421,6 +428,7 @@ fn check_internal_home_node_forward() -> TestResult {
                 serde_json::from_slice(&request.body)?;
             assert_eq!(forward.source_node_id, "node-a");
             assert_ne!(forward.signed.signature, "");
+            ramflux_node_core::verify_federated_envelope_forward(&forward, &source_public_key)?;
             ramflux_transport::write_mesh_json_response(
                 &mut stream,
                 "200 OK",

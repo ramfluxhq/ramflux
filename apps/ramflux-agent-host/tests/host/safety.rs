@@ -57,21 +57,6 @@ async fn removed_group_absent_conversation_and_self_message_do_not_trigger_repli
     Ok(())
 }
 #[tokio::test]
-async fn per_conversation_rate_limit_survives_restart_and_is_independent() -> TestResult {
-    let f = Fixture::new()?;
-    let mut bus = Fake::default();
-    let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
-    host.start(&mut bus).await?;
-    host.apply(&mut bus, incoming(11, false), 2000).await?;
-    drop(host);
-    let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
-    host.start(&mut bus).await?;
-    host.apply(&mut bus, incoming(12, false), 2500).await?;
-    host.apply(&mut bus, incoming(13, true), 2500).await?;
-    assert_eq!(bus.replies.len(), 2);
-    Ok(())
-}
-#[tokio::test]
 async fn lagged_foreign_and_revoked_events_fail_closed() -> TestResult {
     let f = Fixture::new()?;
     let mut bus = Fake::default();
@@ -108,10 +93,10 @@ fn configuration_checkpoint_lock_and_corruption_are_bounded() -> TestResult {
     Ok(())
 }
 #[tokio::test]
-async fn directory_size_is_independent_of_recent_rate_history_capacity() -> TestResult {
+async fn directory_size_is_independent_of_pending_turn_capacity() -> TestResult {
     let f = Fixture::new()?;
     let mut config = f.config.clone();
-    config.max_conversations = 1;
+    config.max_pending_turns = 1;
     let mut bus = Fake::default();
     let mut host = AgentHost::new(config.clone(), RuleEngine::new(&config)?)?;
     host.start(&mut bus).await?;

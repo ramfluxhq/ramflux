@@ -23,7 +23,6 @@ struct IntentDelivery<'a> {
     message_id: &'a str,
     intents: Vec<Intent>,
     seq: u64,
-    now_ms: u64,
 }
 impl<E: EngineProvider> AgentHost<E> {
     /// # Errors
@@ -41,8 +40,7 @@ impl<E: EngineProvider> AgentHost<E> {
         }
         engine.restore(state.engine.as_ref())?;
         state.engine = engine.checkpoint()?;
-        if !crate::runner_deferred::valid(&state)
-            || !crate::runner_approval::valid(&state)
+        if !crate::runner_approval::valid(&state)
             || state.handled_actions.len() > 2048
             || state.pending.as_ref().is_some_and(|p| {
                 !matches!(
@@ -113,8 +111,6 @@ impl<E: EngineProvider> AgentHost<E> {
     pub async fn start(&mut self, bus: &mut impl AgentBus) -> Result<()> {
         self.owner_account =
             participant::identity(bus, &mut self.state, &self.config.account_id).await?;
-        self.engine.publish_limits().await?;
-        self.normalize_deferred()?;
         let topics = json!([
             "message.received",
             "group.message.received",
@@ -186,7 +182,6 @@ impl<E: EngineProvider> AgentHost<E> {
             self.save_state()?;
             return Err(Error::IdentityLost);
         }
-        self.prune_rate_history(now_ms);
         let result = self.apply_event(bus, &event, seq, now_ms).await;
         self.finish_event(result, &event, seq)
     }
@@ -214,7 +209,7 @@ impl<E: EngineProvider> AgentHost<E> {
             self.message(bus, event, seq, now_ms).await?;
         }
         if event.method == "surface.changed" {
-            self.surface_action(bus, event, seq, now_ms).await?;
+            self.surface_action(bus, event, seq).await?;
         }
         if matches!(event.method.as_str(), "conversation.changed" | "group.changed") {
             self.cancel_removed_conversations(bus).await?;
@@ -239,26 +234,11 @@ impl<E: EngineProvider> AgentHost<E> {
             return Ok(());
         }
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
-        let Some(conversation) = participant::conversation(
-            bus,
-            &self.state,
-            conversation_id,
-            self.config.max_conversations,
-        )
-        .await?
+        let Some(conversation) =
+            participant::conversation(bus, &self.state, conversation_id).await?
         else {
             return Ok(());
         };
-        if !self.engine.is_busy(conversation_id)
-            && self.state.last_reply_ms.get(conversation_id).is_some_and(|last| {
-                now_ms < last.saturating_add(self.config.per_conversation_interval_ms)
-            })
-        {
-            return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::RateLimited));
-        }
-        if !self.rate_history_has_capacity(conversation_id) {
-            return Err(Error::Limit);
-        }
         let Some(message) = crate::message_input::read(bus, conversation_id, message_id).await?
         else {
             return Ok(());
@@ -303,9 +283,7 @@ impl<E: EngineProvider> AgentHost<E> {
             let acknowledged = event.clone();
             match event {
                 EngineEvent::Intents { conversation_id, message_id, intents } => {
-                    if intents.is_empty() {
-                        self.state.last_reply_ms.insert(conversation_id.clone(), now_ms);
-                    } else {
+                    if !intents.is_empty() {
                         self.emit_intents(
                             bus,
                             IntentDelivery {
@@ -313,7 +291,6 @@ impl<E: EngineProvider> AgentHost<E> {
                                 message_id: &message_id,
                                 intents,
                                 seq,
-                                now_ms,
                             },
                         )
                         .await?;
@@ -368,7 +345,6 @@ impl<E: EngineProvider> AgentHost<E> {
                                         .into(),
                                 )],
                                 seq,
-                                now_ms,
                             },
                         )
                         .await?;
@@ -405,7 +381,7 @@ impl<E: EngineProvider> AgentHost<E> {
         bus: &mut impl AgentBus,
         event: &EngineEvent,
         seq: u64,
-        now_ms: u64,
+        _now_ms: u64,
     ) -> Result<()> {
         let EngineEvent::VisibleFailure { conversation_id, message_id, reason } = event else {
             return Err(Error::State);
@@ -417,7 +393,6 @@ impl<E: EngineProvider> AgentHost<E> {
                 message_id,
                 intents: vec![Intent::ReplyText(reason.reply().into())],
                 seq,
-                now_ms,
             },
         )
         .await?;
@@ -430,15 +405,7 @@ impl<E: EngineProvider> AgentHost<E> {
     async fn cancel_removed_conversations(&mut self, bus: &mut impl AgentBus) -> Result<()> {
         let conversations = self.engine.active_conversations();
         for conversation_id in conversations {
-            if participant::conversation(
-                bus,
-                &self.state,
-                &conversation_id,
-                self.config.max_conversations,
-            )
-            .await?
-            .is_none()
-            {
+            if participant::conversation(bus, &self.state, &conversation_id).await?.is_none() {
                 self.engine.erase_history(&conversation_id).await?;
                 self.engine.cancel(&conversation_id).await?;
                 self.state.approvals.remove(&conversation_id);
@@ -452,15 +419,10 @@ impl<E: EngineProvider> AgentHost<E> {
         bus: &mut impl AgentBus,
         delivery: IntentDelivery<'_>,
     ) -> Result<()> {
-        let IntentDelivery { conversation_id, message_id, intents, seq, now_ms } = delivery;
+        let IntentDelivery { conversation_id, message_id, intents, seq } = delivery;
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
-        let Some(conversation) = participant::conversation(
-            bus,
-            &self.state,
-            conversation_id,
-            self.config.max_conversations,
-        )
-        .await?
+        let Some(conversation) =
+            participant::conversation(bus, &self.state, conversation_id).await?
         else {
             self.engine.cancel(conversation_id).await?;
             self.state.approvals.remove(conversation_id);
@@ -480,7 +442,6 @@ impl<E: EngineProvider> AgentHost<E> {
                         surface_id: intents.first().and_then(Intent::surface_id).map(str::to_owned),
                         reason,
                     });
-                    self.state.last_reply_ms.insert(conversation_id.into(), now_ms);
                     return self.store.save(&self.state);
                 }
                 Err(error) => return Err(error),
@@ -518,7 +479,6 @@ impl<E: EngineProvider> AgentHost<E> {
             plan,
             needs_rederive: None,
         });
-        self.state.last_reply_ms.insert(conversation_id.into(), now_ms);
         self.save_state()?;
         self.recover_pending(bus).await?;
         Ok(())

@@ -81,7 +81,6 @@ async fn r3_two_hundred_conversations_do_not_exhaust_a_recent_reply_cache() -> T
     }
     assert_eq!(bus.inner.replies.len(), 400);
     assert_eq!(host.checkpoint().cursor, Some(210));
-    assert!(host.checkpoint().last_reply_ms.len() <= 1);
     Ok(())
 }
 #[tokio::test]
@@ -131,28 +130,6 @@ fn r3_unsafe_reply_and_choice_labels_are_refused_at_configuration_load() -> Test
     f.config.rules[0].surface.as_mut().ok_or("surface")?.choices =
         vec![Choice { id: "a".into(), label: "spoof\u{202e}text".into() }];
     assert!(matches!(f.config.validate(), Err(Error::Config)));
-    Ok(())
-}
-#[tokio::test]
-async fn r3_rate_limited_actions_do_not_sleep_or_block_the_next_event() -> TestResult {
-    let mut f = fixture()?;
-    f.config.per_conversation_interval_ms = 3_600_000;
-    let mut bus = SurfaceBus::default();
-    let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
-    host.start(&mut bus).await?;
-    host.apply(&mut bus, incoming(11, true), 2000).await?;
-    bus.decision()?;
-    tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        host.apply(&mut bus, event(20, false), 2001),
-    )
-    .await??;
-    let queued = serde_json::to_value(host.checkpoint())?;
-    assert_eq!(queued["deferred_surfaces"].as_object().ok_or("deferred")?.len(), 1);
-    let mut next = event(21, false);
-    next.method = "device.changed".into();
-    host.apply(&mut bus, next, 2002).await?;
-    assert_eq!(host.checkpoint().cursor, Some(21));
     Ok(())
 }
 struct PoisonOnce {

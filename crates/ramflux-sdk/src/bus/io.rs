@@ -304,6 +304,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         | SdkError::Crypto(CryptoError::Protocol(
             ramflux_protocol::ProtocolError::GroupStateLimit(_),
         )) => "GroupStateCapacity",
+        SdkError::PairingCode(code) => code,
         other => delivery_error_code(other),
     }
 }

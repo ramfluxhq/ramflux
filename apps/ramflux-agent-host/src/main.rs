@@ -44,7 +44,7 @@ async fn run() -> ramflux_agent_host::Result<()> {
     }
     unlock_provisioned_account(&vault, &config.socket, &config.account_id).await?;
     if let Some(engine) = &config.engine {
-        let provider = PrxEngine::new(&engine.prx, config.max_conversations)?;
+        let provider = PrxEngine::new(&engine.prx, config.max_pending_turns)?;
         let sync =
             SyncTask::spawn(&engine.prx, &config.state_file, &config.socket, &config.account_id);
         let result = run_provider(config, provider).await;

@@ -5,7 +5,7 @@
 //!
 //! An alert carries `mutable-content`, a localisation key, and empty `loc-args`.
 //! It has no literal title, body, sender, or message text. `rf.w` is the wake id;
-//! the source envelope id is not copied. `rf.t` stays empty until a route tag exists.
+//! the source envelope id is not copied. `rf.t` is the route tag from registration.
 //! Background push is unsupported: this module has no background builder.
 //! Custom `ramflux-*` headers are not produced. A call omits collapse fields.
 //! `VoIP` keeps an empty `aps` and `apns-expiration` `0`. Message and call alerts
@@ -22,8 +22,6 @@ pub const WEB_ENCRYPTED_BODY_LIMIT: usize = 4096;
 const MESSAGE_LOC_KEY: &str = "RF_PUSH_MESSAGE";
 const CALL_LOC_KEY: &str = "RF_PUSH_CALL";
 const ALERT_SOUND: &str = "default";
-/// Empty until registration stores a per-account route tag.
-const ROUTE_TAG_PLACEHOLDER: &str = "";
 const LOC_ARGS_NONE: &[&str] = &[];
 const WAKE_ID_BYTES: usize = 16;
 const COLLAPSE_BYTES: usize = 24;
@@ -62,6 +60,8 @@ pub enum ProviderBuildError {
     InvalidWakeId,
     /// The collapse key is not canonical unpadded base64url of 24 bytes.
     InvalidCollapseKey,
+    /// The route tag is not canonical unpadded base64url of 16 bytes.
+    InvalidRouteTag,
     /// The provider token is empty.
     EmptyToken,
 }
@@ -76,6 +76,8 @@ pub struct ProviderBuildInput<'a> {
     pub collapse_key: Option<&'a str>,
     /// Provider device token. It is placed only in the FCM transport field.
     pub token: &'a str,
+    /// Canonical unpadded base64url of 16 bytes. Echoed as `rf.t`.
+    pub route_tag: &'a str,
     /// APNs topic. Ignored for FCM and Web Push.
     pub topic: &'a str,
     /// Persisted absolute expiry, Unix seconds.
@@ -145,6 +147,9 @@ pub fn build_provider_parts(
     if input.token.is_empty() {
         return Err(ProviderBuildError::EmptyToken);
     }
+    if !ramflux_node_core::push_route_tag_valid(input.route_tag) {
+        return Err(ProviderBuildError::InvalidRouteTag);
+    }
     validate_wake_id(input.wake_id)?;
     let collapse = collapse_for_class(input.class, input.collapse_key)?;
     let remaining = input.expires_at - input.now;
@@ -152,7 +157,8 @@ pub fn build_provider_parts(
     let (body, headers) = match input.mode {
         ProviderWireMode::ApnsAlert => {
             validate_alert_topic(input.topic)?;
-            let body = apns_alert_body(input.class, input.wake_id, class_name, collapse)?;
+            let body =
+                apns_alert_body(input.class, input.wake_id, class_name, collapse, input.route_tag)?;
             let headers = apns_headers(input, false, collapse);
             (body, headers)
         }
@@ -161,7 +167,7 @@ pub fn build_provider_parts(
                 return Err(ProviderBuildError::VoipRequiresCall);
             }
             validate_voip_topic(input.topic)?;
-            let body = apns_voip_body(input.wake_id, class_name)?;
+            let body = apns_voip_body(input.wake_id, class_name, input.route_tag)?;
             let headers = apns_headers(input, true, None);
             (body, headers)
         }
@@ -280,6 +286,7 @@ fn apns_alert_body(
     wake_id: &str,
     class_name: &'static str,
     collapse: Option<&str>,
+    route_tag: &str,
 ) -> Result<Vec<u8>, ProviderBuildError> {
     serde_json::to_vec(&ApnsAlertBody {
         aps: ApnsAlertAps {
@@ -290,7 +297,7 @@ fn apns_alert_body(
         wake_id,
         class: class_name,
         collapse_key: collapse,
-        rf: rf_meta(class, wake_id),
+        rf: rf_meta(class, wake_id, route_tag),
     })
     .map_err(|_source| ProviderBuildError::PayloadTooLarge)
 }
@@ -309,18 +316,27 @@ fn rf_code(class: WakeClass) -> &'static str {
     }
 }
 
-fn rf_meta(class: WakeClass, wake_id: &str) -> RfMeta<'_> {
-    RfMeta { v: 1, c: rf_code(class), t: ROUTE_TAG_PLACEHOLDER, w: wake_id }
+fn rf_meta<'a>(class: WakeClass, wake_id: &'a str, route_tag: &'a str) -> RfMeta<'a> {
+    RfMeta { v: 1, c: rf_code(class), t: route_tag, w: wake_id }
 }
 
-fn rf_json(class: WakeClass, wake_id: &str) -> Result<String, ProviderBuildError> {
-    serde_json::to_string(&rf_meta(class, wake_id))
+fn rf_json(class: WakeClass, wake_id: &str, route_tag: &str) -> Result<String, ProviderBuildError> {
+    serde_json::to_string(&rf_meta(class, wake_id, route_tag))
         .map_err(|_source| ProviderBuildError::PayloadTooLarge)
 }
 
-fn apns_voip_body(wake_id: &str, class_name: &'static str) -> Result<Vec<u8>, ProviderBuildError> {
-    serde_json::to_vec(&ApnsVoipBody { aps: ApnsEmpty {}, wake_id, class: class_name })
-        .map_err(|_source| ProviderBuildError::PayloadTooLarge)
+fn apns_voip_body(
+    wake_id: &str,
+    class_name: &'static str,
+    route_tag: &str,
+) -> Result<Vec<u8>, ProviderBuildError> {
+    serde_json::to_vec(&ApnsVoipBody {
+        aps: ApnsEmpty {},
+        wake_id,
+        class: class_name,
+        rf: rf_meta(WakeClass::CallWake, wake_id, route_tag),
+    })
+    .map_err(|_source| ProviderBuildError::PayloadTooLarge)
 }
 
 fn fcm_body(
@@ -330,7 +346,7 @@ fn fcm_body(
     remaining: u64,
 ) -> Result<Vec<u8>, ProviderBuildError> {
     let ttl = format!("{remaining}s");
-    let rf = rf_json(input.class, input.wake_id)?;
+    let rf = rf_json(input.class, input.wake_id, input.route_tag)?;
     serde_json::to_vec(&FcmEnvelope {
         message: FcmMessage {
             token: input.token,
@@ -366,7 +382,7 @@ struct ApnsAlertAps {
 struct RfMeta<'a> {
     v: u8,
     c: &'static str,
-    t: &'static str,
+    t: &'a str,
     w: &'a str,
 }
 
@@ -388,6 +404,7 @@ struct ApnsVoipBody<'a> {
     aps: ApnsEmpty,
     wake_id: &'a str,
     class: &'static str,
+    rf: RfMeta<'a>,
 }
 
 #[derive(Serialize)]
@@ -444,6 +461,8 @@ mod tests {
         ramflux_protocol::encode_base64url([7_u8; 24])
     }
 
+    const ROUTE_TAG: &str = "AAAAAAAAAAAAAAAAAAAAAA";
+
     fn json_of(parts: &super::ProviderRequestParts) -> Result<Value, ProviderBuildError> {
         serde_json::from_slice(&parts.body).map_err(|_source| ProviderBuildError::PayloadTooLarge)
     }
@@ -463,6 +482,7 @@ mod tests {
             wake_id: &id,
             collapse_key: Some(&key),
             token: "tok",
+            route_tag: ROUTE_TAG,
             topic: "app.bundle",
             expires_at: 2_000,
             now: 1_000,
@@ -478,7 +498,7 @@ mod tests {
         assert!(parsed["aps"].get("content-available").is_none());
         assert_eq!(parsed["rf"]["v"], 1);
         assert_eq!(parsed["rf"]["c"], "m");
-        assert_eq!(parsed["rf"]["t"], "");
+        assert_eq!(parsed["rf"]["t"], ROUTE_TAG);
         assert_eq!(parsed["rf"]["w"], id);
         assert_eq!(parsed["class"], "message");
         assert_eq!(parsed["collapse_key"], key);
@@ -496,6 +516,7 @@ mod tests {
             wake_id: &id,
             collapse_key: Some(&key),
             token: "tok",
+            route_tag: ROUTE_TAG,
             topic: "",
             expires_at: 1_000 + 86_400,
             now: 1_000,
@@ -509,7 +530,7 @@ mod tests {
         assert_eq!(parsed["message"]["android"]["collapse_key"], key);
         let rf = fcm_rf(&parsed)?;
         assert_eq!(rf["c"], "m");
-        assert_eq!(rf["t"], "");
+        assert_eq!(rf["t"], ROUTE_TAG);
         assert_eq!(rf["w"], id);
         assert_eq!(fcm.headers.len(), 0);
 
@@ -518,6 +539,7 @@ mod tests {
             wake_id: &id,
             collapse_key: Some(&key),
             token: "tok",
+            route_tag: ROUTE_TAG,
             topic: "",
             expires_at: 1_100,
             now: 1_000,
@@ -538,6 +560,7 @@ mod tests {
             wake_id: &id,
             collapse_key: None,
             token: "voip-or-alert",
+            route_tag: ROUTE_TAG,
             topic: "app.bundle",
             expires_at: 1_030,
             now: 1_020,
@@ -564,6 +587,7 @@ mod tests {
             wake_id: &id,
             collapse_key: None,
             token: "pushkit",
+            route_tag: ROUTE_TAG,
             topic: "app.bundle.voip",
             expires_at: 1_030,
             now: 1_000,
@@ -571,6 +595,7 @@ mod tests {
         })?;
         let parsed = json_of(&voip)?;
         assert_eq!(parsed["aps"], serde_json::json!({}));
+        assert_eq!(parsed["rf"]["t"], ROUTE_TAG);
         assert!(parsed.get("collapse_key").is_none());
         assert!(voip.headers.iter().any(|(name, value)| name == "apns-expiration" && value == "0"));
         assert!(
@@ -587,6 +612,7 @@ mod tests {
             wake_id: &id,
             collapse_key: None,
             token: "tok",
+            route_tag: ROUTE_TAG,
             topic: "",
             expires_at: 1_030,
             now: 1_020,
@@ -612,6 +638,7 @@ mod tests {
             wake_id: &id,
             collapse_key: None,
             token: "tok",
+            route_tag: ROUTE_TAG,
             topic: "app.bundle",
             expires_at: 1_030,
             now: 1_030,
@@ -624,6 +651,7 @@ mod tests {
                 wake_id: &id,
                 collapse_key: None,
                 token: "tok",
+                route_tag: ROUTE_TAG,
                 topic: "",
                 expires_at: 2_000,
                 now: 1_000,
@@ -638,6 +666,7 @@ mod tests {
                 wake_id: &id,
                 collapse_key: Some(&key),
                 token: "tok",
+                route_tag: ROUTE_TAG,
                 topic: "app.bundle.voip",
                 expires_at: 2_000,
                 now: 1_000,
@@ -662,6 +691,7 @@ mod tests {
                 wake_id: &id,
                 collapse_key: None,
                 token: &huge,
+                route_tag: ROUTE_TAG,
                 topic: "",
                 expires_at: 2_000,
                 now: 1_000,

@@ -2800,6 +2800,7 @@ fn contract_parts(
         wake_id: &prepared.payload.wake_id,
         collapse_key: prepared.payload.collapse_key.as_deref(),
         token: &prepared.route.token,
+        route_tag: &prepared.route.route_tag,
         topic,
         expires_at: prepared.expires_at,
         now: ramflux_node_core::now_unix_seconds(),

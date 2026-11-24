@@ -25,7 +25,6 @@ pub enum EngineFailure {
     ApprovalUnavailable,
     ApprovalTimeout,
     ApprovalDeclined,
-    AuthorizationMismatch,
     /// PRX HTTP 429 `agent_busy`. `retry_after_secs` is the `Retry-After` delta-seconds header.
     AgentBusy {
         retry_after_secs: Option<u64>,
@@ -59,9 +58,6 @@ impl EngineFailure {
             Self::ApprovalDeclined => {
                 Cow::Borrowed("The requested operation was declined. [approval_declined]")
             }
-            Self::AuthorizationMismatch => Cow::Borrowed(
-                "PRX requested approval in full authorization mode. [authorization_mismatch]",
-            ),
             Self::AgentBusy { retry_after_secs } => admission_reply(
                 "The agent is at its concurrency limit.",
                 "agent_busy",
@@ -304,13 +300,6 @@ pub trait EngineProvider {
     /// Rejects an acknowledgement that conflicts with provider state.
     fn acknowledge(&mut self, _event: &EngineEvent) -> Result<()> {
         Ok(())
-    }
-    /// Install configured admission limits. The default provider has none.
-    ///
-    /// # Errors
-    /// Rejects a limits configuration whose PRX write fails.
-    fn publish_limits(&mut self) -> impl Future<Output = Result<()>> + '_ {
-        async { Ok(()) }
     }
     /// Erase every agent's turns in the provider session mapped to this conversation.
     /// The default provider has no session.
