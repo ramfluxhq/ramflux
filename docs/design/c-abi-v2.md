@@ -584,10 +584,20 @@ background decryption. No plaintext key persistence or file-vault fallback.
 
 ### Ownership and acceptance boundary
 
-Shared storage does not grant concurrent writer/session access. The existing
-whole-root lease and same-process registry still apply. A second app/extension
-open must receive `AccountBusy` until ownership is released. This contract adds
-no extension-safe wake-fetch entry point, shared-reader mode or session handoff.
+One process owns mutation of a shared root. `ramflux_v2_client_open` and
+`ramflux_v2_client_open_with_custody` still take the whole-root lease and the
+same-process registry. A second open returns `AccountBusy` (18) and starts no
+supervisor. Account database writes take the per-account writer lock and fail
+immediately with that same status when another process holds it. A receive that
+loses the lock returns before any acknowledgement. An uncommitted write rolls
+back with the process. Journal mode and synchronous settings are unchanged.
+
+`ramflux_v2_shared_snapshot(config, config_len, code, code_len, out)` is the
+extension read. Config is `{data_root, account_id}`. `code` is the borrowed
+account code. It does not take the whole-root lease or the writer lock, and it
+does not start a supervisor. One deferred read transaction returns
+`{account_id, direct_message_ids, message_ids}` from the last commit. Output
+uses `ramflux_v2_buffer_free`. Session handoff after suspension is out of scope.
 Optional app lock is separate: a presence-gated wrap must not be silently
 replaced by the background wrap when app lock is enabled; this card does not
 implement that policy.

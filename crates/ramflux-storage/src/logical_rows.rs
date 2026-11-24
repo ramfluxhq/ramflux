@@ -44,6 +44,7 @@ pub fn load_account_db_key(
         data_root.join(ACCOUNT_INDEX_FILE),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
+    index.execute_batch("PRAGMA query_only=ON;")?;
     let (relative, provider, wrapping_ref, wrapped, nonce) = index.query_row(
         "SELECT db_relative_path, key_wrapping_provider, key_wrapping_ref, wrapped_key, wrapped_key_nonce
            FROM local_account WHERE local_account_id = ?1",
@@ -87,7 +88,10 @@ pub fn load_account_db_key(
 }
 
 /// Logical rows of the message, event, outbox, receipt and actor-state tables.
-/// Includes committed WAL frames. Does not take the writer lock.
+///
+/// One deferred transaction on a query-only connection. The caller sees one
+/// committed snapshot and not a writer transaction that has not committed.
+/// Does not take the account writer lock and does not change durability pragmas.
 ///
 /// # Errors
 /// Returns an error when the database cannot be opened or a present table cannot
@@ -96,12 +100,19 @@ pub fn logical_table_rows(
     db_path: &Path,
     key: &AccountDbKey,
 ) -> Result<BTreeMap<String, Vec<String>>, StorageError> {
-    let connection = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let connection = Connection::open_account_reader(db_path)?;
     apply_key(&connection, key)?;
     connection.execute_batch("PRAGMA query_only=ON;")?;
+    let transaction = connection.deferred_transaction()?;
+    let tables = snapshot_tables(&connection)?;
+    transaction.commit()?;
+    Ok(tables)
+}
+
+fn snapshot_tables(connection: &Connection) -> Result<BTreeMap<String, Vec<String>>, StorageError> {
     let mut tables = BTreeMap::new();
     for (name, sql) in TABLES {
-        tables.insert((*name).to_owned(), table_lines(&connection, name, sql)?);
+        tables.insert((*name).to_owned(), table_lines(connection, name, sql)?);
     }
     Ok(tables)
 }

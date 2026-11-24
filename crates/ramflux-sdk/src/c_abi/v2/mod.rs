@@ -29,6 +29,7 @@ mod projection;
 #[cfg(test)]
 mod review_tests;
 mod runtime;
+mod snapshot;
 mod state;
 mod suspend;
 #[cfg(test)]
@@ -49,4 +50,5 @@ pub use exports::{
     ramflux_v2_set_credential_provider, ramflux_v2_set_host_credential_provider,
     ramflux_v2_username_authorize,
 };
+pub use snapshot::ramflux_v2_shared_snapshot;
 pub use suspend::{ramflux_v2_client_resume, ramflux_v2_client_suspend};

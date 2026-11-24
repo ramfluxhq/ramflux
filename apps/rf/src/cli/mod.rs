@@ -26,6 +26,7 @@ mod grant;
 mod group;
 mod keychain;
 mod prx;
+mod root;
 mod vault;
 pub(crate) use vault::*;
 mod mcp;
@@ -49,6 +50,7 @@ pub(crate) use daemon::*;
 pub(crate) use device::*;
 pub(crate) use diag::*;
 pub(crate) use prx::*;
+pub(crate) use root::*;
 mod pairing;
 mod transfer;
 pub(crate) use dm::*;
@@ -111,6 +113,8 @@ pub(crate) enum Command {
     Admin(AdminCommand),
     /// Plaintext residue diagnostics.
     Diag(DiagCommand),
+    /// Shared-root snapshot and one fenced direct-message commit.
+    Root(RootCommand),
     Attachment(AttachmentCommand),
 }
 
