@@ -207,6 +207,10 @@ const S10A_HOST_IMPORTS: &[(&str, &str)] = &[
     ("crate::bus::connection_manager::NetworkingState", "audited S10a endpoint boundary only"),
     ("crate::bus::events::EventBatch", "audited S10a endpoint boundary only"),
     ("tokio::sync::oneshot::channel", "audited S10a endpoint boundary only"),
+    (
+        "crate::bus::app_lock_fence::Fences",
+        "audited S10a endpoint boundary only; in-memory fence lookup, no durable write",
+    ),
 ];
 const S10A_HOST_CALLS: &[&str] = &[
     "Ok",
@@ -232,6 +236,7 @@ const S10A_HOST_CALLS: &[&str] = &[
     "ephemeral_negotiated",
     "filter_map",
     "flatten",
+    "for_root",
     "frozen",
     "generation",
     "get",
@@ -261,6 +266,7 @@ const S10A_HOST_CALLS: &[&str] = &[
     "send",
     "snapshot",
     "take_ephemeral_consumer",
+    "token",
     "transient_deadline",
     "try_from",
     "try_reserve",
