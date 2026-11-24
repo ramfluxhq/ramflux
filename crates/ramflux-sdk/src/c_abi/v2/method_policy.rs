@@ -34,6 +34,7 @@ policies! {
     "a2i.list" => ("a2i", false, true, false, false),
     "a2i.list_pending" => ("a2i", false, true, false, false),
     "account.app_lock.configure" => ("account", false, false, false, false),
+    "account.app_lock.lifecycle" => ("account", false, false, false, false),
     "account.app_lock.lock" => ("account", false, false, false, false),
     "account.app_lock.state" => ("account", false, false, false, false),
     "account.backup.cancel" => ("account", true, false, false, false),

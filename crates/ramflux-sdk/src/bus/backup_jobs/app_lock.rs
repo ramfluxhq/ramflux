@@ -52,7 +52,7 @@ impl BackupJobs {
                 row.installed_account.as_ref().map(|account| account.local_account_id.as_str())
             });
         match account {
-            Some(account) => Ok(!fences.epoch(account)?.locked),
+            Some(account) => Ok(!fences.epoch(account)?.blocks_access()),
             None => Ok(!fences.any_locked()?),
         }
     }

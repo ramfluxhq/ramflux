@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Account switching can list locked account identifiers without profile data; backup job lists omit app-locked accounts, and lock changes reach only attached connections.
+- App lock uses a suspend-aware monotonic background timeout, ignores duplicate lifecycle signals, cancels on foreground before expiry, and keeps enabled accounts locked after restart.
 
 - Optional app lock fences account requests, queued native results, subscriptions, media readers and exports; lock state changes remain available on a content-free control stream.
 
