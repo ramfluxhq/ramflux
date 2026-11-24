@@ -179,23 +179,44 @@ impl AccountRuntime {
         let ready = handle.require_live_since(admitted_at, self.timeouts.network_wait);
         tokio::pin!(ready);
         loop {
+            // A live session proceeds. A command already queued beats another page:
+            // this send is claimed, and the page must not spend the queue-wait budget.
+            self.service_waiting_commands().await?;
             tokio::select! {
                 biased;
                 ready=&mut ready=>{ready?;break;},
-                work=self.head_rx.recv()=>{if let Some(work)=work {self.apply_connection_work(work).await?;}},
-                work=self.connection_work.recv()=>{if let Some(work)=work {
-                    #[cfg(test)]
-                    let outcome = matches!(&work, AccountWork::Connected { .. } | AccountWork::Failed { .. });
-                    self.apply_connection_work(work).await?;
-                    #[cfg(test)]
-                    if outcome && let Some(gate) = &self.state.config.test_network_command_gate {
-                        gate.applied.notify_one();
-                        let _ = gate.release.acquire().await;
-                    }
-                }}
+                command=self.receiver.recv()=>{
+                    let Some(command)=command else { return Err(super::stopped()); };
+                    self.note_command_taken();
+                    super::publication_park::set_final(false);
+                    if Box::pin(self.apply(command)).await? { return Err(super::stopped()); }
+                },
+                work=self.head_rx.recv()=>{if let Some(work)=work {self.drive_or_apply_network_work(work).await?;}},
+                work=self.connection_work.recv()=>{if let Some(work)=work {self.drive_or_apply_network_work(work).await?;}},
             }
         }
         self.prepare_command_heads(command, admitted_at).await
+    }
+
+    /// Connection work during a claimed send yields when another command is waiting.
+    /// The network-gate tests keep the uninterrupted apply so their release barrier fires.
+    async fn drive_or_apply_network_work(&mut self, work: AccountWork) -> Result<(), SdkError> {
+        #[cfg(test)]
+        if self.state.config.test_network_command_gate.is_some() {
+            let outcome =
+                matches!(&work, AccountWork::Connected { .. } | AccountWork::Failed { .. });
+            self.apply_connection_work(work).await?;
+            if outcome && let Some(gate) = &self.state.config.test_network_command_gate {
+                gate.applied.notify_one();
+                let _ = gate.release.acquire().await;
+            }
+            return Ok(());
+        }
+        let mut checkpoints = 0_u8;
+        if Box::pin(self.drive_connection_work(work, &mut checkpoints)).await? {
+            return Err(super::stopped());
+        }
+        Ok(())
     }
 
     pub(super) async fn apply_connection_work(
