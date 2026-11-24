@@ -216,9 +216,21 @@ pub fn wait_listed(daemon: &Daemon, owner: &Account, anchor: &str) -> Result<Val
                     .iter()
                     .any(|row| row.get("agentAnchor").and_then(Value::as_str) == Some(anchor))
                 {
-                    return show(daemon, owner, anchor);
+                    match show(daemon, owner, anchor) {
+                        Ok(record)
+                            if record
+                                .get("persona")
+                                .and_then(|persona| persona.get("name"))
+                                .is_some() =>
+                        {
+                            return Ok(record);
+                        }
+                        Ok(record) => last = record.to_string(),
+                        Err(error) => last = error.to_string(),
+                    }
+                } else {
+                    last = reply.to_string();
                 }
-                last = reply.to_string();
             }
             Err(error) => last = error.to_string(),
         }

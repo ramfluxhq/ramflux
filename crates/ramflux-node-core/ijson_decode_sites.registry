@@ -163,3 +163,5 @@ crates/ramflux-node-core/src/username_directory/reporting.rs | prune | 1 | E | e
 crates/ramflux-node-core/src/username_directory/schema.rs | read_head | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/username_directory/home.rs | begin | 1 | E | excluded=closed username intent and due-index metadata outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/username_directory/home.rs | update | 2 | E | excluded=closed username intent and due-index metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/router_store/agent_publish/owner_continuity.rs | account_owner | 1 | D | admitted-before-persist; custody authority row from router account table
+crates/ramflux-node-core/src/router_store/agent_publish/owner_continuity.rs | host_owner | 1 | D | admitted-before-persist; validated agent-host binding from router host table

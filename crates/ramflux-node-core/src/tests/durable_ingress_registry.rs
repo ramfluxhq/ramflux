@@ -13,6 +13,12 @@ enum Class {
 
 const DURABLE_INGRESS: &[(&str, Class)] = &[
     (
+        "federation_store.rs:inbound_forward_committed",
+        Class::NonIngress("read-only committed replay lookup; no envelope delivery or persistence"),
+    ),
+    ("federation_store.rs:inbound_replay_tuple", Class::NonIngress("pure replay-key construction")),
+    ("router/foreign_source.rs:authenticated_envelope_source_with_peer", Class::Sink),
+    (
         "custody_authority.rs:publish_custody_record",
         Class::NonIngress("custody publication API; no envelope delivery effect"),
     ),
@@ -219,7 +225,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
     assert_eq!(
         (ingress_count, sink_count, non_ingress_count),
-        (20, 6, 42),
+        (20, 7, 44),
         "registry counts match the classified live functions"
     );
     for (entry, class) in DURABLE_INGRESS {
@@ -1001,12 +1007,28 @@ fn first_statement_has_mode_guard(
     if !after_brace.is_empty() {
         return Ok(after_brace.contains("require_durable"));
     }
-    Ok(lines
+    let mut statements = lines
         .iter()
         .skip(body + 1)
         .map(|line| line.trim())
-        .find(|line| !line.is_empty() && !line.starts_with("//"))
-        .is_some_and(|line| line.contains("require_durable")))
+        .filter(|line| !line.is_empty() && !line.starts_with("//"));
+    let first = statements.next().unwrap_or("");
+    if first.contains("require_durable") {
+        return Ok(true);
+    }
+    // The origin-only wrapper is exactly one tail call to the peer-aware sink. Require
+    // that complete body and the callee's first-statement guard; no preceding or trailing
+    // statement may be hidden by treating a delegation as its own admission guard.
+    if entry == "router/foreign_source.rs:authenticated_envelope_source_from"
+        && first == "self.authenticated_envelope_source_with_peer(envelope, store, origin, None)"
+        && statements.next() == Some("}")
+    {
+        return first_statement_has_mode_guard(
+            src,
+            "router/foreign_source.rs:authenticated_envelope_source_with_peer",
+        );
+    }
+    Ok(false)
 }
 
 fn public_envelope_sources(
@@ -1090,7 +1112,8 @@ fn assert_registry_scan_matches(
 }
 
 #[test]
-fn durable_ingress_registry_scanner_rejects_drift_fixtures() {
+fn durable_ingress_registry_scanner_rejects_drift_fixtures()
+-> Result<(), Box<dyn std::error::Error>> {
     let unlisted =
         vec![("registry.rs".to_owned(), "pub fn newly_exposed(envelope: Envelope) {}".to_owned())];
     assert_eq!(
@@ -1117,6 +1140,30 @@ fn durable_ingress_registry_scanner_rejects_drift_fixtures() {
         ),
         Err("duplicate durable ingress registry entries".to_owned())
     );
+    let root = tempfile::tempdir()?;
+    std::fs::create_dir(root.path().join("router"))?;
+    let file = root.path().join("router/foreign_source.rs");
+    let wrapper = "fn authenticated_envelope_source_from() {\nself.authenticated_envelope_source_with_peer(envelope, store, origin, None)\n}\n";
+    let guarded =
+        "fn authenticated_envelope_source_with_peer() {\nrequire_durable(envelope)?;\n}\n";
+    let entry = "router/foreign_source.rs:authenticated_envelope_source_from";
+    std::fs::write(&file, format!("{wrapper}{guarded}"))?;
+    assert!(
+        first_statement_has_mode_guard(root.path(), entry)?,
+        "exact guarded delegation refused"
+    );
+    for source in [
+        format!("{}{guarded}", wrapper.replace("{\n", "{\neffect();\n")),
+        format!("{}{guarded}", wrapper.replace("\n}\n", ";\neffect();\n}\n")),
+        format!("{wrapper}{}", guarded.replace("require_durable(envelope)?;", "effect();")),
+    ] {
+        std::fs::write(&file, source)?;
+        assert!(
+            !first_statement_has_mode_guard(root.path(), entry)?,
+            "effects or missing sink guard escaped detection"
+        );
+    }
+    Ok(())
 }
 
 fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -1162,9 +1209,11 @@ fn e1_public_wrappers_refuse_marked_fresh_foreign_authority()
     ];
     for with_wal in [true, false] {
         for (index, mode) in modes.iter().enumerate() {
-            for wrapper in
-                ["authenticated_envelope_source", "authenticated_envelope_source_durable"]
-            {
+            for wrapper in [
+                "authenticated_envelope_source",
+                "authenticated_envelope_source_durable",
+                "authenticated_envelope_source_with_peer",
+            ] {
                 let store_directory_2 =
                     temp_store_path(&format!("e1_{wrapper}_{with_wal}_{index}"))?;
                 let path = store_directory_2.to_path_buf();
@@ -1187,8 +1236,15 @@ fn e1_public_wrappers_refuse_marked_fresh_foreign_authority()
                 let control = without_delivery_mode(&marked)?;
                 let control_result = if wrapper == "authenticated_envelope_source" {
                     router.authenticated_envelope_source(&control)
-                } else {
+                } else if wrapper == "authenticated_envelope_source_durable" {
                     router.authenticated_envelope_source_durable(&control, &store)
+                } else {
+                    router.authenticated_envelope_source_with_peer(
+                        &control,
+                        Some(&store),
+                        RouterEnvelopeOrigin::Gateway,
+                        Some("node-a"),
+                    )
                 };
                 assert!(
                     matches!(control_result, Err(NodeCoreError::Unauthorized(_))),
@@ -1197,8 +1253,15 @@ fn e1_public_wrappers_refuse_marked_fresh_foreign_authority()
                 let before = store.foreign_authority_row_counts()?;
                 let result = if wrapper == "authenticated_envelope_source" {
                     router.authenticated_envelope_source(&marked)
-                } else {
+                } else if wrapper == "authenticated_envelope_source_durable" {
                     router.authenticated_envelope_source_durable(&marked, &store)
+                } else {
+                    router.authenticated_envelope_source_with_peer(
+                        &marked,
+                        Some(&store),
+                        RouterEnvelopeOrigin::Gateway,
+                        Some("node-a"),
+                    )
                 };
                 assert_eq!(
                     result.err().map(|error| error.to_string()).as_deref(),

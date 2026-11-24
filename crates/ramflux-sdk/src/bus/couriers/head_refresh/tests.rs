@@ -220,7 +220,7 @@ async fn eligibility_storage_reads_are_independent_of_pending_root_count() -> Te
     let plan = prepare(&mut account, requested.clone())?.ok_or("small plan")?;
     let small = probe.snapshot().read_statements;
     assert!(small > 0, "counter must observe real roster reads");
-    assert!(small <= 2 + 5 * 4, "one contact load and linear group reads: {small}");
+    assert!(small <= 2 + 5 * 4 + 4, "contact, group, and four pinned-origin reads: {small}");
     drop(plan);
     for index in 0..MAX_PENDING - 1 {
         assert!(account.head_refresh.enqueue(format!("absent-{index:04}")));
@@ -245,8 +245,8 @@ async fn eligibility_storage_reads_are_independent_of_pending_root_count() -> Te
     );
     assert_eq!(
         probe.snapshot().read_statements - before,
-        small,
-        "Apply must rebuild one current eligibility set per writer turn"
+        small - 4,
+        "Apply rebuilds eligibility without repeating the four planned-origin reads"
     );
     account.connection.take().ok_or("connection")?.stop().await;
     Ok(())
