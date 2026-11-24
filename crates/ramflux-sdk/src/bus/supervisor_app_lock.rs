@@ -18,6 +18,8 @@ impl Supervisor {
         if matches!(
             method,
             "account.app_lock.configure"
+                | "account.app_lock.lifecycle"
+                | "account.app_lock.state"
                 | "account.app_lock.lock"
                 | "account.unlock"
                 | "account.lock"
@@ -61,18 +63,29 @@ impl Supervisor {
         }
         Ok(())
     }
-    fn app_lock_body(
+    pub(super) fn app_lock_body(
         &self,
         policy: &AppLockPolicy,
         id: &str,
     ) -> Result<serde_json::Value, SdkError> {
         let open = self.accounts.borrow().get(id).is_some_and(super::AccountActor::is_open);
         let epoch = self.app_fences.epoch(id)?;
+        let (state, reason, remaining_ms) = epoch.snapshot();
         let mut body = state_body(policy, open && !epoch.locked);
         let fields = body.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?;
         fields.insert("generation".into(), epoch.generation.into());
-        if !epoch.reason.is_empty() {
-            fields.insert("reason".into(), epoch.reason.into());
+        match reason {
+            None => {
+                fields.insert("reason".into(), serde_json::Value::Null);
+            }
+            Some(reason) if !reason.is_empty() => {
+                fields.insert("reason".into(), reason.into());
+            }
+            Some(_) => {}
+        }
+        if open && !epoch.locked {
+            fields.insert("state".into(), state.into());
+            fields.insert("remaining_ms".into(), remaining_ms.into());
         }
         Ok(body)
     }
@@ -82,14 +95,15 @@ impl Supervisor {
         id: &str,
     ) -> Result<(), SdkError> {
         let epoch = self.app_fences.epoch(id)?;
+        let (state, reason, remaining_ms) = epoch.snapshot();
         let frame = local_bus_event(
             request,
             id,
             "account",
             "account.app_lock.changed",
             serde_json::json!({
-                "state": if epoch.locked { "locked" } else { "unlocked" },
-                "reason": epoch.reason, "generation": epoch.generation, "remaining_ms": 0,
+                "state": state, "reason": reason, "generation": epoch.generation,
+                "remaining_ms": remaining_ms,
             }),
         );
         self.controls.borrow_mut().retain(|connection, outbound| {
@@ -122,14 +136,33 @@ impl Supervisor {
             });
         }
         self.attach_app_control(connection.connection_id, &id);
-        self.app_fences.transition(&id, true, true, "manual")?;
-        self.close_app_subscriptions(&id);
-        self.backup_jobs.app_lock_account(&id).await?;
-        self.lock_account_session(&id).await?;
+        self.close_app_access(request, &id, "manual").await?;
+        Ok(super::reply(self.app_lock_body(&policy, &id)?))
+    }
+    pub(super) async fn close_app_access(
+        &self,
+        request: &LocalBusFrame,
+        id: &str,
+        reason: &'static str,
+    ) -> Result<(), SdkError> {
+        self.app_fences.transition(id, true, true, reason)?;
+        self.close_app_subscriptions(id);
+        self.backup_jobs.app_lock_account(id).await?;
+        if self.config.background.load(std::sync::atomic::Ordering::Acquire) {
+            // A parked actor cannot run account.lock without reopening files. Stop it to
+            // erase its retained keys; ON cold-open authority is already persistently gated.
+            let actor = self.accounts.borrow().get(id).cloned();
+            if let Some(actor) = actor {
+                actor.stop().await?;
+                self.accounts.borrow_mut().remove(id);
+            }
+            self.attended.borrow_mut().retain(|_, account| account != id);
+        } else {
+            self.lock_account_session(id).await?;
+        }
         // Every transport write admitted before the epoch change must finish before acknowledgement.
         let _drained = Arc::clone(&self.app_fences.delivery).write_owned().await;
-        self.emit_app_lock_change(request, &id)?;
-        Ok(super::reply(self.app_lock_body(&policy, &id)?))
+        self.emit_app_lock_change(request, id)
     }
     pub(super) fn close_app_subscriptions(&self, id: &str) {
         let ids = self
@@ -172,6 +205,7 @@ impl Supervisor {
     ) -> Result<super::ActorResponse, SdkError> {
         let account_id = self.authorize_app_lock_change(request, connection)?;
         self.attach_app_control(connection.connection_id, &account_id);
+        let armed = self.app_fences.epoch(&account_id)?.deadline;
         let enabled = required_bool(&request.body)?;
         let timeout_ms = required_timeout(&request.body)?;
         let policy = if enabled {
@@ -183,6 +217,13 @@ impl Supervisor {
             self.write_app_lock(account_id.clone(), false, timeout_ms, Some(wrap)).await?
         };
         self.app_fences.transition(&account_id, policy.enabled, false, "configured")?;
+        if policy.enabled
+            && let Some(armed) = armed
+        {
+            self.app_fences.deadline(&account_id, Some(armed.reconfigure(timeout_ms)?))?;
+            self.expire_app_deadlines().await?;
+            self.app_timer_wake.notify_one();
+        }
         self.emit_app_lock_change(request, &account_id)?;
         Ok(super::reply(self.app_lock_body(&policy, &account_id)?))
     }
@@ -200,7 +241,7 @@ impl Supervisor {
     ) -> Result<(), SdkError> {
         for row in rows {
             let id = super::super::account_local::row_id(row).to_owned();
-            if self.app_fences.epoch(&id)?.locked {
+            if self.app_fences.epoch(&id)?.blocks_access() {
                 *row = if detailed {
                     serde_json::json!({"id":id,"state":"locked","locked":true})
                 } else {
@@ -295,12 +336,11 @@ fn read_policy(
 }
 
 fn state_body(policy: &AppLockPolicy, open: bool) -> serde_json::Value {
-    let (state, reason) = if open {
+    // An OFF account never reports app-lock `locked`, opened or not (no code is ever asked).
+    let (state, reason) = if open || !policy.enabled {
         ("unlocked", "authenticated")
-    } else if policy.enabled {
-        ("locked", "cold_start")
     } else {
-        ("locked", "manual")
+        ("locked", "cold_start")
     };
     serde_json::json!({
         "enabled": policy.enabled,
@@ -351,7 +391,10 @@ fn refuse_body_account(body: &serde_json::Value, account_id: &str) -> Result<(),
     Ok(())
 }
 
-fn refuse_attended(connection: &LocalBusConnectionState, account_id: &str) -> Result<(), SdkError> {
+pub(super) fn refuse_attended(
+    connection: &LocalBusConnectionState,
+    account_id: &str,
+) -> Result<(), SdkError> {
     if connection.attended_account_id.as_deref().is_some_and(|attended| attended != account_id) {
         return Err(unauthorized());
     }

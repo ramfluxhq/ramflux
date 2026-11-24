@@ -23,10 +23,12 @@ pub(crate) fn client_suspended() -> SdkError {
 #[cfg(feature = "c-abi")]
 impl Supervisor {
     pub(super) async fn suspend_for_background(&self) -> Result<(), SdkError> {
+        let control = self.app_control.lock().await;
         if self.config.background.load(Ordering::Acquire) && self.root_lease.borrow().is_none() {
             ramflux_transport::drain_abandoned_quic().await;
             return Ok(());
         }
+        self.arm_app_suspend().await?;
         self.config.background.store(true, Ordering::Release);
         let node = self.node_actor.clone();
         let accounts = self.accounts.borrow().values().cloned().collect::<Vec<_>>();
@@ -37,6 +39,7 @@ impl Supervisor {
         if let Err(error) = released {
             // Release can fail after earlier actors (or SQLite itself) have closed files.
             // Keep admission fenced until every owner has been reopened.
+            drop(control);
             let rollback = self.resume_for_background().await;
             return Err(SdkError::LocalBusRefused {
                 code: "SuspendFailed".into(),
@@ -60,11 +63,13 @@ impl Supervisor {
     }
 
     pub(super) async fn resume_for_background(&self) -> Result<(), SdkError> {
+        let _control = self.app_control.lock().await;
         if !self.config.background.load(Ordering::Acquire) && self.root_lease.borrow().is_some() {
             return Ok(());
         }
         self.reacquire_root().await?;
         self.index.reopen_files().map_err(SdkError::from)?;
+        self.expire_app_deadlines().await?;
         let node = self.node_actor.clone();
         let accounts = self.accounts.borrow().values().cloned().collect::<Vec<_>>();
         // Try every actor: one refusal must not strand the remaining parked owners.
@@ -76,6 +81,9 @@ impl Supervisor {
             }
         }
         reopened?;
+        self.expire_app_deadlines().await?;
+        // Resume can be a background wake on a locked device. Only an explicit
+        // foreground lifecycle signal may cancel a deadline that has not expired.
         self.config.background.store(false, Ordering::Release);
         Ok(())
     }
