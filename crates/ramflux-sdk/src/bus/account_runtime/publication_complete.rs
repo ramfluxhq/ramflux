@@ -4,9 +4,9 @@
 //! Command replies parked until their durable outbox prefix reaches the journal.
 
 use super::{AccountRuntime, stopped};
-use crate::bus::actor::ActorResponse;
+use crate::bus::actor::{AccountCommand, ActorResponse};
 use crate::{LocalBusFrame, SdkError};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 pub(super) struct Completion {
     request: LocalBusFrame,
@@ -14,6 +14,7 @@ pub(super) struct Completion {
     reply: oneshot::Sender<Result<ActorResponse, SdkError>>,
     through: Option<i64>,
     started: tokio::time::Instant,
+    wake: Option<watch::Sender<u64>>,
 }
 
 impl AccountRuntime {
@@ -46,7 +47,63 @@ impl AccountRuntime {
             reply,
             through,
             started: tokio::time::Instant::now(),
+            wake: None,
         });
+    }
+
+    /// An expiry snapshot must reach the journal before another command can replace it.
+    pub(super) fn defer_expiry_command(
+        &mut self,
+        command: AccountCommand,
+        reply: oneshot::Sender<Result<ActorResponse, SdkError>>,
+    ) -> Option<(AccountCommand, oneshot::Sender<Result<ActorResponse, SdkError>>)> {
+        let Some(through) = self.networking_expiry_pending else { return Some((command, reply)) };
+        let pending = (|| {
+            let account = self.state.accounts.get(&self.id).ok_or_else(stopped)?;
+            Ok::<_, SdkError>(
+                account
+                    .client
+                    .account_db()?
+                    .pending_outbox(1)?
+                    .first()
+                    .is_some_and(|entry| entry.sequence <= through),
+            )
+        })();
+        match pending {
+            Ok(false) => return Some((command, reply)),
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return None;
+            }
+            Ok(true) => {}
+        }
+        let (completed, result) = oneshot::channel();
+        let (wake, changed) = watch::channel(0);
+        self.publications.push_back(Completion {
+            request: LocalBusFrame::request(
+                "sync",
+                Some(self.id.clone()),
+                "runtime",
+                "sync.run",
+                serde_json::json!({}),
+            ),
+            result: Ok(ActorResponse {
+                body: serde_json::Value::Null,
+                events: Vec::new(),
+                nodes: None,
+                owner_copy: None,
+            }),
+            reply: completed,
+            through: Some(through),
+            started: tokio::time::Instant::now(),
+            wake: Some(wake),
+        });
+        let deadline = command.admission.as_ref().map_or_else(
+            || tokio::time::Instant::now() + self.timeouts.command,
+            |admission| admission.command_deadline,
+        );
+        super::command_park::park_journal(&self.id, command, reply, deadline, changed, result);
+        None
     }
 
     /// One durable row per actor turn. Commands always precede the next row.
@@ -102,6 +159,9 @@ impl AccountRuntime {
             Some(error) => Err(error),
         };
         let _ = pending.reply.send(result);
+        if let Some(wake) = pending.wake {
+            let _ = wake.send(1);
+        }
         Ok(())
     }
 }

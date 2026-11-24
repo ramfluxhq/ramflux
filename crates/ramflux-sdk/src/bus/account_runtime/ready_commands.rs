@@ -28,6 +28,10 @@ impl Queue {
     pub(super) fn take(&mut self) -> Option<AccountCommand> {
         self.receiver.try_recv().ok()
     }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.receiver.is_empty()
+    }
 }
 
 /// Reserve separate bounded space before taking a command from the real mailbox.
