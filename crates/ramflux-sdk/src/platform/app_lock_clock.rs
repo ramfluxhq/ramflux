@@ -105,9 +105,8 @@ impl MonotonicClock for SystemClock {
 #[cfg(windows)]
 impl MonotonicClock for SystemClock {
     fn now() -> Result<Duration, SdkError> {
-        // SAFETY: the OS clock takes no pointers and includes sleep and hibernation.
-        let millis = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() };
-        Ok(Duration::from_millis(millis))
+        // The OS tick count includes sleep and hibernation; the FFI lives in clock_windows.
+        Ok(Duration::from_millis(super::clock_windows::tick_count_ms()))
     }
 }
 
