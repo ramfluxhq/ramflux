@@ -23,7 +23,9 @@ impl AccountRuntime {
         };
         // No mutation or operation receipt has been reserved. The actor can apply the
         // bootstrap page while this command retains its original admission deadline.
-        super::command_park::park_receive(command, reply, deadline, connection, generation);
+        super::command_park::park_receive(
+            &self.id, command, reply, deadline, connection, generation,
+        );
         None
     }
 

@@ -251,7 +251,7 @@ impl AccountRuntime {
         if *self.shutdown.borrow() {
             return Ok(true);
         }
-        let mut reply = command.reply.take().ok_or_else(stopped)?;
+        let reply = command.reply.take().ok_or_else(stopped)?;
         if reply.is_closed() {
             return Ok(false);
         }
@@ -269,21 +269,16 @@ impl AccountRuntime {
         if !lifecycle {
             let _phase =
                 super::command_phase::Phase::start("network_prepare", &command.request.method);
-            let mut shutdown = self.shutdown.clone();
-            let mut preempt = self.preempt.clone();
-            let gate = tokio::select! {
-                biased;
-                _=shutdown.changed()=>return Ok(true),
-                _=preempt.changed()=>{
-                    let error=self.preemption_error();
-                    let _=reply.send(Err(error));return Ok(false);
-                },
-                ()=reply.closed()=>return Ok(false),
-                gate=self.prepare_command_network(&command)=>gate,
-            };
-            if let Err(error) = gate {
-                let _ = reply.send(Err(error));
-                return Ok(false);
+            match self.prepare_network_step(&mut command).await {
+                Ok(None) => {}
+                Ok(Some(wait)) => {
+                    super::command_park::park_network(&self.id, command, reply, wait);
+                    return Ok(false);
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return Ok(false);
+                }
             }
         }
         let Some((command, mut reply)) = self.defer_initial_receive(command, reply) else {
@@ -327,7 +322,7 @@ impl AccountRuntime {
         }
         match dispatched {
             Dispatch::Park { deadline, generation } if !reply.is_closed() => {
-                super::command_park::park(command, reply, deadline, generation);
+                super::command_park::park(&self.id, command, reply, deadline, generation);
                 Ok(false)
             }
             Dispatch::Park { .. } => Ok(false),

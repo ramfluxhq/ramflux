@@ -600,6 +600,10 @@ impl ConnectionHandle {
     pub(crate) fn receive_observations(&self) -> &receive_observations::Counters {
         &self.shared.receive_observations
     }
+    pub(crate) fn note_command_readiness(&self) {
+        self.shared.changed.send_modify(|_| {});
+    }
+
     pub(crate) fn snapshot_watch(&self) -> watch::Receiver<u64> {
         self.shared.changed.subscribe()
     }

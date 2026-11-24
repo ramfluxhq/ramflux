@@ -15,6 +15,7 @@ mod command_phase;
 mod commands;
 mod initial_receive;
 mod maintenance;
+mod network_prepare;
 use maintenance::Maintenance;
 mod transient;
 pub(super) use transient::TransientHost;
@@ -364,7 +365,10 @@ impl AccountRuntime {
         if waiting && let Some(command) = self.try_mailbox() {
             return Some(command);
         }
-        if let Some(command) = command_park::take_ready() {
+        if head_demand::demand_active() && !self.head_rx.is_empty() {
+            return None;
+        }
+        if let Some(command) = command_park::take_ready(&self.id) {
             let _ = command_park::take_skip_note();
             return Some(command);
         }
@@ -568,8 +572,15 @@ impl AccountRuntime {
             _ = self.shutdown.changed() => return Ok(true),
             command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
             command = self.receiver.recv() => command,
-            () = command_park::until_ready(), if command_park::pending() => {
-                match command_park::take_ready() {
+            () = std::future::ready(()), if head_demand::demand_active() && !self.head_rx.is_empty() => {
+                if let Ok(work) = self.head_rx.try_recv() {
+                    *checkpoints += 1;
+                    return Box::pin(self.drive_connection_work(work, checkpoints)).await;
+                }
+                return Ok(false);
+            },
+            () = command_park::until_ready(&self.id), if command_park::pending(&self.id) => {
+                match command_park::take_ready(&self.id) {
                     Some(command) => Some(command),
                     None => return Ok(false),
                 }

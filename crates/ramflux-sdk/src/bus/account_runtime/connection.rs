@@ -4,12 +4,10 @@
 //! Account-writer preparation and conditional application of connection outcomes.
 
 use super::AccountRuntime;
+use crate::bus::connection_manager::{AccountWork, ReceiveTurn, SessionMetadata};
 use crate::bus::state::LocalBusAccountState;
-use crate::bus::{
-    actor::AccountCommand,
-    connection_manager::{AccountWork, ReceiveTurn, SessionMetadata},
-    mutation_intent::MutationIntent,
-};
+#[cfg(test)]
+use crate::bus::{actor::AccountCommand, mutation_intent::MutationIntent};
 use crate::prelude::{
     SdkError, local_bus_account_manifest_path, read_local_bus_account_manifest,
     write_local_bus_account_manifest,
@@ -66,7 +64,15 @@ impl AccountRuntime {
         &mut self,
         work: AccountWork,
     ) -> Result<(), SdkError> {
-        match self.apply_connection_work(work).await {
+        #[cfg(test)]
+        let outcome = matches!(&work, AccountWork::Connected { .. } | AccountWork::Failed { .. });
+        let result = self.apply_connection_work(work).await;
+        #[cfg(test)]
+        if outcome && let Some(gate) = &self.state.config.test_network_command_gate {
+            gate.applied.notify_one();
+            let _ = gate.release.acquire().await;
+        }
+        match result {
             Ok(()) => Ok(()),
             Err(error) if crate::bus::task_courier_queue::stop_class(&error) => Err(error),
             Err(error) => {
@@ -125,6 +131,7 @@ impl AccountRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn prepare_command_network(
         &mut self,
         command: &AccountCommand,
@@ -181,6 +188,7 @@ impl AccountRuntime {
 
     /// Connection work during a claimed send yields when another command is waiting.
     /// The network-gate tests keep the uninterrupted apply so their release barrier fires.
+    #[cfg(test)]
     async fn drive_or_apply_network_work(&mut self, work: AccountWork) -> Result<(), SdkError> {
         #[cfg(test)]
         if self.state.config.test_network_command_gate.is_some() {

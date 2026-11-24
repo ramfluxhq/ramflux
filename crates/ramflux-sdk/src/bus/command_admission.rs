@@ -22,6 +22,7 @@ pub(super) struct CommandAdmission {
     residence_deadline: Instant,
     post_claim_deadline: Instant,
     state: AtomicU8,
+    network_started: std::sync::OnceLock<std::time::Instant>,
     pub(super) retain_completion: bool,
     #[cfg(test)]
     pub expired_replies: Option<std::sync::Arc<ExpiredReplies>>,
@@ -35,10 +36,15 @@ impl CommandAdmission {
             residence_deadline: admitted_at + timeouts.network_wait,
             post_claim_deadline: admitted_at + timeouts.post_claim,
             state: AtomicU8::new(QUEUED),
+            network_started: std::sync::OnceLock::new(),
             retain_completion: RETAIN_COMPLETION.try_with(|()| ()).is_ok(),
             #[cfg(test)]
             expired_replies: None,
         }
+    }
+
+    pub(super) fn network_started(&self) -> std::time::Instant {
+        *self.network_started.get_or_init(std::time::Instant::now)
     }
 
     pub(super) fn is_claimed(&self) -> bool {
