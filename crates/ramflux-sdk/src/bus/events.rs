@@ -115,7 +115,7 @@ pub(super) async fn publish(
     client.expire_surface_pending()?;
     let db = client.account_db()?;
     loop {
-        match publish_one_page(client, account_id, request, networking_expiry, sender, db, 256)? {
+        match publish_one_page(client, account_id, request, networking_expiry, sender, 256)? {
             PageEnd::Drained => return Ok(()),
             PageEnd::Paused => return Err(SdkError::WriterPause),
             PageEnd::Page(sequence) => finish_published_page(db, request, sequence)?,
@@ -131,8 +131,7 @@ pub(super) fn publish_slice(
     networking_expiry: Option<(i64, &LocalBusFrame)>,
     sender: &mpsc::Sender<EventBatch>,
 ) -> Result<(), SdkError> {
-    let db = client.account_db()?;
-    match publish_one_page(client, account_id, request, networking_expiry, sender, db, 1)? {
+    match publish_one_page(client, account_id, request, networking_expiry, sender, 1)? {
         PageEnd::Paused => Err(SdkError::WriterPause),
         PageEnd::Drained | PageEnd::Page(_) => Ok(()),
     }
@@ -144,9 +143,9 @@ fn publish_one_page(
     request: &LocalBusFrame,
     networking_expiry: Option<(i64, &LocalBusFrame)>,
     sender: &mpsc::Sender<EventBatch>,
-    db: &ramflux_storage::AccountDb,
     limit: u32,
 ) -> Result<PageEnd, SdkError> {
+    let db = client.account_db()?;
     let entries = db.pending_outbox(limit)?;
     let Some(last) = entries.last() else {
         return Ok(PageEnd::Drained);

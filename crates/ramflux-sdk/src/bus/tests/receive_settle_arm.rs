@@ -96,7 +96,7 @@ async fn settle_retained_arm_honours_generation() -> TestResult {
 
 async fn case() -> TestResult {
     let fixture = Fixture::new("settle-arm").await?;
-    let mut account = LocalBusAccountState::disconnected(
+    let account = LocalBusAccountState::disconnected(
         fixture.client,
         fixture.config,
         fixture.manifest.principal_commitment.clone(),
@@ -106,67 +106,7 @@ async fn case() -> TestResult {
     let before = hold_then_advance(db)?;
     let erasure_generation = db.privacy_erasure_generation()?;
 
-    let handle = ConnectionHandle::start_with(
-        account.gateway_config.clone(),
-        None,
-        crate::bus::runtime_limits::RuntimeTimeouts::held_for_test(),
-        std::sync::Arc::new(Pending),
-        None,
-        None,
-    );
-    let generation = handle.generation();
-    account.connection = Some(handle);
-
-    let (events, mut batches) = mpsc::channel::<EventBatch>(8);
-    tokio::task::spawn_local(async move {
-        while let Some(batch) = batches.recv().await {
-            let _ = batch.accepted.send(());
-        }
-    });
-    let (connection_sender, connection_work) = mpsc::channel(2);
-    let (head_completion_sender, head_rx) = mpsc::channel(1);
-    let (_lifecycle_sender, lifecycle) = mpsc::channel(4);
-    let (_preempt_sender, preempt) = watch::channel(0);
-    let (_stop, shutdown) = watch::channel(false);
-    let (_commands, receiver) = mpsc::channel(1);
-    let mut runtime = AccountRuntime {
-        timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
-        lifecycle,
-        preempt,
-        command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        connection_sender,
-        connection_work,
-        head_completion_sender,
-        head_rx,
-        deferred: std::collections::VecDeque::new(),
-        ledger: None,
-        publications: std::collections::VecDeque::new(),
-        resume_receive_until: None,
-        transient: crate::bus::account_runtime::TransientHost::default(),
-        pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
-        username: crate::bus::account_runtime::username_calls::Calls::default(),
-        transfers: super::uploads::Transfers::start(),
-        id: "settle-arm".into(),
-        state: LocalBusDaemonState {
-            account_index: None,
-            config: LocalBusConfig::new(fixture.root.0.join("bus.sock"), &fixture.root.0),
-            nodes: crate::node::NodeStore::default(),
-            accounts: BTreeMap::from([("settle-arm".into(), account)]),
-            active_account_id: None,
-            attended_accounts: BTreeSet::new(),
-            subscribers: BTreeMap::new(),
-        },
-        receiver,
-        readers: std::sync::Arc::new(RoutingMutex::new(None)),
-        events,
-        shutdown,
-        courier: None,
-        networking_expiry_pending: None,
-        networking_expiry_warned: false,
-        networking_observation_warned: false,
-        courier_events: None,
-        receive_gate_hook: None,
-    };
+    let (mut runtime, generation) = runtime_with_pending(account, "settle-arm", &fixture.root.0);
     let turn = ReceiveTurn {
         target: "t".into(),
         incarnation: "e".into(),
