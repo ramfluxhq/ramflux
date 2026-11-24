@@ -18,6 +18,14 @@ symbols belong to that crate; sessions are renderer-thread-affine u64 tokens,
 and callback JSON is borrowed only for the synchronous callback. Card events
 produce declarative intents; SDK authority validates and signs any send.
 
+## Notification-extension host
+
+[`ramflux_v2_wake_fetch`](wake-fetch-host.md) runs one bounded authenticated inbox
+fetch for one account using shared custody and the notification-priority session
+lease. It does not open a full client or start background workers. Its typed
+outcomes are `fetched`, `busy`, `locked` and `deadline`; transport receipt does
+not imply durable application, ACK or a notification result.
+
 ## Negotiation and requests
 
 Call `ramflux_v2_negotiate(2, 0, &buffer)` before opening a client. Negotiation
