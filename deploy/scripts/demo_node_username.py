@@ -136,8 +136,12 @@ def render(state, override, label, record):
             healthcheck=dict(test=["CMD-SHELL", "test -S "+ROOT+"/socket/witness.sock" if role == "witness"
                 else "test -s "+ROOT+"/center/center.redb"], interval="2s", timeout="2s", retries=30))
         if role == "center":
+            # SO_PEERCRED requires both protected peers to see a nonzero peer PID.
+            item["pid"] = "container:"+os.environ["DEMO_PROJECT"]+"-username-witness"
             item["depends_on"] = {"ramflux-username-witness": {"condition": "service_healthy"}}
         else:
+            # An explicit name also works with providers that pass pid modes through.
+            item["container_name"] = os.environ["DEMO_PROJECT"]+"-username-witness"
             item["ports"] = [f"{os.environ['DEMO_BIND_ADDR']}:{config['DEMO_USERNAME_CENTER_PORT']}:{config['DEMO_USERNAME_CENTER_PORT']}/{protocol}"
                              for protocol in ("tcp", "udp")]
         services["ramflux-username-"+role] = item

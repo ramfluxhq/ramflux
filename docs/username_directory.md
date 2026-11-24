@@ -316,6 +316,8 @@ containers as well as by clients; do not use a loopback address. Open the centre
 port for TCP/UDP and the home port for TCP. These are dedicated authenticated TLS
 listeners using the existing federation certificate and CA, separate from the
 public discovery reverse proxy. All three roles use trust generation 1.
+The private federation admin body budget defaults to 5 MiB with this switch,
+as required by the home authority; a smaller explicit budget is refused.
 
 The tooling writes `username-pin.json` next to `identity.env`, mode 0644, with only
 `url`, `id`, `public_key`, `generation`. Transfer this public file over a trusted
@@ -326,6 +328,9 @@ and for signing commands. Clients never learn this pin from lookup replies.
 
 A separate short-lived provisioning container prepares the six owned volumes
 before the services start; it exits and is removed after checking their modes.
+The centre joins the witness's private PID namespace so Linux Unix-socket peer
+credentials contain visible peer PIDs. Their UIDs and protected volumes remain
+separate; neither service uses the host PID namespace.
 The initial provisioning consumes `--username-home-initialize`,
 `--username-initialize` and `--username-rebuild` once. Normal restart opens existing
 stores. Missing/corrupt protected stores require explicit operator recovery; the
