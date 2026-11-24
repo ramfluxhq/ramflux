@@ -5,6 +5,16 @@
 use crate::prelude::*;
 use crate::{ContactReason, ContactRootChange, ContactRootSource};
 use serde_json::{Value, json};
+
+fn stored_fingerprint(identity: &Value) -> Option<String> {
+    identity
+        .get("node")
+        .and_then(|node| node.get("key_fingerprint"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
 impl RamfluxClient {
     pub(crate) fn contact_own_commitment(&self) -> Result<String, SdkError> {
         self.own_account_anchor()
@@ -80,6 +90,46 @@ impl RamfluxClient {
             None => {}
         }
         identity["home_node_id"] = json!(home);
+        db.persist_client_record("identity", principal, &identity)?;
+        Ok(())
+    }
+
+    /// Pins the verified card home and its node-key fingerprint in one write.
+    ///
+    /// # Errors
+    /// Returns `InvalidCard` when the fingerprint is not 64 hex digits or the
+    /// node URL is empty, `UnknownPrincipal` when the contact is absent,
+    /// `RootConflict` when a different home is already pinned, and
+    /// `NodeFingerprintMismatch` when a different fingerprint is already stored.
+    pub(crate) fn pin_verified_card_home(
+        &self,
+        principal: &str,
+        home: &str,
+        node_url: &str,
+        key_fingerprint: &str,
+    ) -> Result<(), SdkError> {
+        let fingerprint = crate::client::recipient_home::require_card_fingerprint(key_fingerprint)?;
+        if node_url.is_empty() {
+            return Err(ContactReason::InvalidCard.into());
+        }
+        let db = self.account_db()?;
+        let Some(mut identity) = db.client_record("identity", principal)? else {
+            return Err(ContactReason::UnknownPrincipal.into());
+        };
+        match identity.get("home_node_id").and_then(Value::as_str) {
+            Some(existing) if existing == home => {}
+            Some(_) => return Err(ContactReason::RootConflict.into()),
+            None => identity["home_node_id"] = json!(home),
+        }
+        match stored_fingerprint(&identity) {
+            Some(existing) if existing != fingerprint => {
+                return Err(ContactReason::NodeFingerprintMismatch.into());
+            }
+            Some(_) => {}
+            None => {
+                identity["node"] = json!({"url": node_url, "key_fingerprint": fingerprint});
+            }
+        }
         db.persist_client_record("identity", principal, &identity)?;
         Ok(())
     }
