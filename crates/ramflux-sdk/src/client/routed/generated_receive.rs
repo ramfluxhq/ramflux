@@ -656,8 +656,12 @@ impl RamfluxClient {
                 }
                 let manifest_hash = ramflux_protocol::encode_base64url(&media.manifest_digest);
                 let reference_hash = ramflux_crypto::blake3_256_base64url(
-                    "ramflux.object.received_media.v1",
-                    &ramflux_protocol::canonical_json_bytes(&(message_id, &media.object_id))?,
+                    "ramflux.object.transport.owner.v1",
+                    &ramflux_protocol::canonical_json_bytes(&(
+                        &media.object_id,
+                        &manifest_hash,
+                        message_id,
+                    ))?,
                 );
                 let reference = serde_json::json!({});
                 let metadata = serde_json::json!({});

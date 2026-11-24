@@ -382,7 +382,7 @@ fn bind(
     });
     for sent in files {
         let (object_hex, relay_hex) = identity(sent.media)?;
-        let reference_hash = reference_hash(message_id, &object_hex)?;
+        let reference_hash = reference_hash(message_id, &object_hex, &relay_hex)?;
         ctx.db.register_object_reference(
             ObjectReferenceAdmission::FreshMessage,
             &ObjectReferenceOwner {
@@ -631,10 +631,14 @@ fn grant_ids(media: &MediaRef) -> Result<Vec<[u8; 32]>, Refusal> {
     media.key_slots.iter().map(|slot| hash32(&slot.grant_id)).collect()
 }
 
-fn reference_hash(message_id: &str, object_hex: &str) -> Result<String, SdkError> {
+fn reference_hash(
+    message_id: &str,
+    object_hex: &str,
+    manifest_hex: &str,
+) -> Result<String, SdkError> {
     Ok(ramflux_crypto::blake3_256_base64url(
-        "ramflux.attachment.sent_reference.v1",
-        &ramflux_protocol::canonical_json_bytes(&(message_id, object_hex))?,
+        "ramflux.object.transport.owner.v1",
+        &ramflux_protocol::canonical_json_bytes(&(object_hex, manifest_hex, message_id))?,
     ))
 }
 
