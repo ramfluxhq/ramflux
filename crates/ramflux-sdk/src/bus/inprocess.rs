@@ -42,6 +42,7 @@ impl BusStream for MemoryStream {
 
 pub(crate) struct LifecycleRequest {
     pub resume: bool,
+    pub complete: Box<dyn FnOnce(bool, bool) + Send>,
     pub reply: std::sync::mpsc::SyncSender<Result<(), SdkError>>,
 }
 
@@ -162,6 +163,11 @@ async fn drive_lifecycle(
     } else {
         supervisor.suspend_for_background().await
     };
+    // The worker owns completion even when the FFI caller has timed out.
+    (request.complete)(
+        supervisor.config.background.load(std::sync::atomic::Ordering::Acquire),
+        result.is_ok(),
+    );
     let _ = request.reply.send(result);
     true
 }

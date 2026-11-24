@@ -172,10 +172,6 @@ impl Shared {
     pub fn cancel_for_suspend(&self) {
         self.suspended.store(true, std::sync::atomic::Ordering::Release);
         let Ok(operations) = self.operations.lock() else { return };
-        if let Ok(mut subscription) = self.subscription.lock() {
-            *subscription = None;
-        }
-        self.deactivate_generation();
         for operation in operations.values() {
             let Ok(mut state) = operation.state.lock() else { continue };
             if state.result.is_some() {
@@ -185,6 +181,13 @@ impl Shared {
             state.slot = ResultSlot::Frozen;
             state.result = Some(suspended_bytes(effects));
         }
+    }
+
+    pub(super) fn finish_suspend(&self) {
+        if let Ok(mut subscription) = self.subscription.lock() {
+            *subscription = None;
+        }
+        self.deactivate_generation();
     }
 
     pub fn close(&self) {

@@ -42,6 +42,7 @@ pub(super) struct Client {
     done: Mutex<CloseCompletion>,
     close_wait: Duration,
     pub closing: AtomicBool,
+    pub(super) lifecycle_gate: Mutex<()>,
     pub data_root: std::path::PathBuf,
 }
 
@@ -189,6 +190,7 @@ impl Client {
         };
         Ok(Arc::new(Self {
             diagnostics,
+            lifecycle_gate: Mutex::new(()),
             username_directory,
             data_root,
             commands,
@@ -228,7 +230,17 @@ impl Client {
 
     pub(super) fn drive_lifecycle(&self, resume: bool, wait: Duration) -> Result<(), DriveError> {
         let (reply, response) = std::sync::mpsc::sync_channel(1);
-        let request = crate::bus::inprocess::LifecycleRequest { resume, reply };
+        let shared = Arc::clone(&self.shared);
+        let request = crate::bus::inprocess::LifecycleRequest {
+            resume,
+            complete: Box::new(move |suspended, succeeded| {
+                if !resume && succeeded {
+                    shared.finish_suspend();
+                }
+                shared.suspended.store(suspended, Ordering::Release);
+            }),
+            reply,
+        };
         if self.lifecycle.blocking_send(request).is_err() {
             return Err(DriveError::Failed(SdkError::LocalBus("lifecycle channel closed".into())));
         }
