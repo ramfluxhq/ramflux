@@ -132,6 +132,9 @@ async fn fetch(
     let mut account =
         super::state::LocalBusAccountState::disconnected(client, engine.config.clone(), anchor);
     account.engine = Some(engine);
+    // Data unlock clears branch credentials. Receive needs the same current-head
+    // refresh and certified branch/prekey installation as the ordinary account writer.
+    account.prepare_native_branch().await?;
     let page = receive::run(&mut account).await;
     // TCP/TLS only: dropping a cancelled future closes its sole session socket directly.
     if let Some(engine) = account.engine.take() {
