@@ -242,15 +242,13 @@ impl Client {
             reply,
         };
         if self.lifecycle.blocking_send(request).is_err() {
-            return Err(DriveError::Failed(SdkError::LocalBus("lifecycle channel closed".into())));
+            return Err(DriveError::Unavailable);
         }
         match response.recv_timeout(wait) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(DriveError::Failed(error)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(DriveError::TimedOut),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(DriveError::Failed(SdkError::LocalBus("lifecycle reply lost".into())))
-            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(DriveError::Unavailable),
         }
     }
 
@@ -329,6 +327,7 @@ enum WriteAction {
 }
 
 pub(super) enum DriveError {
+    Unavailable,
     TimedOut,
     Failed(SdkError),
 }

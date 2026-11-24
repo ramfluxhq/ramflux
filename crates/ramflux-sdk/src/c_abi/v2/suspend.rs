@@ -98,6 +98,9 @@ fn refuse_closed(client: &Client) -> Result<(), CAbiError> {
 fn drive(client: &Arc<Client>, resume: bool) -> Result<(), CAbiError> {
     match client.drive_lifecycle(resume, Duration::from_secs(10)) {
         Ok(()) => Ok(()),
+        Err(DriveError::Unavailable) => {
+            Err(CAbiError::new(RamfluxErrorCode::TransportUnavailable, "lifecycle_unavailable"))
+        }
         Err(DriveError::TimedOut) => {
             Err(CAbiError::new(RamfluxErrorCode::Timeout, "lifecycle_timed_out"))
         }
