@@ -15,6 +15,7 @@ pub(crate) struct AccountCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum AccountAction {
+    AppLock(AccountAppLockCommand),
     Backup(AccountBackupCommand),
     Create(Box<AccountCreate>),
     ExportAgentCredentials(AccountExportAgentCredentials),
@@ -25,6 +26,28 @@ pub(crate) enum AccountAction {
     Switch(AccountSelector),
     Status(AccountSelector),
     Unlock(AccountUnlock),
+}
+
+#[derive(Args)]
+pub(crate) struct AccountAppLockCommand {
+    #[command(subcommand)]
+    pub(crate) action: AccountAppLockAction,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum AccountAppLockAction {
+    State(AccountSelector),
+    Set(AccountAppLockSet),
+}
+
+#[derive(Args)]
+pub(crate) struct AccountAppLockSet {
+    #[arg(allow_hyphen_values = true, long)]
+    pub(crate) account: String,
+    #[arg(long, action = clap::ArgAction::Set, required = true)]
+    pub(crate) enabled: bool,
+    #[arg(long)]
+    pub(crate) timeout_ms: u64,
 }
 
 #[derive(Args)]

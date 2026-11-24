@@ -4,6 +4,7 @@
 pub mod a2i;
 pub mod account;
 mod account_authority;
+mod app_lock;
 pub(crate) mod attachment_diagnostics;
 pub(crate) mod attachment_roster;
 mod backup_activation;
