@@ -445,6 +445,9 @@ pub(super) fn notify_webpush_route(
         registered_at: 1_760_000_000,
         expires_at: 1_760_010_000,
         route_generation: 0,
+        route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+        environment: crate::PushRouteEnvironment::Production,
+        capability: crate::PushRouteCapability::Alert,
     }
 }
 

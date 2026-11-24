@@ -506,6 +506,9 @@ impl NativeScenario {
                 registered_at: now,
                 expires_at: now + 3600,
                 route_generation: 0,
+                route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+                environment: crate::PushRouteEnvironment::Production,
+                capability: crate::PushRouteCapability::Alert,
             },
         )?;
         Ok(())

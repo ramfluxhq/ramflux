@@ -4,8 +4,9 @@
 //! A slow or unreachable push backend must never delay or desynchronise the session.
 #![allow(clippy::expect_used)]
 use crate::gateway::{
-    GatewayPushProvider, GatewayPushRouteRegistration, GatewayQuicEndpointConfig,
-    GatewayServerFrame, GatewaySessionConfig, GatewaySessionEngine,
+    GatewayPushProvider, GatewayPushRouteCapability, GatewayPushRouteEnvironment,
+    GatewayPushRouteRegistration, GatewayQuicEndpointConfig, GatewayServerFrame,
+    GatewaySessionConfig, GatewaySessionEngine,
 };
 use crate::prelude::*;
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
@@ -143,6 +144,9 @@ fn engine_with_stray(
         GatewayPushRouteRegistration {
             provider: GatewayPushProvider::WebPush,
             token: "slow-token".into(),
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: GatewayPushRouteEnvironment::Production,
+            capability: GatewayPushRouteCapability::Alert,
             endpoint: Some("https://push.example/sub".into()),
             webpush_p256dh: Some("p256dh".into()),
             webpush_auth: Some("auth".into()),

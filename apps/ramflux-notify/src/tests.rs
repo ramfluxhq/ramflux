@@ -530,6 +530,9 @@ fn test_prepared_push(
             registered_at: 1_760_000_000,
             expires_at: 4_102_444_800,
             route_generation: 0,
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: ramflux_node_core::PushRouteEnvironment::Production,
+            capability: ramflux_node_core::DevicePushRoute::capability_for(&provider),
         },
         credential: match &provider {
             ramflux_node_core::PushProviderKind::Fcm => ramflux_node_core::ProviderCredential::Fcm(
