@@ -424,7 +424,12 @@ pub(super) fn publish_metadata(handle: &ConnectionHandle, engine: &GatewaySessio
 }
 fn failed(handle: &ConnectionHandle, retry: &AdmissionRetry, error: &SdkError) {
     let delay = backoff(handle, retry, error);
-    tracing::warn!(%error, retry_after_ms = ?delay, "account connection attempt deferred");
+    tracing::warn!(
+        %error,
+        error_code = crate::bus::io::local_bus_error_code(error),
+        retry_after_ms = ?delay,
+        "account connection attempt deferred"
+    );
 }
 
 /// Publishes the retry boundary after a failed attempt or a retired session.

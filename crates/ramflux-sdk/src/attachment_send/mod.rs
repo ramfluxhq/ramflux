@@ -30,6 +30,7 @@ mod publish;
 mod r2_import_tests;
 #[cfg(test)]
 mod r2_store_tests;
+pub(crate) mod recovery;
 mod retire;
 #[cfg(test)]
 mod retire_tests;

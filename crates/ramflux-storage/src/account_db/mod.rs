@@ -22,6 +22,7 @@ mod backup_contact_merge;
 pub(crate) mod backup_database;
 pub(crate) mod backup_edit_register;
 mod backup_generated_identity;
+pub(crate) mod backup_media;
 pub(crate) mod backup_merge;
 mod backup_message_footprint;
 mod backup_missing;

@@ -152,6 +152,11 @@ pub(in crate::account_db) fn prepare(
                     exclude_actor(db, schema, table, id)?;
                     continue;
                 }
+                // Encrypted media recovery records are verified by their own AEAD and
+                // ownership checks (backup_media.rs) and may exceed the redaction scan bound.
+                if actor && key.starts_with("attachment/recovery/") {
+                    continue;
+                }
                 let bytes = match row.get::<_, Option<Vec<u8>>>(2)? {
                     Some(bytes) => Zeroizing::new(bytes),
                     None if !relevant => continue,

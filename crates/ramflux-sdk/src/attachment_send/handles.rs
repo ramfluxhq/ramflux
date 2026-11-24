@@ -57,6 +57,7 @@ struct Job {
     cancelled: AtomicBool,
     finished: AtomicBool,
     meter: budget::Meter,
+    privacy: Mutex<Option<ramflux_storage::PrivacyResourceRegistration>>,
 }
 
 impl Job {
@@ -110,7 +111,11 @@ pub(crate) fn begin(
         return Ok(view);
     }
     let source = Source::find(&account.client, &id, &body)?;
-    let plane = bus::plane_for(account)?;
+    let plane = if matches!(&source, Source::Remote { .. }) {
+        Some(bus::plane_for(account)?)
+    } else {
+        None
+    };
     let length = source.length();
     let scheduler_large = length >= scheduler::LARGE_BYTES;
     let import_id = fresh_id()?;
@@ -134,7 +139,12 @@ pub(crate) fn begin(
         cancelled: AtomicBool::new(false),
         finished: AtomicBool::new(false),
         meter: budget::Meter::default(),
+        privacy: Mutex::new(None),
     });
+    if let Err(error) = register_recovery_privacy(&account.client, &import_id, &job, &source) {
+        job.invalidate();
+        return Err(error);
+    }
     jobs()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -151,18 +161,47 @@ pub(crate) fn begin(
     Ok(local_bus_ok(view(&import_id, 1, "pending", 0, length, job.expires_at)))
 }
 
+fn register_recovery_privacy(
+    client: &crate::RamfluxClient,
+    import_id: &str,
+    job: &Arc<Job>,
+    source: &Source,
+) -> Result<(), SdkError> {
+    let Source::Recovered { reader, .. } = source else { return Ok(()) };
+    let weak = Arc::downgrade(job);
+    let registration = client.account_db()?.register_privacy_resource(
+        import_id,
+        reader.privacy_erasure_generation()?,
+        Arc::new(move || {
+            if let Some(job) = weak.upgrade() {
+                job.invalidate();
+            }
+            Ok(())
+        }),
+    )?;
+    *job.privacy.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(registration);
+    Ok(())
+}
+
 /// What the worker streams from.
 enum Source {
     /// A reference this device holds an entry in.
     Remote { opened: Box<Opened>, length: u64 },
     /// A file this account sealed: its own prepare row and account-sealed key.
     Owned { store: Store, row: Box<super::meta::Row>, length: u64 },
+    Recovered {
+        reader: Box<ramflux_storage::AccountDb>,
+        media: Box<ramflux_storage::BackupMedia>,
+        length: u64,
+    },
 }
 
 impl Source {
     fn length(&self) -> u64 {
         match self {
-            Self::Remote { length, .. } | Self::Owned { length, .. } => *length,
+            Self::Remote { length, .. }
+            | Self::Owned { length, .. }
+            | Self::Recovered { length, .. } => *length,
         }
     }
 }
@@ -176,6 +215,18 @@ impl Source {
         let media = message_media(client, &body.message_id, body.index)?;
         let reference = import_job::canonical(&media)?;
         let length = reference.large_manifest.plaintext_length;
+        if let Some(saved) = super::recovery::stored(
+            client.account_db()?,
+            &body.message_id,
+            body.index,
+            &prost::Message::encode_to_vec(&media),
+        )? {
+            return Ok(Self::Recovered {
+                reader: Box::new(client.account_db()?.open_backup_reader()?),
+                media: Box::new(saved),
+                length,
+            });
+        }
         if let Some(prepare_id) = prepare_at(client, &body.message_id, body.index)? {
             let store = bus::open_store(client, account_id)?;
             let row = store.load(&prepare_id)?;
@@ -210,13 +261,13 @@ impl Source {
 struct Task {
     job: Arc<Job>,
     source: Source,
-    plane: Arc<dyn Plane>,
+    plane: Option<Arc<dyn Plane>>,
 }
 
 impl Task {
     fn run(self) {
         let Self { job, source, plane } = self;
-        let result = stream(&job, &source, plane.as_ref());
+        let result = stream(&job, &source, plane.as_deref());
         match result {
             Ok(()) => job.ready.store(true, Ordering::Release),
             Err(refusal) => {
@@ -229,7 +280,7 @@ impl Task {
     }
 }
 
-fn stream(job: &Job, source: &Source, plane: &dyn Plane) -> Result<(), Refusal> {
+fn stream(job: &Job, source: &Source, plane: Option<&dyn Plane>) -> Result<(), Refusal> {
     fs::create_dir_all(&job.dir).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     let part = job.dir.join("body.part");
     let file = File::create(&part).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
@@ -237,10 +288,19 @@ fn stream(job: &Job, source: &Source, plane: &dyn Plane) -> Result<(), Refusal> 
     let fenced = || job.cancelled.load(Ordering::Acquire);
     match source {
         Source::Remote { opened, .. } => {
-            import_job::stream_remote(plane, opened, &mut sink, &fenced, &job.meter)?;
+            import_job::stream_remote(
+                plane.ok_or(Refusal::new(CODE_NOT_GRANTEE))?,
+                opened,
+                &mut sink,
+                &fenced,
+                &job.meter,
+            )?;
         }
         Source::Owned { store, row, .. } => {
             import_job::stream_owned(store, row, &mut sink, &fenced, &job.meter)?;
+        }
+        Source::Recovered { reader, media, .. } => {
+            super::recovery::stream(reader, media, &mut sink, &fenced, &job.meter)?;
         }
     }
     sink.flush().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
@@ -412,8 +472,20 @@ fn message_media(
     message_id: &str,
     index: u64,
 ) -> Result<ramflux_protocol::message::MediaRef, SdkError> {
-    let exact = client
-        .account_db()?
+    let index = usize::try_from(index).map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
+    message_media_entries(client.account_db()?, message_id)?.into_iter().nth(index).ok_or_else(
+        || {
+            Refusal::because_of(CODE_LAYOUT_INVALID, "the message has no media entry at that index")
+                .into()
+        },
+    )
+}
+
+pub(super) fn message_media_entries(
+    db: &ramflux_storage::AccountDb,
+    message_id: &str,
+) -> Result<Vec<ramflux_protocol::message::MediaRef>, SdkError> {
+    let exact = db
         .message_content(message_id)?
         .ok_or_else(|| SdkError::from(Refusal::new(CODE_ATTACHMENT_DELETED)))?;
     let (_, content) = crate::RamfluxClient::decode_generated_inner(&exact)?;
@@ -427,8 +499,7 @@ fn message_media(
     // A received group message keeps its wire wrapper in the Inner and the opened Message
     // beside it; the opened bytes are the sender's Message and carry the media.
     let message = if message.sealed_group.is_some() {
-        let opened = client
-            .account_db()?
+        let opened = db
             .load_actor_state::<Vec<u8>>(&format!("routed/group-content/{message_id}"))?
             .ok_or_else(|| {
                 Refusal::because_of(CODE_LAYOUT_INVALID, "the opened group message is not stored")
@@ -439,11 +510,7 @@ fn message_media(
     } else {
         message
     };
-    let index = usize::try_from(index).map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
-    message.media.into_iter().nth(index).ok_or_else(|| {
-        Refusal::because_of(CODE_LAYOUT_INVALID, "the message has no media entry at that index")
-            .into()
-    })
+    Ok(message.media)
 }
 
 /// The prepare behind entry `index` of a message this account sent.
@@ -452,7 +519,15 @@ fn prepare_at(
     message_id: &str,
     index: u64,
 ) -> Result<Option<String>, SdkError> {
-    let Some(record) = client.account_db()?.client_record(SENT, message_id)? else {
+    prepare_at_on(client.account_db()?, message_id, index)
+}
+
+pub(super) fn prepare_at_on(
+    db: &ramflux_storage::AccountDb,
+    message_id: &str,
+    index: u64,
+) -> Result<Option<String>, SdkError> {
+    let Some(record) = db.client_record(SENT, message_id)? else {
         return Ok(None);
     };
     let index = usize::try_from(index).map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
@@ -591,6 +666,7 @@ pub(crate) fn test_register_job(import_id: &str, account: &str, message_id: &str
         cancelled: AtomicBool::new(false),
         finished: AtomicBool::new(false),
         meter: budget::Meter::default(),
+        privacy: Mutex::new(None),
     });
     jobs()
         .lock()

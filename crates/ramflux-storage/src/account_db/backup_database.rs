@@ -471,6 +471,7 @@ impl BackupDatabase {
             bytes = bytes.saturating_add(size);
             progress(checks.verified + checks.mismatched + checks.missing, bytes)?;
         }
+        checks.verified += self.verify_backup_media(archive_only, &mut progress)?;
         let all_missing = self.missing_attachment_count()?;
         let (missing, approved) = if archive_only {
             self.install_missing_counts()?
