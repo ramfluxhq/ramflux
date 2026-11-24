@@ -12,6 +12,16 @@ Group receipts are not broadcast to other members or the sender's sibling device
 Own messages and own-device copies never generate peer receipts. Read receipts retain
 their existing explicit privacy/opt-in behavior; this mechanism never sends a read event.
 
+An explicit `message.receipt.read` request that omits `read_at` reuses the first captured
+read timestamp for that conversation, message and reader. Repeating the same request,
+including after reopening the account, resends the retained receipt rather than allocating
+a new event or rewinding a newer local read cursor. An explicitly supplied `read_at` must
+match the captured content on replay; a conflicting value is refused as `ReplayMismatch`.
+
+In typed `message.read` results, `revision` is the highest applied content Edit revision,
+so a receipt-only update can keep it at zero. Use `journal_sequence` and the
+`after_sequence` change cursor to observe receipt and other row updates.
+
 ## Durable retries
 
 The durable key is `(conversation_id, message_id, receiving_device_id)`. A completed or

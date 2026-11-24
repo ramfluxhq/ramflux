@@ -247,6 +247,15 @@ pub(crate) fn prepare(
         super::conversation_journal::save(client, &journal_key, &receipt)?;
         // Private replacement text follows its target's erasure ownership.
         db.persist_message_actor_state(&intent.message_id, &key, &prepared)?;
+        // Authorization has succeeded and the exact delete intent is durable with
+        // retirement, even if routing fails or the process dies before submission.
+        if request.method == "conversation.delete" && intent.scope.as_deref() == Some("everyone") {
+            crate::attachment_send::request_delete(
+                db,
+                &intent.message_id,
+                crate::attachment_send::unix_now()?,
+            )?;
+        }
         Ok(prepared)
     })
 }

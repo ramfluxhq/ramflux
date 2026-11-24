@@ -233,6 +233,72 @@ pub(crate) fn enqueue(
 ) -> Result<(), SdkError> {
     enqueue_kind(client, state, previous, false)
 }
+/// Re-send an unconfirmed grant without adding duplicate signed membership or a new carrier.
+pub(super) fn reinvite(
+    client: &RamfluxClient,
+    state: &VerifiedGroupState,
+    member: &ramflux_protocol::group_state::GroupMemberIdentity,
+) -> Result<(), SdkError> {
+    enqueue(client, state, None)?;
+    let db = client.account_db()?;
+    let id = key(&state.view().group_id);
+    let mut intent: Intent =
+        db.load_actor_state(&id)?.ok_or(StorageError::GroupPermissionDenied)?;
+    let recipient = (member.root_commitment.clone(), member.device_id.clone());
+    intent.delivered.remove(&recipient);
+    intent.active = None;
+    intent.cursor = None;
+    intent.round_active = false;
+    intent.attempt = 0;
+    intent.next_at = now_unix_timestamp();
+    intent.expires_at = intent.next_at.saturating_add(3600);
+    db.persist_actor_state(
+        &delivered_key(&state.view().group_id),
+        &Delivered {
+            state_hash: state.snapshot().state_hash.clone(),
+            devices: intent.delivered.clone(),
+        },
+    )?;
+    persist_intent(client, &intent)
+}
+
+/// Gateway acceptance does not settle a membership grant. Keep its existing bounded retry
+/// owner alive so a pair repaired after submission can still receive the same signed grant.
+fn defer_unconfirmed(
+    client: &RamfluxClient,
+    state: &VerifiedGroupState,
+    intent: &mut Intent,
+) -> Result<bool, SdkError> {
+    let pending = client
+        .group_member_delivery_outcomes(state)?
+        .into_iter()
+        .filter(|row| row["state"] == "pending")
+        .filter_map(|row| {
+            Some((
+                row["root_commitment"].as_str()?.to_owned(),
+                row["device_id"].as_str()?.to_owned(),
+            ))
+        })
+        .collect::<BTreeSet<_>>();
+    if pending.is_empty() {
+        return Ok(false);
+    }
+    if intent.attempt >= 8 || now_unix_timestamp() >= intent.expires_at {
+        // Budget exhaustion is still unconfirmed delivery, never evidence of peer refusal.
+        client.account_db()?.remove_actor_state(&key(&state.view().group_id))?;
+        return Ok(true);
+    }
+    intent.delivered.retain(|recipient| !pending.contains(recipient));
+    client.account_db()?.persist_actor_state(
+        &delivered_key(&state.view().group_id),
+        &Delivered {
+            state_hash: state.snapshot().state_hash.clone(),
+            devices: intent.delivered.clone(),
+        },
+    )?;
+    defer_round(client, intent)?;
+    Ok(true)
+}
 pub(super) fn enqueue_recovery(
     client: &RamfluxClient,
     state: &VerifiedGroupState,
@@ -379,7 +445,9 @@ async fn drive_one(
             delivered += count;
             match progress {
                 DeliveryProgress::Complete => {
-                    account.client.account_db()?.remove_actor_state(&id)?;
+                    if !defer_unconfirmed(&account.client, &state, &mut intent)? {
+                        account.client.account_db()?.remove_actor_state(&id)?;
+                    }
                 }
                 DeliveryProgress::Continue => {
                     persist_intent(&account.client, &intent)?;

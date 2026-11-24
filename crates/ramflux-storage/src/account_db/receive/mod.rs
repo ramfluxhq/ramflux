@@ -111,6 +111,18 @@ pub struct ReceiveTransaction<'a> {
 /// Cover and stage refuse a retired incarnation with this exact error.
 pub(crate) const RETIRED_INCARNATION: &str = "retired incarnation is local recovery only";
 
+/// Restores the projection scope on both successful and failed callbacks.
+struct MessageProjectionScope<'a> {
+    flag: &'a std::cell::Cell<bool>,
+    previous: bool,
+}
+
+impl Drop for MessageProjectionScope<'_> {
+    fn drop(&mut self) {
+        self.flag.set(self.previous);
+    }
+}
+
 impl ReceiveTransaction<'_> {
     /// Confirms that authority is still inside the account writer transaction.
     /// # Errors
@@ -120,6 +132,22 @@ impl ReceiveTransaction<'_> {
             return Err(StorageError::AuthorizationRejected);
         }
         Ok(())
+    }
+
+    /// Accounts for message scrubbing performed by this authenticated projection only.
+    /// The synchronous callback must not perform network I/O. Erasures before or after
+    /// this scope remain outside the projection and invalidate the receive phase.
+    ///
+    /// # Errors
+    /// Refuses a closed writer and propagates projection errors to the outer rollback.
+    pub fn project_message<T, E>(&self, project: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<StorageError>,
+    {
+        self.require_writer()?;
+        let flag = &self.db.receive_message_projection;
+        let _scope = MessageProjectionScope { flag, previous: flag.replace(true) };
+        project()
     }
 
     /// Account writer this fence is bound to. W1 joiners and `*_in(tx)` adapters persist through this handle.
@@ -300,11 +328,43 @@ impl AccountDb {
         &self,
         expected: ReceiveExpectation<'_>,
         authority: &ReceiveTransaction<'_>,
+        message_erasure_increments: i64,
     ) -> Result<(), StorageError> {
         authority.require_writer()?;
-        if self.privacy_erasure_generation()? != expected.erasure_generation {
+        // BEGIN IMMEDIATE excludes outside writers after admission. Only the exact
+        // authenticated projection's scrub increments are accounted for; any other change
+        // still invalidates the whole phase, including cover, cursor and ACK.
+        let own_increments = self
+            .message_erasure_increments
+            .get()
+            .checked_sub(message_erasure_increments)
+            .ok_or(StorageError::ObjectErased)?;
+        let produced_generation = expected
+            .erasure_generation
+            .checked_add(own_increments)
+            .ok_or(StorageError::ObjectErased)?;
+        if self.privacy_erasure_generation()? != produced_generation {
             return Err(StorageError::ObjectErased);
         }
+        Ok(())
+    }
+
+    /// Records only scrub changes inside the authenticated receive projection scope.
+    pub(super) fn record_message_erasure(&self, before: i64) -> Result<(), StorageError> {
+        if !self.receive_message_projection.get() {
+            return Ok(());
+        }
+        let increment = self
+            .privacy_erasure_generation()?
+            .checked_sub(before)
+            .filter(|increment| *increment >= 0)
+            .ok_or(StorageError::ObjectErased)?;
+        let total = self
+            .message_erasure_increments
+            .get()
+            .checked_add(increment)
+            .ok_or(StorageError::ObjectErased)?;
+        self.message_erasure_increments.set(total);
         Ok(())
     }
 
@@ -321,8 +381,9 @@ impl AccountDb {
         let account = self.local_account_id.clone();
         self.write_transaction(|| {
             let authority = self.admit_receive(expected, current_generation)?;
+            let scrub_baseline = self.message_erasure_increments.get();
             let value = write(&authority)?;
-            self.recheck_receive(expected, &authority)?;
+            self.recheck_receive(expected, &authority, scrub_baseline)?;
             Ok(value)
         })
         .map_err(|error| busy_writer(account, error))
@@ -342,8 +403,9 @@ impl AccountDb {
     ) -> Result<page::ReceiveReconcileResult, StorageError> {
         self.read_snapshot(|| {
             let authority = self.admit_receive(expected, current_generation)?;
+            let scrub_baseline = self.message_erasure_increments.get();
             let plan = authority.reconcile(page)?;
-            self.recheck_receive(expected, &authority)?;
+            self.recheck_receive(expected, &authority, scrub_baseline)?;
             Ok(plan)
         })
     }

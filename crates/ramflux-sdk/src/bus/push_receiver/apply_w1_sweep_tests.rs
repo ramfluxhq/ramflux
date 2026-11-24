@@ -137,13 +137,18 @@ fn dummy_seq(target: &str, payload: &str, principal: &str, device: &str, seq: u6
 }
 
 fn own_dummy(account: &crate::bus::state::LocalBusAccountState) -> ReceiveEntry {
-    dummy_seq(
+    let mut entry = dummy_seq(
         &account.target_delivery_id,
         &encode_base64url(b"legacy-a2i-dummy"),
         &account.gateway_config.principal_id,
         &account.gateway_config.device_id,
         1,
-    )
+    );
+    entry.entry.envelope.ext.ext.insert(
+        "source_root_commitment".into(),
+        json!(account.client.own_account_anchor().expect("test: fixture owns a root")),
+    );
+    entry
 }
 
 fn live_dummy(account: &crate::bus::state::LocalBusAccountState) -> ReceiveEntry {
@@ -295,8 +300,13 @@ fn arm_w1_cut(_db: &AccountDb) {
     set_before_commit("apply page w1 before-commit");
 }
 
+thread_local! {
+    static ERASE_REACHED: Cell<bool> = const { Cell::new(false) };
+}
+
 fn erase_pending(db: &AccountDb) {
     erase_through_retention(db).expect("erase");
+    ERASE_REACHED.with(|reached| reached.set(true));
 }
 
 fn arm_w1_erase(_db: &AccountDb) {
@@ -679,11 +689,19 @@ async fn erase_while_w1_pending_reopen_no_resurrection() -> Result<(), SdkError>
 #[tokio::test(flavor = "current_thread")]
 async fn late_w0_fence_refuses_erase_during_stage() -> Result<(), SdkError> {
     let mut harness = open()?;
+    let erasure_before = harness.account.client.account_db()?.privacy_erasure_generation()?;
+    ERASE_REACHED.with(|reached| reached.set(false));
     set_before_commit_hook(erase_pending);
     let entry = own_dummy(&harness.account);
     let refused = drive(&mut harness.account, entry, || 1).await;
     let error = refused.as_ref().err();
+    assert!(ERASE_REACHED.with(Cell::get), "late W0 erasure hook was not reached: {error:?}");
     assert!(matches!(error, Some(SdkError::ObjectErased)), "late W0 fence: {error:?}");
+    assert_eq!(
+        harness.account.client.account_db()?.privacy_erasure_generation()?,
+        erasure_before,
+        "late W0 erase committed"
+    );
     assert_eq!(
         harness.account.client.account_db()?.receive_state_for_test(1)?,
         (None, 0),
@@ -695,11 +713,22 @@ async fn late_w0_fence_refuses_erase_during_stage() -> Result<(), SdkError> {
 #[tokio::test(flavor = "current_thread")]
 async fn late_w1_fence_refuses_erase_during_commit() -> Result<(), SdkError> {
     let mut harness = open_real().await?;
+    let erasure_before = harness.account.client.account_db()?.privacy_erasure_generation()?;
+    ERASE_REACHED.with(|reached| reached.set(false));
     set_after_classify(arm_w1_erase);
     let entry = sweep_entry(Sweep::OwnCopy, &harness)?;
     let refused = drive(&mut harness.account, entry, || 1).await;
     let error = refused.as_ref().err();
+    assert!(ERASE_REACHED.with(Cell::get), "late W1 erasure hook was not reached: {error:?}");
     assert!(matches!(error, Some(SdkError::ObjectErased)), "late W1 fence: {error:?}");
+    let db = harness.account.client.account_db()?;
+    assert_eq!(db.privacy_erasure_generation()?, erasure_before, "late W1 erase committed");
+    assert_eq!(cursor(&harness.account)?, 0, "late W1 advanced the receive cursor");
+    assert_eq!(
+        db.receive_state_for_test(1)?,
+        (Some("staged".into()), 1),
+        "late W1 must retain only the already-committed W0 input"
+    );
     Ok(())
 }
 

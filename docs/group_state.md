@@ -129,6 +129,33 @@ different intent is refused. Results are creator-root signed and bound to the
 original request hash. Statuses include `applied`, `already_applied`,
 `permission_denied`, `capacity` and local `expired`.
 
+Membership grants and confirmed participation are distinct. Create/add replies,
+`group.members`, `group.list`, and group read-model rows include `member_outcomes`.
+Each outcome identifies the root, principal and device, with `joined_epoch`,
+`state`, `reason`, and `status_text`. Roster entries also carry the participation
+fields. A newly invited peer has `state: pending`, `reason: delivery_unconfirmed`,
+and status text `Delivery unconfirmed`. `accepted: true` acknowledges the local
+mutation; gateway submission does not prove that the peer received the grant.
+Unconfirmed delivery does not disclose contact removal, blocking, or pair state,
+and is not reported as failure.
+An unconfirmed grant retains the existing bounded delivery retries even after
+gateway acceptance, so pair recovery can finish before a later copy arrives.
+Exhausting those confirmation retries leaves the member pending.
+
+After adopting the grant, the peer sends the existing authenticated device-set
+beacon. A beacon from that exact member at or after its signed join epoch confirms
+`state: joined` with a null reason and publishes `group.changed`. Confirmation is
+durable and bound to the group genesis and join epoch; a beacon predating removal
+and re-admission cannot confirm a later grant. Local membership and the creator's
+signed participation are already confirmed. These display outcomes do not change
+the signed authorization roster or sender-key permissions.
+
+After contact consent is restored, the creator may re-invite an unconfirmed
+member with the same `group.member.add` identity and role. This requeues the
+existing grant without duplicating membership or claiming a join. The ordinary
+contact, pair, snapshot and consent paths still apply. No new wire operation or
+C ABI method is required.
+
 **When the creator is offline, changes wait for the group owner.** No admin or
 member device signs replacement group state. There are at most 8 pending requests
 per requester root/group and 64 per group, with seven-day expiry. Admission checks current membership before directory IO and before persistence;

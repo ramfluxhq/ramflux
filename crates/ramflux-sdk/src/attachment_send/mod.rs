@@ -20,6 +20,7 @@ mod import_job;
 #[cfg(test)]
 mod listener;
 mod meta;
+mod metadata;
 mod owner_wire;
 mod path_admit;
 mod plane;
@@ -29,6 +30,7 @@ mod publish;
 mod r2_import_tests;
 #[cfg(test)]
 mod r2_store_tests;
+pub(crate) mod recovery;
 mod retire;
 #[cfg(test)]
 mod retire_tests;
@@ -39,6 +41,7 @@ mod seal_job;
 mod section10;
 mod store;
 mod targets;
+mod thumbnail;
 
 pub(crate) use bus::{AuthorityPin, authority, dispatch, open_store, plane_for, unix_now};
 pub(crate) use codes::{
@@ -52,6 +55,7 @@ pub(crate) use hooks::Binding;
 pub(crate) use meta::{MAX_ATTACHMENTS, Phase, Recipient, Row};
 pub(crate) use plane::{OwnerCall, Plane, ReadCall, RegisterCall, RetireCall};
 pub(crate) use publish::{PublishInput, upload_all, wrap_all};
+pub(crate) use retire::{fence_deleted, request_delete};
 pub(crate) use store::Store;
 pub(crate) use targets::{MediaDevice, MediaScope, choose_targets};
 

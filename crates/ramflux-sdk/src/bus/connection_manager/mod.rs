@@ -143,6 +143,7 @@ struct Shared {
     session_mode: std::sync::Mutex<crate::gateway::session_push::SessionMode>,
     compat_session: std::sync::Mutex<crate::bus::push_receiver::compat::CompatSession>,
     catch_ups_total: AtomicU64,
+    initial_receive_generation: AtomicU64,
     receive_observations: receive_observations::Counters,
     last_catch_up_at_ms: std::sync::Mutex<Option<u64>>,
     fallback_clock_unverified: std::sync::atomic::AtomicBool,
@@ -210,6 +211,7 @@ fn new_shared(
         session_mode: std::sync::Mutex::new(crate::gateway::session_push::SessionMode::Direct),
         compat_session: std::sync::Mutex::new(crate::bus::push_receiver::compat::start_session()),
         catch_ups_total: AtomicU64::new(0),
+        initial_receive_generation: AtomicU64::new(0),
         receive_observations: receive_observations::Counters::default(),
         last_catch_up_at_ms: std::sync::Mutex::new(None),
         fallback_clock_unverified: std::sync::atomic::AtomicBool::new(false),
@@ -598,6 +600,10 @@ impl ConnectionHandle {
     pub(crate) fn receive_observations(&self) -> &receive_observations::Counters {
         &self.shared.receive_observations
     }
+    pub(crate) fn note_command_readiness(&self) {
+        self.shared.changed.send_modify(|_| {});
+    }
+
     pub(crate) fn snapshot_watch(&self) -> watch::Receiver<u64> {
         self.shared.changed.subscribe()
     }
@@ -715,6 +721,22 @@ impl ConnectionHandle {
             session;
     }
 
+    /// Conversation metadata restored by the first pass is not available at transport Live.
+    pub(crate) fn initial_receive_pending(&self, generation: u64) -> bool {
+        let snapshot = self.snapshot();
+        snapshot.generation == generation
+            && snapshot.state == NetworkingState::Live
+            && self.session_is_push()
+            && self.shared.initial_receive_generation.load(Ordering::Acquire) != generation
+    }
+
+    pub(crate) fn note_initial_receive_complete(&self, generation: u64) {
+        if self.generation() == generation {
+            self.shared.initial_receive_generation.fetch_max(generation, Ordering::Release);
+            self.shared.changed.send_modify(|_| {});
+        }
+    }
+
     pub(crate) fn note_catch_up_finished(&self, at_ms: u64) {
         self.shared.catch_ups_total.fetch_add(1, Ordering::Relaxed);
         *self
@@ -777,12 +799,14 @@ impl ConnectionHandle {
         admitted_at: Instant,
         wait: std::time::Duration,
     ) -> Result<(), SdkError> {
-        #[cfg(test)]
-        let _waiter = LiveWaiter::new(&self.shared.live_waiters);
-        let mut changed = self.shared.changed.subscribe();
         let snapshot = self.snapshot();
         let origin = snapshot.attempt_started.map_or(admitted_at, |start| start.min(admitted_at));
-        let deadline = origin + wait;
+        self.require_live_until(origin + wait).await
+    }
+    pub(crate) async fn require_live_until(&self, deadline: Instant) -> Result<(), SdkError> {
+        #[cfg(test)]
+        let _waiter = self.test_live_waiter();
+        let mut changed = self.shared.changed.subscribe();
         loop {
             if self.snapshot().state == NetworkingState::Live {
                 return Ok(());
@@ -1006,22 +1030,26 @@ async fn sleep_until_optional(deadline: Option<Instant>) {
 pub(crate) mod tests;
 
 #[cfg(test)]
-struct LiveWaiter<'a>(&'a std::sync::atomic::AtomicUsize);
+pub(crate) struct LiveWaiter(Arc<Shared>);
 #[cfg(test)]
-impl<'a> LiveWaiter<'a> {
-    fn new(count: &'a std::sync::atomic::AtomicUsize) -> Self {
-        count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        Self(count)
+impl LiveWaiter {
+    fn new(shared: Arc<Shared>) -> Self {
+        shared.live_waiters.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(shared)
     }
 }
 #[cfg(test)]
-impl Drop for LiveWaiter<'_> {
+impl Drop for LiveWaiter {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        self.0.live_waiters.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 #[cfg(test)]
 impl ConnectionHandle {
+    pub(crate) fn test_live_waiter(&self) -> LiveWaiter {
+        LiveWaiter::new(Arc::clone(&self.shared))
+    }
+
     pub(crate) fn test_live_waiters(&self) -> usize {
         self.shared.live_waiters.load(std::sync::atomic::Ordering::Acquire)
     }

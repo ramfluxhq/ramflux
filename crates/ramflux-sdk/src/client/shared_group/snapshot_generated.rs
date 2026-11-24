@@ -205,10 +205,11 @@ impl crate::RamfluxClient {
         let own = self.owned_device_identity()?;
         let epoch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_epoch;
         let key = format!(
-            "group-state/generated-identity/{}/{}/{}/{}",
+            "group-state/generated-identity/{}/{}/{}/{}/{}",
             ramflux_protocol::encode_base64url(&state.view().group_id),
             own.storage_key(),
             epoch,
+            state.view().epoch,
             ramflux_protocol::hash_base64url(
                 "ramflux.group-state.generated-control.v1",
                 &control.encode_to_vec()

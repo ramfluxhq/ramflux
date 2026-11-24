@@ -101,7 +101,16 @@ fn finish(
         &body.prepare_id,
         body.generation,
         body.plaintext_length,
-        digest,
+        super::metadata::Finished {
+            digest,
+            metadata: super::metadata::Metadata {
+                width: body.width,
+                height: body.height,
+                duration_ms: body.duration_ms,
+                animated: body.animated,
+            },
+            thumbnail: body.thumbnail.map(super::thumbnail::Input::decode).transpose()?,
+        },
         unix_now()?,
     )?;
     Ok(local_bus_ok(progress(&row)))
@@ -180,10 +189,7 @@ async fn enable(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: EnableBody = serde_json::from_value(request.body.clone())?;
     let row = if body.from_node {
-        let plane = plane_for(account)?;
-        let reply = tokio::task::spawn_blocking(move || plane_authority(plane.as_ref()))
-            .await
-            .map_err(|_| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))??;
+        let reply = node_authority(account).await?;
         let key = ramflux_protocol::decode_base64url(&reply.signing_public_key)
             .ok()
             .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
@@ -221,12 +227,18 @@ async fn enable(
     })))
 }
 
-/// The one place the Authority call is made from a plane. A test plane answers it too.
-fn plane_authority(
-    plane: &dyn super::plane::Plane,
-) -> Result<ramflux_protocol::attachment_wire::AttachmentAuthorityReply, Refusal> {
-    let bytes = plane.authority()?;
-    serde_json::from_slice(&bytes).map_err(|_| Refusal::new(CODE_AUTHORITY_UNAVAILABLE))
+async fn node_authority(
+    account: &mut crate::bus::state::LocalBusAccountState,
+) -> Result<ramflux_protocol::attachment_wire::AttachmentAuthorityReply, SdkError> {
+    let bytes = if let Some(plane) = account.client.attachment_plane.clone() {
+        tokio::task::spawn_blocking(move || plane.authority())
+            .await
+            .map_err(|_| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))??
+    } else {
+        crate::bus::attachment_plane::authority(account).await?
+    };
+    serde_json::from_slice(&bytes)
+        .map_err(|_| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))
 }
 
 fn renew(
@@ -411,6 +423,12 @@ struct FinishBody {
     generation: u64,
     plaintext_length: u64,
     plaintext_digest: String,
+    thumbnail: Option<super::thumbnail::Input>,
+    width: Option<u32>,
+    height: Option<u32>,
+    #[serde(default, deserialize_with = "super::metadata::duration::deserialize")]
+    duration_ms: Option<u64>,
+    animated: Option<bool>,
 }
 
 #[derive(Deserialize)]

@@ -12,6 +12,9 @@ pub(crate) const CONTROL_SCHEMA: &str = "ramflux.sdk.group_control.v2";
 pub(crate) struct GroupControlPacket {
     pub schema: String,
     pub body: GroupControlBody,
+    /// Authenticated Inner epoch, populated only by the receive decoder; never a wire field.
+    #[serde(skip)]
+    pub received_group_epoch: Option<u64>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -23,7 +26,7 @@ pub(crate) enum GroupControlBody {
 }
 impl GroupControlPacket {
     pub(crate) fn new(body: GroupControlBody) -> Self {
-        Self { schema: CONTROL_SCHEMA.into(), body }
+        Self { schema: CONTROL_SCHEMA.into(), body, received_group_epoch: None }
     }
     pub(crate) fn group(&self) -> &str {
         match &self.body {
@@ -45,6 +48,7 @@ impl GroupControlPacket {
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct BeaconRecord {
     pub packet: GroupControlPacket,
+    pub group_epoch: u64,
     pub expires_at: i64,
     pub next_at: i64,
     pub delivered: BTreeSet<(String, String)>,
@@ -58,11 +62,18 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let id = format!("group-beacon/{}", ramflux_protocol::encode_base64url(group));
         let now = now_unix_timestamp();
+        let group_epoch = self
+            .account_db()?
+            .shared_group_state(group)?
+            .ok_or(StorageError::GroupPermissionDenied)?
+            .view()
+            .epoch;
         let old: Option<BeaconRecord> = self.account_db()?.load_actor_state(&id)?;
-        if old.is_some_and(|old| matches!(old.packet.body,GroupControlBody::DeviceSet {device_set_epoch,..} if device_set_epoch==epoch)) { return Ok(()); }
+        if old.is_some_and(|old| old.group_epoch == group_epoch && matches!(old.packet.body,GroupControlBody::DeviceSet {device_set_epoch,..} if device_set_epoch==epoch)) { return Ok(()); }
         self.account_db()?.persist_actor_state(
             &id,
             &BeaconRecord {
+                group_epoch,
                 packet: GroupControlPacket::new(GroupControlBody::DeviceSet {
                     group_id: group.into(),
                     actor: self.owned_group_actor(target)?,
@@ -255,7 +266,15 @@ impl RamfluxClient {
                 }
             }
             GroupControlBody::Result { result } => self.apply_group_request_result(result)?,
-            GroupControlBody::DeviceSet { .. } => {}
+            GroupControlBody::DeviceSet { group_id, actor, .. } => {
+                self.confirm_group_member_beacon(
+                    group_id,
+                    &actor.identity,
+                    packet
+                        .received_group_epoch
+                        .ok_or(super::invalid("group beacon epoch missing"))?,
+                )?;
+            }
             GroupControlBody::Transfer { control } => {
                 let own = self.owned_device_identity()?;
                 let local = self.trusted_device(HeadUse::NewAuthorization, &own)?;

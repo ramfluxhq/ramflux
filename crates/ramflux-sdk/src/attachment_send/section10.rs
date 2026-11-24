@@ -112,7 +112,19 @@ pub(super) fn accept(store: &Store, operation: &str, bytes: &[u8]) -> super::met
     }
     let digest = *blake3::hash(bytes).as_bytes();
     let len = u64::try_from(bytes.len()).unwrap();
-    store.finish(&row.prepare_id, row.generation, len, digest, NOW).unwrap()
+    store
+        .finish(
+            &row.prepare_id,
+            row.generation,
+            len,
+            super::metadata::Finished {
+                digest,
+                thumbnail: None,
+                metadata: super::metadata::Metadata::default(),
+            },
+            NOW,
+        )
+        .unwrap()
 }
 
 #[test]
@@ -255,7 +267,19 @@ fn digest_mismatch_fences_and_deletes_the_snapshot() {
         )
         .unwrap();
     store.chunk(&row.prepare_id, 1, 0, b"hello", NOW).unwrap();
-    let error = store.finish(&row.prepare_id, 1, 5, [9; 32], NOW).unwrap_err();
+    let error = store
+        .finish(
+            &row.prepare_id,
+            1,
+            5,
+            super::metadata::Finished {
+                digest: [9; 32],
+                thumbnail: None,
+                metadata: super::metadata::Metadata::default(),
+            },
+            NOW,
+        )
+        .unwrap_err();
     assert_eq!(error.code, CODE_DIGEST_MISMATCH);
     let fenced = store.load(&row.prepare_id).unwrap();
     assert_eq!(fenced.phase, Phase::Fenced);

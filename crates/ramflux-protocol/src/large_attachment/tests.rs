@@ -67,6 +67,10 @@ fn large_manifest_matches_s0_layer4_vectors() {
         assert_eq!(verified.manifest(), &native);
         assert_eq!(verified.signature(), &signature);
         let mut reference = MediaRef {
+            width: None,
+            height: None,
+            duration_ms: None,
+            animated: None,
             mime_type: "application/octet-stream".into(),
             file_name: Some("fixture.bin".into()),
             inline_thumbnail: None,

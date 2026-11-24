@@ -28,6 +28,8 @@ mod bus;
 #[cfg(feature = "c-abi")]
 pub mod c_abi;
 mod client;
+#[cfg(all(feature = "diag-realrun", ramflux_production))]
+compile_error!("production builds must not enable diag-realrun");
 pub mod diag;
 mod platform;
 pub mod username_directory;

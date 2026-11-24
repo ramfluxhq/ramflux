@@ -1161,9 +1161,12 @@ impl Supervisor {
             task.abort();
         }
         self.subscribers.borrow_mut().remove(&connection.connection_id);
-        if let Some(task) =
-            super::subscription::start(actor.reader_pool()?, request, connection.outbound.clone())
-                .await?
+        if let Some(task) = super::subscription::start(
+            super::subscription::StreamReaders::new(actor, Arc::clone(&self.config.background)),
+            request,
+            connection.outbound.clone(),
+        )
+        .await?
         {
             // The acknowledgement is already queued. Only live transient traffic uses
             // this router; all durable topics retain their journal-tail ordering.
@@ -1197,9 +1200,11 @@ impl Supervisor {
         let Some(actor) = self.accounts.borrow().get(id).cloned() else {
             return Ok(OpenJournal::Unavailable);
         };
-        let Ok(readers) = actor.reader_pool() else {
+        if actor.reader_pool().is_err() {
             return Ok(OpenJournal::Unavailable);
-        };
+        }
+        let readers =
+            super::subscription::StreamReaders::new(actor, Arc::clone(&self.config.background));
         match super::subscription::prepare_follow(readers, request, &connection.outbound).await? {
             None => Ok(OpenJournal::Resync),
             Some(follow) => Ok(OpenJournal::Ready(Box::new(follow))),

@@ -23,6 +23,14 @@ pub struct MediaRef {
     pub inline_thumbnail: ::core::option::Option<Thumbnail>,
     #[prost(message, optional, tag = "8")]
     pub large_manifest: ::core::option::Option<MediaManifest>,
+    #[prost(uint32, optional, tag = "9")]
+    pub width: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "10")]
+    pub height: ::core::option::Option<u32>,
+    #[prost(uint64, optional, tag = "11")]
+    pub duration_ms: ::core::option::Option<u64>,
+    #[prost(bool, optional, tag = "12")]
+    pub animated: ::core::option::Option<bool>,
 }
 impl serde::Serialize for MediaRef {
     #[allow(deprecated)]
@@ -54,6 +62,18 @@ impl serde::Serialize for MediaRef {
             len += 1;
         }
         if self.large_manifest.is_some() {
+            len += 1;
+        }
+        if self.width.is_some() {
+            len += 1;
+        }
+        if self.height.is_some() {
+            len += 1;
+        }
+        if self.duration_ms.is_some() {
+            len += 1;
+        }
+        if self.animated.is_some() {
             len += 1;
         }
         let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.MediaRef", len)?;
@@ -88,6 +108,20 @@ impl serde::Serialize for MediaRef {
         if let Some(v) = self.large_manifest.as_ref() {
             struct_ser.serialize_field("largeManifest", v)?;
         }
+        if let Some(v) = self.width.as_ref() {
+            struct_ser.serialize_field("width", v)?;
+        }
+        if let Some(v) = self.height.as_ref() {
+            struct_ser.serialize_field("height", v)?;
+        }
+        if let Some(v) = self.duration_ms.as_ref() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field("durationMs", ToString::to_string(&v).as_str())?;
+        }
+        if let Some(v) = self.animated.as_ref() {
+            struct_ser.serialize_field("animated", v)?;
+        }
         struct_ser.end()
     }
 }
@@ -113,6 +147,11 @@ impl<'de> serde::Deserialize<'de> for MediaRef {
             "inlineThumbnail",
             "large_manifest",
             "largeManifest",
+            "width",
+            "height",
+            "duration_ms",
+            "durationMs",
+            "animated",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
@@ -124,6 +163,10 @@ impl<'de> serde::Deserialize<'de> for MediaRef {
             FileName,
             InlineThumbnail,
             LargeManifest,
+            Width,
+            Height,
+            DurationMs,
+            Animated,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -157,6 +200,10 @@ impl<'de> serde::Deserialize<'de> for MediaRef {
                                 Ok(GeneratedField::InlineThumbnail)
                             }
                             "largeManifest" | "large_manifest" => Ok(GeneratedField::LargeManifest),
+                            "width" => Ok(GeneratedField::Width),
+                            "height" => Ok(GeneratedField::Height),
+                            "durationMs" | "duration_ms" => Ok(GeneratedField::DurationMs),
+                            "animated" => Ok(GeneratedField::Animated),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -182,6 +229,10 @@ impl<'de> serde::Deserialize<'de> for MediaRef {
                 let mut file_name__ = None;
                 let mut inline_thumbnail__ = None;
                 let mut large_manifest__ = None;
+                let mut width__ = None;
+                let mut height__ = None;
+                let mut duration_ms__ = None;
+                let mut animated__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -240,6 +291,48 @@ impl<'de> serde::Deserialize<'de> for MediaRef {
                             }
                             large_manifest__ = map_.next_value()?;
                         }
+                        GeneratedField::Width => {
+                            if width__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("width"));
+                            }
+                            width__ = map_
+                                .next_value::<
+                                    ::std::option::Option<
+                                        ::pbjson::private::NumberDeserialize<_>,
+                                    >,
+                                >()?
+                                .map(|x| x.0);
+                        }
+                        GeneratedField::Height => {
+                            if height__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("height"));
+                            }
+                            height__ = map_
+                                .next_value::<
+                                    ::std::option::Option<
+                                        ::pbjson::private::NumberDeserialize<_>,
+                                    >,
+                                >()?
+                                .map(|x| x.0);
+                        }
+                        GeneratedField::DurationMs => {
+                            if duration_ms__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("durationMs"));
+                            }
+                            duration_ms__ = map_
+                                .next_value::<
+                                    ::std::option::Option<
+                                        ::pbjson::private::NumberDeserialize<_>,
+                                    >,
+                                >()?
+                                .map(|x| x.0);
+                        }
+                        GeneratedField::Animated => {
+                            if animated__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("animated"));
+                            }
+                            animated__ = map_.next_value()?;
+                        }
                     }
                 }
                 Ok(MediaRef {
@@ -251,6 +344,10 @@ impl<'de> serde::Deserialize<'de> for MediaRef {
                     file_name: file_name__,
                     inline_thumbnail: inline_thumbnail__,
                     large_manifest: large_manifest__,
+                    width: width__,
+                    height: height__,
+                    duration_ms: duration_ms__,
+                    animated: animated__,
                 })
             }
         }

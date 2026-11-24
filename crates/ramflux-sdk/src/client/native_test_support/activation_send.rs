@@ -635,6 +635,10 @@ pub(crate) mod tests {
             retention_class: "relay_retained.v1".into(),
         };
         let reference = large::MediaRef {
+            width: None,
+            height: None,
+            duration_ms: None,
+            animated: None,
             mime_type: "application/octet-stream".into(),
             file_name: Some("three-bytes.bin".into()),
             inline_thumbnail: None,

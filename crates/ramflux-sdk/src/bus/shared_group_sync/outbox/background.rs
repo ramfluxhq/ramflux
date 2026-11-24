@@ -6,8 +6,8 @@
 use super::{
     DEVICES_PER_DRAIN, DRIVER_PROGRESS, Delivered, GatewayDirectMessage, Intent,
     LocalBusAccountState, LocalBusFederationRoute, MAX_DEVICES, ROOTS_PER_DRAIN, RecipientCursor,
-    SdkError, StagedEnvelope, VerifiedGroupState, defer_round, delivered_key, key,
-    now_unix_timestamp, persist_intent, prepare_intent, recipient_snapshot, recipients,
+    SdkError, StagedEnvelope, VerifiedGroupState, defer_round, defer_unconfirmed, delivered_key,
+    key, now_unix_timestamp, persist_intent, prepare_intent, recipient_snapshot, recipients,
 };
 use crate::bus::{
     connection_manager::SessionContext,
@@ -438,6 +438,8 @@ fn finish_round(
         persist_intent(&account.client, &plan.intent)
     } else if plan.intent.round_failed {
         defer_round(&account.client, &mut plan.intent)
+    } else if defer_unconfirmed(&account.client, &plan.state, &mut plan.intent)? {
+        Ok(())
     } else {
         account.client.account_db()?.remove_actor_state(&key(&plan.intent.snapshot.group_id))?;
         Ok(())

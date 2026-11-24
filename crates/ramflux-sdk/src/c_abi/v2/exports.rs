@@ -42,6 +42,10 @@ static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registr
 #[derive(zeroize::ZeroizeOnDrop)]
 pub(super) struct Config {
     #[zeroize(skip)]
+    pub(super) diag: crate::diag::DiagnosticConfig,
+    #[zeroize(skip)]
+    pub(super) username_directory: Option<ramflux_protocol::username_directory::NativeDirectoryPin>,
+    #[zeroize(skip)]
     pub(super) session_lease: Option<(crate::SessionLeasePriority, u64)>,
     pub(super) allow_raw_messages: bool,
     pub(super) allow_secret_exports: bool,
@@ -161,7 +165,13 @@ pub(super) fn call(action: impl FnOnce() -> Result<(), CAbiError>) -> i32 {
         action()
     })) {
         Ok(Ok(())) => 0,
-        Ok(Err(error)) => error.status.unwrap_or(error.code as i32),
+        Ok(Err(error)) => {
+            let code = error.status.unwrap_or(error.code as i32);
+            crate::diag::logging::refusal(
+                &json!({"code":code,"name":super::native_error::status_name(i64::from(code)),"reason_code":"native_admission_refused","effects":"none"}),
+            );
+            code
+        }
         Err(payload) => {
             // Arbitrary panic payload destructors may panic again. Never unwind from this boundary.
             std::mem::forget(payload);
@@ -306,11 +316,11 @@ fn open_inner(
         registry.opening.insert(candidate_root.clone());
         id
     };
-    let _opening = Opening(candidate_root);
-    let mut bus = LocalBusConfig::in_process(
-        std::path::PathBuf::new(),
-        std::mem::take(&mut config.data_root),
-    );
+    let _opening = Opening(candidate_root.clone());
+    let diagnostics = crate::diag::start(&candidate_root, config.diag.clone())
+        .map_err(|e| super::super::map_sdk_error(&e))?;
+    let mut bus =
+        LocalBusConfig::in_process(std::path::PathBuf::new(), std::mem::take(&mut config.data_root));
     if let Some((priority, wait_ms)) = config.session_lease {
         bus = bus.with_session_lease(priority, std::time::Duration::from_millis(wait_ms));
     }
@@ -318,8 +328,9 @@ fn open_inner(
         .into_iter()
         .map(|mut profile| profile.take_node())
         .collect();
+    bus.username_directory = config.username_directory.take();
     bus.custody_vault = vault;
-    let started = Client::start(bus);
+    let started = Client::start_with_diagnostics(bus, diagnostics);
     let mut registry = REGISTRY.lock().map_err(|_| internal())?;
     let client = started.map_err(|error| super::super::map_sdk_error(&error))?;
     client
@@ -347,6 +358,9 @@ pub extern "C" fn ramflux_v2_client_close(handle: u64) -> i32 {
             client.shared.credentials.shutdown();
             match client.close().map_err(|error| super::super::map_sdk_error(&error))? {
                 CloseResult::Done => {
+                    if let Some(diag) = &client.diagnostics {
+                        diag.flush();
+                    }
                     REGISTRY.lock().map_err(|_| internal())?.clients.remove(&handle);
                 }
                 CloseResult::TimedOut => status = RamfluxErrorCode::Timeout as i32,
@@ -962,5 +976,28 @@ pub extern "C" fn ramflux_v2_set_host_credential_provider(
         let mut slot = client.shared.host_key.lock().map_err(|_| internal())?;
         *slot = callback.map(|call| super::state::HostKeyFn { call, user: user as usize });
         Ok(())
+    })
+}
+
+/// Return the build-pinned diagnostic support public key catalog, without opening an account.
+/// An unprovisioned build returns available=false. Free output with `ramflux_v2_buffer_free`.
+#[unsafe(no_mangle)]
+#[must_use]
+pub extern "C" fn ramflux_v2_diag_support_key(out: *mut *mut RamfluxBuffer) -> i32 {
+    call(|| {
+        super::super::clear_out_ptr(out)?;
+        let bytes = include_bytes!("../../../diag/support-public-keys.v1.json");
+        let catalog = ramflux_protocol::diag_support::Catalog::decode(bytes);
+        match catalog {
+            Ok(catalog) if catalog.active_epoch.is_some() => {
+                super::buffer::write_json_buffer(out, &catalog)
+            }
+            _ => super::buffer::write_json_buffer(
+                out,
+                &serde_json::json!({
+                    "available": false, "reason": "support_key_unavailable"
+                }),
+            ),
+        }
     })
 }

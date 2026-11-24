@@ -40,6 +40,49 @@ use super::store::Store;
 /// Per-message record of what was bound and what the source has retired.
 const GRANTS: &str = "attachment-grants";
 const INNER: &str = "attachment-inner";
+const DELETE_PENDING: &str = "attachment-delete/";
+
+/// Captures an authorized everyone-delete in the caller's write transaction, before
+/// message erasure can discard its ownership. Recipients have no locally owned grants.
+/// The separate queue survives message cleanup and is completed after commit.
+pub(crate) fn request_delete(db: &AccountDb, message_id: &str, now: u64) -> Result<(), SdkError> {
+    fence_deleted(db, message_id, now)?;
+    let Some(mut record) = load_record(db, message_id)? else { return Ok(()) };
+    if !record.revoked {
+        record.revoked = true;
+        save_record(db, &record)?;
+        db.persist_client_record(RETIREMENT, message_id, &json!({ "relay_erased": false }))?;
+        db.persist_actor_state(&format!("{DELETE_PENDING}{message_id}"), &true)?;
+    }
+    Ok(())
+}
+
+/// Invalidates this device's imports without retiring another recipient's grants.
+pub(crate) fn fence_deleted(db: &AccountDb, message_id: &str, now: u64) -> Result<(), SdkError> {
+    db.persist_client_record(TOMBSTONE, message_id, &json!({ "revoked_at": now }))?;
+    handles::fence_message(message_id);
+    if load_record(db, message_id)?.is_some_and(|record| !record.revoked) {
+        db.persist_actor_state(&format!("{DELETE_PENDING}{message_id}"), &false)?;
+    }
+    Ok(())
+}
+
+/// Finishes one bounded page of committed deletion intents. Signing or cleanup failure
+/// leaves the marker durable; removing it happens only after every retirement is queued.
+pub(crate) fn resume_deletes(ctx: &RetireCtx<'_>, now: u64) -> Result<(), SdkError> {
+    for key in ctx.db.actor_state_key_page(DELETE_PENDING, 64)? {
+        let message_id = key.strip_prefix(DELETE_PENDING).ok_or(SdkError::ReplayMismatch)?;
+        if ctx.db.load_actor_state::<bool>(&key)?.ok_or(SdkError::ReplayMismatch)? {
+            revoke_local(ctx, message_id, now)?;
+        } else if let Some(record) = load_record(ctx.db, message_id)? {
+            for file in &record.files {
+                release_local(ctx.store, &file.prepare_id)?;
+            }
+        }
+        ctx.db.remove_actor_state(&key)?;
+    }
+    Ok(())
+}
 
 /// The pinned source authority a capability and a retirement must name.
 pub(crate) struct Source<'a> {
@@ -339,7 +382,7 @@ fn bind(
     });
     for sent in files {
         let (object_hex, relay_hex) = identity(sent.media)?;
-        let reference_hash = reference_hash(message_id, &object_hex)?;
+        let reference_hash = reference_hash(message_id, &object_hex, &relay_hex)?;
         ctx.db.register_object_reference(
             ObjectReferenceAdmission::FreshMessage,
             &ObjectReferenceOwner {
@@ -588,10 +631,14 @@ fn grant_ids(media: &MediaRef) -> Result<Vec<[u8; 32]>, Refusal> {
     media.key_slots.iter().map(|slot| hash32(&slot.grant_id)).collect()
 }
 
-fn reference_hash(message_id: &str, object_hex: &str) -> Result<String, SdkError> {
+fn reference_hash(
+    message_id: &str,
+    object_hex: &str,
+    manifest_hex: &str,
+) -> Result<String, SdkError> {
     Ok(ramflux_crypto::blake3_256_base64url(
-        "ramflux.attachment.sent_reference.v1",
-        &ramflux_protocol::canonical_json_bytes(&(message_id, object_hex))?,
+        "ramflux.object.transport.owner.v1",
+        &ramflux_protocol::canonical_json_bytes(&(object_hex, manifest_hex, message_id))?,
     ))
 }
 

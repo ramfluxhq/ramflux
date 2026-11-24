@@ -588,7 +588,7 @@ impl BackupDatabase {
                 report.kept_newer.tasks += retained;
             }
         }
-        Ok(())
+        self.count_backup_media(filter, join, newer, report)
     }
     fn preserve_imported_archives(&self, key: &AccountDbKey) -> Result<(), StorageError> {
         let source = key.fingerprint();

@@ -238,6 +238,36 @@ impl RamfluxClient {
         Ok(())
     }
 
+    /// An omitted read time means the first captured acknowledgement time, even after reopen.
+    /// Explicit times still pass through the exact content comparison in preparation.
+    pub(crate) fn retained_read_receipt_at(
+        &self,
+        message: &GatewayDirectMessage,
+        target_id: &str,
+    ) -> Result<Option<i64>, SdkError> {
+        let db = self.account_db()?;
+        let target = db
+            .load_actor_state::<g::EventIdentity>(&format!(
+                "routed/generated-identity/{target_id}"
+            ))?
+            .ok_or_else(|| refused("receipt target has no authenticated identity"))?;
+        let own = self.owned_device_identity()?;
+        let (operation, _) =
+            self.authored_operation_keys(message, target.group_id.as_deref(), &own)?;
+        let Some(id) = db.load_actor_state::<String>(&operation)? else { return Ok(None) };
+        let prepared = db
+            .load_actor_state::<PreparedMessage>(&format!("message-send/prepared/{id}"))?
+            .ok_or_else(|| refused("operation content was retired"))?;
+        let (_, content) = Self::decode_generated_inner(&prepared.exact)?;
+        let Some(g::content::Value::Receipt(receipt)) = content.value else {
+            return Err(SdkError::ReplayMismatch);
+        };
+        if receipt.state != i32::from(g::ReceiptState::ReceiptRead) {
+            return Err(SdkError::ReplayMismatch);
+        }
+        Ok(Some(i64::try_from(receipt.at).map_err(|_| refused("receipt timestamp overflow"))?))
+    }
+
     pub(crate) fn prepare_authored_content(
         &self,
         message: &mut GatewayDirectMessage,

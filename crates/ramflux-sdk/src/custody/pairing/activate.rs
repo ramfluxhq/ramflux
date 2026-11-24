@@ -7,6 +7,7 @@ use super::install_store::{self, Install};
 use crate::{SdkError, custody};
 use ramflux_protocol::custody::{CustodyAuthority, object_hash};
 use ramflux_storage::{AccountDb, AdoptionRow};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     fs,
     path::Path,
@@ -51,6 +52,9 @@ pub fn activate_recipient(
 /// the in-flight marker can wait for completion instead of polling.
 pub(crate) static INSTALL_SETTLED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
+/// Bumps on every install signal so a waiter that missed `notify_waiters` still wakes.
+pub(crate) static INSTALL_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 pub(crate) fn install_exact(
     local: &Installation<'_>,
     install: &Install,
@@ -58,6 +62,7 @@ pub(crate) fn install_exact(
     authority: &CustodyAuthority,
 ) -> Result<(), SdkError> {
     let outcome = install_exact_inner(local, install, acknowledged_hash, authority);
+    INSTALL_GENERATION.fetch_add(1, Ordering::Release);
     INSTALL_SETTLED.notify_waiters();
     outcome
 }

@@ -149,3 +149,6 @@ pub use sframe::{
 
 #[cfg(test)]
 mod identity_profile_tests;
+
+mod diagnostic_hash;
+pub use diagnostic_hash::diagnostic_short_hash;

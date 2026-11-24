@@ -839,6 +839,12 @@ fn group_list_row(
 ) -> Result<serde_json::Value, SdkError> {
     let db = account.client.account_db()?;
     let shared = db.shared_group_state(&group.group_id)?;
+    if shared.is_some() {
+        return account
+            .client
+            .shared_group_metadata(&group.group_id)?
+            .ok_or(StorageError::GroupPermissionDenied.into());
+    }
     let saved = db.client_record("group", &group.group_id)?;
     let mut metadata = serde_json::to_value(group)?;
     if let Some(state) = shared.as_ref() {

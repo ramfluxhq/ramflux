@@ -68,6 +68,11 @@ impl AccountRuntime {
         self.transfers.stop().await;
         self.username.stop().await;
         self.pairing.stop().await;
+        if let Ok(readers) = self.readers.lock()
+            && let Some(pool) = readers.as_ref()
+        {
+            pool.mark_suspend();
+        }
         self.close_readers().await;
         self.ledger = None;
         let released = self.drop_open_files();
@@ -174,6 +179,13 @@ impl AccountRuntime {
             if *self.shutdown.borrow() {
                 return Ok(true);
             }
+            if let Some(command) = self.ready_commands.take() {
+                self.note_command_taken();
+                if self.command_while_released(command) {
+                    return Ok(false);
+                }
+                continue;
+            }
             let command = tokio::select! {
                 biased;
                 _ = self.shutdown.changed() => return Ok(true),
@@ -186,6 +198,9 @@ impl AccountRuntime {
             let Some(command) = command else {
                 return Ok(true);
             };
+            // Every enqueue increments command_waiting, including lifecycle commands.
+            // The parked loop owns dequeue just as the normal serve loop does.
+            self.note_command_taken();
             if self.command_while_released(command) {
                 return Ok(false);
             }

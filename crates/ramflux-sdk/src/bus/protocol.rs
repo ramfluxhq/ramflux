@@ -7,6 +7,8 @@ use crate::prelude::*;
 
 #[derive(Clone)]
 pub struct LocalBusConfig {
+    /// Explicit directory origin and trust pin; native hosts never read process environment.
+    pub username_directory: Option<ramflux_protocol::username_directory::NativeDirectoryPin>,
     pub(crate) session_lease: Option<super::session_lease::SessionLeaseConfig>,
     /// Shared host network reports; retain a clone to notify running account sessions.
     pub network_monitor: crate::NetworkMonitor,
@@ -1098,6 +1100,7 @@ impl LocalBusConfig {
     #[must_use]
     pub fn new(socket_path: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
         Self {
+            username_directory: None,
             session_lease: None,
             network_monitor: crate::NetworkMonitor::new(),
             connection_race: crate::ConnectionRace::default(),

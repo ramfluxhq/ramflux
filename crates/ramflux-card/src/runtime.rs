@@ -116,9 +116,15 @@ impl CardRuntime {
             return Err(CardError::Inactive);
         }
         spec.validate()?;
-        let input = spec.render_input()?;
+        let mut current = spec.clone();
+        if current.render_tree.is_none() {
+            // Reuse the host projection for input and commit validation, as sessions do.
+            // Resolving it again in __rf_commit would charge host work to the VM budget.
+            current.render_tree = Some(crate::projection::expected(spec)?);
+        }
+        let input = current.render_input()?;
         self.budget.borrow_mut().begin()?;
-        *self.spec.borrow_mut() = spec.clone();
+        *self.spec.borrow_mut() = current;
         self.commit.borrow_mut().take();
         self.count.set(0);
         let result = self.context.with(|ctx| -> Result<(), CardError> {

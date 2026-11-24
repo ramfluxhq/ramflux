@@ -537,13 +537,36 @@ async fn dispatch_message_receipt_read(
     fill_read_receipt_route(account, &mut body)?;
     let read_at = body.read_at.unwrap_or_else(now_unix_timestamp);
     let actor = account.client.owned_account_device_identity(&body.reader_id)?;
-    if body.recipient_device_id.is_some()
-        && body.target_delivery_id.is_some()
-        && actor != account.client.owned_device_identity()?
+    let route = if let (Some(recipient), Some(target)) =
+        (body.recipient_device_id.as_deref(), body.target_delivery_id.as_deref())
     {
-        return Err(SdkError::InboundRejected("receipt actor differs from signing device".into()));
+        if actor != account.client.owned_device_identity()? {
+            return Err(SdkError::InboundRejected(
+                "receipt actor differs from signing device".into(),
+            ));
+        }
+        let receipt_id =
+            format!("receipt:read:{}:{}:{}", body.conversation_id, body.message_id, body.reader_id);
+        let message = receipt_gateway_message(
+            account,
+            &body.conversation_id,
+            &receipt_visible_envelope_id(&receipt_id),
+            recipient,
+            target,
+            read_at,
+        )?;
+        Some((receipt_id, message))
+    } else {
+        None
+    };
+    let retained_at = match route.as_ref() {
+        Some((_, message)) => account.client.retained_read_receipt_at(message, &body.message_id)?,
+        None => None,
+    };
+    // Replaying an already captured receipt must not rewrite or rewind the local read cursor.
+    if retained_at.is_none() {
+        account.client.mark_read(&body.conversation_id, &actor, &body.message_id)?;
     }
-    account.client.mark_read(&body.conversation_id, &actor, &body.message_id)?;
     let mut response = serde_json::json!({
         "conversation_id": body.conversation_id,
         "reader_id": actor.device_id(),
@@ -551,12 +574,9 @@ async fn dispatch_message_receipt_read(
         "read_through_message_id": body.message_id,
         "scope": "local_projection",
     });
-    if let (Some(recipient_device_id), Some(target_delivery_id)) =
-        (body.recipient_device_id.clone(), body.target_delivery_id.clone())
-    {
+    if let Some((receipt_id, message)) = route {
         let mut engine = account.session_client().await?;
-        let receipt_id =
-            format!("receipt:read:{}:{}:{}", body.conversation_id, body.message_id, body.reader_id);
+        let read_at = body.read_at.or(retained_at).unwrap_or(read_at);
         let event = SdkReceiptEventEnvelope {
             schema: "ramflux.sdk.receipt_event.v1".to_owned(),
             version: 1,
@@ -572,14 +592,6 @@ async fn dispatch_message_receipt_read(
                 own_device_scope: "e2ee_private".to_owned(),
             },
         };
-        let message = receipt_gateway_message(
-            account,
-            &body.conversation_id,
-            &receipt_visible_envelope_id(&receipt_id),
-            &recipient_device_id,
-            &target_delivery_id,
-            read_at,
-        )?;
         let entry =
             account.client.send_receipt_event_via_gateway(&mut engine, message, event).await;
         account.apply_session_metadata(engine);

@@ -21,6 +21,8 @@ pub(crate) struct FileBound<'a> {
     pub mime: &'a str,
     pub name: &'a str,
     pub plaintext_length: u64,
+    pub thumbnail: Option<&'a ramflux_protocol::message::Thumbnail>,
+    pub metadata: &'a super::metadata::Metadata,
 }
 
 /// # Errors
@@ -47,6 +49,8 @@ pub(crate) fn measure(
     let slots = slots(targets, &owner, source)?;
     let mut media = Vec::with_capacity(files.len());
     for file in files {
+        super::thumbnail::validate(file.thumbnail)?;
+        file.metadata.validate()?;
         let reference = one_ref(file, &slots)?;
         media.push(to_prost(&reference));
     }
@@ -146,7 +150,11 @@ fn one_ref(file: &FileBound<'_>, slots: &[MediaKeySlot]) -> Result<MediaRef, Ref
     let reference = MediaRef {
         mime_type: file.mime.to_owned(),
         file_name: Some(file.name.to_owned()),
-        inline_thumbnail: None,
+        inline_thumbnail: file.thumbnail.map(super::thumbnail::to_canonical),
+        width: file.metadata.width,
+        height: file.metadata.height,
+        duration_ms: file.metadata.duration_ms,
+        animated: file.metadata.animated,
         object_id: ramflux_protocol::encode_base64url([0_u8; 32]),
         manifest_digest: digest,
         size: file.plaintext_length,
@@ -169,7 +177,11 @@ pub(crate) fn to_prost(reference: &MediaRef) -> ramflux_protocol::message::Media
         size: reference.size,
         key_slots: reference.key_slots.iter().map(prost_slot).collect(),
         file_name: reference.file_name.clone(),
-        inline_thumbnail: None,
+        width: reference.width,
+        height: reference.height,
+        duration_ms: reference.duration_ms,
+        animated: reference.animated,
+        inline_thumbnail: reference.inline_thumbnail.as_ref().map(super::thumbnail::to_prost),
         large_manifest: Some(prost_manifest(&reference.large_manifest)),
     }
 }

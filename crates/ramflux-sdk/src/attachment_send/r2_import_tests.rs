@@ -300,7 +300,19 @@ fn a_nine_megabyte_import_holds_two_segments_not_the_file() {
         offset += u64::try_from(piece.len()).unwrap();
     }
     let digest = *blake3::hash(&body).as_bytes();
-    let row = store.finish(&begun.prepare_id, 1, offset, digest, NOW).unwrap();
+    let row = store
+        .finish(
+            &begun.prepare_id,
+            1,
+            offset,
+            super::metadata::Finished {
+                digest,
+                thumbnail: None,
+                metadata: super::metadata::Metadata::default(),
+            },
+            NOW,
+        )
+        .unwrap();
     let wrapped = publish::publish_all(
         &publish_input(&store, &listener, &owner, &key, std::slice::from_ref(&device), "node-a"),
         std::slice::from_ref(&row),

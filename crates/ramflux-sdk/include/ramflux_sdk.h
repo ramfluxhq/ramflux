@@ -450,6 +450,12 @@ int32_t ramflux_v2_set_host_credential_provider(uint64_t handle,
                                                 void *user);
 
 /*
+ Return the build-pinned diagnostic support public key catalog, without opening an account.
+ An unprovisioned build returns available=false. Free output with `ramflux_v2_buffer_free`.
+ */
+int32_t ramflux_v2_diag_support_key(struct RamfluxBuffer **out);
+
+/*
  Read one committed account snapshot. Does not start a supervisor or take a writer lease.
 
  Config is `{data_root, account_id}`. The host supplies the shared OS custody provider.
@@ -468,6 +474,9 @@ int32_t ramflux_v2_shared_snapshot(const uint8_t *config,
  Unlocked account state, including the database key, stays in memory.
  Pending operations complete as `RAMFLUX_V2_STATUS_SUSPENDED` (30).
  A second call while already suspended returns 0.
+ A release failure rolls back parked files and returns `StorageFailed` (8).
+ Diagnostics contain `SuspendFailed` and `suspend_release_failed` or `suspend_rollback_failed`.
+ Call resume after any failure, then reopen the event subscription from its cursor.
  Call off the UI thread. A killed process is a cold start and must unlock again.
  */
 int32_t ramflux_v2_client_suspend(uint64_t handle);

@@ -279,6 +279,18 @@ The SDK derives the sender from its authenticated device. A group send passes
 submission use the existing SDK delivery paths. DM and group media use the same
 generated Message contract.
 
+Finish also accepts optional `width`, `height`, `duration_ms`, and `animated`.
+Width and height must appear together, each in 1–32768 pixels. Duration is an
+unsigned u64 millisecond count: use an exact decimal string (safe JSON integers
+are also accepted). Zero duration and `animated:false` retain explicit presence;
+absent values mean unknown. Accepted metadata and poster are immutable on replay.
+These are client-supplied hints; the SDK neither decodes nor transcodes the body.
+The encrypted layer-5 `MediaRef` carries fields 9–12 in that order, preserving
+`inline_thumbnail` as the M1 poster. Message reads expose ProtoJSON `width`,
+`height`, `durationMs` (decimal string), and `animated` after reopen. No metadata
+is published to the relay. Bindings must pin the new descriptor. Unknown media fields are never silently
+dropped by the canonical scanner.
+
 The call returns the usual asynchronous operation handle. Its completion body has
 `message_id`, `conversation_id`, `delivery_state` (`submitted` or `failed`), and
 per-target `deliveries` with stable error codes on failure. Submitted means gateway
@@ -314,7 +326,19 @@ URL-safe base64, and each chunk is at most 512 KiB. Finish with
 `attachment.prepare.finish`
 `{prepare_id, generation, plaintext_length, plaintext_digest}`.
 `plaintext_digest` is the lowercase hex BLAKE3 of the plaintext bytes with no
-domain separator. Then `conversation.send` the `{prepare_id}` values.
+domain separator. Finish optionally accepts
+`thumbnail: {mime_type, width, height, encoded_image_base64}`: JPEG or WebP,
+1–320 pixels in each dimension, 1–16384 encoded bytes, unpadded URL-safe base64.
+The SDK checks the image container and its actual dimensions against these fields;
+clients remain responsible for safe pixel decoding. Invalid thumbnails return
+`layout_invalid` before any relay reservation. An accepted finish is immutable:
+retry with the same digest, length and thumbnail; changed metadata returns
+`duplicate_operation`. Omit `thumbnail` for no preview. The exact thumbnail
+persists across reopen and appears as `inline_thumbnail` in `message.read`,
+inside the encrypted message, before any `attachment.import.*` body fetch.
+Thumbnail bytes count toward the encoded message size before upload; a valid
+thumbnail can still produce `manifest_too_large` for an oversized message.
+Then `conversation.send` the `{prepare_id}` values.
 
 Import the peer's bytes with `attachment.import.begin`
 `{message_id, index, operation_id}`, poll `attachment.import.status`
@@ -407,12 +431,10 @@ A local delete applies the shared local-account deletion and returns
 `delivery_state:"local"` with an empty deliveries list; it never fans out to peers.
 
 These structural operations obey the existing message-schema activation gate.
-Negotiation reports `message_schema_generation`. Main currently has storage generation **0**: they return the typed
-`peer_upgrade_required` refusal before allocating a counter, payload, ratchet or
-outbox. This bridge does not activate generation 1 or substitute legacy text for
-a structural operation. Existing generation-zero send and local `message.delete`
-behavior remains available. Generation-enabled tests exercise real native
-identity, reference derivation, authorization, exact retries and payload encoding.
+Negotiation reports `message_schema_generation`. Storage generation remains **1**;
+media metadata advances the wire application layer to **5** and changes the
+descriptor fingerprint. Generation-zero stores are refused with
+`SchemaResetRequired`; no migration is performed.
 
 Generated API errors remain in the owned completion JSON body as
 `{code,name,message,details}` (including target-not-found/deleted, edit-conflict,
@@ -671,3 +693,93 @@ Platform references: [Apple background Keychain accessibility](https://developer
 [Apple shared containers](https://developer.apple.com/documentation/foundation/filemanager/containerurl(forsecurityapplicationgroupidentifier:)),
 [Android Direct Boot storage](https://developer.android.com/privacy-and-security/direct-boot),
 [Android Keystore parameters](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder).
+
+### Phone provisioning and process diagnostics
+
+Both open entrypoints accept an optional `username_directory` object containing
+`url` (canonical HTTPS origin), `id`, `public_key` (base64url Ed25519) and
+`generation` (positive safe JSON integer). This is an independently provisioned
+trust pin, never learned from an unverified reply. Each client's supervisor and
+private username authorization ceremony use that same pin. Native clients do
+not consult username environment variables. An omitted pin yields
+`UsernameDirectoryRefused` / `directory_unavailable`. The `rf daemon` CLI alone
+can provision the pin from its `RAMFLUX_USERNAME_CENTER_*` and
+`RAMFLUX_USERNAME_TRUST_GENERATION` environment settings.
+
+Both open entrypoints also accept the optional strict object:
+
+```json
+{"diag":{"level":"info","process":"app","build_class":"release",
+         "max_file_bytes":1048576,"max_files":5,"max_age_days":7}}
+```
+
+These are the defaults. Native process values are `app`, `nse`, `fgs`; build
+classes are `release`, `beta`, `realrun`; levels are `error`, `warn`, `info`,
+`debug`, `trace`. Unknown keys and invalid values are refused. Limits can be
+lowered to 4096 bytes / 1 file / 1 day, never raised above the defaults. Without
+the explicit `diag-realrun` library feature, `realrun` becomes `release` and
+`debug`/`trace` become `info`. Phase 0 never records free-text error messages,
+even in real-run builds. Later diagnostic calls and verbose windows are separate.
+
+One SDK-owned writer thread serves the process. The first opened data root owns
+`diag/<process>.<epoch_ms>.ndjson`; simultaneous clients share this sink when using its configuration or the default
+policy. Default callers join the active process policy without changing it;
+this also permits a host to embed a socket supervisor and a native client. A
+conflicting explicit process configuration is refused.
+After the last client closes, a later open may choose a new root. Each file is
+UTF-8 NDJSON with schema `ramflux.diag.v1`, wall and monotonic times, process
+sequence, severity, layer, component, event and typed fields. Each line is at
+most 2048 bytes; oversized fields are omitted and `trunc:true` is set. Rotation
+includes the current file in the file-count budget; age pruning runs at open
+and rotation. Files have private permissions. `rf daemon` writes the same
+format with process `daemon`, independently of the stderr `RUST_LOG` filter.
+
+Producers use a bounded 2048-record queue and never wait for the writer. Overflow
+is reported as `diag.dropped` when another event can be queued. Warning/error
+records request immediate flush; other records flush at 16 KiB. Client close
+and suspend flush the writer. A hard kill may lose queued or unsynced records;
+readers must skip a torn final line. Hosts with a Rust tracing subscriber can
+compose `ramflux_sdk::diag::DiagnosticLayer`; the native SDK worker installs its
+own scoped layer. Existing SDK trace locations are `trace.<source-line>` events;
+free text is discarded or replaced with its length. Only known numeric,
+boolean and token fields survive. Account, principal, device, conversation,
+group, contact, username, message, envelope, object, operation, node, session
+and delivery identifiers become `h:` plus ten lowercase hex characters of
+HMAC-SHA-256(key, class || NUL || value). Never log message bodies, file names,
+passcodes, recovery words, keys, tokens or contact card payloads at any level.
+
+`diag.key_file` may name an existing host-owned private file outside the data
+root containing exactly 32 random bytes (Unix owner and mode 0600 required;
+symlinks refused). Provision it in private, non-backed-up app storage and rotate
+it every 30 days or when deleting diagnostics. If omitted, the SDK creates a
+random process key which is never persisted or exported. Hashes then correlate
+only within that writer's lifetime. Durable cross-process key storage remains
+an open host contract for DIAGNOSTIC-LOGGING-01 C-3/Q5; Phase 0 introduces no
+Keychain or Keystore provisioning API. The file header carries a key epoch,
+never the key. Clients must collect `diag/` after a run and scan for secret
+canaries before sharing it.
+
+Every nonzero asynchronous completion now has a nonempty typed `name`, `reason`
+and `reason_code` at the completion root as well as its error envelope. Existing
+business reason tokens survive; errors without finer typed context use their
+status name (or `invalid_argument`, `internal_error`, `cancelled`). English
+`message` text remains internal. Diagnostic refusal records carry code, name,
+reason, effect and variant. Immediate synchronous admission calls still return
+an integer according to their existing C signature; the diagnostic sink records
+the named admission refusal. A group `message.focus` returns the typed
+`unsupported_for_group` refusal; group typing is outside the beta scope.
+
+
+### Suspend failure recovery
+
+`ramflux_v2_client_suspend` rolls back a failed release by reopening parked files
+before returning `StorageFailed` (8). The existing event subscription stays active
+when rollback succeeds; pending operations may already have completed as Suspended.
+The diagnostic writer records `client.suspend.failed`, name `SuspendFailed`, and
+reason `suspend_release_failed`. If reopening also fails, admission stays fenced
+and the reason is `suspend_rollback_failed`; no new work is admitted into partially
+reopened owners. Call `ramflux_v2_client_resume` after any failed suspend (including
+a timeout), check its result, and reopen the event subscription from the last cursor.
+Resume needs no unlock prompt. The worker publishes the completed lifecycle state
+even if the synchronous caller times out. Normal successful suspend still cancels
+the subscription, releases files and stops networking; resume reopens them.

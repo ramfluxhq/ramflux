@@ -99,6 +99,8 @@ impl AccountDb {
             },
             connection,
             erasure_authority: Some(erasure_authority),
+            message_erasure_increments: std::cell::Cell::new(0),
+            receive_message_projection: std::cell::Cell::new(false),
             volatile_typing: RefCell::new(BTreeMap::new()),
             segment_reconciled: std::cell::OnceCell::new(),
             volatile_presence: RefCell::new(BTreeMap::new()),
