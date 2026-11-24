@@ -13,8 +13,10 @@ use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefiniti
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 mod publication;
+pub(crate) mod reach;
 mod recovery;
 pub use publication::*;
+pub use reach::ReachCommit;
 
 const ROOTS: TableDefinition<&str, &[u8]> = TableDefinition::new("username_home_roots");
 const OUTBOX: TableDefinition<&str, &[u8]> = TableDefinition::new("username_home_outbox");

@@ -102,6 +102,42 @@
     },
     {
       "bridge_allowed": true,
+      "capability": "conversation",
+      "key_export": false,
+      "name": "conversation.start",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "contact",
+      "key_export": false,
+      "name": "contact.requests.reply",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "account.reach.get",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "account.reach.set",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
       "capability": "account",
       "key_export": false,
       "name": "account.config.get",

@@ -63,6 +63,7 @@ pub(crate) fn parse(input: &str, now: i64) -> Result<ContactCardBody, SdkError> 
     crate::contact_card::validate(&body, now)?;
     body.version = 3;
     body.native_authority = Some(crate::contact_card::ContactCardAuthority {
+        reach: card.body.reach,
         head_hash: card.body.authority_head_hash,
         epoch: card.body.authority_epoch,
         master_certificate_hash: ramflux_protocol::custody::object_hash(
@@ -89,6 +90,7 @@ mod tests {
         Ok(account.sign_contact_card(
             vault,
             ContactCardV3 {
+                reach: None,
                 version: 3,
                 principal_id: account.record().body.principal_id.clone(),
                 account_anchor: account.record().body.account_anchor.clone(),

@@ -200,6 +200,7 @@ impl DirectoryAuthority {
                     add(&mut meta, &format!("auth_lifetime_home:{}", old.home), -1, 100_000)?;
                 }
                 let floor = HomeFloor {
+                    reach: reporter.reach.clone(),
                     epoch: reporter.history.epoch(),
                     hash: reporter.history.hash().into(),
                     home: reporter.home.clone(),

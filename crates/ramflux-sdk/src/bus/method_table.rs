@@ -55,7 +55,7 @@ methods! {
     LocalRead(Always) => Actor: ["account.config.get", "diag.residue"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     NeedsNetwork(AuthorityFromNode) => Actor: ["attachment.enable"];
-    LocalFirst(Always) => Actor: ["object.get", "object.get.begin", "username.mutate", "profile.update"];
+    LocalFirst(Always) => Actor: ["object.get", "object.get.begin", "username.mutate", "profile.update", "account.reach.set"];
     LocalRead(Always) => Actor: ["a2i.list_pending", "agent.approval.list", "agent.job.list", "agent.job.sessions", "device.pair.status", "device.transfer.status"];
     LocalMutation(Always) => Actor: [
         "account.config.set",
@@ -208,7 +208,7 @@ methods! {
         "node.list",
     ];
     NeedsNetwork(Always) => Actor: [
-        "username.status", "username.resolve", "username.contact.add",
+        "conversation.start", "contact.requests.reply", "account.reach.get", "username.status", "username.resolve", "username.contact.add",
         "a2i.append",
         "call.answer",
         "call.hangup",

@@ -7,8 +7,11 @@ use ed25519_dalek::{Signer, SigningKey};
 use ramflux_protocol::{home_migration::ResolveResult, username_directory as wire};
 use serde::{Deserialize, Serialize};
 
-pub const MAX_REPORT_BYTES: usize = 1024 * 1024 + 16 * 1024;
-pub const MAX_EVIDENCE_BYTES: usize = 1024 * 1024;
+// One bounded historical custody record accompanies a signed reach policy in addition to
+// the existing home history. The complete frame remains below the private 2 MiB frame cap.
+pub const MAX_EVIDENCE_BYTES: usize =
+    1024 * 1024 + ramflux_protocol::custody::MAX_RECORD_BYTES + 8192;
+pub const MAX_REPORT_BYTES: usize = MAX_EVIDENCE_BYTES + 16 * 1024;
 pub const REPORT_PROOF_DOMAIN: &str = "ramflux.identity.username_reporting_home.v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +103,7 @@ pub struct ReportingProofBody {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportingEvidence {
+    pub reach: Option<ramflux_protocol::account_reach::ReachRecord>,
     pub discovery: crate::FederationServerRecord,
     pub history: ResolveResult,
     pub service: super::SignedHomeServiceAddress,
@@ -128,11 +132,13 @@ pub struct VerifiedReporter {
     pub(crate) nonce: String,
     pub(crate) expires_at: u64,
     pub(crate) service: super::SignedHomeServiceAddress,
+    pub(crate) reach: Option<ramflux_protocol::account_reach::ReachRecord>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HomeFloor {
+    pub reach: Option<ramflux_protocol::account_reach::ReachRecord>,
     pub epoch: u64,
     pub hash: String,
     pub home: String,
@@ -243,6 +249,20 @@ pub fn verify_reporting_request(
         &verified.evidence().authority.record.body.master_certificate.body.master_public_key,
     )
     .map_err(|_| CheckpointError::Refused("master_key"))?;
+    if let Some(reach) = &value.evidence.reach {
+        ramflux_crypto::account_reach::verify_reach_policy(&reach.policy, &reach.authority)
+            .map_err(|_| CheckpointError::Refused("reach_signature"))?;
+        require(reach.policy.body.account_anchor == p.root, "reach_report_root")?;
+    }
+    if let Some(old) = retained.and_then(|floor| floor.reach.as_ref()) {
+        let new =
+            value.evidence.reach.as_ref().ok_or(CheckpointError::Refused("reach_downgrade"))?;
+        require(new.policy.body.revision >= old.policy.body.revision, "reach_rollback")?;
+        require(
+            new.policy.body.revision != old.policy.body.revision || new == old,
+            "reach_equivocation",
+        )?;
+    }
     if let DirectoryRequest::Mutate { operation, profile, .. } = &value.request {
         require(operation.body.principal_commitment == p.root, "operation_root")?;
         if let Some(profile) = profile {
@@ -263,6 +283,7 @@ pub fn verify_reporting_request(
         nonce: p.nonce.clone(),
         expires_at: p.expires_at,
         service: value.evidence.service.clone(),
+        reach: value.evidence.reach.clone(),
     })
 }
 

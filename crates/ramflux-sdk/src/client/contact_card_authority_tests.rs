@@ -41,6 +41,7 @@ fn card_for(
 ) -> TestResult<ContactCardBody> {
     let signer = primary(fixture)?;
     let body = ContactCardV3 {
+        reach: None,
         version: 3,
         principal_id: record.body.principal_id.clone(),
         account_anchor: record.body.account_anchor.clone(),
@@ -463,6 +464,7 @@ fn an_old_schema_card_is_refused_with_a_typed_error() -> TestResult {
         let record = peer.manifest.custody.as_ref().ok_or("native")?.publication.record.clone();
         let signer = primary(&peer)?;
         let body = ContactCardV3 {
+            reach: None,
             version: 3,
             principal_id: record.body.principal_id.clone(),
             account_anchor: record.body.account_anchor.clone(),

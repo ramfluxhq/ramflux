@@ -144,6 +144,7 @@ fn mismatched_native_card(
     let signed = account.sign_contact_card(
         sender.vault.as_ref(),
         ramflux_protocol::custody::ContactCardV3 {
+            reach: None,
             version: 3,
             principal_id: record.body.principal_id.clone(),
             account_anchor: record.body.account_anchor.clone(),
@@ -286,6 +287,7 @@ fn resigned_native_card(
     let signed = born.sign_contact_card(
         vault.as_ref(),
         ramflux_protocol::custody::ContactCardV3 {
+            reach: None,
             version: 3,
             principal_id: record.body.principal_id.clone(),
             account_anchor: record.body.account_anchor.clone(),

@@ -17,6 +17,44 @@ pub(in crate::bus) fn delivery_status(
         return Ok(None);
     }
     let account = local_bus_account(state, id)?;
+    if let Some(policy) = account
+        .client
+        .account_db()?
+        .load_actor_state::<ramflux_protocol::account_reach::ReachPolicy>(
+        &format!("reach/change/{}", account.principal_commitment),
+    )? {
+        return Ok(Some(prepare(
+            &LocalBusFrame::request(
+                "reach-retry",
+                Some(id.into()),
+                "account",
+                "account.reach.set",
+                serde_json::json!({"mode":policy.body.mode,"expected_revision":policy.body.expected_revision,"operation_id":policy.body.operation_id}),
+            ),
+            state,
+        )?));
+    }
+    if state.config.username_directory.is_some()
+        && account
+            .client
+            .account_db()?
+            .load_actor_state::<ramflux_protocol::account_reach::ReachRecord>(&format!(
+                "reach/floor/{}",
+                account.principal_commitment
+            ))?
+            .is_none()
+    {
+        return Ok(Some(prepare(
+            &LocalBusFrame::request(
+                "reach-initialize",
+                Some(id.into()),
+                "account",
+                "account.reach.get",
+                serde_json::json!({}),
+            ),
+            state,
+        )?));
+    }
     if account
         .client
         .account_db()?
@@ -50,6 +88,9 @@ pub(in crate::bus) fn delivery_retry(
     id: &str,
     body: &serde_json::Value,
 ) -> Result<Option<Prepared>, SdkError> {
+    if body.get("policy").is_some() && body.get("revision").is_some() {
+        return Ok(None);
+    }
     let status: w::NativeUsernameStatus = serde_json::from_value(body.clone())?;
     let account = local_bus_account(state, id)?;
     let Some(intent) = account.client.account_db()?.load_actor_state::<SignedUsernameChange>(

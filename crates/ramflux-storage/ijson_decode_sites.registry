@@ -145,3 +145,4 @@ crates/ramflux-storage/src/account_db/username_directory.rs | decode_floor | 1 |
 crates/ramflux-storage/src/account_db/username_directory.rs | decode_name | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/backup_media.rs | backup_media_state | 1 | E | excluded=bounded encrypted media recovery records; not Envelope/Ack/Nack admission
 crates/ramflux-storage/src/account_db/backup_media.rs | backup_media_state | 2 | E | excluded=bounded encrypted media recovery records; not Envelope/Ack/Nack admission
+crates/ramflux-storage/src/account_db/backup_account_reach.rs | decode | 1 | E | excluded=account reach policy or local message intent metadata; no message Envelope/Ack/Nack admission

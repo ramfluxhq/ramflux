@@ -403,6 +403,10 @@ pub(super) async fn export(
             return Err(SdkError::NetworkingPending);
         }
         let body = ramflux_protocol::custody::ContactCardV3 {
+            reach: account.client.account_db()?.load_actor_state(&format!(
+                "reach/floor/{}",
+                current.record().body.account_anchor
+            ))?,
             version: 3,
             principal_id: current.record().body.principal_id.clone(),
             account_anchor: current.record().body.account_anchor.clone(),
