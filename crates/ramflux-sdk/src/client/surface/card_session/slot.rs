@@ -116,6 +116,7 @@ fn decide(
         })),
         submit: None,
         draft_conflict: false,
+        action_outcome: None,
     }))
 }
 
@@ -130,6 +131,7 @@ fn refused(sheet: &Sheet<'_>) -> Value {
         host_request: None,
         submit: None,
         draft_conflict: false,
+        action_outcome: None,
     })
 }
 
@@ -184,6 +186,22 @@ fn finish_link(
     };
     match held.session().complete_link(reply).map_err(card_err)? {
         EventResult::StaleDropped => Ok(stale(session, fallback)),
+        EventResult::Refused { reason } => Ok(respond::view(respond::View {
+            result: "refused",
+            allowed: true,
+            session: Some(session),
+            fallback,
+            reason: Some(reason),
+            batch: None,
+            host_request: None,
+            submit: None,
+            draft_conflict: false,
+            action_outcome: Some(respond::action_outcome(
+                if reason == "card_superseded" { "superseded" } else { "refused" },
+                Some(reason),
+                None,
+            )),
+        })),
         EventResult::Edited { batch } => Ok(shown(Shown {
             result,
             session,
@@ -192,6 +210,7 @@ fn finish_link(
             host_request: None,
             submit: None,
             draft_conflict: false,
+            action_outcome: None,
         })),
         EventResult::Validation { .. } | EventResult::Submit { .. } => {
             Err(super::super::invalid("card_session_refused"))

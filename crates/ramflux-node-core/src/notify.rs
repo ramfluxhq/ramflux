@@ -32,6 +32,8 @@ mod wake_admission;
 pub use route_authority::PUSH_ROUTE_FENCE_SECONDS;
 mod format;
 pub(crate) use send_gate::retire_call_wakes;
+mod device_route;
+pub use device_route::{DevicePushRoute, admit_push_registration, push_provider_endpoint};
 mod route_selection;
 pub use route_selection::{apns_topic_is_voip, voip_push_enabled};
 mod routes;
@@ -120,25 +122,6 @@ pub struct WebPushProviderCredential {
     pub subject: String,
     #[serde(default)]
     pub provider_ca_pem_ref: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct DevicePushRoute {
-    pub device_delivery_id: String,
-    pub provider: PushProviderKind,
-    #[serde(default)]
-    pub credential_id: Option<String>,
-    pub token: String,
-    pub endpoint: String,
-    #[serde(default)]
-    pub webpush_p256dh: Option<String>,
-    #[serde(default)]
-    pub webpush_auth: Option<String>,
-    pub registered_at: u64,
-    pub expires_at: u64,
-    /// Server-allocated id. It is never reused. Zero was not admitted here.
-    #[serde(default)]
-    pub route_generation: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

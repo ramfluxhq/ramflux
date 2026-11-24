@@ -14,6 +14,7 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 mod genesis;
+mod group_participant;
 mod networking;
 pub(crate) mod pairing;
 mod publication;
@@ -415,11 +416,41 @@ impl BornAccount {
         })
     }
 
+    /// Human-primary lease for custody: pairing, recovery, transfer, device revoke and
+    /// home declaration. Group operations use [`Self::group_operation_signer`].
     pub(crate) fn group_primary(
         &self,
         vault: &dyn PrimaryVault,
     ) -> Result<super::PrimarySigningLease, SdkError> {
         self.primary_lease(vault, false)
+    }
+    /// Signer for group create, invite, membership and settings changes. A human signs
+    /// on the device named by the master certificate. A hosted agent signs with its own
+    /// self-signing key on the device that hosts it. A retired agent, or one whose
+    /// approving primary or host desktop is no longer active, is refused.
+    ///
+    /// `host` is the custodian's current directory record. A hosted agent with `None`
+    /// is refused before a lease exists. A human passes `None`.
+    ///
+    /// # Errors
+    /// `PairingCode("PrimaryRequired")` when a human is not on its primary device.
+    /// `AgentCreationRefused("agent_retired")` when the hosted agent or its host is no
+    /// longer operable. Other failures match the custody lease.
+    pub(crate) fn group_operation_signer(
+        &self,
+        vault: &dyn PrimaryVault,
+        host: Option<&VerifiedRecord>,
+    ) -> Result<super::PrimarySigningLease, SdkError> {
+        group_participant::admit(self, host)?;
+        self.primary_lease(vault, self.hosts_agent_locally()?)
+    }
+    /// Account anchor of the custodian when this device hosts the agent.
+    pub(crate) fn hosted_human_anchor(&self) -> Result<Option<String>, SdkError> {
+        group_participant::hosted_human_anchor(self)
+    }
+    /// Data root that holds this account's custody directory.
+    pub(crate) fn data_root(&self) -> Result<&Path, SdkError> {
+        group_participant::data_root(self)
     }
     /// The signer of this account's contact card and contact consent. A human signs on its
     /// primary device. An agent's record names its custodian's primary phone as primary, and that
@@ -955,6 +986,21 @@ pub(crate) async fn load_account_after_install(
 /// loader grants no branch permission and is used only by the data unlock/list paths.
 pub(crate) fn load_data_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {
     read_account(root, id, now, false, None)
+}
+/// Select human data accounts without trying to authorize paused agents against a new primary.
+/// The decoded kind only excludes rows; every included human still receives full verification.
+pub(super) fn load_human_data_account(
+    root: &Path,
+    id: &str,
+    now: u64,
+) -> Result<Option<BornAccount>, SdkError> {
+    if read_stored(root, id)?.record.body.principal_kind != ramflux_protocol::PrincipalKind::Human {
+        return Ok(None);
+    }
+    let account = load_data_account(root, id, now)?;
+    // Recheck the verified kind in case the authority file changed between reads.
+    Ok((account.record().body.principal_kind == ramflux_protocol::PrincipalKind::Human)
+        .then_some(account))
 }
 pub(crate) fn load_account_with_cache(
     root: &Path,

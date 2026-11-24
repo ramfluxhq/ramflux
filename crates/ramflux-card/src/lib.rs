@@ -9,6 +9,7 @@ mod engine_compiler;
 mod error;
 #[cfg(all(feature = "c-abi", not(target_arch = "wasm32")))]
 mod ffi;
+mod host_view;
 #[cfg(test)]
 mod library_tests;
 mod package;
@@ -24,6 +25,7 @@ mod web;
 
 pub use components::NodeKind;
 pub use error::CardError;
+pub use host_view::{ApprovalFacts, ApprovalScope, CardLifecycle, OmittedFalse};
 pub use package::{
     AcceptancePolicy, ENGINE_ID, HOST_ABI, PackageDescriptor, SignedPackage, catalog_digest,
 };

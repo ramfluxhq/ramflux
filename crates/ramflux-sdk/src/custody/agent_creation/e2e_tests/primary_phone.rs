@@ -79,7 +79,14 @@ pub(super) async fn complete_agent(
     let desk_vault: Arc<dyn PrimaryVault> = vault_of(&pair.laptop.client)?;
 
     // The human account reaches the test node first: the phone publishes its current record.
-    node.publish_current(&phone_root, &phone_id, &phone_device, phone_vault.clone()).await?;
+    node.publish_current(
+        &phone_root,
+        &phone_id,
+        &phone_device,
+        phone_vault.clone(),
+        pair.phone.client.account_db()?,
+    )
+    .await?;
 
     // The desktop starts the creation. Nothing is listed before the receipt.
     let created =

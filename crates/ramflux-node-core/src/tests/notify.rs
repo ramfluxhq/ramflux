@@ -111,6 +111,9 @@ fn provider_attempts_are_redacted() -> Result<(), Box<dyn std::error::Error>> {
             registered_at: 1_760_000_000,
             expires_at: 1_760_010_000,
             route_generation: 0,
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: crate::PushRouteEnvironment::Production,
+            capability: crate::PushRouteCapability::Alert,
         },
         credential: ProviderCredential::WebPush(WebPushProviderCredential {
             credential_id: "credential_1".to_owned(),

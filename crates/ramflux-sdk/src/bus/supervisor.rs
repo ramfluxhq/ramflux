@@ -10,6 +10,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
+#[path = "supervisor_app_lock.rs"]
+mod app_lock;
 #[path = "supervisor_device_unlock.rs"]
 mod device_unlock;
 
@@ -210,6 +212,7 @@ impl Supervisor {
         self: &Rc<Self>,
         tasks: &mut tokio::task::JoinSet<()>,
     ) -> Result<(), SdkError> {
+        self.reconcile_app_lock_wraps();
         for (path, account_id) in self.hydrate_paths()? {
             if crate::custody::account_exists(&self.config.data_root, &account_id)? {
                 if let Err(error) = self.hydrate_native(account_id, tasks) {
@@ -587,6 +590,12 @@ impl Supervisor {
             }
             "account.remove_local" => {
                 return self.remove_local(request).await;
+            }
+            "account.app_lock.configure" => {
+                return self.configure_app_lock(&request, connection).await;
+            }
+            "account.app_lock.state" => {
+                return self.app_lock_state(&request, connection).await;
             }
             _ => {}
         }

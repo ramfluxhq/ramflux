@@ -17,11 +17,9 @@ pub(super) fn admit(client: &RamfluxClient, surface_ref: &str) -> Result<Admissi
         return Ok(Admission::Missing);
     };
     let fallback = state.content().map(|content| content.fallback_text.clone()).unwrap_or_default();
-    if state.is_closed()
-        || state.version() == 0
-        || state.hash().is_none()
-        || state.content().is_none()
-    {
+    // A closed snapshot with content stays renderable. Version 0 and a missing
+    // hash or body still have nothing to show.
+    if state.version() == 0 || state.hash().is_none() || state.content().is_none() {
         return Ok(Admission::Closed { fallback });
     }
     Ok(Admission::Ready { stored, state: Box::new(state) })

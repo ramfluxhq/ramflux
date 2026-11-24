@@ -273,14 +273,33 @@ struct CardHome {
     directory_base: Option<String>,
 }
 
+fn known_home_pin_refused(
+    card: &ContactCardBody,
+    home: &crate::NodeProfile,
+) -> Result<bool, SdkError> {
+    let Ok(home_origin) = home.discovery_origin() else {
+        return Ok(false);
+    };
+    let Ok(card_origin) = crate::node::discovery_origin(&card.node.url) else {
+        return Ok(false);
+    };
+    if card_origin != home_origin {
+        return Ok(false);
+    }
+    Ok(crate::contact_node_fingerprint(&home.node_public_key)? != card.node.key_fingerprint)
+}
+
 async fn card_gateway(
     card: &ContactCardBody,
     own: &GatewaySessionConfig,
     root: &Path,
     home: &crate::NodeProfile,
 ) -> Result<CardHome, SdkError> {
-    // The card URL is the locator the user presented. The signed client record, not the
-    // URL text, names the home. A foreign record's gateway addresses are not dialed.
+    // A card that names this home but a different node key is refused before discovery.
+    // A foreign origin is still fetched; the signed record, not the URL text, names that home.
+    if known_home_pin_refused(card, home)? {
+        return Err(ContactReason::NodeFingerprintMismatch.into());
+    }
     let record =
         crate::node::fetch_client_record(&card.node.url).await.map_err(|error| match error {
             SdkError::Transport(_) | SdkError::Io(_) => lookup_failure(error),

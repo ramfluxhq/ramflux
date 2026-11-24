@@ -9,14 +9,23 @@ export interface RFTheme {
     readonly badge: string;
     readonly bg: string;
     readonly bubble_max: number;
+    readonly card_max: number;
+    readonly card_padding: number;
+    readonly card_padding_compact: number;
+    readonly card_padding_wide: number;
     readonly chart_1: string;
     readonly chart_2: string;
     readonly column_max: number;
     readonly composer_min: number;
     readonly control: string;
+    readonly control_height: number;
+    readonly control_height_touch: number;
     readonly danger: string;
     readonly danger_bg: string;
+    readonly field_height: number;
+    readonly field_height_touch: number;
     readonly focus: string;
+    readonly focus_width: number;
     readonly font: string;
     readonly font_latin: string;
     readonly font_mono: string;
@@ -33,6 +42,9 @@ export interface RFTheme {
     readonly line_strong: string;
     readonly menu_item_height: number;
     readonly mobile_bubble_max: number;
+    readonly motion_base: number;
+    readonly motion_fast: number;
+    readonly motion_slow: number;
     readonly nav: string;
     readonly on_accent: string;
     readonly on_agent_av: string;
@@ -83,11 +95,14 @@ export interface RFTheme {
     readonly size_secondary: number;
     readonly size_subheading: number;
     readonly size_title: number;
+    readonly space_step: number;
     readonly success: string;
     readonly success_bg: string;
     readonly surface: string;
     readonly surface_white: string;
     readonly text: string;
+    readonly toggle_size: number;
+    readonly toggle_size_touch: number;
     readonly tooltip: string;
     readonly warning: string;
     readonly warning_bg: string;
@@ -99,14 +114,23 @@ export const light: RFTheme = Object.freeze({
     badge: "#222224",
     bg: "#FCFBF9",
     bubble_max: 600,
+    card_max: 640,
+    card_padding: 16,
+    card_padding_compact: 12,
+    card_padding_wide: 20,
     chart_1: "#2A78D6",
     chart_2: "#EB6834",
     column_max: 880,
     composer_min: 48,
     control: "#8E8E8E",
+    control_height: 32,
+    control_height_touch: 44,
     danger: "#C62828",
     danger_bg: "#FCEBEB",
+    field_height: 40,
+    field_height_touch: 48,
     focus: "#222224",
+    focus_width: 2,
     font: "Noto Sans SC",
     font_latin: "Hanken Grotesk",
     font_mono: "JetBrains Mono",
@@ -123,6 +147,9 @@ export const light: RFTheme = Object.freeze({
     line_strong: "#D4D4D4",
     menu_item_height: 38,
     mobile_bubble_max: 300,
+    motion_base: 200,
+    motion_fast: 120,
+    motion_slow: 280,
     nav: "#F5F4F1",
     on_accent: "#FFFFFF",
     on_agent_av: "#FFFFFF",
@@ -173,11 +200,14 @@ export const light: RFTheme = Object.freeze({
     size_secondary: 13,
     size_subheading: 17,
     size_title: 20,
+    space_step: 4,
     success: "#2E7D32",
     success_bg: "#E8F2E9",
     surface: "#EFEFEF",
     surface_white: "#FFFFFF",
     text: "#161616",
+    toggle_size: 18,
+    toggle_size_touch: 24,
     tooltip: "#222224",
     warning: "#9A5800",
     warning_bg: "#FBF0DE",
@@ -189,14 +219,23 @@ export const dark: RFTheme = Object.freeze({
     badge: "#EBEBEB",
     bg: "#171716",
     bubble_max: 600,
+    card_max: 640,
+    card_padding: 16,
+    card_padding_compact: 12,
+    card_padding_wide: 20,
     chart_1: "#3987E5",
     chart_2: "#D95926",
     column_max: 880,
     composer_min: 48,
     control: "#7A7A7A",
+    control_height: 32,
+    control_height_touch: 44,
     danger: "#FF6B6B",
     danger_bg: "#2E1818",
+    field_height: 40,
+    field_height_touch: 48,
     focus: "#C8C8C8",
+    focus_width: 2,
     font: "Noto Sans SC",
     font_latin: "Hanken Grotesk",
     font_mono: "JetBrains Mono",
@@ -213,6 +252,9 @@ export const dark: RFTheme = Object.freeze({
     line_strong: "#3A3A3A",
     menu_item_height: 38,
     mobile_bubble_max: 300,
+    motion_base: 200,
+    motion_fast: 120,
+    motion_slow: 280,
     nav: "#121211",
     on_accent: "#121211",
     on_agent_av: "#121211",
@@ -263,11 +305,14 @@ export const dark: RFTheme = Object.freeze({
     size_secondary: 13,
     size_subheading: 17,
     size_title: 20,
+    space_step: 4,
     success: "#5FD27A",
     success_bg: "#14251A",
     surface: "#212121",
     surface_white: "#1E1E1E",
     text: "#EBEBEB",
+    toggle_size: 18,
+    toggle_size_touch: 24,
     tooltip: "#EBEBEB",
     warning: "#F2B94B",
     warning_bg: "#2B2210",

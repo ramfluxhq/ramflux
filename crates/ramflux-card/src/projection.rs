@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! Resolver-to-native projection. The signed library cannot change these semantics.
-use crate::{CardError, CardSpec, EventToken, HostSlot, Node, NodeKind, Tree, slots::SlotRequest};
+use crate::{
+    ApprovalFacts, CardError, CardSpec, EventToken, HostSlot, Node, NodeKind, Tree,
+    slots::SlotRequest,
+};
 use ramflux_protocol::a2ui::{ResolvedSlot, ResolvedSurface};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,46 +38,8 @@ pub(crate) fn project(
     let mut host_slots = Vec::new();
     for (index, source) in resolved.nodes.iter().enumerate() {
         let key = keys.get(index).ok_or(CardError::Invalid("instance key"))?.clone();
-        let mut attrs = source.properties.clone();
-        for field in [
-            "id",
-            "component",
-            "children",
-            "child",
-            "action",
-            "@checks",
-            "@catalogId",
-            "@metadata",
-            "trigger",
-            "content",
-        ] {
-            attrs.remove(field);
-        }
-        if let Some(tabs) = attrs.get_mut("tabs").and_then(Value::as_array_mut) {
-            for tab in tabs {
-                tab.as_object_mut().ok_or(CardError::Invalid("tab"))?.remove("child");
-            }
-        }
-        let accessibility = attrs.remove("@accessibility").unwrap_or_else(|| json!({"live":"off"}));
-        attrs.insert("accessibility".into(), accessibility);
         let is_mounted = *mounted.get(index).ok_or(CardError::Invalid("mounted instance"))?;
-        let action = resolved.actions.iter().find(|action| action.node == index);
-        let disabled = !is_mounted
-            || local.consumed.contains(&key)
-            || action.is_some_and(|action| {
-                matches!(
-                    action.kind,
-                    ramflux_protocol::a2ui::ResolvedActionKind::Event { checks_pass: false, .. }
-                )
-            });
-        attrs.insert("disabled".into(), json!(disabled));
-        attrs.insert("errors".into(), json!(source.errors));
-        if let Some(input) = resolved.inputs.iter().find(|input| input.node == index) {
-            attrs.insert("input_pointer".into(), json!(input.pointer));
-        }
-        if action.is_some() {
-            attrs.insert("action_ref".into(), json!(key));
-        }
+        let attrs = node_attrs(source, &resolved, index, &key, is_mounted, local)?;
         let kind: NodeKind = serde_json::from_value(json!(source.component))?;
         let token = EventToken {
             session,
@@ -105,7 +70,7 @@ pub(crate) fn project(
             attrs,
         });
     }
-    let tree = Tree {
+    let mut tree = Tree {
         schema: "ramflux.card.tree.v1".into(),
         session,
         signed_version: spec.signed_version,
@@ -118,10 +83,64 @@ pub(crate) fn project(
         locale: resolved.locale.clone(),
         format_locale: resolved.format_locale.clone(),
         direction: resolved.direction.clone(),
+        generating: spec.generating.into(),
+        lifecycle: spec.lifecycle.clone(),
+        replacement_ref: spec.replacement_ref.clone(),
     };
+    apply_facts(&mut tree, &spec.approval_facts);
     tree.check_limits()?;
     Ok(tree)
 }
+fn node_attrs(
+    source: &ramflux_protocol::a2ui::ResolvedNode,
+    resolved: &ResolvedSurface,
+    index: usize,
+    key: &str,
+    is_mounted: bool,
+    local: &LocalState,
+) -> Result<serde_json::Map<String, Value>, CardError> {
+    let mut attrs = source.properties.clone();
+    for field in [
+        "id",
+        "component",
+        "children",
+        "child",
+        "action",
+        "@checks",
+        "@catalogId",
+        "@metadata",
+        "trigger",
+        "content",
+    ] {
+        attrs.remove(field);
+    }
+    if let Some(tabs) = attrs.get_mut("tabs").and_then(Value::as_array_mut) {
+        for tab in tabs {
+            tab.as_object_mut().ok_or(CardError::Invalid("tab"))?.remove("child");
+        }
+    }
+    let accessibility = attrs.remove("@accessibility").unwrap_or_else(|| json!({"live":"off"}));
+    attrs.insert("accessibility".into(), accessibility);
+    let action = resolved.actions.iter().find(|action| action.node == index);
+    let disabled = !is_mounted
+        || local.consumed.contains(key)
+        || action.is_some_and(|action| {
+            matches!(
+                action.kind,
+                ramflux_protocol::a2ui::ResolvedActionKind::Event { checks_pass: false, .. }
+            )
+        });
+    attrs.insert("disabled".into(), json!(disabled));
+    attrs.insert("errors".into(), json!(source.errors));
+    if let Some(input) = resolved.inputs.iter().find(|input| input.node == index) {
+        attrs.insert("input_pointer".into(), json!(input.pointer));
+    }
+    if action.is_some() {
+        attrs.insert("action_ref".into(), json!(key));
+    }
+    Ok(attrs)
+}
+
 pub(crate) fn keys(resolved: &ResolvedSurface) -> Result<Vec<String>, CardError> {
     let mut routes: Vec<Vec<ResolvedSlot>> = Vec::new();
     let mut keys = Vec::new();
@@ -171,6 +190,13 @@ fn mounted(
     }
     Ok(mounted)
 }
+pub(crate) fn apply_facts(tree: &mut Tree, facts: &BTreeMap<String, ApprovalFacts>) {
+    for slot in &mut tree.host_slots {
+        if let SlotRequest::Approval { request_ref, facts: slot_facts, .. } = &mut slot.request {
+            *slot_facts = facts.get(request_ref).cloned();
+        }
+    }
+}
 fn slot(
     source: &ramflux_protocol::a2ui::ResolvedNode,
     keys: &[String],
@@ -188,17 +214,21 @@ fn slot(
     };
     let request_id = serde_json::to_string(token)?;
     let request = match source.component.as_str() {
-        "Approval" => Some((
-            "approval",
-            SlotRequest::Approval {
-                request_id,
-                request_ref: text("requestRef")?,
-                task_binding: p
-                    .get("taskBinding")
-                    .map(|value| serde_json::from_value(value.clone()))
-                    .transpose()?,
-            },
-        )),
+        "Approval" => {
+            let request_ref = text("requestRef")?;
+            Some((
+                "approval",
+                SlotRequest::Approval {
+                    request_id,
+                    facts: None,
+                    request_ref,
+                    task_binding: p
+                        .get("taskBinding")
+                        .map(|value| serde_json::from_value(value.clone()))
+                        .transpose()?,
+                },
+            ))
+        }
         "Image" => Some((
             "image",
             SlotRequest::Image {

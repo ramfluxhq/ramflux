@@ -89,6 +89,7 @@ fn stale_registration_cannot_undo_rotation() -> Result<(), Box<dyn std::error::E
 
 fn kind_route(token: &str, provider: PushProviderKind, now: u64) -> DevicePushRoute {
     let mut route = route_at(token, now);
+    route.capability = DevicePushRoute::capability_for(&provider);
     route.provider = provider;
     route
 }

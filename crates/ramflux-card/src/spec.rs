@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! Authorized snapshot envelope. Authentication remains the caller SDK's responsibility.
-use crate::{CardError, Tree};
+use crate::{ApprovalFacts, CardError, CardLifecycle, Tree};
 use ramflux_protocol::a2ui::{
     DisplayLocale, ResolvedSurface, SurfaceDrafts, SurfaceSnapshot, SurfaceState,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 pub(crate) const MAX_INPUT: usize = 32 * 1024;
 pub(crate) const MAX_JSON_DEPTH: usize = 32;
 pub(crate) const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -25,6 +26,18 @@ pub struct CardSpec {
     pub(crate) drafts: SurfaceDrafts,
     #[serde(skip)]
     pub(crate) render_tree: Option<Tree>,
+    /// Set by the SDK from stream state. Fixtures leave this false.
+    #[serde(skip)]
+    pub generating: bool,
+    /// Set by the SDK from closure or a verified replacement. Not a signed field.
+    #[serde(skip)]
+    pub lifecycle: CardLifecycle,
+    /// Client reference of the replacement card. Absent when unverified.
+    #[serde(skip)]
+    pub replacement_ref: Option<String>,
+    /// Keyed by the approval component's `requestRef` hint. Values are verified rows.
+    #[serde(skip)]
+    pub approval_facts: BTreeMap<String, ApprovalFacts>,
 }
 /// Check raw byte/depth limits before deserialization allocates any values.
 pub(crate) fn preflight(bytes: &[u8], max: usize) -> Result<(), CardError> {
@@ -69,7 +82,7 @@ impl CardSpec {
         let spec: Self = ramflux_protocol::parse_i_json(bytes)
             .map_err(|_| CardError::Invalid("I-JSON envelope"))?;
         spec.state()?;
-        if spec.render_allowed && !spec.snapshot.closed {
+        if spec.render_allowed {
             spec.validate()?;
         }
         Ok(spec)
@@ -110,8 +123,24 @@ impl CardSpec {
         }
         Ok(state)
     }
+    /// Lifecycle the host should show. Closed snapshots still resolve.
+    pub(crate) fn displayed_lifecycle(&self) -> CardLifecycle {
+        if !self.render_allowed {
+            return CardLifecycle::Retired;
+        }
+        if self.lifecycle == CardLifecycle::Superseded || self.replacement_ref.is_some() {
+            return CardLifecycle::Superseded;
+        }
+        if self.snapshot.closed || self.lifecycle == CardLifecycle::Closed {
+            return CardLifecycle::Closed;
+        }
+        if self.lifecycle == CardLifecycle::Retired {
+            return CardLifecycle::Retired;
+        }
+        CardLifecycle::Open
+    }
     pub(crate) fn validate(&self) -> Result<(), CardError> {
-        if !self.render_allowed || self.snapshot.closed {
+        if !self.render_allowed {
             return Err(CardError::Inactive);
         }
         self.state()?;

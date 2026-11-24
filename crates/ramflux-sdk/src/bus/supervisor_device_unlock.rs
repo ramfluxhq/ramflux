@@ -22,6 +22,9 @@ impl Supervisor {
         if account.account_state == "locked" {
             return Ok(false);
         }
+        if self.index.app_lock_policy(id)?.enabled {
+            return Ok(false);
+        }
         Ok(self.index.load_device_wrapped_db_key(id)?.is_some())
     }
 

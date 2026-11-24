@@ -128,6 +128,12 @@ pub struct AccountDb {
 }
 
 impl AccountDb {
+    /// Copies the key that opened this database.
+    #[must_use]
+    pub fn copy_current_key(&self) -> AccountDbKey {
+        self.current_key.clone()
+    }
+
     pub fn open(
         index: &AccountIndex,
         local_account_id: &str,

@@ -23,12 +23,52 @@ pub const PUSH_ROUTE_CONTROL_SKEW_SECONDS: u64 = 5;
 pub struct PushRouteRegistration {
     pub provider: PushProviderKind,
     pub token: String,
+    /// Canonical unpadded base64url of 16 bytes, chosen by this account's device.
+    pub route_tag: String,
+    pub environment: PushRouteEnvironment,
+    pub capability: PushRouteCapability,
     #[serde(default)]
     pub endpoint: Option<String>,
     #[serde(default)]
     pub webpush_p256dh: Option<String>,
     #[serde(default)]
     pub webpush_auth: Option<String>,
+}
+
+/// APNs host the node will use. FCM and Web Push are production only.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushRouteEnvironment {
+    Sandbox,
+    Production,
+}
+
+/// How this registration wants its wakes delivered.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushRouteCapability {
+    /// Alert transport. Messages, and calls when the device did not register `VoIP`.
+    Alert,
+    /// APNs `PushKit`. Calls only.
+    Voip,
+}
+
+/// `true` when `tag` is canonical unpadded base64url of exactly 16 bytes.
+#[must_use]
+pub fn push_route_tag_valid(tag: &str) -> bool {
+    let Ok(decoded) = ramflux_protocol::decode_base64url(tag) else {
+        return false;
+    };
+    decoded.len() == 16 && ramflux_protocol::encode_base64url(&decoded) == tag
+}
+
+fn capability_matches(provider: &PushProviderKind, capability: PushRouteCapability) -> bool {
+    match provider {
+        PushProviderKind::ApnsVoip => capability == PushRouteCapability::Voip,
+        PushProviderKind::Apns | PushProviderKind::Fcm | PushProviderKind::WebPush => {
+            capability == PushRouteCapability::Alert
+        }
+    }
 }
 impl std::fmt::Debug for PushRouteRegistration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -141,7 +181,11 @@ impl PushRouteRegistration {
                     .as_ref()
                     .is_none_or(|value| value.len() <= 4096 && !value.chars().any(char::is_control))
             });
-        if !token_valid || !keys_valid {
+        if !token_valid
+            || !keys_valid
+            || !push_route_tag_valid(&self.route_tag)
+            || !capability_matches(&self.provider, self.capability)
+        {
             return Err(NodeCoreError::Unauthorized("push route credential rejected".into()));
         }
         Ok(())

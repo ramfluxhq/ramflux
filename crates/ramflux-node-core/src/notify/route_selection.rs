@@ -31,6 +31,9 @@ pub(super) fn select_wake_routes(
     voip_enabled: bool,
     mut voip_ready: impl FnMut(&super::DevicePushRoute) -> bool,
 ) -> Vec<super::DevicePushRoute> {
+    routes.retain(|route| {
+        route.capability == super::DevicePushRoute::capability_for(&route.provider)
+    });
     let call = matches!(*class, NotificationDeliveryClass::CallWakeNotification);
     let use_voip = call
         && voip_enabled
