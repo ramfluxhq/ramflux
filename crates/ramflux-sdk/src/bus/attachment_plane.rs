@@ -16,6 +16,7 @@ use super::connection_manager::{ConnectionHandle, NetworkingState, SessionClient
 use crate::SdkError;
 use crate::attachment_send::{
     CODE_AUTHORITY_UNAVAILABLE, OwnerCall, Plane, ReadCall, Refusal, RegisterCall, RetireCall,
+    UploadQuery,
 };
 
 const CALL_BUDGET: Duration = Duration::from_secs(60);
@@ -92,6 +93,21 @@ fn request_id() -> Result<String, Refusal> {
 }
 
 impl Plane for GatewayPlane {
+    fn upload_status(
+        &self,
+        query: &UploadQuery,
+    ) -> Result<ramflux_protocol::attachment_wire::AttachmentUploadStatus, Refusal> {
+        let bytes = self.call(AttachmentCall::UploadStatus {
+            upload_id: WireBytes(query.upload_id.to_vec()),
+            object_id: WireBytes(query.object_id.to_vec()),
+            manifest_hash: WireBytes(query.manifest_hash.to_vec()),
+            payload_generation: query.payload_generation,
+            index: query.index,
+        })?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| Refusal::new(crate::attachment_send::CODE_LAYOUT_INVALID))
+    }
+
     fn authority(&self) -> Result<Vec<u8>, Refusal> {
         self.call(AttachmentCall::Authority)
     }

@@ -121,6 +121,25 @@ impl Listener {
 }
 
 impl Plane for Listener {
+    fn upload_status(
+        &self,
+        query: &super::plane::UploadQuery,
+    ) -> Result<ramflux_protocol::attachment_wire::AttachmentUploadStatus, Refusal> {
+        self.registry
+            .checkpoint_after_authentication(
+                &self.requester,
+                &ramflux_node_core::AttachmentCheckpoint {
+                    upload_id: query.upload_id,
+                    object_id: query.object_id,
+                    manifest_hash: query.manifest_hash,
+                    payload_generation: query.payload_generation,
+                    index: query.index,
+                },
+                &self.backend,
+                self.now(),
+            )
+            .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))
+    }
     fn owner(&self, call: &OwnerCall<'_>) -> Result<Vec<u8>, Refusal> {
         self.owner_calls.fetch_add(1, Ordering::Relaxed);
         if OwnerAttachmentOperation::decode(call.operation).is_ok_and(|op| op.op == 9) {
