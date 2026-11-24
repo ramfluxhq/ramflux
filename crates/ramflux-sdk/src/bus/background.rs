@@ -82,7 +82,8 @@ impl Supervisor {
         }
         reopened?;
         self.expire_app_deadlines().await?;
-        self.cancel_app_resume().await?;
+        // Resume can be a background wake on a locked device. Only an explicit
+        // foreground lifecycle signal may cancel a deadline that has not expired.
         self.config.background.store(false, Ordering::Release);
         Ok(())
     }

@@ -93,14 +93,6 @@ impl Supervisor {
         Ok(())
     }
 
-    #[cfg(feature = "c-abi")]
-    pub(in crate::bus) async fn cancel_app_resume(&self) -> Result<(), SdkError> {
-        for (id, _) in self.app_fences.armed()? {
-            self.cancel_app_deadline(&lifecycle_request(&id), &id).await?;
-        }
-        Ok(())
-    }
-
     pub(super) fn start_app_timer(self: &Rc<Self>) {
         if self.app_timer.borrow().is_some() {
             return;

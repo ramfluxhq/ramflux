@@ -70,18 +70,16 @@ impl Supervisor {
     ) -> Result<serde_json::Value, SdkError> {
         let open = self.accounts.borrow().get(id).is_some_and(super::AccountActor::is_open);
         let epoch = self.app_fences.epoch(id)?;
+        let (state, reason, remaining_ms) = epoch.snapshot();
         let mut body = state_body(policy, open && !epoch.locked);
         let fields = body.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?;
         fields.insert("generation".into(), epoch.generation.into());
-        if !epoch.reason.is_empty() {
-            fields.insert("reason".into(), epoch.reason.into());
+        if !reason.is_empty() {
+            fields.insert("reason".into(), reason.into());
         }
         if open && !epoch.locked {
-            fields.insert("state".into(), epoch.state().into());
-            fields.insert("remaining_ms".into(), epoch.remaining_ms().into());
-            if epoch.expired() {
-                fields.insert("reason".into(), "timeout".into());
-            }
+            fields.insert("state".into(), state.into());
+            fields.insert("remaining_ms".into(), remaining_ms.into());
         }
         Ok(body)
     }
@@ -91,15 +89,15 @@ impl Supervisor {
         id: &str,
     ) -> Result<(), SdkError> {
         let epoch = self.app_fences.epoch(id)?;
+        let (state, reason, remaining_ms) = epoch.snapshot();
         let frame = local_bus_event(
             request,
             id,
             "account",
             "account.app_lock.changed",
             serde_json::json!({
-                "state": epoch.state(),
-                "reason": if epoch.expired() { "timeout" } else { epoch.reason }, "generation": epoch.generation,
-                "remaining_ms": epoch.remaining_ms(),
+                "state": state, "reason": reason, "generation": epoch.generation,
+                "remaining_ms": remaining_ms,
             }),
         );
         self.controls.borrow_mut().retain(|connection, outbound| {
@@ -147,9 +145,10 @@ impl Supervisor {
         if self.config.background.load(std::sync::atomic::Ordering::Acquire) {
             // A parked actor cannot run account.lock without reopening files. Stop it to
             // erase its retained keys; ON cold-open authority is already persistently gated.
-            let actor = self.accounts.borrow_mut().remove(id);
+            let actor = self.accounts.borrow().get(id).cloned();
             if let Some(actor) = actor {
                 actor.stop().await?;
+                self.accounts.borrow_mut().remove(id);
             }
             self.attended.borrow_mut().retain(|_, account| account != id);
         } else {
