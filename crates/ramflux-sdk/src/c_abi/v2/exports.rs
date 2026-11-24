@@ -319,8 +319,10 @@ fn open_inner(
     let _opening = Opening(candidate_root.clone());
     let diagnostics = crate::diag::start(&candidate_root, config.diag.clone())
         .map_err(|e| super::super::map_sdk_error(&e))?;
-    let mut bus =
-        LocalBusConfig::in_process(std::path::PathBuf::new(), std::mem::take(&mut config.data_root));
+    let mut bus = LocalBusConfig::in_process(
+        std::path::PathBuf::new(),
+        std::mem::take(&mut config.data_root),
+    );
     if let Some((priority, wait_ms)) = config.session_lease {
         bus = bus.with_session_lease(priority, std::time::Duration::from_millis(wait_ms));
     }

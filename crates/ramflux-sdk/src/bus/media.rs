@@ -143,7 +143,9 @@ pub(crate) fn reconcile(account: &super::state::LocalBusAccountState) {
         // The home rejected this session's authority. A reconnect may establish
         // new authority, but it cannot revive the consumed media session.
         if matches!(snapshot.last_reason.as_deref(), Some("renewal_refused" | "branch_revoked")) {
-            account.client.stop_in_process_media(ramflux_media::authorization::GateReason::Terminal);
+            account
+                .client
+                .stop_in_process_media(ramflux_media::authorization::GateReason::Terminal);
             return None;
         }
         handle
