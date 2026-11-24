@@ -12,6 +12,11 @@ compile_error!("itest-http must not be enabled in release or production builds")
 mod attachment_wire;
 mod authority_refusal;
 mod config;
+mod node_report_config;
+pub use node_report_config::{
+    NodeReportCentreConfig, NodeReportConfig, NodeReportRegionConfig, load_node_report_config,
+    load_node_report_config_file,
+};
 mod durability_io;
 #[cfg(any(test, feature = "durability-test-hooks"))]
 pub mod durability_test_hooks;
