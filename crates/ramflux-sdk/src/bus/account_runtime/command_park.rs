@@ -30,8 +30,15 @@ struct Waiting {
 
 enum Wake {
     Publication(u64),
-    InitialReceive { connection: Box<ConnectionHandle>, generation: u64 },
+    InitialReceive {
+        connection: Box<ConnectionHandle>,
+        generation: u64,
+    },
     Network(Box<super::network_prepare::NetworkWait>),
+    Journal {
+        changed: watch::Receiver<u64>,
+        result: oneshot::Receiver<Result<ActorResponse, SdkError>>,
+    },
 }
 
 impl Wake {
@@ -42,6 +49,7 @@ impl Wake {
                 !connection.initial_receive_pending(*generation)
             }
             Self::Network(wait) => wait.changed.has_changed().unwrap_or(true),
+            Self::Journal { changed, .. } => changed.has_changed().unwrap_or(true),
         }
     }
 
@@ -50,6 +58,7 @@ impl Wake {
             Self::Publication(_) => "publication_wait",
             Self::InitialReceive { .. } => "initial_receive_wait",
             Self::Network(_) => "network_prepare_wait",
+            Self::Journal { .. } => "outbox_prefix_wait",
         }
     }
 }
@@ -79,6 +88,24 @@ pub(super) fn take_skip_note() -> bool {
 
 pub(super) fn pending(owner: &str) -> bool {
     WAITING.with(|queue| queue.borrow().iter().any(|item| item.owner == owner))
+}
+
+pub(super) fn cancel(owner: &str, mut error: impl FnMut() -> SdkError) -> Result<(), SdkError> {
+    WAITING
+        .try_with(|queue| {
+            let mut queue = queue.try_borrow_mut().map_err(|_| super::stopped())?;
+            queue.retain_mut(|item| {
+                if item.owner != owner {
+                    return true;
+                }
+                if let Some(reply) = item.command.reply.take() {
+                    let _ = reply.send(Err(error()));
+                }
+                false
+            });
+            Ok(())
+        })
+        .map_err(|_| super::stopped())?
 }
 
 pub(super) fn park(
@@ -112,6 +139,17 @@ pub(super) fn park_network(
     enqueue(owner, command, reply, wait.deadline, Wake::Network(Box::new(wait)));
 }
 
+pub(super) fn park_journal(
+    owner: &str,
+    command: AccountCommand,
+    reply: oneshot::Sender<Result<ActorResponse, SdkError>>,
+    deadline: Instant,
+    changed: watch::Receiver<u64>,
+    result: oneshot::Receiver<Result<ActorResponse, SdkError>>,
+) {
+    enqueue(owner, command, reply, deadline, Wake::Journal { changed, result });
+}
+
 fn enqueue(
     owner: &str,
     mut command: AccountCommand,
@@ -142,9 +180,24 @@ pub(super) fn take_ready(owner: &str) -> Option<AccountCommand> {
         let index = queue
             .iter()
             .position(|item| item.owner == owner && (item.wake.ready() || now >= item.deadline))?;
-        let item = queue.remove(index)?;
+        let mut item = queue.remove(index)?;
         let elapsed_ms = elapsed_ms(item.started);
         let timed_out = now >= item.deadline;
+        if let Wake::Journal { result, .. } = &mut item.wake {
+            let completed = match result.try_recv() {
+                Ok(result) => result.map(|_| ()),
+                Err(_) if timed_out => Err(crate::bus::command_admission::unavailable(
+                    "account command deadline expired",
+                )),
+                Err(_) => Err(super::stopped()),
+            };
+            if let Err(error) = completed {
+                if let Some(reply) = item.command.reply.take() {
+                    let _ = reply.send(Err(error));
+                }
+                return None;
+            }
+        }
         tracing::debug!(
             phase = item.wake.phase(),
             event = "resume",
@@ -191,6 +244,7 @@ fn receive_watch(owner: &str) -> Option<watch::Receiver<u64>> {
         queue.borrow().iter().filter(|item| item.owner == owner).find_map(|item| match &item.wake {
             Wake::InitialReceive { connection, .. } => Some(connection.snapshot_watch()),
             Wake::Network(wait) => Some(wait.changed.clone()),
+            Wake::Journal { changed, .. } => Some(changed.clone()),
             Wake::Publication(_) => None,
         })
     })

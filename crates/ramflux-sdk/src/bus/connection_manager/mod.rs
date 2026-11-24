@@ -800,7 +800,7 @@ impl ConnectionHandle {
         wait: std::time::Duration,
     ) -> Result<(), SdkError> {
         #[cfg(test)]
-        let _waiter = LiveWaiter::new(&self.shared.live_waiters);
+        let _waiter = self.test_live_waiter();
         let mut changed = self.shared.changed.subscribe();
         let snapshot = self.snapshot();
         let origin = snapshot.attempt_started.map_or(admitted_at, |start| start.min(admitted_at));
@@ -1028,22 +1028,26 @@ async fn sleep_until_optional(deadline: Option<Instant>) {
 pub(crate) mod tests;
 
 #[cfg(test)]
-struct LiveWaiter<'a>(&'a std::sync::atomic::AtomicUsize);
+pub(crate) struct LiveWaiter(Arc<Shared>);
 #[cfg(test)]
-impl<'a> LiveWaiter<'a> {
-    fn new(count: &'a std::sync::atomic::AtomicUsize) -> Self {
-        count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        Self(count)
+impl LiveWaiter {
+    fn new(shared: Arc<Shared>) -> Self {
+        shared.live_waiters.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(shared)
     }
 }
 #[cfg(test)]
-impl Drop for LiveWaiter<'_> {
+impl Drop for LiveWaiter {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        self.0.live_waiters.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 #[cfg(test)]
 impl ConnectionHandle {
+    pub(crate) fn test_live_waiter(&self) -> LiveWaiter {
+        LiveWaiter::new(Arc::clone(&self.shared))
+    }
+
     pub(crate) fn test_live_waiters(&self) -> usize {
         self.shared.live_waiters.load(std::sync::atomic::Ordering::Acquire)
     }

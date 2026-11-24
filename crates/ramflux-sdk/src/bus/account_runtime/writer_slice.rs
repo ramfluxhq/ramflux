@@ -68,7 +68,7 @@ impl AccountRuntime {
     }
 
     pub(super) async fn service_one_command(&mut self) -> Result<(), SdkError> {
-        if self.command_waiting.load(Ordering::Acquire) == 0 {
+        if self.command_waiting.load(Ordering::Acquire) == 0 && self.ready_commands.is_empty() {
             return Ok(());
         }
         let Some(_guard) = ramflux_storage::writer_budget::ServiceGuard::enter() else {
@@ -91,12 +91,32 @@ impl AccountRuntime {
         &mut self,
         request: &LocalBusFrame,
     ) -> Result<(), SdkError> {
+        self.publish_with_yields(request, true).await
+    }
+
+    /// A command's durable output must not wait for a router acknowledgement.
+    pub(super) async fn publish_queued_yielding(
+        &mut self,
+        request: &LocalBusFrame,
+    ) -> Result<(), SdkError> {
+        self.publish_with_yields(request, false).await
+    }
+
+    async fn publish_with_yields(
+        &mut self,
+        request: &LocalBusFrame,
+        confirm_router: bool,
+    ) -> Result<(), SdkError> {
         let mut yielded = false;
         loop {
             ramflux_storage::writer_budget::begin_attempt();
             let result = {
                 let _yield = super::super::events::OutboxYield::enter();
-                self.publish(request).await
+                if confirm_router {
+                    self.publish(request).await
+                } else {
+                    self.publish_queued(request)
+                }
             };
             match result {
                 Err(error) if is_writer_pause(&error) => {
@@ -122,7 +142,7 @@ impl AccountRuntime {
     /// arrives while one is running waits for the next slice.
     pub(super) async fn service_waiting_commands(&mut self) -> Result<(), SdkError> {
         let mut stalled = 0_u8;
-        while self.command_waiting.load(Ordering::Acquire) > 0 {
+        while self.command_waiting.load(Ordering::Acquire) > 0 || !self.ready_commands.is_empty() {
             let before = self.command_waiting.load(Ordering::Acquire);
             self.service_one_command().await?;
             if self.command_waiting.load(Ordering::Acquire) >= before {

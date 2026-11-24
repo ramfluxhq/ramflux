@@ -18,6 +18,8 @@ pub(super) struct NetworkWait {
     pub changed: watch::Receiver<u64>,
     // Writer priority only: this does not occupy either command mailbox.
     pub _demand: Option<HeadDemand>,
+    #[cfg(test)]
+    pub _live_waiter: Option<crate::bus::connection_manager::LiveWaiter>,
 }
 
 impl AccountRuntime {
@@ -67,7 +69,13 @@ impl AccountRuntime {
             return if Instant::now() >= deadline {
                 Err(connection.pending())
             } else {
-                Ok(Some(NetworkWait { deadline, changed, _demand: None }))
+                Ok(Some(NetworkWait {
+                    deadline,
+                    changed,
+                    _demand: None,
+                    #[cfg(test)]
+                    _live_waiter: Some(connection.test_live_waiter()),
+                }))
             };
         }
         let since = admission.network_started();
@@ -100,6 +108,8 @@ impl AccountRuntime {
             deadline,
             changed,
             _demand: Some(HeadDemand::arm(&self.command_waiting)),
+            #[cfg(test)]
+            _live_waiter: None,
         }))
     }
 

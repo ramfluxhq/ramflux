@@ -247,7 +247,12 @@ impl AccountRuntime {
     }
 
     async fn refresh_networking_expiry(&mut self) {
-        match self.publish_networking_expiry().await {
+        let result = self.publish_networking_expiry().await;
+        self.note_networking_expiry(result);
+    }
+
+    fn note_networking_expiry(&mut self, result: Result<bool, SdkError>) {
+        match result {
             Ok(_) => self.networking_expiry_warned = false,
             Err(error) => {
                 if !self.networking_expiry_warned {
@@ -260,14 +265,18 @@ impl AccountRuntime {
         }
     }
 
-    async fn publish_networking_expiry(&mut self) -> Result<bool, SdkError> {
+    fn stage_networking_expiry(&mut self) -> Result<bool, SdkError> {
         if let Some(account) = self.state.accounts.get(&self.id)
             && super::networking_events::refresh_expired(account)?
         {
             self.networking_expiry_pending =
                 account.client.account_db()?.pending_actor_state_sequence("account/networking")?;
         }
-        if self.networking_expiry_pending.is_none() {
+        Ok(self.networking_expiry_pending.is_some())
+    }
+
+    async fn publish_networking_expiry(&mut self) -> Result<bool, SdkError> {
+        if !self.stage_networking_expiry()? {
             return Ok(false);
         }
         // Project expiry before another attempt can replace the actor-state snapshot.
@@ -278,7 +287,9 @@ impl AccountRuntime {
             "sync.run",
             serde_json::json!({}),
         );
-        self.publish_yielding(&request).await?;
+        // The maintenance caller races this confirmed handoff against commands
+        // and its sync deadline. Command completions use the nonblocking slice.
+        self.publish(&request).await?;
         self.networking_expiry_pending = None;
         Ok(true)
     }
@@ -361,7 +372,9 @@ impl AccountRuntime {
     fn queued_command(&mut self, checkpoints: &mut u8) -> Option<AccountCommand> {
         // A mailbox command is claimed before a parked publication wait. The
         // parked command is not in this mailbox, and it must not delay one that is.
-        let waiting = self.command_waiting.load(Ordering::Acquire) > 0;
+        // A claimed entry must run without requiring another mailbox arrival.
+        let waiting =
+            self.command_waiting.load(Ordering::Acquire) > 0 || !self.ready_commands.is_empty();
         if waiting && let Some(command) = self.try_mailbox() {
             return Some(command);
         }
@@ -404,6 +417,9 @@ impl AccountRuntime {
         &mut self,
         ready: std::sync::mpsc::SyncSender<()>,
     ) -> Result<bool, SdkError> {
+        if let Err(error) = self.stage_networking_expiry() {
+            self.note_networking_expiry(Err(error));
+        }
         self.initialize_readers()?;
         self.start_connection_or_defer();
         self.start_courier();
@@ -418,7 +434,7 @@ impl AccountRuntime {
         let mut shutdown = self.shutdown.clone();
         tokio::select! {
             _ = shutdown.changed() => return Ok(false),
-            result = self.publish(&restore) => result?,
+            result = self.publish_queued_yielding(&restore) => result?,
         }
         Ok(true)
     }
@@ -554,6 +570,7 @@ impl AccountRuntime {
                 break;
             }
         }
+        command_park::cancel(&self.id, || SdkError::NetworkingPending)?;
         Ok(())
     }
 
