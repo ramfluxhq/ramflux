@@ -18,8 +18,6 @@ pub(super) struct Files {
     unflushed: usize,
     epoch: u64,
     next_name: u64,
-    sequence: u64,
-    begun: std::time::Instant,
 }
 impl Files {
     pub(super) fn open(
@@ -37,17 +35,7 @@ impl Files {
         crate::platform::fs::set_owner_only_dir(&dir)?;
         prune(&dir, &config)?;
         let (file, next_name) = create(&dir, &config.process, epoch)?;
-        Ok(Self {
-            dir,
-            config,
-            file,
-            bytes: 0,
-            unflushed: 0,
-            epoch,
-            next_name,
-            sequence: 0,
-            begun: std::time::Instant::now(),
-        })
+        Ok(Self { dir, config, file, bytes: 0, unflushed: 0, epoch, next_name })
     }
     pub(super) fn run(mut self, receiver: &Receiver<Command>) {
         while let Ok(command) = receiver.recv() {
@@ -67,7 +55,8 @@ impl Files {
         let _ = self.file.sync_data();
     }
     fn write(&mut self, mut value: Value, flush: bool) -> Result<(), SdkError> {
-        value["s"] = json!(self.sequence.saturating_add(u64::from(self.bytes == 0)));
+        // Reserve the largest sequence spelling before choosing the file; the actual line is smaller.
+        value["s"] = json!(u64::MAX);
         let mut line = serde_json::to_vec(&value)?;
         if line.len() >= 2048 {
             value["f"] = json!({});
@@ -86,15 +75,13 @@ impl Files {
             self.file = file;
             self.next_name = next;
             self.bytes = 0;
-            self.header()?;
-            value["s"] = json!(self.sequence);
-            line = serde_json::to_vec(&value)?;
-            line.push(b'\n');
         }
         if self.bytes == 0 {
             self.header()?;
         }
-        self.sequence = self.sequence.saturating_add(1);
+        value["s"] = json!(super::next_sequence());
+        line = serde_json::to_vec(&value)?;
+        line.push(b'\n');
         self.file.write_all(&line)?;
         self.bytes += line.len() as u64;
         self.unflushed += line.len();
@@ -106,10 +93,9 @@ impl Files {
     }
     fn header(&mut self) -> Result<(), SdkError> {
         let mut header = serde_json::to_vec(
-            &json!({"schema":"ramflux.diag.v1","t":now_ms(),"m":u64::try_from(self.begun.elapsed().as_millis()).unwrap_or(u64::MAX),"s":self.sequence,"lv":"I","p":self.config.process,"ly":"sdk","c":"sdk.diag","e":"proc.start","f":{"build_class":self.config.build_class,"level":self.config.level,"key_epoch":self.epoch}}),
+            &json!({"schema":"ramflux.diag.v1","t":now_ms(),"m":super::elapsed_ms(),"s":super::next_sequence(),"lv":"I","p":self.config.process,"ly":"sdk","c":"sdk.diag","e":"proc.start","f":{"build_class":self.config.build_class,"level":self.config.level,"key_epoch":self.epoch}}),
         )?;
         header.push(b'\n');
-        self.sequence = self.sequence.saturating_add(1);
         self.file.write_all(&header)?;
         self.bytes = header.len() as u64;
         Ok(())

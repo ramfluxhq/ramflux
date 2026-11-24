@@ -93,12 +93,20 @@ pub(crate) enum Command {
 pub(crate) struct Session {
     config: DiagnosticConfig,
     key: zeroize::Zeroizing<[u8; 32]>,
-    begun: Instant,
     dropped: AtomicU64,
     sender: mpsc::SyncSender<Command>,
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 static ACTIVE: LazyLock<Mutex<Weak<Session>>> = LazyLock::new(|| Mutex::new(Weak::new()));
+// These counters outlive individual root owners: closing and reopening is not a process restart.
+static PROCESS_START: LazyLock<Instant> = LazyLock::new(Instant::now);
+static PROCESS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+pub(super) fn next_sequence() -> u64 {
+    PROCESS_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+}
+pub(super) fn elapsed_ms() -> u64 {
+    u64::try_from(PROCESS_START.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 pub(crate) fn start(root: &Path, config: DiagnosticConfig) -> Result<Arc<Session>, SdkError> {
     config.validate(false)?;
@@ -121,7 +129,6 @@ pub(crate) fn start(root: &Path, config: DiagnosticConfig) -> Result<Arc<Session
     let session = Arc::new(Session {
         config,
         key,
-        begun: Instant::now(),
         dropped: AtomicU64::new(0),
         sender,
         writer: Mutex::new(Some(writer)),
@@ -181,7 +188,7 @@ impl Session {
         }
     }
     fn envelope(&self, level: &str, component: &str, event: &str) -> Value {
-        json!({"schema":"ramflux.diag.v1","t":now_ms(),"m":u64::try_from(self.begun.elapsed().as_millis()).unwrap_or(u64::MAX),"lv":level,"p":self.config.process,"ly":"sdk","c":component,"e":event})
+        json!({"schema":"ramflux.diag.v1","t":now_ms(),"m":elapsed_ms(),"lv":level,"p":self.config.process,"ly":"sdk","c":component,"e":event})
     }
     fn report_dropped(&self) {
         let count = self.dropped.swap(0, Ordering::Relaxed);
