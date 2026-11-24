@@ -428,6 +428,10 @@ async fn deliver_control(
     let Some(envelope) = envelope else {
         return Ok(Delivered::Unsealed);
     };
+    tracing::debug!(
+        remaining_ms = deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis(),
+        "call control prepared for submit"
+    );
     if route.is_some() {
         let route = federation::pinned_submit_route(writer, input_root, route).await?;
         federation::submit_until(context, envelope, route, context.call_deadline(), true).await?;

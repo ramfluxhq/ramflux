@@ -637,6 +637,7 @@ impl GatewaySessionEngine {
         // An already-due control must not hit the wire. The gateway would still answer,
         // and that reply would arrive after this call had stopped reading.
         if deadline <= tokio::time::Instant::now() {
+            tracing::debug!(?action, "call resolution deadline elapsed before submit");
             return Err(SdkError::GatewaySessionRejected("call_resolution_timeout".into()));
         }
         let deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(10));
