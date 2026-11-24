@@ -74,6 +74,11 @@ export DEMO_ADMIN_LOOPBACK_PORT RAMFLUX_ROUTER_ADMIN_PORT RAMFLUX_ROUTER_ADMIN_E
 RAMFLUX_DEVICE_PAIRING_ENABLED=${RAMFLUX_DEVICE_PAIRING_ENABLED:-0}
 case "$RAMFLUX_DEVICE_PAIRING_ENABLED" in 0|1) ;; *) fail 'RAMFLUX_DEVICE_PAIRING_ENABLED must be 0 or 1' ;; esac
 export RAMFLUX_DEVICE_PAIRING_ENABLED
+DEMO_USERNAME_DIRECTORY=${DEMO_USERNAME_DIRECTORY:-0}
+case "$DEMO_USERNAME_DIRECTORY" in 0|1) ;; *) fail 'DEMO_USERNAME_DIRECTORY must be 0 or 1' ;; esac
+DEMO_USERNAME_CENTER_PORT=${DEMO_USERNAME_CENTER_PORT-59484}
+DEMO_USERNAME_HOME_PORT=${DEMO_USERNAME_HOME_PORT-59485}
+export DEMO_USERNAME_DIRECTORY DEMO_USERNAME_CENTER_PORT DEMO_USERNAME_HOME_PORT
 case "$DEMO_HOST" in ''|*[!a-zA-Z0-9.-]*|-*) fail 'DEMO_HOST must be a DNS name or IPv4 address' ;; esac
 case "$DEMO_NODE_ID" in ''|*[!a-zA-Z0-9.-]*|-*) fail 'invalid DEMO_NODE_ID' ;; esac
 case "$DEMO_PROJECT" in [a-z0-9]*) ;; *) fail 'invalid DEMO_PROJECT' ;; esac
@@ -322,7 +327,7 @@ check_resources() {
         all_names=$(runtime volume ls -q)
         for name in $all_names; do
           case "$name" in
-            "${DEMO_PROJECT}_gateway-redb"|"${DEMO_PROJECT}_router-redb"|"${DEMO_PROJECT}_notify-redb"|"${DEMO_PROJECT}_federation-redb"|"${DEMO_PROJECT}_relay-redb"|"${DEMO_PROJECT}_signaling-redb"|"${DEMO_PROJECT}_retention-redb"|"${DEMO_PROJECT}_node-privacy") ids="$ids $name" ;;
+            "${DEMO_PROJECT}_gateway-redb"|"${DEMO_PROJECT}_router-redb"|"${DEMO_PROJECT}_notify-redb"|"${DEMO_PROJECT}_federation-redb"|"${DEMO_PROJECT}_relay-redb"|"${DEMO_PROJECT}_signaling-redb"|"${DEMO_PROJECT}_retention-redb"|"${DEMO_PROJECT}_node-privacy"|"${DEMO_PROJECT}_username-center"|"${DEMO_PROJECT}_username-witness"|"${DEMO_PROJECT}_username-socket"|"${DEMO_PROJECT}_username-home"|"${DEMO_PROJECT}_username-center-privacy"|"${DEMO_PROJECT}_username-witness-privacy") ids="$ids $name" ;;
           esac
         done
         ;;
@@ -451,12 +456,19 @@ compose() (
   clean_env python3 "$script_dir/compose-preflight.py" \
     --provider "$preflight_provider" "$@" || exit 1
   case "$operation" in
-    up-build) set -- "$@" up -d --build ;;
-    up-no-build) set -- "$@" up -d --no-build ;;
+    up-build|up-no-build)
+      if [ "$operation" = up-build ]; then set -- "$@" up -d --build; else set -- "$@" up -d --no-build; fi
+      if [ "$DEMO_USERNAME_DIRECTORY" = 1 ]; then
+        set -- "$@" ramflux-gateway ramflux-router ramflux-notify ramflux-federation \
+          ramflux-relay ramflux-signaling ramflux-retention ramflux-username-witness ramflux-username-center
+      fi
+      ;;
     health-ps|status) set -- "$@" ps ;;
     health-logs) set -- "$@" logs --tail 50 ;;
     logs) set -- "$@" logs --tail 200 ;;
     restart-router) set -- "$@" restart ramflux-router ;;
+    username-build) set -- "$@" build ramflux-federation ;;
+    username-init) set -- "$@" run --rm --no-deps ramflux-username-init ;;
     down)
       set -- "$@" down
       if [ "$flag" = --purge ]; then set -- "$@" --volumes; fi
@@ -471,6 +483,10 @@ compose() (
 )
 
 compose_up() {
+  if [ "$DEMO_USERNAME_DIRECTORY" = 1 ]; then
+    [ "$1" != build ] || compose username-build
+    compose username-init
+  fi
   case "$1" in
     build) compose up-build ;;
     no-build) compose up-no-build ;;
@@ -481,8 +497,10 @@ compose_up() {
 # Do not use compose ps -q SERVICE: podman-compose 1.3.0 does not filter it by service.
 # Return 1 for a service still starting; 2 for a terminal failure or invalid inspection.
 inspect_services() {
+  username_services=
+  [ "$DEMO_USERNAME_DIRECTORY" != 1 ] || username_services="username-witness username-center"
   health_problem=
-  for service in gateway router notify federation relay signaling retention; do
+  for service in gateway router notify federation relay signaling retention $username_services; do
     service_ids=$(runtime ps -aq \
       --filter "label=com.docker.compose.project=$DEMO_PROJECT" \
       --filter "label=com.docker.compose.service=ramflux-$service") || {
@@ -544,7 +562,11 @@ wait_for_services() {
   health_deadline=$(( $(date +%s) + DEMO_HEALTH_TIMEOUT_SECONDS ))
   while :; do
     if inspect_services; then
-      printf 'all seven demo services are healthy\n'
+      if [ "$DEMO_USERNAME_DIRECTORY" = 1 ]; then
+        printf 'all selected demo services are healthy\n'
+      else
+        printf 'all seven demo services are healthy\n'
+      fi
       return 0
     else
       health_result=$?
@@ -616,6 +638,15 @@ fi
 state_service=$(clean_env env DEMO_RESET_SERVICE="$reset_cli" python3 "$script_dir/demo-node-config.py" "$repo" "$state" state-plan "$command" "$container_engine")
 if [ "$command" = recover ]; then
   [ -f "$state/transaction.pending" ] || fail 'no unfinished demo transaction is available for recovery'
+  if [ -f "$state/username-pin.json" ]; then
+    # A restored snapshot may omit newly added roles. Stop the owned cohort first.
+    check_resources
+    recovery_containers=$(runtime ps -aq --filter "label=com.docker.compose.project=$DEMO_PROJECT")
+    printf 'stopping owned demo containers before directory recovery: %s\n' "$recovery_containers"
+    for recovery_container in $recovery_containers; do
+      runtime stop "$recovery_container"
+    done
+  fi
   DEMO_VERSION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover)
   export DEMO_VERSION
 elif [ "$command" = up ]; then
@@ -652,6 +683,7 @@ case "$command" in
       RAMFLUX_DEPLOY_DIR="$state" sh "$script_dir/provision-node.sh"
     # Service identities and certificate SPIFFE identities must use the same node id.
       python3 "$script_dir/demo-node-config.py" "$repo" "$state" set-node-id "$DEMO_NODE_ID"
+      python3 "$script_dir/demo-node-config.py" "$repo" "$state" username-material
     # The signing seed has its own mount, shared only by federation and retention.
       [ ! -e "$state/certs/federation/node-signing.key" ] || fail "obsolete layout: $state/certs/federation/node-signing.key; the node identity key lives only in certs/node-identity (no migration before v1; redeploy into a fresh data directory)"
       chmod 755 "$state/certs/node-identity"

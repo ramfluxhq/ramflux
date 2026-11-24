@@ -238,11 +238,10 @@ operations also let account restrictions cover profiles without names and releas
 restore unions independent directory/profile floors, retaining conflicts and delete
 restrictions. Historical records are never sufficient for a positive profile read.
 
-SDK/bus/CLI signing, status and exact resolution are wired. Contact-by-name and
-account-owned asynchronous delivery are under verification; the remaining real runs
-and final-head CI still gate release.
+SDK/bus/CLI signing, status, exact resolution and contact-by-name use the
+explicitly provisioned directory. The demo deployment below enables these paths.
 
-## CLI and account jobs under verification
+## CLI and account jobs
 
 `rf username set @name --account ACCOUNT` requests a fresh unsigned draft, then
 performs the master ceremony locally and submits only signed public records. The
@@ -292,3 +291,62 @@ or home and can carry only authentication, rate, capacity, unavailable or versio
 failures. They cannot enter a positive response builder or disclose name conflicts.
 Their encrypted writes use the same primary-application, witness-boot, incarnation,
 lease, head and channel fence as every authenticated response.
+
+## Single demo node
+
+The demo can host the home, centre writer and witness together. This is a beta
+configuration: separate Linux UIDs and volumes protect the writer and witness;
+they share the node failure domain and the existing online node signing identity.
+It does not protect against loss or compromise of the whole node.
+
+First bring up the normal demo, then provision its existing identity with
+`rf node custody-init` as described in [demo custody provisioning](../deploy/README.md#demo-custody-provisioning).
+Keep the custody fragment in the trusted operator env. Add:
+
+```sh
+DEMO_USERNAME_DIRECTORY=1
+# Optional; distinct from every other demo port:
+DEMO_USERNAME_CENTER_PORT=59484
+DEMO_USERNAME_HOME_PORT=59485
+```
+
+Run `sh deploy/scripts/demo-node.sh up /absolute/path/demo.env`. The node ID must
+be a lowercase DNS identity. The demo host must be reachable from its own
+containers as well as by clients; do not use a loopback address. Open the centre
+port for TCP/UDP and the home port for TCP. These are dedicated authenticated TLS
+listeners using the existing federation certificate and CA, separate from the
+public discovery reverse proxy. All three roles use trust generation 1.
+
+The tooling writes `username-pin.json` next to `identity.env`, mode 0644, with only
+`url`, `id`, `public_key`, `generation`. Transfer this public file over a trusted
+channel and provide its `username_directory` object to native clients when opening
+the SDK. For `rf`, set `RAMFLUX_USERNAME_CENTER_URL`, `_ID`, `_PUBLIC_KEY` and
+`RAMFLUX_USERNAME_TRUST_GENERATION` from those fields **before starting each daemon**
+and for signing commands. Clients never learn this pin from lookup replies.
+
+A separate short-lived provisioning container prepares the six owned volumes
+before the services start; it exits and is removed after checking their modes.
+The initial provisioning consumes `--username-home-initialize`,
+`--username-initialize` and `--username-rebuild` once. Normal restart opens existing
+stores. Missing/corrupt protected stores require explicit operator recovery; the
+demo never silently reconstructs them. Keep the six username volumes with the
+node, including across upgrades. Restore the same switch and ports for maintenance.
+Rollback requires the same directory selection and ports in its saved snapshot.
+Recovery also requires the saved selection and stops the owned container cohort
+before restoring configuration, so removed roles cannot continue serving.
+Enabling on an existing custody-provisioned demo is supported; changing an already
+selected directory identity/port or disabling it requires a fresh demo deployment.
+
+With two unlocked accounts on separate daemons, check the business flow:
+
+```sh
+python3 deploy/scripts/demo-username-check.py --pin /private/demo/username-pin.json \
+  --name @a_unique_demo_name \
+  --socket-a /private/a/bus.sock --account-a ACCOUNT_A --phrase-a /private/a/words \
+  --socket-b /private/b/bus.sock --account-b ACCOUNT_B --phrase-b /private/b/words
+```
+
+Both phrase files must be owner-only. The check commits A's name, verifies that B
+resolves A's exact root, and requires B's duplicate claim to fail with `username_taken`.
+The check uses existing accounts and never prints recovery words. Ordinary demos
+with the switch absent retain their existing service set and configuration.

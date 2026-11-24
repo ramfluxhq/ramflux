@@ -2,6 +2,7 @@
 """Validate, render, snapshot, and restore an isolated production demo project."""
 import hashlib
 import demo_node_state
+import demo_node_username
 import ipaddress
 import json
 import os
@@ -19,7 +20,8 @@ SERVICES = ("gateway", "router", "notify", "federation", "relay", "signaling", "
 SNAPSHOT_ROOT_FILES = (
     "compose.yml", "compose.voice.yml", "compose.admin.yml", "compose.router-admin.yml", "runtime.env",
     "owner.json", "owner.token", "demo-override.json", "deploy-tree.version",
-    "identity.env", ".env",
+    "identity.env", ".env", "username-pin.json", "username-start.sh", "username-init.sh",
+    "username-private.json",
 )
 PAIRING_KEY_PATH = "/etc/ramflux/pairing/node-signing.key"
 SNAPSHOT_DIRECTORIES = ("config", "certs", "secrets")
@@ -370,6 +372,8 @@ def snapshot_runtime_values(state, reference):
 
 def validate_snapshot_overlays(state, reference):
     values = snapshot_runtime_values(state, reference)
+    source, _, _ = read_snapshot_manifest(state, reference)
+    demo_node_username.validate_snapshot(source)
     voice_value = values.get("RAMFLUX_RELAY_VOICE_UDP_PORT", "")
     target_voice_port = voice_value.rsplit(":", 1)[-1] if voice_value else ""
     target_admin_port = values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT", "")
@@ -637,6 +641,7 @@ def render_files(repo, state, owner):
         router["environment"]["RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE"] = PAIRING_KEY_PATH
         router.setdefault("volumes", []).append(f"./certs/node-identity/node-signing.key:{PAIRING_KEY_PATH}:ro")
         router["group_add"] = ["${RAMFLUX_SECRET_GID:-0}"]
+    demo_node_username.render(state, override, label, record)
     atomic_json(state / "demo-override.json", override)
     refreshed = []
     for filename, source, enabled in (
@@ -694,6 +699,7 @@ def prepare(repo, state, command, validate_only=False):
         "DEMO_BIND_ADDR", "DEMO_VERSION",
     )}
     settings["DEMO_PUBLIC_ORIGIN"] = os.environ.get("DEMO_PUBLIC_ORIGIN", "")
+    settings.update(demo_node_username.settings())
     marker = state / "owner.json"
     pending_marker = state / "owner.json.pending"
     check_pending(state)
@@ -703,12 +709,15 @@ def prepare(repo, state, command, validate_only=False):
             sys.exit("demo settings changed: restore the original env file or use a fresh data directory/project")
         current = owner["settings"]
         if command in ("upgrade", "rollback"):
-            changed = [key for key in settings if key != "DEMO_VERSION" and settings[key] != current.get(key)]
+            changed = [key for key in settings.keys() | current.keys()
+                       if key != "DEMO_VERSION" and settings.get(key) != current.get(key)]
             if changed:
                 sys.exit("demo settings changed beyond DEMO_VERSION: restore every other original setting")
         if command == "upgrade":
             validate_maintenance_overlays(state)
             validate_selected_overlay_values(state)
+        elif command == "up" and demo_node_username.enable_only(owner["settings"], settings):
+            pass
         elif owner["settings"] != settings:
             sys.exit("demo settings changed: use upgrade for DEMO_VERSION only, or restore the original env file")
     else:
@@ -825,6 +834,7 @@ def router_admin_settings(state, command):
     reference = maintenance_snapshot(state, command)
     values = snapshot_runtime_values(state, reference)
     source, _, _ = read_snapshot_manifest(state, reference)
+    demo_node_username.validate_snapshot(source)
     token = json.loads((source / "owner.json").read_text())["token"]
     port = values.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488")
     admin = values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT", "")
@@ -876,6 +886,8 @@ def recover(state):
     previous = transaction.get("previous_snapshot")
     if not previous:
         sys.exit("failed initial up has no previous snapshot to restore")
+    source, _, _ = read_snapshot_manifest(state, previous)
+    demo_node_username.validate_snapshot(source)
     restore_snapshot(state, previous)
     durable_unlink(state / "owner.json.pending")
     owner = json.loads((state / "owner.json").read_text())
@@ -1086,6 +1098,8 @@ def main():
         elif action == "federation-bind":
             public_origin()
             print(federation_bind())
+        elif action == "username-material":
+            demo_node_username.material(state, atomic_bytes)
         elif action == "client-runtime":
             print(client_runtime(), end="")
         elif action == "check-pending":
