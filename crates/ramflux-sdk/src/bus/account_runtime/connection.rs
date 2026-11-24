@@ -165,7 +165,7 @@ impl AccountRuntime {
                 "account.status",
                 serde_json::json!({}),
             );
-            self.publish(&request).await?;
+            self.publish_yielding(&request).await?;
         }
         Ok(())
     }
@@ -544,7 +544,7 @@ impl AccountRuntime {
         );
         #[cfg(test)]
         let published = std::time::Instant::now();
-        self.publish(&request).await?;
+        self.publish_yielding(&request).await?;
         #[cfg(test)]
         if let Some(connection) =
             self.state.accounts.get(&self.id).and_then(|account| account.connection.as_ref())
@@ -685,7 +685,7 @@ impl AccountRuntime {
         );
         #[cfg(test)]
         let started = std::time::Instant::now();
-        self.publish(&request).await?;
+        self.publish_yielding(&request).await?;
         #[cfg(test)]
         if let Some(handle) =
             self.state.accounts.get(&self.id).and_then(|account| account.connection.as_ref())

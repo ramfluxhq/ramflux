@@ -9,6 +9,7 @@ use crate::bus::actor::AccountCommand;
 use crate::bus::connection_manager::{ReceiveEntry, ReceiveTurn};
 use crate::bus::contact_backpressure::Backpressure;
 use crate::client::routed::PreparedInbound;
+use crate::prelude::LocalBusFrame;
 use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 
@@ -78,6 +79,41 @@ impl AccountRuntime {
         // Boxed so a page or directory attempt can service this command without
         // an infinitely sized future.
         Box::pin(self.apply(command)).await.map(|_| ())
+    }
+
+    /// Drains the outbox, but returns to queued commands between commits.
+    ///
+    /// The caller resumes until the outbox is durable. A reply stays unsent
+    /// across that pause, so acknowledgement still follows durability.
+    pub(super) async fn publish_yielding(
+        &mut self,
+        request: &LocalBusFrame,
+    ) -> Result<(), SdkError> {
+        let mut yielded = false;
+        loop {
+            ramflux_storage::writer_budget::begin_attempt();
+            let result = {
+                let _yield = super::super::events::OutboxYield::enter();
+                self.publish(request).await
+            };
+            match result {
+                Err(error) if is_writer_pause(&error) => {
+                    yielded = true;
+                    self.service_waiting_commands().await?;
+                }
+                Ok(()) if yielded => return self.acknowledge_yielded_decision(request),
+                other => return other,
+            }
+        }
+    }
+
+    /// A nested drain can finish this command's rows under another method.
+    /// The decision acknowledgement still belongs to this request.
+    fn acknowledge_yielded_decision(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
+        let Some(account) = self.state.accounts.get(&self.id) else {
+            return Ok(());
+        };
+        super::super::events::acknowledge_decision(account.client.account_db()?, request)
     }
 
     /// Applies each command that was queued before this call. A command that

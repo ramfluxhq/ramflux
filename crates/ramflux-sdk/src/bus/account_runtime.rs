@@ -267,7 +267,7 @@ impl AccountRuntime {
             "sync.run",
             serde_json::json!({}),
         );
-        self.publish(&request).await?;
+        self.publish_yielding(&request).await?;
         self.networking_expiry_pending = None;
         Ok(true)
     }
@@ -654,10 +654,10 @@ impl AccountRuntime {
             "sync.run",
             serde_json::json!({}),
         );
-        self.publish(&request).await?;
+        self.publish_yielding(&request).await?;
         // Publish message receipt before spending any transfer budget on its deferred objects.
         let fetched = self.start_next_fetch()?;
-        self.publish(&request).await?;
+        self.publish_yielding(&request).await?;
         Ok(activity || fetched)
     }
 

@@ -123,7 +123,7 @@ impl AccountRuntime {
                             &self.id,
                         )?)
                     });
-                    let result = match self.publish(request).await {
+                    let result = match self.publish_yielding(request).await {
                         Ok(()) => result,
                         Err(error) => Err(error),
                     };
@@ -357,11 +357,11 @@ impl AccountRuntime {
         (dispatched, stopping, cancelled, preempted)
     }
 
-    async fn publish_after_cancel(&self, request: &LocalBusFrame) {
+    async fn publish_after_cancel(&mut self, request: &LocalBusFrame) {
         if super::super::generated_typing::is_transient(&request.method, &request.body) {
             return;
         }
-        if let Err(error) = self.publish(request).await {
+        if let Err(error) = self.publish_yielding(request).await {
             tracing::warn!(account_id = %self.id, %error,
                 "cancelled request publication deferred; account remains open");
         }
@@ -394,7 +394,7 @@ impl AccountRuntime {
         {
             connection.wake_couriers();
         }
-        let result = match self.publish(&command.request).await {
+        let result = match self.publish_yielding(&command.request).await {
             Ok(()) => result,
             // The progress row is already committed. A later outbox wake can fail
             // with the writer pause, which the bus reports as ValidationFailed.
