@@ -17,6 +17,10 @@ use std::{
 
 const PROFILE_PATH: &str = "/v1/usernames/profile";
 
+fn trace_rpc_failure(hop: &'static str, peer: &str) {
+    tracing::debug!(hop, peer_address = peer, "username resolve RPC failed");
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FetchRequest {
@@ -122,10 +126,13 @@ impl HomeService {
         name: &str,
         nonce: &str,
     ) -> Result<w::NativeUsernameReply> {
-        let response = self.client.exchange_blocking(
-            reporter,
-            &directory::DirectoryRequest::Resolve { name: name.into(), nonce: nonce.into() },
-        )?;
+        let response = self
+            .client
+            .exchange_blocking(
+                reporter,
+                &directory::DirectoryRequest::Resolve { name: name.into(), nonce: nonce.into() },
+            )
+            .inspect_err(|_| trace_rpc_failure("centre_exchange", &self.client.pin.url))?;
         let directory::AuthorityResponse::Resolved {
             resolve,
             binding,
@@ -152,7 +159,8 @@ impl HomeService {
             reach: reach.clone(),
         };
         let fetched: FetchReply =
-            rpc::home(&self.client.node, &service, &self.private, PROFILE_PATH, &request)?;
+            rpc::home(&self.client.node, &service, &self.private, PROFILE_PATH, &request)
+                .inspect_err(|_| trace_rpc_failure("home_profile_fetch", &service.body.origin))?;
         let FetchReply::Profile { view, history, nonce: echoed, reach: fetched_reach } = fetched
         else {
             let FetchReply::Refused { failure } = fetched else {
