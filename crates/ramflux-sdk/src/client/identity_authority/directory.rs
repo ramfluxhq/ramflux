@@ -19,21 +19,24 @@ impl RamfluxClient {
                 crate::custody::network_now()?,
             )?;
             self.check_directory_ownership(manifest)?;
+            let keep_devices = self.keeps_existing_devices(manifest)?;
             self.account_db()?
                 .write_transaction(|| self.record_pinned_group_key_changes(manifest))?;
             self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
                 for device in &manifest.devices {
                     self.rotate_verified_group_pins(manifest, device)?;
                 }
-                self.record_contact_directory_change(manifest)?;
-                self.account_db()?.persist_actor_state(
-                    &format!("identity/manifest-root/{}", manifest.principal_commitment),
-                    manifest,
-                )?;
-                self.account_db()?.persist_actor_state(
-                    &format!("identity/manifest/{}", manifest.principal_id),
-                    manifest,
-                )?;
+                if !keep_devices {
+                    self.record_contact_directory_change(manifest)?;
+                    self.account_db()?.persist_actor_state(
+                        &format!("identity/manifest-root/{}", manifest.principal_commitment),
+                        manifest,
+                    )?;
+                    self.account_db()?.persist_actor_state(
+                        &format!("identity/manifest/{}", manifest.principal_id),
+                        manifest,
+                    )?;
+                }
                 Ok(())
             })?;
             return Ok(());
@@ -88,6 +91,23 @@ impl RamfluxClient {
         })?;
         self.finish_pair_retirement()
     }
+
+    /// An authority observation with no devices proves the head. It must not
+    /// erase a directory that already names the devices a call can address.
+    fn keeps_existing_devices(
+        &self,
+        manifest: &SdkDeviceManifestResponse,
+    ) -> Result<bool, SdkError> {
+        if !manifest.devices.is_empty() {
+            return Ok(false);
+        }
+        let stored = self.account_db()?.load_actor_state::<SdkDeviceManifestResponse>(&format!(
+            "identity/manifest-root/{}",
+            manifest.principal_commitment
+        ))?;
+        Ok(stored.is_some_and(|stored| !stored.devices.is_empty()))
+    }
+
     pub(crate) fn record_authority_rejection(
         &self,
         record: &SignedDeviceSetRecord,

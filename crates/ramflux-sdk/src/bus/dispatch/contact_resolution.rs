@@ -182,7 +182,16 @@ pub(super) async fn add(
     account.apply_session_metadata(engine);
     let contact = result?;
     if let (Some(home), Some(principal)) = (verified_home, contact["principal_id"].as_str()) {
-        account.client.pin_contact_home(principal, &home)?;
+        if let Some(card) = card.as_ref() {
+            account.client.pin_verified_card_home(
+                principal,
+                &home,
+                &card.node.url,
+                &card.node.key_fingerprint,
+            )?;
+        } else {
+            account.client.pin_contact_home(principal, &home)?;
+        }
     }
     #[cfg(test)]
     if let Err(error) = Box::pin(crate::client::contact_requests::flush(account)).await {
@@ -219,17 +228,39 @@ async fn pin_accepted_card(
     {
         return Ok(None);
     }
-    if old.get("home_node_id").and_then(Value::as_str).is_some_and(|home| !home.is_empty())
-        || account.client.born_v3_account.is_none()
-    {
+    if account.client.born_v3_account.is_none() {
+        return Err(ContactReason::AlreadyContact.into());
+    }
+    // Refuse before any pin. A parsed card can still arrive without 64 hex digits.
+    let fingerprint =
+        crate::client::recipient_home::require_card_fingerprint(&card.node.key_fingerprint)?;
+    let recorded_home = old
+        .get("home_node_id")
+        .and_then(Value::as_str)
+        .filter(|home| !home.is_empty())
+        .map(str::to_owned);
+    let recorded_fingerprint = old
+        .get("node")
+        .and_then(|node| node.get("key_fingerprint"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    if recorded_home.is_some() && recorded_fingerprint.is_some() {
         return Err(ContactReason::AlreadyContact.into());
     }
     let home = account_home(state, account_id)?;
     let own = local_bus_account(state, account_id)?.gateway_config.clone();
     let root = state.config.data_root.clone();
-    card_gateway(card, &own, &root, &home).await?;
+    let verified = card_gateway(card, &own, &root, &home).await?;
+    if recorded_home.as_deref().is_some_and(|recorded| recorded != verified.node_id) {
+        return Err(ContactReason::RootConflict.into());
+    }
     let account = local_bus_account_mut(state, account_id)?;
-    account.client.pin_contact_home(selector, &home.node_id)?;
+    account.client.pin_verified_card_home(
+        selector,
+        &verified.node_id,
+        &card.node.url,
+        &fingerprint,
+    )?;
     let contact = account.client.contact_entry(selector)?;
     Ok(Some(local_bus_ok(contact_response(account, &contact, None)?)))
 }

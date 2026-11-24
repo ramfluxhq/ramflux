@@ -170,8 +170,9 @@ impl RamfluxClient {
 
     /// Opens an account with its account code (or, for a plain client, its data secret).
     ///
-    /// A correct code on native account data also (re)writes the device wrap, so an account
-    /// opened after an explicit lock opens silently again afterwards.
+    /// A correct code on native account data rewrites the device wrap when app lock is off,
+    /// so an account opened after an explicit lock opens silently again afterwards.
+    /// App lock on leaves that wrap absent.
     ///
     /// # Errors
     /// Returns an error for a wrong code, a refused attempt, or storage and custody failures.
@@ -214,7 +215,7 @@ impl RamfluxClient {
             )?;
             generated
         };
-        if born.is_some() {
+        if born.is_some() && !account_index.app_lock_policy(local_account_id)?.enabled {
             device_unlock::store_device_wrap(account_index, local_account_id, &vault_secret, &key)?;
         }
         self.open_unlocked_account(local_account_id, &key, born)

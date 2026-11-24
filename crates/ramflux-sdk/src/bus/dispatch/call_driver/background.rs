@@ -23,6 +23,8 @@ use ramflux_protocol::{
 /// Typed refusal from `GatewaySessionEngine` when the established session carries no call
 /// resolution generation (the node has no call authority configured).
 const CALL_RESOLUTION_NOT_NEGOTIATED: &str = "call_resolution_not_negotiated";
+/// Gateway NACK when the attached call intent does not verify. The envelope was not posted.
+const CALL_INTENT_REJECTED: &str = "call intent rejected";
 
 #[derive(Clone)]
 struct Plan {
@@ -115,7 +117,7 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
             }
         }
         // Completion of the delivery attempt, including failure, always precedes release.
-        let sent = send_controls(&context, &writer, &id).await;
+        let sent = Box::pin(send_controls(&context, &writer, &id)).await;
         release(&context, &writer, &id).await?;
         if let Err(error) = sent {
             tracing::debug!(%error,"call control delivery deferred");
@@ -325,7 +327,7 @@ async fn send_controls(
     if plan.original.retry_at > now_unix_timestamp() {
         return Ok(false);
     }
-    let result = async {
+    let result = Box::pin(async {
         if plan.original.pending.is_empty() {
             return Ok((false, None, Vec::new()));
         }
@@ -344,56 +346,22 @@ async fn send_controls(
         let Some(controls) = controls else { return Ok((false, None, Vec::new())) };
         let mut acknowledged = None;
         let mut resolutions = Vec::new();
-        for mut control in controls {
-            let request = std::mem::replace(
-                &mut control.request,
-                SendMaterialRequest { root: None, prekey: None },
-            );
-            let commitment = input.root.clone();
-            let material = federation::material_for_route(
-                context,
-                &plan.config,
-                request,
-                crate::bus::connection_manager::CallClass::Priority,
-                federation::HomeLookup {
-                    writer,
-                    commitment: &commitment,
-                    route: control.target.federation.as_ref(),
-                },
-            )
-            .await?;
-            let route = control.target.federation.clone();
+        for control in controls {
             let call_ref = control.extras.call_ref.clone();
-            let extras = std::mem::replace(
-                &mut control.extras,
-                crate::gateway::engine::CallSubmitExtras::from_intent(None),
-            );
-            let deadline = control.deadline;
-            let envelope =
-                writer.apply(move |account| seal_control(account, control, material)).await?;
-            let Some(envelope) = envelope else { return Ok((false, None, Vec::new())) };
-            if route.is_none() {
-                let resolved = federation::submit_local_call(
-                    context,
-                    envelope,
-                    context.call_deadline().min(deadline),
-                    extras,
-                )
-                .await?;
-                resolutions.push(resolved);
-            } else {
-                // The destination federation forward admits the envelope only.
-                let root = input.root.clone();
-                let route = federation::pinned_submit_route(writer, &root, route).await?;
-                federation::submit_until(context, envelope, route, context.call_deadline(), true)
-                    .await?;
+            let delivered =
+                Box::pin(deliver_control(context, writer, &input.root, control)).await?;
+            let Delivered::Posted(resolved) = delivered else {
+                return Ok((false, None, Vec::new()));
+            };
+            if let Some(resolved) = resolved {
+                resolutions.push(*resolved);
             }
             if acknowledged.is_none() {
                 acknowledged = call_ref;
             }
         }
         Ok((true, acknowledged, resolutions))
-    }
+    })
     .await;
     let outcome = ControlOutcome {
         #[cfg(feature = "test-support")]
@@ -411,13 +379,84 @@ async fn send_controls(
             .map(|(_, _, resolutions)| resolutions.clone())
             .unwrap_or_default(),
     };
-    writer.apply(move |account| note_control_result(account, plan, outcome)).await?;
+    writer.apply(move |account| note_control_result(account, plan, &outcome)).await?;
     result.map(|(sent, _, _)| sent)
 }
+
+enum Delivered {
+    Unsealed,
+    Posted(Option<Box<crate::gateway::call_resolution::CallSubmitOutcome>>),
+}
+
+async fn deliver_control(
+    context: &SessionContext,
+    writer: &Writer,
+    input_root: &str,
+    mut control: Control,
+) -> Result<Delivered, SdkError> {
+    let request =
+        std::mem::replace(&mut control.request, SendMaterialRequest { root: None, prekey: None });
+    let material = federation::material_for_route(
+        context,
+        &control.plan.config,
+        request,
+        crate::bus::connection_manager::CallClass::Priority,
+        federation::HomeLookup {
+            writer,
+            commitment: input_root,
+            route: control.target.federation.as_ref(),
+        },
+    )
+    .await?;
+    let route = control.target.federation.clone();
+    let extras = std::mem::replace(
+        &mut control.extras,
+        crate::gateway::engine::CallSubmitExtras::from_intent(None),
+    );
+    let deadline = control.deadline;
+    let envelope = writer.apply(move |account| seal_control(account, control, material)).await?;
+    let Some(envelope) = envelope else {
+        return Ok(Delivered::Unsealed);
+    };
+    if route.is_some() {
+        let route = federation::pinned_submit_route(writer, input_root, route).await?;
+        federation::submit_until(context, envelope, route, context.call_deadline(), true).await?;
+        return Ok(Delivered::Posted(None));
+    }
+    submit_home_control(context, envelope, deadline, extras).await
+}
+
+/// One home submit. A rejected intent is retried once without it: that NACK is before post.
+async fn submit_home_control(
+    context: &SessionContext,
+    envelope: ramflux_protocol::Envelope,
+    deadline: tokio::time::Instant,
+    extras: crate::gateway::engine::CallSubmitExtras,
+) -> Result<Delivered, SdkError> {
+    let bare = extras.call_intent.is_some().then(|| {
+        let mut bare = extras.clone();
+        bare.call_intent = None;
+        bare
+    });
+    let retry = bare.as_ref().map(|_| envelope.clone());
+    let until = context.call_deadline().min(deadline);
+    match federation::submit_local_call(context, envelope, until, extras).await {
+        Ok(resolved) => Ok(Delivered::Posted(Some(Box::new(resolved)))),
+        Err(SdkError::GatewaySessionRejected(reason)) if reason == CALL_INTENT_REJECTED => {
+            let (Some(bare), Some(envelope)) = (bare, retry) else {
+                return Err(SdkError::GatewaySessionRejected(reason));
+            };
+            let resolved = federation::submit_local_call(context, envelope, until, bare).await?;
+            Ok(Delivered::Posted(Some(Box::new(resolved))))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn note_control_result(
     account: &mut LocalBusAccountState,
     plan: Plan,
-    outcome: ControlOutcome,
+    outcome: &ControlOutcome,
 ) -> Result<(), SdkError> {
     if !current(account, &plan)? {
         return Ok(());
@@ -440,65 +479,17 @@ fn note_control_result(
     }
     #[cfg(feature = "test-support")]
     {
-        next.last_control_error = outcome.error;
+        next.last_control_error.clone_from(&outcome.error);
     }
-    if outcome.success {
+    if outcome.success && outcome.sent {
         next.pending.clear();
         next.retry_attempts = 0;
         next.retry_at = 0;
-        if outcome.sent && outcome.acknowledged.is_some() {
-            let peers = if next.local == next.caller {
-                next.invited.clone()
-            } else {
-                vec![next.caller.clone()]
-            };
-            let mut bindings = Vec::new();
-            for peer in peers {
-                if let Some(start) =
-                    call::intent::start_for_control(account, &next, &peer.device_id)?
-                {
-                    let origin_identity = account.client.call_device_identity(&next.caller)?;
-                    let destination = if next.local == next.caller { &peer } else { &next.local };
-                    let target_identity = account.client.call_device_identity(destination)?;
-                    if start.body.sender_device == origin_identity.storage_key()
-                        && start.body.target_device == target_identity.storage_key()
-                    {
-                        bindings.push((peer, ramflux_protocol::call_intent_digest(&start)?, start));
-                    }
-                }
-            }
-            for resolved in outcome.resolutions {
-                let Some((peer, _, start)) = bindings.iter().find(|(_, digest, start)| {
-                    resolved.context.start_digest == *digest
-                        && resolved.context.call_ref == start.body.call_ref
-                }) else {
-                    continue;
-                };
-                if account.connection.as_ref().is_some_and(|handle| {
-                    let snapshot = handle.snapshot();
-                    handle.metadata().is_some_and(|metadata| {
-                        snapshot.state == crate::bus::connection_manager::NetworkingState::Live
-                            && metadata.generation == snapshot.generation
-                            && metadata.session.session_id == resolved.context.session_id
-                            && metadata.session.call_session_generation.as_ref()
-                                == Some(&resolved.context.session_generation)
-                    })
-                }) && expected_actions.contains(&resolved.action)
-                    && !next.expired(now)
-                    && next.row.state != "ended"
-                {
-                    let allowed = resolved.permits_media();
-                    next.apply_media_for(
-                        peer.clone(),
-                        start,
-                        allowed,
-                        allowed
-                            && resolved.decision.state
-                                == ramflux_protocol::CallResolutionState::Answered,
-                    )?;
-                }
-            }
+        if outcome.acknowledged.is_some() {
+            apply_sent_resolutions(account, &mut next, &expected_actions, outcome, now)?;
         }
+    } else if outcome.success {
+        // The control was not posted. Keep it pending so a hangup is retried.
     } else if outcome.not_negotiated && next.row.state != "ended" {
         // Retrying cannot help within a ring window; report the real cause, not a timeout.
         tracing::warn!("call failed: the home node did not negotiate call resolution");
@@ -513,6 +504,110 @@ fn note_control_result(
     next.queue_requested_answer(now)?;
     install(account, next)
 }
+
+struct BoundStart {
+    peer: ramflux_protocol::CallEndpoint,
+    digest: String,
+    start: ramflux_protocol::SignedCallIntentV1,
+}
+
+fn apply_sent_resolutions(
+    account: &LocalBusAccountState,
+    next: &mut LiveCall,
+    expected_actions: &std::collections::BTreeSet<
+        crate::gateway::call_resolution::CallOperationAction,
+    >,
+    outcome: &ControlOutcome,
+    now: i64,
+) -> Result<(), SdkError> {
+    let peers =
+        if next.local == next.caller { next.invited.clone() } else { vec![next.caller.clone()] };
+    let mut bindings = Vec::new();
+    for peer in peers {
+        let Some(start) = call::intent::start_for_control(account, next, &peer.device_id)? else {
+            continue;
+        };
+        let origin_identity = account.client.call_device_identity(&next.caller)?;
+        let destination = if next.local == next.caller { &peer } else { &next.local };
+        let target_identity = account.client.call_device_identity(destination)?;
+        if start.body.sender_device == origin_identity.storage_key()
+            && start.body.target_device == target_identity.storage_key()
+        {
+            bindings.push(BoundStart {
+                peer,
+                digest: ramflux_protocol::call_intent_digest(&start)?,
+                start,
+            });
+        }
+    }
+    for resolved in &outcome.resolutions {
+        apply_one_resolution(account, next, expected_actions, resolved, &bindings, now)?;
+    }
+    Ok(())
+}
+
+fn apply_one_resolution(
+    account: &LocalBusAccountState,
+    next: &mut LiveCall,
+    expected_actions: &std::collections::BTreeSet<
+        crate::gateway::call_resolution::CallOperationAction,
+    >,
+    resolved: &crate::gateway::call_resolution::CallSubmitOutcome,
+    bindings: &[BoundStart],
+    now: i64,
+) -> Result<(), SdkError> {
+    let Some(bound) = bindings.iter().find(|bound| {
+        resolved.context.start_digest == bound.digest
+            && resolved.context.call_ref == bound.start.body.call_ref
+    }) else {
+        return Ok(());
+    };
+    if !live_resolution(account, resolved)
+        || !expected_actions.contains(&resolved.action)
+        || next.expired(now)
+        || next.row.state == "ended"
+    {
+        return Ok(());
+    }
+    if matches!(
+        resolved.decision.state,
+        ramflux_protocol::CallResolutionState::Ended
+            | ramflux_protocol::CallResolutionState::Cancelled
+    ) {
+        let reason = if next.row.answered_at.is_some() {
+            "completed"
+        } else if next.local == next.caller {
+            "cancelled"
+        } else {
+            "missed"
+        };
+        return next.finish(reason, now);
+    }
+    let allowed = resolved.permits_media();
+    next.apply_media_for(
+        bound.peer.clone(),
+        &bound.start,
+        allowed,
+        allowed && resolved.decision.state == ramflux_protocol::CallResolutionState::Answered,
+    )
+}
+
+fn live_resolution(
+    account: &LocalBusAccountState,
+    resolved: &crate::gateway::call_resolution::CallSubmitOutcome,
+) -> bool {
+    account.connection.as_ref().is_some_and(|handle| {
+        let snapshot = handle.snapshot();
+        handle.metadata().is_some_and(|metadata| {
+            snapshot.state == crate::bus::connection_manager::NetworkingState::Live
+                && metadata.generation == snapshot.generation
+                && metadata.session.session_id == resolved.context.session_id
+                && metadata.session.call_session_generation.as_ref()
+                    == Some(&resolved.context.session_generation)
+        })
+    })
+}
+
 fn prepare_controls(
     account: &LocalBusAccountState,
     plan: &Plan,
@@ -530,88 +625,153 @@ fn prepare_controls(
         .iter()
         .map(|device| (device.device_id.clone(), device.device_epoch))
         .collect::<Vec<_>>();
-    let targets = {
-        account.client.persist_fetched_identity_directory(&manifest)?;
-        task_transport::direct_targets_from_manifest(account, &plan.thread, manifest)
-    }?;
+    let targets = addressable_targets(account, plan, manifest)?;
     let now = u64::try_from(now_unix_timestamp()).unwrap_or(0);
     let mut controls = Vec::new();
-    for mut control in plan.original.pending.clone() {
-        let recipient = if control.sender == control.caller {
-            &control.callee.device_id
-        } else {
-            &control.caller.device_id
-        };
-        let target = targets
-            .iter()
-            .find(|target| target.device == *recipient)
-            .ok_or_else(|| invalid("call target no longer active"))?
-            .clone();
-        let prepared = if target.federation.is_none()
-            && let Some((_, epoch)) = device_epochs.iter().find(|(id, _)| id == &target.device)
-        {
-            call::intent::bind_call_intent(
-                account,
-                &control,
-                &call::intent::IntentTarget {
-                    device_id: target.device.clone(),
-                    qualified_device: target.identity.storage_key().to_owned(),
-                    epoch: *epoch,
-                    delivery_id: target.delivery.clone(),
-                },
-                now,
-            )?
-        } else {
-            None
-        };
-        if let Some(prepared) = prepared.as_ref() {
-            control.call_ref = Some(prepared.signed.body.call_ref.clone());
-            if matches!(control.body, ramflux_protocol::CallAction::Invite { .. }) {
-                control.call_start = Some(prepared.signed.clone());
-            }
-        }
-        let stored_start =
-            call::intent::start_for_control(account, &plan.original, &target.device)?;
-        let bound_start = control.call_start.as_ref().or(stored_start.as_ref());
-        let start_digest = bound_start.map(ramflux_protocol::call_intent_digest).transpose()?;
-        let mut deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        if !plan.original.gateway_answered
-            && let Some(start) = bound_start
-        {
-            deadline = deadline.min(
-                tokio::time::Instant::now()
-                    + std::time::Duration::from_secs(start.body.expires_at.saturating_sub(now)),
-            );
-        }
-
-        // Fan-out controls bind their actual recipient, including a losing sibling.
-        control.call_ref = bound_start.map(|start| start.body.call_ref.clone());
-        let signed = sign_control(account, &mut control, prepared, start_digest)?;
-        let message = GatewayDirectMessage {
-            conversation_id: plan.original.row.conversation_id.clone(),
-            message_id: signed.id.clone(),
-            envelope_id: signed.id,
-            source_principal_id: plan.config.config().principal_id.clone(),
-            sender_id: plan.config.config().device_id.clone(),
-            recipient_device_id: Some(target.device.clone()),
-            recipient_principal_commitment: Some(target.identity.root_commitment().into()),
-            target_delivery_id: target.delivery.clone(),
-            encrypted_body: Vec::new(),
-            created_at: signed.intent_created_at.unwrap_or_else(now_unix_timestamp),
-            ttl: crate::offline_retention::CALL_SIGNAL_TTL_SECS,
-        };
-        let request = account.client.routed_send_material_request(&plan.config, &message)?;
-        controls.push(Control {
-            plan: plan.clone(),
-            target,
-            message,
-            bytes: signed.bytes,
-            request,
-            extras: signed.extras,
-            deadline,
-        });
+    for control in plan.original.pending.clone() {
+        controls.push(bind_pending_control(account, plan, &targets, &device_epochs, control, now)?);
     }
     Ok(Some(controls))
+}
+
+fn addressable_targets(
+    account: &LocalBusAccountState,
+    plan: &Plan,
+    manifest: crate::SdkDeviceManifestResponse,
+) -> Result<Vec<Target>, SdkError> {
+    account.client.persist_fetched_identity_directory(&manifest)?;
+    match task_transport::direct_targets_from_manifest(account, &plan.thread, manifest) {
+        Ok(targets) => Ok(targets),
+        Err(SdkError::TaskRefused { message, .. }) if message == "task peer root changed" => {
+            Ok(Vec::new())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn bind_pending_control(
+    account: &LocalBusAccountState,
+    plan: &Plan,
+    targets: &[Target],
+    device_epochs: &[(String, u64)],
+    mut control: ramflux_protocol::CallControl,
+    now: u64,
+) -> Result<Control, SdkError> {
+    let (target, pinned_epoch) = recipient_target(account, plan, targets, &control)?;
+    let epoch = pinned_epoch.or_else(|| {
+        device_epochs.iter().find(|(id, _)| id == &target.device).map(|(_, epoch)| *epoch)
+    });
+    let prepared = if target.federation.is_none()
+        && let Some(epoch) = epoch
+    {
+        call::intent::bind_call_intent(
+            account,
+            &control,
+            &call::intent::IntentTarget {
+                device_id: target.device.clone(),
+                qualified_device: target.identity.storage_key().to_owned(),
+                epoch,
+                delivery_id: target.delivery.clone(),
+            },
+            now,
+        )?
+    } else {
+        None
+    };
+    if let Some(prepared) = prepared.as_ref() {
+        control.call_ref = Some(prepared.signed.body.call_ref.clone());
+        if matches!(control.body, ramflux_protocol::CallAction::Invite { .. }) {
+            control.call_start = Some(prepared.signed.clone());
+        }
+    }
+    let stored_start = call::intent::start_for_control(account, &plan.original, &target.device)?;
+    let bound_start = control.call_start.as_ref().or(stored_start.as_ref());
+    let start_digest = bound_start.map(ramflux_protocol::call_intent_digest).transpose()?;
+    let mut deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    if !plan.original.gateway_answered
+        && let Some(start) = bound_start
+    {
+        deadline = deadline.min(
+            tokio::time::Instant::now()
+                + std::time::Duration::from_secs(start.body.expires_at.saturating_sub(now)),
+        );
+    }
+    // Fan-out controls bind their actual recipient, including a losing sibling.
+    control.call_ref = bound_start.map(|start| start.body.call_ref.clone());
+    let signed = sign_control(account, &mut control, prepared, start_digest)?;
+    let message = GatewayDirectMessage {
+        conversation_id: plan.original.row.conversation_id.clone(),
+        message_id: signed.id.clone(),
+        envelope_id: signed.id,
+        source_principal_id: plan.config.config().principal_id.clone(),
+        sender_id: plan.config.config().device_id.clone(),
+        recipient_device_id: Some(target.device.clone()),
+        recipient_principal_commitment: Some(target.identity.root_commitment().into()),
+        target_delivery_id: target.delivery.clone(),
+        encrypted_body: Vec::new(),
+        created_at: signed.intent_created_at.unwrap_or_else(now_unix_timestamp),
+        ttl: crate::offline_retention::CALL_SIGNAL_TTL_SECS,
+    };
+    let request = account.client.routed_send_material_request(&plan.config, &message)?;
+    Ok(Control {
+        plan: plan.clone(),
+        target,
+        message,
+        bytes: signed.bytes,
+        request,
+        extras: signed.extras,
+        deadline,
+    })
+}
+
+fn recipient_target(
+    account: &LocalBusAccountState,
+    plan: &Plan,
+    targets: &[Target],
+    control: &ramflux_protocol::CallControl,
+) -> Result<(Target, Option<u64>), SdkError> {
+    let endpoint = if control.sender == control.caller { &control.callee } else { &control.caller };
+    if let Some(target) = targets.iter().find(|target| target.device == endpoint.device_id) {
+        return Ok((target.clone(), None));
+    }
+    let federation = task_transport::direct_target_input(account, &plan.thread)
+        .ok()
+        .and_then(|input| input.federation);
+    pinned_device(account, endpoint, federation)?
+        .ok_or_else(|| invalid("call target no longer active"))
+}
+
+fn pinned_device(
+    account: &LocalBusAccountState,
+    endpoint: &ramflux_protocol::CallEndpoint,
+    federation: Option<crate::bus::protocol::LocalBusFederationRoute>,
+) -> Result<Option<(Target, Option<u64>)>, SdkError> {
+    let root = crate::identity_root_public_key_commitment(&endpoint.root_public_key)?;
+    let stored =
+        account.client.account_db()?.load_actor_state::<crate::SdkDeviceManifestResponse>(
+            &format!("identity/manifest-root/{root}"),
+        )?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let Some(device) =
+        stored.devices.into_iter().find(|device| device.device_id == endpoint.device_id)
+    else {
+        return Ok(None);
+    };
+    let epoch = device.device_epoch;
+    let identity =
+        account.client.device_identity_for_root(&device.principal_commitment, &device.device_id)?;
+    Ok(Some((
+        Target {
+            device: device.device_id,
+            identity,
+            delivery: device.target_delivery_id,
+            federation,
+            own: false,
+        },
+        Some(epoch),
+    )))
 }
 fn sign_control(
     account: &LocalBusAccountState,

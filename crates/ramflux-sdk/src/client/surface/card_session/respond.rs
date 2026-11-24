@@ -14,6 +14,7 @@ pub(super) struct View<'a> {
     pub host_request: Option<Value>,
     pub submit: Option<Value>,
     pub draft_conflict: bool,
+    pub action_outcome: Option<Value>,
 }
 
 pub(super) fn view(view: View<'_>) -> Value {
@@ -45,6 +46,9 @@ pub(super) fn view(view: View<'_>) -> Value {
     if view.draft_conflict {
         object.insert("draft_conflict".into(), json!(true));
     }
+    if let Some(outcome) = view.action_outcome {
+        object.insert("action_outcome".into(), outcome);
+    }
     body
 }
 
@@ -59,6 +63,7 @@ pub(super) fn refused(reason: &str, fallback: &str) -> Value {
         host_request: None,
         submit: None,
         draft_conflict: false,
+        action_outcome: None,
     })
 }
 
@@ -70,6 +75,7 @@ pub(super) struct Shown<'a> {
     pub host_request: Option<Value>,
     pub submit: Option<Value>,
     pub draft_conflict: bool,
+    pub action_outcome: Option<Value>,
 }
 
 pub(super) fn shown(fields: Shown<'_>) -> Value {
@@ -83,6 +89,7 @@ pub(super) fn shown(fields: Shown<'_>) -> Value {
         host_request: fields.host_request,
         submit: fields.submit,
         draft_conflict: fields.draft_conflict,
+        action_outcome: fields.action_outcome,
     })
 }
 
@@ -97,6 +104,7 @@ pub(super) fn stale(session: u64, fallback: &str) -> Value {
         host_request: None,
         submit: None,
         draft_conflict: false,
+        action_outcome: None,
     })
 }
 
@@ -122,7 +130,49 @@ pub(super) fn submitted(
             "delivery_state": "submitted",
         })),
         draft_conflict: false,
+        action_outcome: Some(action_outcome("accepted", None, None)),
     })
+}
+
+pub(super) fn stopped(
+    session: u64,
+    fallback: &str,
+    status: &str,
+    reason: &str,
+    replacement: Option<&str>,
+    batch: Option<Value>,
+) -> Value {
+    let result = if status == "superseded" { "superseded" } else { "refused" };
+    view(View {
+        result,
+        allowed: true,
+        session: Some(session),
+        fallback,
+        reason: Some(reason),
+        batch,
+        host_request: None,
+        submit: None,
+        draft_conflict: false,
+        action_outcome: Some(action_outcome(status, Some(reason), replacement)),
+    })
+}
+
+pub(super) fn action_outcome(
+    status: &str,
+    reason: Option<&str>,
+    replacement: Option<&str>,
+) -> Value {
+    let mut body = json!({ "status": status });
+    let Some(object) = body.as_object_mut() else {
+        return body;
+    };
+    if let Some(reason) = reason {
+        object.insert("reason".into(), json!(reason));
+    }
+    if let Some(replacement) = replacement {
+        object.insert("replacement_ref".into(), json!(replacement));
+    }
+    body
 }
 
 #[cfg(feature = "card-runtime")]

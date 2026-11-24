@@ -32,10 +32,11 @@ impl GroupDirectoryRequest {
     ) -> Result<(Self, SdkDeviceManifestResponse), SdkError> {
         let origin = match &self.home {
             Some(home) => {
-                let fingerprint =
-                    self.node_fingerprint.as_deref().filter(|value| !value.is_empty()).ok_or_else(
-                        || SdkError::LocalBus("pinned node fingerprint is required".into()),
-                    )?;
+                let fingerprint = self
+                    .node_fingerprint
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(crate::client::recipient_home::fingerprint_required)?;
                 crate::client::foreign_manifest::SenderManifestOrigin::Remote {
                     home: home.clone(),
                     fingerprint: fingerprint.to_owned(),

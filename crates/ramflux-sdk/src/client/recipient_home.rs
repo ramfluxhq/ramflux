@@ -128,8 +128,63 @@ pub(crate) fn pinned_node_fingerprint(
     }
 }
 
-fn fingerprint_required() -> SdkError {
-    SdkError::LocalBus("pinned node fingerprint is required".into())
+pub(crate) const PINNED_FINGERPRINT_CODE: &str = "pinned_node_fingerprint_required";
+pub(crate) const PINNED_HOME_CONFLICT_CODE: &str = "pinned_home_conflict";
+
+/// 64 hex digits from a contact card, stored lowercase.
+///
+/// # Errors
+/// Returns `InvalidCard` when `value` is empty or not 64 hex digits.
+pub(crate) fn require_card_fingerprint(value: &str) -> Result<String, SdkError> {
+    let fingerprint = value.to_ascii_lowercase();
+    if fingerprint.len() == 64 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(fingerprint)
+    } else {
+        Err(crate::ContactReason::InvalidCard.into())
+    }
+}
+
+pub(crate) fn fingerprint_required() -> SdkError {
+    SdkError::LocalBusRefused {
+        code: PINNED_FINGERPRINT_CODE.into(),
+        message: "pinned node fingerprint is required".into(),
+        body: Box::new(serde_json::json!({ "reason_code": PINNED_FINGERPRINT_CODE })),
+    }
+}
+
+pub(crate) fn pinned_fingerprint_required(error: &SdkError) -> bool {
+    matches!(
+        error.directory_source(),
+        SdkError::LocalBusRefused { code, .. } if code == PINNED_FINGERPRINT_CODE
+    )
+}
+
+/// Receive code when this entry is blocked by a pinned home.
+///
+/// A missing fingerprint keeps its own code. A disagreement, a malformed source
+/// pin, or a remote fetch the pin refuses is `pinned_home_conflict`. Other local
+/// refusals stay unclassified so a session or storage error still stops the pass.
+pub(crate) fn pinned_receive_code(error: &SdkError) -> Option<&'static str> {
+    if pinned_fingerprint_required(error) {
+        return Some(PINNED_FINGERPRINT_CODE);
+    }
+    let SdkError::LocalBus(message) = error.directory_source() else {
+        return None;
+    };
+    match message.as_str() {
+        "pinned home disagrees with the verified source"
+        | "verified source home is malformed"
+        | "pinned home is not a node id"
+        | "pinned source home capacity exhausted"
+        | "source home root is malformed"
+        | "pinned home does not match the signed client record"
+        | "pinned home has no public prekey endpoint"
+        | "caller target_node disagrees with the pinned home"
+        | "pinned home is required before a remote recipient directory fetch" => {
+            Some(PINNED_HOME_CONFLICT_CODE)
+        }
+        _ => None,
+    }
 }
 
 /// `prekey_http_url` from the pinned home's signed client record.

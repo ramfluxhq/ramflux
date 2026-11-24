@@ -5,6 +5,7 @@
 use super::body::{self, MAX_BODY};
 use super::gate::card_err;
 use super::guard::{Kept, keep};
+use super::host_view;
 use super::respond::{self, Shown, shown, stale};
 use super::sign;
 use super::store;
@@ -58,6 +59,19 @@ fn deliver(drive: &Drive<'_>, event: HostEvent) -> Result<Value, SdkError> {
     let account = drive.account;
     let session = drive.session;
     store::with_session(account, session, |held| {
+        if let Some(block) =
+            host_view::seal_if_blocked(drive.client, held, drive.state, drive.fallback)?
+        {
+            let batch = mounted_batch(held)?;
+            return Ok(respond::stopped(
+                drive.session,
+                drive.fallback,
+                block.status,
+                block.reason,
+                block.replacement_ref.as_deref(),
+                batch,
+            ));
+        }
         if !held.matches(drive.state) {
             return Ok(stale(drive.session, drive.fallback));
         }
@@ -65,6 +79,20 @@ fn deliver(drive: &Drive<'_>, event: HostEvent) -> Result<Value, SdkError> {
         match held.session().next_event().map_err(card_err)? {
             None => Err(super::super::invalid("card_session_inactive")),
             Some(EventResult::StaleDropped) => Ok(stale(drive.session, drive.fallback)),
+            Some(EventResult::Refused { reason }) => {
+                let replacement =
+                    held.session().tree().and_then(|tree| tree.replacement_ref.clone());
+                let status = if reason == "card_superseded" { "superseded" } else { "refused" };
+                let batch = mounted_batch(held)?;
+                Ok(respond::stopped(
+                    drive.session,
+                    drive.fallback,
+                    status,
+                    reason,
+                    replacement.as_deref(),
+                    batch,
+                ))
+            }
             Some(EventResult::Validation { batch }) => {
                 edited(drive.session, drive.fallback, "validation", &batch, None)
             }
@@ -78,6 +106,14 @@ fn deliver(drive: &Drive<'_>, event: HostEvent) -> Result<Value, SdkError> {
             }
         }
     })
+}
+
+fn mounted_batch(held: &store::Held) -> Result<Option<Value>, SdkError> {
+    match held.session_ref().shown_batch() {
+        Ok(batch) => Ok(Some(respond::batch_value(&batch)?)),
+        Err(ramflux_card::CardError::Inactive) => Ok(None),
+        Err(error) => Err(card_err(error)),
+    }
 }
 
 fn edited(
@@ -95,6 +131,7 @@ fn edited(
         host_request,
         submit: None,
         draft_conflict: false,
+        action_outcome: None,
     }))
 }
 
@@ -123,19 +160,24 @@ fn submit_result(
                 host_request: None,
                 submit: Some(submit),
                 draft_conflict: false,
+                action_outcome: None,
             }))
         }
-        Err(error) => Ok(respond::view(respond::View {
-            result: "refused",
-            allowed: true,
-            session: Some(session),
-            fallback: drive.fallback,
-            reason: Some(error_reason(&error)),
-            batch: Some(batch_value),
-            host_request: None,
-            submit: None,
-            draft_conflict: false,
-        })),
+        Err(error) => {
+            let reason = error_reason(&error);
+            Ok(respond::view(respond::View {
+                result: "refused",
+                allowed: true,
+                session: Some(session),
+                fallback: drive.fallback,
+                reason: Some(reason),
+                batch: Some(batch_value),
+                host_request: None,
+                submit: None,
+                draft_conflict: false,
+                action_outcome: Some(respond::action_outcome("refused", Some(reason), None)),
+            }))
+        }
     }
 }
 

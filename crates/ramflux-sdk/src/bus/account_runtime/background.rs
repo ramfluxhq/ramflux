@@ -250,6 +250,9 @@ fn reject_private(private: PrivateCommand) {
         PrivateCommand::NativeUnlock { reply, .. } => {
             let _ = reply.send(Err(error));
         }
+        PrivateCommand::SilentDeviceWrap { reply } => {
+            let _ = reply.send(Err(error));
+        }
         PrivateCommand::Capture(reply) => {
             let _ = reply.send(Err(error));
         }

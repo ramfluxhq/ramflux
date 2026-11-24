@@ -373,9 +373,7 @@ impl LiveCall {
         }
     }
     pub fn control(&mut self, body: CallAction, now: i64) -> Result<CallControl, SdkError> {
-        if self.call_ref.is_some()
-            && !matches!(body, CallAction::Invite { .. } | CallAction::AnsweredElsewhere)
-        {
+        if self.holds_media_for(&body) {
             let peer = self.media_peer().clone();
             self.hold_media_for(&peer);
         }
@@ -396,6 +394,25 @@ impl LiveCall {
             signature: String::new(),
         })
     }
+    /// A media grant already in hand stays until its correlated decision replaces it.
+    /// Continue actions must not take a ringing or answered grant back while that
+    /// decision is in flight. Answer and hangup still require a new decision.
+    fn holds_media_for(&self, body: &CallAction) -> bool {
+        if self.call_ref.is_none()
+            || matches!(body, CallAction::Invite { .. } | CallAction::AnsweredElsewhere)
+        {
+            return false;
+        }
+        let continue_action = matches!(
+            body,
+            CallAction::Ack { .. }
+                | CallAction::Ready { .. }
+                | CallAction::Rekey { .. }
+                | CallAction::RekeyAck { .. }
+        );
+        !(continue_action && (!self.media_held || self.gateway_answered))
+    }
+
     /// Remember an answer that arrived before the gateway released media.
     pub(crate) fn request_answer(&mut self) {
         self.held_answer = HeldAnswer::Requested;

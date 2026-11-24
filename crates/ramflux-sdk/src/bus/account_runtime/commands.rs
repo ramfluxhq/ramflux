@@ -77,6 +77,48 @@ impl AccountRuntime {
         Ok(())
     }
 
+    fn silent_device_wrap(&self) -> Result<ramflux_storage::WrappedAccountDbKey, SdkError> {
+        self.state
+            .accounts
+            .get(&self.id)
+            .ok_or_else(|| SdkError::AccountNotOpen(self.id.clone()))?
+            .client
+            .silent_device_wrap()
+    }
+
+    async fn apply_native_unlock(
+        &mut self,
+        secret: super::super::native_account::NativeUnlockSecret,
+        home_node_id: Option<String>,
+        reply: tokio::sync::oneshot::Sender<Result<crate::LocalBusCreatedAccount, SdkError>>,
+        request: &LocalBusFrame,
+    ) -> Result<(), SdkError> {
+        if reply.is_closed() {
+            return Ok(());
+        }
+        let result =
+            super::super::native_account::unlock(&mut self.state, &self.id, secret, home_node_id);
+        if reply.is_closed() {
+            self.cancel_native_unlock().await?;
+            return Ok(());
+        }
+        let result = match self.initialize_readers() {
+            Ok(()) => result,
+            Err(error) => Err(error),
+        };
+        self.start_connection_or_defer();
+        self.start_courier();
+        let result = result.and_then(|_| {
+            super::super::native_account::response(local_bus_account(&self.state, &self.id)?)
+        });
+        let result = match self.publish_yielding(request).await {
+            Ok(()) => result,
+            Err(error) => Err(error),
+        };
+        let _ = reply.send(result);
+        Ok(())
+    }
+
     async fn apply_private(
         &mut self,
         backup: super::super::actor::PrivateCommand,
@@ -100,35 +142,10 @@ impl AccountRuntime {
                 let _ = reply.send(result);
             }
             super::super::actor::PrivateCommand::NativeUnlock { secret, home_node_id, reply } => {
-                if !reply.is_closed() {
-                    let result = super::super::native_account::unlock(
-                        &mut self.state,
-                        &self.id,
-                        secret,
-                        home_node_id,
-                    );
-                    if reply.is_closed() {
-                        self.cancel_native_unlock().await?;
-                        return Ok(());
-                    }
-                    let result = match self.initialize_readers() {
-                        Ok(()) => result,
-                        Err(error) => Err(error),
-                    };
-                    self.start_connection_or_defer();
-                    self.start_courier();
-                    let result = result.and_then(|_| {
-                        super::super::native_account::response(local_bus_account(
-                            &self.state,
-                            &self.id,
-                        )?)
-                    });
-                    let result = match self.publish_yielding(request).await {
-                        Ok(()) => result,
-                        Err(error) => Err(error),
-                    };
-                    let _ = reply.send(result);
-                }
+                self.apply_native_unlock(secret, home_node_id, reply, request).await?;
+            }
+            super::super::actor::PrivateCommand::SilentDeviceWrap { reply } => {
+                let _ = reply.send(self.silent_device_wrap());
             }
             super::super::actor::PrivateCommand::SearchRebuild {
                 owner,

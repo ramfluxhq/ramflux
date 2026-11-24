@@ -164,11 +164,10 @@ fn branch(
         let verified = ramflux_crypto::custody::verify_publication(&authority, now)?;
         let body = &verified.envelope().body;
         anyhow::ensure!(
-            body.principal_kind == ramflux_protocol::PrincipalKind::Human
-                && body.principal_id == endpoint.principal_id
+            body.principal_id == endpoint.principal_id
                 && body.account_anchor == manifest.principal_commitment
                 && body.master_certificate.body.master_public_key == endpoint.root_public_key,
-            "voice native root identity or kind mismatch"
+            "voice native root identity mismatch"
         );
         let device = body
             .devices
@@ -194,9 +193,8 @@ fn branch(
     ramflux_crypto::verify_signed_device_set(&public, set)?;
     anyhow::ensure!(
         set.principal_id == endpoint.principal_id
-            && set.principal_commitment == manifest.principal_commitment
-            && set.principal_kind == ramflux_protocol::PrincipalKind::Human,
-        "voice root identity or kind mismatch"
+            && set.principal_commitment == manifest.principal_commitment,
+        "voice root identity mismatch"
     );
     let device = manifest
         .devices

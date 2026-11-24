@@ -5,7 +5,7 @@
     "moduleResolution": "Bundler",
     "lib": [
       "ES2022",
-      "DOM"
+      "DOM", "DOM.Iterable"
     ],
     "strict": true,
     "noEmit": true,

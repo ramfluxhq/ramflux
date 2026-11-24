@@ -195,18 +195,30 @@ pub(crate) fn store_device_wrap(
     vault_secret: &[u8; 32],
     key: &AccountDbKey,
 ) -> Result<(), SdkError> {
-    let kek = device_key_encryption_key(vault_secret);
-    let (nonce, wrapped_key) = wrap_with_vault_secret(&kek, key.bytes())?;
     index.store_device_wrapped_db_key(
         account_id,
-        &WrappedAccountDbKey {
-            key_wrapping_provider: "platform-device-unlock".to_owned(),
-            key_wrapping_ref: device_unlock_reference(account_id),
-            nonce,
-            wrapped_key,
-        },
+        &wrapped_device_key(account_id, vault_secret, key)?,
     )?;
     Ok(())
+}
+
+/// Builds the device wrap without writing it.
+///
+/// # Errors
+/// Returns an error when the key cannot be wrapped.
+pub(crate) fn wrapped_device_key(
+    account_id: &str,
+    vault_secret: &[u8; 32],
+    key: &AccountDbKey,
+) -> Result<WrappedAccountDbKey, SdkError> {
+    let kek = device_key_encryption_key(vault_secret);
+    let (nonce, wrapped_key) = wrap_with_vault_secret(&kek, key.bytes())?;
+    Ok(WrappedAccountDbKey {
+        key_wrapping_provider: "platform-device-unlock".to_owned(),
+        key_wrapping_ref: device_unlock_reference(account_id),
+        nonce,
+        wrapped_key,
+    })
 }
 
 /// Opens the device wrap. An account without one (explicitly locked) needs its code.

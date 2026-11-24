@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 mod backup;
 mod files;
 pub use backup::{AccountGenerationSelection, BackupIndexInstall};
+mod app_lock;
 mod device_unlock;
+pub use app_lock::{APP_LOCK_MAX_TIMEOUT_MS, AppLockPolicy};
 pub use device_unlock::CodeAttempts;
 mod operations;
 mod search;
@@ -60,6 +62,7 @@ impl AccountIndex {
         index.install_operation_schema()?;
         index.install_backup_schema()?;
         index.install_device_unlock_schema()?;
+        index.install_app_lock_schema()?;
         Ok(index)
     }
 

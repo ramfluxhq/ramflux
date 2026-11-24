@@ -4,6 +4,7 @@
 //! Send the carrier signed by the event. A failed send keeps the same message id.
 use super::body::{self, SessionBody};
 use super::guard::{Kept, keep};
+use super::host_view;
 use super::respond::{self, stale};
 use super::store;
 use super::{SubmitPrep, submitted};
@@ -23,6 +24,9 @@ pub(super) fn admit_send(
     match keep(client, account, session)? {
         Kept::Stopped(value) => Ok(Some(value)),
         Kept::Ready { state, fallback, .. } => {
+            if let Some(value) = blocked(client, account, session, &state, &fallback)? {
+                return Ok(Some(value));
+            }
             if state.version() == version && state.hash() == Some(hash) {
                 return Ok(None);
             }
@@ -56,6 +60,9 @@ fn take(
     state: &SurfaceState,
     fallback: &str,
 ) -> Result<SubmitPrep, SdkError> {
+    if let Some(value) = blocked(client, account, session, state, fallback)? {
+        return Ok(SubmitPrep::Done(value));
+    }
     let pending = store::with_session(account, session, |held| {
         if !held.matches(state) {
             held.set_pending(None);
@@ -86,9 +93,14 @@ fn take(
             held.set_pending(None);
             Ok(())
         })?;
-        return Ok(SubmitPrep::Done(respond::refused(
-            refusal_token(&preflight),
+        let reason = refusal_token(&preflight);
+        return Ok(SubmitPrep::Done(respond::stopped(
+            session,
             &preflight.fallback_text,
+            "refused",
+            reason,
+            None,
+            None,
         )));
     }
     Ok(SubmitPrep::Send {
@@ -99,6 +111,39 @@ fn take(
         surface_hash: pending.surface_hash,
         fallback: fallback.to_owned(),
     })
+}
+
+fn blocked(
+    client: &RamfluxClient,
+    account: &str,
+    session: u64,
+    state: &SurfaceState,
+    fallback: &str,
+) -> Result<Option<Value>, SdkError> {
+    let blocked = store::with_session(account, session, |held| {
+        host_view::seal_if_blocked(client, held, state, fallback)
+    })?;
+    let Some(block) = blocked else {
+        return Ok(None);
+    };
+    host_view::forget_pending(account, session)?;
+    let batch = store::with_session(account, session, |held| mounted(held))?;
+    Ok(Some(respond::stopped(
+        session,
+        fallback,
+        block.status,
+        block.reason,
+        block.replacement_ref.as_deref(),
+        batch,
+    )))
+}
+
+fn mounted(held: &store::Held) -> Result<Option<Value>, SdkError> {
+    match held.session_ref().shown_batch() {
+        Ok(batch) => Ok(Some(respond::batch_value(&batch)?)),
+        Err(ramflux_card::CardError::Inactive) => Ok(None),
+        Err(error) => Err(super::gate::card_err(error)),
+    }
 }
 
 fn refusal_token(outcome: &Outcome) -> &'static str {
