@@ -4,17 +4,21 @@
 //! Account-writer preparation and conditional application of connection outcomes.
 
 use super::AccountRuntime;
+use crate::bus::connection_manager::{AccountWork, ReceiveTurn, SessionMetadata};
 use crate::bus::state::LocalBusAccountState;
-use crate::bus::{
-    actor::AccountCommand,
-    connection_manager::{AccountWork, ReceiveTurn, SessionMetadata},
-    mutation_intent::MutationIntent,
-};
+#[cfg(test)]
+use crate::bus::{actor::AccountCommand, mutation_intent::MutationIntent};
 use crate::prelude::{
     SdkError, local_bus_account_manifest_path, read_local_bus_account_manifest,
     write_local_bus_account_manifest,
 };
 use tokio::time::{Instant, timeout_at};
+
+enum WorkRace {
+    Stop,
+    Preempt,
+    Done(Result<(), SdkError>),
+}
 
 impl AccountRuntime {
     pub(super) fn start_connection(&mut self) -> Result<(), SdkError> {
@@ -60,7 +64,15 @@ impl AccountRuntime {
         &mut self,
         work: AccountWork,
     ) -> Result<(), SdkError> {
-        match self.apply_connection_work(work).await {
+        #[cfg(test)]
+        let outcome = matches!(&work, AccountWork::Connected { .. } | AccountWork::Failed { .. });
+        let result = self.apply_connection_work(work).await;
+        #[cfg(test)]
+        if outcome && let Some(gate) = &self.state.config.test_network_command_gate {
+            gate.applied.notify_one();
+            let _ = gate.release.acquire().await;
+        }
+        match result {
             Ok(()) => Ok(()),
             Err(error) if crate::bus::task_courier_queue::stop_class(&error) => Err(error),
             Err(error) => {
@@ -69,6 +81,46 @@ impl AccountRuntime {
             }
         }
     }
+
+    /// Claim arrivals without cancelling a started page or its publication. The page's
+    /// existing writer checkpoints can service the claimed queue before continuing.
+    pub(super) async fn drive_connection_work(
+        &mut self,
+        work: AccountWork,
+        checkpoints: &mut u8,
+    ) -> Result<bool, SdkError> {
+        let (_standin_sender, standin) = tokio::sync::mpsc::channel(1);
+        let mut mailbox = std::mem::replace(&mut self.receiver, standin);
+        let ready = self.ready_commands.sender();
+        let mut shutdown = self.shutdown.clone();
+        let mut preempt = self.preempt.clone();
+        let outcome = {
+            let work_fut = Box::pin(self.finish_connection_work(work));
+            tokio::pin!(work_fut);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.changed() => break WorkRace::Stop,
+                    command = super::ready_commands::receive(&ready, &mut mailbox) => match command {
+                        Some((permit, command)) => {
+                            *checkpoints = 0;
+                            super::ready_commands::retain(permit, command);
+                        },
+                        None => break WorkRace::Stop,
+                    },
+                    _ = preempt.changed() => break WorkRace::Preempt,
+                    result = &mut work_fut => break WorkRace::Done(result),
+                }
+            }
+        };
+        self.receiver = mailbox;
+        match outcome {
+            WorkRace::Stop => Ok(true),
+            WorkRace::Preempt => Ok(false),
+            WorkRace::Done(result) => result.map(|()| false),
+        }
+    }
+
     pub(super) async fn stop_connection(&mut self) {
         self.clear_transient_host();
         self.transient = super::transient::TransientHost::default();
@@ -79,6 +131,7 @@ impl AccountRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn prepare_command_network(
         &mut self,
         command: &AccountCommand,
@@ -111,26 +164,59 @@ impl AccountRuntime {
         if let Some(gate) = &self.state.config.test_network_command_gate {
             gate.waiting.notify_one();
         }
-        let ready = handle.require_live_since(admitted_at, self.timeouts.network_wait);
+        let deadline = command
+            .admission
+            .as_ref()
+            .map_or(admitted_at + self.timeouts.command, |admission| admission.command_deadline);
+        let network_wait = self.timeouts.network_wait;
+        let ready = async {
+            if command.request.method == "attachment.enable" {
+                handle.require_live_until(deadline).await
+            } else {
+                handle.require_live_since(admitted_at, network_wait).await
+            }
+        };
         tokio::pin!(ready);
         loop {
+            // A live session proceeds. A command already queued beats another page:
+            // this send is claimed, and the page must not spend the queue-wait budget.
+            self.service_waiting_commands().await?;
             tokio::select! {
                 biased;
                 ready=&mut ready=>{ready?;break;},
-                work=self.head_rx.recv()=>{if let Some(work)=work {self.apply_connection_work(work).await?;}},
-                work=self.connection_work.recv()=>{if let Some(work)=work {
-                    #[cfg(test)]
-                    let outcome = matches!(&work, AccountWork::Connected { .. } | AccountWork::Failed { .. });
-                    self.apply_connection_work(work).await?;
-                    #[cfg(test)]
-                    if outcome && let Some(gate) = &self.state.config.test_network_command_gate {
-                        gate.applied.notify_one();
-                        let _ = gate.release.acquire().await;
-                    }
-                }}
+                command=self.receiver.recv()=>{
+                    let Some(command)=command else { return Err(super::stopped()); };
+                    self.note_command_taken();
+                    super::command_park::set_final(false);
+                    if Box::pin(self.apply(command)).await? { return Err(super::stopped()); }
+                },
+                work=self.head_rx.recv()=>{if let Some(work)=work {self.drive_or_apply_network_work(work).await?;}},
+                work=self.connection_work.recv()=>{if let Some(work)=work {self.drive_or_apply_network_work(work).await?;}},
             }
         }
         self.prepare_command_heads(command, admitted_at).await
+    }
+
+    /// Connection work during a claimed send yields when another command is waiting.
+    /// The network-gate tests keep the uninterrupted apply so their release barrier fires.
+    #[cfg(test)]
+    async fn drive_or_apply_network_work(&mut self, work: AccountWork) -> Result<(), SdkError> {
+        #[cfg(test)]
+        if self.state.config.test_network_command_gate.is_some() {
+            let outcome =
+                matches!(&work, AccountWork::Connected { .. } | AccountWork::Failed { .. });
+            self.apply_connection_work(work).await?;
+            if outcome && let Some(gate) = &self.state.config.test_network_command_gate {
+                gate.applied.notify_one();
+                let _ = gate.release.acquire().await;
+            }
+            return Ok(());
+        }
+        let mut checkpoints = 0_u8;
+        if Box::pin(self.drive_connection_work(work, &mut checkpoints)).await? {
+            return Err(super::stopped());
+        }
+        Ok(())
     }
 
     pub(super) async fn apply_connection_work(
@@ -165,7 +251,7 @@ impl AccountRuntime {
                 "account.status",
                 serde_json::json!({}),
             );
-            self.publish(&request).await?;
+            self.publish_yielding(&request).await?;
         }
         Ok(())
     }
@@ -544,7 +630,7 @@ impl AccountRuntime {
         );
         #[cfg(test)]
         let published = std::time::Instant::now();
-        self.publish(&request).await?;
+        self.publish_yielding(&request).await?;
         #[cfg(test)]
         if let Some(connection) =
             self.state.accounts.get(&self.id).and_then(|account| account.connection.as_ref())
@@ -685,7 +771,7 @@ impl AccountRuntime {
         );
         #[cfg(test)]
         let started = std::time::Instant::now();
-        self.publish(&request).await?;
+        self.publish_yielding(&request).await?;
         #[cfg(test)]
         if let Some(handle) =
             self.state.accounts.get(&self.id).and_then(|account| account.connection.as_ref())

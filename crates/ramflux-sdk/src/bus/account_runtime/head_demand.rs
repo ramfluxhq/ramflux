@@ -20,7 +20,7 @@ thread_local! {
     static PREFER_DEPTH: Cell<u8> = const { Cell::new(0) };
 }
 
-/// Held while `prepare_command_heads` is waiting on stale roots.
+/// Writer priority retained while a command waits for its required authority heads.
 pub(super) struct HeadDemand {
     waiting: Arc<AtomicUsize>,
 }
@@ -35,7 +35,7 @@ impl HeadDemand {
 
 impl Drop for HeadDemand {
     fn drop(&mut self) {
-        DEMANDS.with(|cell| cell.set(cell.get().saturating_sub(1)));
+        let _ = DEMANDS.try_with(|cell| cell.set(cell.get().saturating_sub(1)));
         let _ = self
             .waiting
             .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| queued.checked_sub(1));
@@ -131,6 +131,7 @@ impl AccountRuntime {
     }
 
     /// One connection item observed while a head demand is active.
+    #[cfg(test)]
     pub(super) async fn admit_during_head_demand(
         &mut self,
         work: AccountWork,

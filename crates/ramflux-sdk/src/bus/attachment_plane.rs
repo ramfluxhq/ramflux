@@ -20,6 +20,23 @@ use crate::attachment_send::{
 
 const CALL_BUDGET: Duration = Duration::from_secs(60);
 
+/// Captures enable's admitted session with the command deadline for the Authority call.
+pub(crate) async fn authority(
+    account: &mut super::state::LocalBusAccountState,
+) -> Result<Vec<u8>, SdkError> {
+    let mut session = account.live_session_client()?;
+    let reply = session
+        .attachment_call(AttachmentFrame {
+            request_id: request_id()?,
+            call: AttachmentCall::Authority,
+        })
+        .await?;
+    match reply.code {
+        None => Ok(reply.body.0),
+        Some(code) => Err(crate::attachment_send::refusal_for(&code).into()),
+    }
+}
+
 pub(crate) struct GatewayPlane {
     handle: ConnectionHandle,
     runtime: Handle,

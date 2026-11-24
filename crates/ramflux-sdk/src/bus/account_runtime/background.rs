@@ -179,6 +179,13 @@ impl AccountRuntime {
             if *self.shutdown.borrow() {
                 return Ok(true);
             }
+            if let Some(command) = self.ready_commands.take() {
+                self.note_command_taken();
+                if self.command_while_released(command) {
+                    return Ok(false);
+                }
+                continue;
+            }
             let command = tokio::select! {
                 biased;
                 _ = self.shutdown.changed() => return Ok(true),

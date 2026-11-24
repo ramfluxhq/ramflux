@@ -10,6 +10,7 @@ use crate::bus::{actor::AccountCommand, state::LocalBusAccountState};
 use crate::client::identity_authority::HeadUse;
 use std::cell::Cell;
 use std::collections::BTreeSet;
+#[cfg(test)]
 use tokio::time::Instant;
 
 // The account command owns this scope, never the account or connection. Dropping
@@ -156,6 +157,7 @@ pub(crate) fn stale_roots_since(
 }
 
 impl AccountRuntime {
+    #[cfg(test)]
     pub(super) async fn prepare_command_heads(
         &mut self,
         command: &AccountCommand,
@@ -240,6 +242,7 @@ impl AccountRuntime {
 
     /// Apply a demanded head already in the completion slot or the shared queue,
     /// then refuse if the authority is still stale.
+    #[cfg(test)]
     async fn refuse_or_apply_queued(
         &mut self,
         command: &AccountCommand,
@@ -260,6 +263,7 @@ impl AccountRuntime {
         Err(pending(account))
     }
 
+    #[cfg(test)]
     fn demanded_foreign(
         &mut self,
         roots: &BTreeSet<String>,
@@ -271,7 +275,10 @@ impl AccountRuntime {
     /// An explicit send whose root is not this account, an accepted contact, or a
     /// shared-group member fails before any fetch. A failed contact setup must not
     /// wait out the head deadline.
-    fn refuse_ineligible_explicit_send(&self, command: &AccountCommand) -> Result<(), SdkError> {
+    pub(super) fn refuse_ineligible_explicit_send(
+        &self,
+        command: &AccountCommand,
+    ) -> Result<(), SdkError> {
         let method = command.request.method.as_str();
         if method != "message.submit" && method != "conversation.send" {
             return Ok(());
