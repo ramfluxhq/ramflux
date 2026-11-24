@@ -396,6 +396,9 @@ async fn run_one_anchored(
             }
         }
     }
+    if ok && !paused {
+        handle.note_initial_receive_complete(generation);
+    }
     Some((ok, paused))
 }
 

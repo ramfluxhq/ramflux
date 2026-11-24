@@ -169,7 +169,7 @@ impl AccountRuntime {
                 command=self.receiver.recv()=>{
                     let Some(command)=command else { return Err(super::stopped()); };
                     self.note_command_taken();
-                    super::publication_park::set_final(false);
+                    super::command_park::set_final(false);
                     if Box::pin(self.apply(command)).await? { return Err(super::stopped()); }
                 },
                 work=self.head_rx.recv()=>{if let Some(work)=work {self.drive_or_apply_network_work(work).await?;}},

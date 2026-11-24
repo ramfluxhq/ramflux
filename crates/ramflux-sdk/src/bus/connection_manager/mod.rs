@@ -143,6 +143,7 @@ struct Shared {
     session_mode: std::sync::Mutex<crate::gateway::session_push::SessionMode>,
     compat_session: std::sync::Mutex<crate::bus::push_receiver::compat::CompatSession>,
     catch_ups_total: AtomicU64,
+    initial_receive_generation: AtomicU64,
     receive_observations: receive_observations::Counters,
     last_catch_up_at_ms: std::sync::Mutex<Option<u64>>,
     fallback_clock_unverified: std::sync::atomic::AtomicBool,
@@ -210,6 +211,7 @@ fn new_shared(
         session_mode: std::sync::Mutex::new(crate::gateway::session_push::SessionMode::Direct),
         compat_session: std::sync::Mutex::new(crate::bus::push_receiver::compat::start_session()),
         catch_ups_total: AtomicU64::new(0),
+        initial_receive_generation: AtomicU64::new(0),
         receive_observations: receive_observations::Counters::default(),
         last_catch_up_at_ms: std::sync::Mutex::new(None),
         fallback_clock_unverified: std::sync::atomic::AtomicBool::new(false),
@@ -713,6 +715,22 @@ impl ConnectionHandle {
     ) {
         *self.shared.compat_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
             session;
+    }
+
+    /// Conversation metadata restored by the first pass is not available at transport Live.
+    pub(crate) fn initial_receive_pending(&self, generation: u64) -> bool {
+        let snapshot = self.snapshot();
+        snapshot.generation == generation
+            && snapshot.state == NetworkingState::Live
+            && self.session_is_push()
+            && self.shared.initial_receive_generation.load(Ordering::Acquire) != generation
+    }
+
+    pub(crate) fn note_initial_receive_complete(&self, generation: u64) {
+        if self.generation() == generation {
+            self.shared.initial_receive_generation.fetch_max(generation, Ordering::Release);
+            self.shared.changed.send_modify(|_| {});
+        }
     }
 
     pub(crate) fn note_catch_up_finished(&self, at_ms: u64) {

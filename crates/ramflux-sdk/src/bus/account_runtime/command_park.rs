@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Publication waits parked off the account actor.
+//! Command readiness waits parked off the account actor.
 //!
 //! The actor records the command and returns to its loop. A later install
-//! signal or the command deadline makes the command ready; the actor then
+//! or receive signal, or the command deadline, makes the command ready; the actor then
 //! runs it again. The wait itself never holds the serial slot. A parked
 //! command is not put back on the bounded mailbox, so it does not consume
 //! one of those slots or count as a waiting command.
@@ -12,18 +12,42 @@
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
 
 use super::super::actor::{AccountCommand, ActorResponse};
 use crate::SdkError;
+use crate::bus::connection_manager::ConnectionHandle;
 
 struct Waiting {
     command: AccountCommand,
     deadline: Instant,
-    generation: u64,
+    wake: Wake,
     started: Instant,
     method: String,
+}
+
+enum Wake {
+    Publication(u64),
+    InitialReceive { connection: Box<ConnectionHandle>, generation: u64 },
+}
+
+impl Wake {
+    fn ready(&self) -> bool {
+        match self {
+            Self::Publication(generation) => generation_moved(*generation),
+            Self::InitialReceive { connection, generation } => {
+                !connection.initial_receive_pending(*generation)
+            }
+        }
+    }
+
+    fn phase(&self) -> &'static str {
+        match self {
+            Self::Publication(_) => "publication_wait",
+            Self::InitialReceive { .. } => "initial_receive_wait",
+        }
+    }
 }
 
 thread_local! {
@@ -54,27 +78,40 @@ pub(super) fn pending() -> bool {
 }
 
 pub(super) fn park(
-    mut command: AccountCommand,
+    command: AccountCommand,
     reply: oneshot::Sender<Result<ActorResponse, SdkError>>,
     deadline: Instant,
     generation: u64,
 ) {
+    // Keep the generation observed before dispatch, including a settlement before enqueue.
+    enqueue(command, reply, deadline, Wake::Publication(generation));
+}
+
+pub(super) fn park_receive(
+    command: AccountCommand,
+    reply: oneshot::Sender<Result<ActorResponse, SdkError>>,
+    deadline: Instant,
+    connection: Box<ConnectionHandle>,
+    generation: u64,
+) {
+    enqueue(command, reply, deadline, Wake::InitialReceive { connection, generation });
+}
+
+fn enqueue(
+    mut command: AccountCommand,
+    reply: oneshot::Sender<Result<ActorResponse, SdkError>>,
+    deadline: Instant,
+    wake: Wake,
+) {
     command.reply = Some(reply);
     let method = command.request.method.clone();
-    // Keep the generation observed before dispatch. If an install settles
-    // between the refusal and this enqueue, the next actor turn sees it.
-    tracing::debug!(
-        phase = "publication_wait",
-        event = "park",
-        method = %method,
-        elapsed_ms = 0_u64,
-        "account command phase"
-    );
+    tracing::debug!(phase = wake.phase(), event = "park", method = %method,
+        elapsed_ms = 0_u64, "account command phase");
     WAITING.with(|queue| {
         queue.borrow_mut().push_back(Waiting {
             command,
             deadline,
-            generation,
+            wake,
             started: Instant::now(),
             method,
         });
@@ -83,16 +120,14 @@ pub(super) fn park(
 
 pub(super) fn take_ready() -> Option<AccountCommand> {
     let now = Instant::now();
-    let generation = crate::custody::pairing::activate::INSTALL_GENERATION.load(Ordering::Acquire);
     WAITING.with(|queue| {
         let mut queue = queue.borrow_mut();
-        let index =
-            queue.iter().position(|item| item.generation != generation || now >= item.deadline)?;
+        let index = queue.iter().position(|item| item.wake.ready() || now >= item.deadline)?;
         let item = queue.remove(index)?;
         let elapsed_ms = elapsed_ms(item.started);
         let timed_out = now >= item.deadline;
         tracing::debug!(
-            phase = "publication_wait",
+            phase = item.wake.phase(),
             event = "resume",
             method = %item.method,
             timed_out,
@@ -111,6 +146,10 @@ pub(super) async fn until_ready() {
         return;
     }
     let deadline = earliest_deadline();
+    let mut receive = receive_watch();
+    if let Some(changed) = &mut receive {
+        let _ = changed.borrow_and_update();
+    }
     let generation = crate::custody::pairing::activate::INSTALL_GENERATION.load(Ordering::Acquire);
     let notified = crate::custody::pairing::activate::INSTALL_SETTLED.notified();
     tokio::pin!(notified);
@@ -118,24 +157,43 @@ pub(super) async fn until_ready() {
     if due() || generation_moved(generation) {
         return;
     }
-    match deadline {
-        Some(deadline) => {
-            tokio::select! {
-                biased;
-                () = &mut notified => {}
-                () = tokio::time::sleep_until(deadline) => {}
-            }
+    tokio::select! {
+        biased;
+        () = &mut notified => {}
+        () = wait_receive(receive) => {}
+        () = wait_deadline(deadline) => {}
+    }
+}
+
+fn receive_watch() -> Option<watch::Receiver<u64>> {
+    WAITING.with(|queue| {
+        queue.borrow().iter().find_map(|item| match &item.wake {
+            Wake::InitialReceive { connection, .. } => Some(connection.snapshot_watch()),
+            Wake::Publication(_) => None,
+        })
+    })
+}
+
+async fn wait_receive(changed: Option<watch::Receiver<u64>>) {
+    match changed {
+        Some(mut changed) => {
+            let _ = changed.changed().await;
         }
-        None => notified.await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 
 fn due() -> bool {
     let now = Instant::now();
-    let generation = crate::custody::pairing::activate::INSTALL_GENERATION.load(Ordering::Acquire);
-    WAITING.with(|queue| {
-        queue.borrow().iter().any(|item| item.generation != generation || now >= item.deadline)
-    })
+    WAITING
+        .with(|queue| queue.borrow().iter().any(|item| item.wake.ready() || now >= item.deadline))
 }
 
 fn earliest_deadline() -> Option<Instant> {

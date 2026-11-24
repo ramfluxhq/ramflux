@@ -216,7 +216,7 @@ impl AccountRuntime {
             elapsed_ms,
             "account command phase"
         );
-        super::publication_park::set_final(false);
+        super::command_park::set_final(false);
         stop
     }
 
@@ -286,6 +286,9 @@ impl AccountRuntime {
                 return Ok(false);
             }
         }
+        let Some((command, mut reply)) = self.defer_initial_receive(command, reply) else {
+            return Ok(false);
+        };
         if owned_command(&command.request.method) {
             self.start_owned_command(command, reply).await?;
             return Ok(false);
@@ -324,7 +327,7 @@ impl AccountRuntime {
         }
         match dispatched {
             Dispatch::Park { deadline, generation } if !reply.is_closed() => {
-                super::publication_park::park(command, reply, deadline, generation);
+                super::command_park::park(command, reply, deadline, generation);
                 Ok(false)
             }
             Dispatch::Park { .. } => Ok(false),
@@ -351,7 +354,7 @@ impl AccountRuntime {
                 super::super::mutations::execute(&mut self.state, &self.id, command).await,
             )
         } else {
-            let final_attempt = super::publication_park::is_final();
+            let final_attempt = super::command_park::is_final();
             tokio::select! {
                 biased;
                 _ = self.shutdown.changed() => {

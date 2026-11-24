@@ -79,7 +79,7 @@ impl AccountRuntime {
         };
         // Boxed so a page or directory attempt can service this command without
         // an infinitely sized future.
-        super::publication_park::set_final(false);
+        super::command_park::set_final(false);
         Box::pin(self.apply(command)).await.map(|_| ())
     }
 

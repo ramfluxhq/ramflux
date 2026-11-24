@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex as RoutingMutex};
 mod background;
 mod command_phase;
 mod commands;
+mod initial_receive;
 mod maintenance;
 use maintenance::Maintenance;
 mod transient;
@@ -28,13 +29,13 @@ mod username_calls;
 pub(crate) use connection::apply_ack_flush;
 #[cfg(test)]
 pub(crate) use connection::settle_retained;
+mod command_park;
 mod directory;
 pub(super) mod fetches;
 mod head_demand;
 pub(crate) mod head_refresh;
 pub(crate) mod lifecycle_fence;
 mod publication_complete;
-mod publication_park;
 mod readers;
 mod ready_commands;
 pub(crate) mod session_thread;
@@ -363,8 +364,8 @@ impl AccountRuntime {
         if waiting && let Some(command) = self.try_mailbox() {
             return Some(command);
         }
-        if let Some(command) = publication_park::take_ready() {
-            let _ = publication_park::take_skip_note();
+        if let Some(command) = command_park::take_ready() {
+            let _ = command_park::take_skip_note();
             return Some(command);
         }
         // A waiting command skips the eight-checkpoint gate. Its residence
@@ -389,7 +390,7 @@ impl AccountRuntime {
             .or_else(|| self.ready_commands.take())
             .or_else(|| self.receiver.try_recv().ok());
         if command.is_some() {
-            publication_park::set_final(false);
+            command_park::set_final(false);
             self.note_command_taken();
         }
         command
@@ -567,8 +568,8 @@ impl AccountRuntime {
             _ = self.shutdown.changed() => return Ok(true),
             command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
             command = self.receiver.recv() => command,
-            () = publication_park::until_ready(), if publication_park::pending() => {
-                match publication_park::take_ready() {
+            () = command_park::until_ready(), if command_park::pending() => {
+                match command_park::take_ready() {
                     Some(command) => Some(command),
                     None => return Ok(false),
                 }
@@ -669,9 +670,9 @@ impl AccountRuntime {
         let Some(command) = command else {
             return Ok(true);
         };
-        let resumed = publication_park::take_skip_note();
+        let resumed = command_park::take_skip_note();
         if !resumed {
-            publication_park::set_final(false);
+            command_park::set_final(false);
             self.note_command_taken();
         }
         self.apply(command).await
