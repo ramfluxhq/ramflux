@@ -33,6 +33,13 @@ the existing data-root writer lease. A second opener of that root fails. No
 pathname listener is created, and neither the CLI nor its daemon is modified.
 Opening and closing block: invoke them on a native background executor.
 
+App and extension hosts can opt into [shared-root session handoff](shared-root-session-lease.md)
+with `"session_lease": {"priority":"notification", "wait_ms":5000}` in either
+v2 open configuration. Priorities are `foreground`, `notification` and `background`;
+the wait defaults to five seconds and cannot exceed it. A pending request drains
+the old supervisor before releasing its lease. Contention returns AccountBusy (18).
+After yielding, close the old handle and open a fresh client before further work.
+
 `execute` copies this bounded request and returns an operation handle immediately:
 
 ```json

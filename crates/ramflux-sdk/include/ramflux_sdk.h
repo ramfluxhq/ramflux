@@ -306,7 +306,7 @@ int32_t ramflux_client_put_object(struct RamfluxClient *client,
 int32_t ramflux_v2_negotiate(uint32_t major, uint32_t min_minor, struct RamfluxBuffer **out);
 
 /*
- Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?,allow_secret_exports?}`.
+ Open one supervisor on a dedicated thread. Config is `{data_root,builtin_nodes?,allow_raw_messages?,allow_secret_exports?,session_lease?}`.
  The host must supply an existing private directory; see the shared-root contract.
  This may block during startup; invoke off the UI thread. Output is zero on failure.
  */

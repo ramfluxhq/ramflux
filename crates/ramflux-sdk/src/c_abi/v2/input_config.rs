@@ -149,7 +149,13 @@ impl Decode for Config {
     fn decode(v: &mut Value) -> Result<Self, CAbiError> {
         i::object(
             v,
-            &["data_root", "builtin_nodes", "allow_raw_messages", "allow_secret_exports"],
+            &[
+                "data_root",
+                "builtin_nodes",
+                "allow_raw_messages",
+                "allow_secret_exports",
+                "session_lease",
+            ],
         )?;
         let root = i::string(v, "data_root")?;
         let raw = i::boolean(v, "allow_raw_messages", Some(false))?;
@@ -162,10 +168,27 @@ impl Decode for Config {
             _ => return Err(i::invalid()),
         };
         Ok(Config {
+            session_lease: read_session_lease(v)?,
             allow_raw_messages: raw,
             allow_secret_exports: secret,
             data_root: root.into(),
             builtin_nodes: nodes.into_iter().map(Profile::own).collect(),
         })
     }
+}
+
+fn read_session_lease(v: &Value) -> Result<Option<(crate::SessionLeasePriority, u64)>, CAbiError> {
+    let Some(lease) = v.get("session_lease") else { return Ok(None) };
+    i::object(lease, &["priority", "wait_ms"])?;
+    let priority = match i::string(lease, "priority")? {
+        "background" => crate::SessionLeasePriority::Background,
+        "notification" => crate::SessionLeasePriority::Notification,
+        "foreground" => crate::SessionLeasePriority::Foreground,
+        _ => return Err(i::invalid()),
+    };
+    let wait_ms = match lease.get("wait_ms") {
+        None => 5_000,
+        Some(value) => value.as_u64().filter(|wait| *wait <= 5_000).ok_or_else(i::invalid)?,
+    };
+    Ok(Some((priority, wait_ms)))
 }

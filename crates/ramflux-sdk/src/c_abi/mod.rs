@@ -966,6 +966,9 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         SdkError::LifecycleShared(source) => sdk_error_code(source),
         SdkError::DirectoryAuthorityUnavailable { source, .. } => sdk_error_code(source),
         SdkError::DataRootInUse => RamfluxErrorCode::AccountBusy,
+        SdkError::LocalBusRefused { code, .. } if code == "SessionLeaseBusy" => {
+            RamfluxErrorCode::AccountBusy
+        }
         SdkError::CustodyForkFenced => RamfluxErrorCode::CustodyForkFenced,
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
         SdkError::HomeMigrationRefused(reason) => migration_error_code(*reason),

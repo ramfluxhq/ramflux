@@ -22,7 +22,10 @@ pub(super) async fn serve(
         std::fs::create_dir_all(&config.data_root)?;
         set_owner_only_dir_permissions(&config.data_root)?;
     }
-    let root_lease = super::data_root_lock::DataRootLock::acquire(&config.data_root)?;
+    let root_lease = match config.session_lease {
+        Some(lease) => super::session_lease::acquire(&config.data_root, lease).await?,
+        None => super::data_root_lock::DataRootLock::acquire(&config.data_root)?,
+    };
     crate::custody::reconcile_incomplete_markers(&config.data_root, &root_lease)?;
     let _ = std::fs::remove_dir_all(object_get_spool_dir(&config.data_root));
     #[cfg(unix)]
@@ -60,8 +63,24 @@ pub(super) async fn accept<L: BusListener>(
     let mut connections = JoinSet::new();
     let mut next = 1_u64;
     let mut last_peer_warning = None;
+    let mut lease_error = None;
+    let mut lease_poll = tokio::time::interval(super::session_lease::POLL);
+    lease_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = lease_poll.tick(), if supervisor.config.session_lease.is_some() => {
+                match super::session_lease::handoff_requested(&supervisor.config.data_root) {
+                    Ok(false) => {},
+                    Ok(true) => {
+                        tracing::info!("session lease handoff requested; draining current holder");
+                        break;
+                    }
+                    Err(error) => {
+                        lease_error = Some(error);
+                        break;
+                    }
+                }
+            }
             () = supervisor.reap_lifecycle_tasks() => {},
             _ = stopping.changed() => break,
             changed = shutdown.changed() => {
@@ -103,7 +122,8 @@ pub(super) async fn accept<L: BusListener>(
     }
     connections.abort_all();
     while connections.join_next().await.is_some() {}
-    supervisor.shutdown().await
+    supervisor.shutdown().await?;
+    lease_error.map_or(Ok(()), Err)
 }
 
 pub(super) async fn handle<S: crate::platform::listener::BusStream>(
