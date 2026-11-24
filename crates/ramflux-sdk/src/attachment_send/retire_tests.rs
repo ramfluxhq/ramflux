@@ -160,7 +160,11 @@ impl Fixture {
                 &row.prepare_id,
                 row.generation,
                 len,
-                super::metadata::Finished { digest, thumbnail: None, metadata: Default::default() },
+                super::metadata::Finished {
+                    digest,
+                    thumbnail: None,
+                    metadata: super::metadata::Metadata::default(),
+                },
                 self.now,
             )
             .unwrap()

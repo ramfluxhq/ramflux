@@ -370,7 +370,7 @@ impl MediaRef {
                         0 => false,
                         1 => true,
                         _ => return Err(FormatError("media animated boolean")),
-                    })
+                    });
                 }
                 _ => return Err(FormatError("unknown reference field")),
             }
@@ -402,10 +402,19 @@ impl MediaRef {
     /// Pure representation policy; no capability or partial manifest in fallback.
     #[must_use]
     pub fn for_peer<'a>(&'a self, layer: u32, caption: &'a str) -> PeerMedia<'a> {
-        if layer >= 4 {
+        let required_layer = if self.width.is_some()
+            || self.height.is_some()
+            || self.duration_ms.is_some()
+            || self.animated.is_some()
+        {
+            5
+        } else {
+            4
+        };
+        if layer >= required_layer {
             PeerMedia::Large(self)
         } else {
-            PeerMedia::CaptionWithUpgradeRequired { caption, required_layer: 4 }
+            PeerMedia::CaptionWithUpgradeRequired { caption, required_layer }
         }
     }
 }

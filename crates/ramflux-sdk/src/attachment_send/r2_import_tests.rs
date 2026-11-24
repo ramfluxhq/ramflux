@@ -305,7 +305,11 @@ fn a_nine_megabyte_import_holds_two_segments_not_the_file() {
             &begun.prepare_id,
             1,
             offset,
-            super::metadata::Finished { digest, thumbnail: None, metadata: Default::default() },
+            super::metadata::Finished {
+                digest,
+                thumbnail: None,
+                metadata: super::metadata::Metadata::default(),
+            },
             NOW,
         )
         .unwrap();
