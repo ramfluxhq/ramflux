@@ -354,7 +354,7 @@ impl Supervisor {
         mut request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
-        let _app_control = self.app_control_guard(&request.method).await;
+        self.ensure_request_allowed(&request)?;
         self.admit_app_access(&request)?;
         if crate::search::capability::is_method(&request.method) {
             match crate::search::capability::guard(&request.method) {
@@ -380,6 +380,7 @@ impl Supervisor {
         if request.method == "account.unlock"
             && let Some(call) = &credential_call
         {
+            let _app_control = self.app_control_guard(&request.method).await;
             return self.private_unlock(&request, call, connection.credential_prompts).await;
         }
         // Authentication and lock effects must run again; a receipt from a previous
@@ -608,6 +609,10 @@ impl Supervisor {
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
         self.start_event_router();
+        self.ensure_request_allowed(&request)?;
+        // Serialize effects in their execution owner, never lifecycle receipt waiters.
+        // Retries must reach conflict detection and shutdown must close admission promptly.
+        let _app_control = self.app_control_guard(&request.method).await;
         self.ensure_request_allowed(&request)?;
         self.admit_app_access(&request)?;
         if let Some(body) = super::custody_setup::guard_account(&self.config.data_root, &request)? {
