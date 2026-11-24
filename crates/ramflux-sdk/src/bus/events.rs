@@ -99,8 +99,8 @@ fn lagged(subscriber: &LocalBusSubscriber, event: &LocalBusFrame) {
 
 enum PageEnd {
     Drained,
-    Page(i64),
-    Paused,
+    Page(i64, Option<oneshot::Receiver<()>>),
+    Paused(Option<oneshot::Receiver<()>>),
 }
 
 pub(super) async fn publish(
@@ -110,17 +110,47 @@ pub(super) async fn publish(
     networking_expiry: Option<(i64, &LocalBusFrame)>,
     sender: &mpsc::Sender<EventBatch>,
 ) -> Result<(), SdkError> {
-    // Callers race this future against shutdown. The body does not wait on the router.
-    std::future::ready(()).await;
     client.expire_surface_pending()?;
     let db = client.account_db()?;
     loop {
         match publish_one_page(client, account_id, request, networking_expiry, sender, 256)? {
             PageEnd::Drained => return Ok(()),
-            PageEnd::Paused => return Err(SdkError::WriterPause),
-            PageEnd::Page(sequence) => finish_published_page(db, request, sequence)?,
+            PageEnd::Paused(accepted) => {
+                confirm_handoff(accepted).await?;
+                return Err(SdkError::WriterPause);
+            }
+            PageEnd::Page(sequence, accepted) => {
+                confirm_handoff(accepted).await?;
+                finish_published_page(db, request, sequence)?;
+            }
         }
     }
+}
+
+/// Queues durably journaled output without waiting for router acceptance.
+pub(super) fn publish_queued(
+    client: &RamfluxClient,
+    account_id: &str,
+    request: &LocalBusFrame,
+    networking_expiry: Option<(i64, &LocalBusFrame)>,
+    sender: &mpsc::Sender<EventBatch>,
+) -> Result<(), SdkError> {
+    client.expire_surface_pending()?;
+    let db = client.account_db()?;
+    loop {
+        match publish_one_page(client, account_id, request, networking_expiry, sender, 256)? {
+            PageEnd::Drained => return Ok(()),
+            PageEnd::Paused(_) => return Err(SdkError::WriterPause),
+            PageEnd::Page(sequence, _) => finish_published_page(db, request, sequence)?,
+        }
+    }
+}
+
+async fn confirm_handoff(accepted: Option<oneshot::Receiver<()>>) -> Result<(), SdkError> {
+    if let Some(accepted) = accepted {
+        accepted.await.map_err(|_| closed())?;
+    }
+    Ok(())
 }
 
 /// Journals at most one outbox entry; the actor polls its mailbox before the next entry.
@@ -132,8 +162,8 @@ pub(super) fn publish_slice(
     sender: &mpsc::Sender<EventBatch>,
 ) -> Result<(), SdkError> {
     match publish_one_page(client, account_id, request, networking_expiry, sender, 1)? {
-        PageEnd::Paused => Err(SdkError::WriterPause),
-        PageEnd::Drained | PageEnd::Page(_) => Ok(()),
+        PageEnd::Paused(_) => Err(SdkError::WriterPause),
+        PageEnd::Drained | PageEnd::Page(_, _) => Ok(()),
     }
 }
 
@@ -155,7 +185,12 @@ fn publish_one_page(
     let (events, paused) =
         journal_entries(client, db, account_id, request, networking_expiry, &entries)?;
     let durable_ms = elapsed_ms(page_started);
-    let deferred = if events.is_empty() { false } else { handoff(sender, events)? };
+    let (deferred, accepted) = if events.is_empty() {
+        (false, None)
+    } else {
+        let (deferred, accepted) = handoff(sender, events)?;
+        (deferred, Some(accepted))
+    };
     tracing::debug!(
         phase = "outbox_publish",
         method = %request.method,
@@ -166,9 +201,9 @@ fn publish_one_page(
         "account command phase"
     );
     if paused {
-        return Ok(PageEnd::Paused);
+        return Ok(PageEnd::Paused(accepted));
     }
-    Ok(PageEnd::Page(last_sequence))
+    Ok(PageEnd::Page(last_sequence, accepted))
 }
 
 fn journal_entries(
@@ -274,20 +309,16 @@ fn closed() -> SdkError {
 fn handoff(
     sender: &mpsc::Sender<EventBatch>,
     events: Vec<LocalBusFrame>,
-) -> Result<bool, SdkError> {
+) -> Result<(bool, oneshot::Receiver<()>), SdkError> {
     let (accepted, done) = oneshot::channel();
     match sender.try_send(EventBatch { events, accepted }) {
-        Ok(()) => {
-            drop(done);
-            Ok(false)
-        }
+        Ok(()) => Ok((false, done)),
         Err(mpsc::error::TrySendError::Full(batch)) => {
-            drop(done);
             let sender = sender.clone();
             tokio::spawn(async move {
                 let _ = sender.send(batch).await;
             });
-            Ok(true)
+            Ok((true, done))
         }
         Err(mpsc::error::TrySendError::Closed(_)) => Err(closed()),
     }

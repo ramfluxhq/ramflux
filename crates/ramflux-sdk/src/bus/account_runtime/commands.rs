@@ -8,6 +8,9 @@ use super::{AccountRuntime, stopped};
 use crate::bus::actor::AccountCommand;
 use crate::prelude::*;
 
+type CommandReply =
+    tokio::sync::oneshot::Sender<Result<super::super::actor::ActorResponse, SdkError>>;
+
 #[cfg(test)]
 async fn wait_receive_gate(hook: Option<super::ReceiveGateHook>) {
     if let Some((entered, release)) = hook {
@@ -60,6 +63,7 @@ impl AccountRuntime {
     }
 
     async fn preempt_network_tasks(&mut self) -> Result<(), SdkError> {
+        super::command_park::cancel(&self.id, || self.preemption_error())?;
         self.username.stop().await;
         self.pairing.stop().await;
         self.transfers.stop().await;
@@ -111,7 +115,7 @@ impl AccountRuntime {
         let result = result.and_then(|_| {
             super::super::native_account::response(local_bus_account(&self.state, &self.id)?)
         });
-        let result = match self.publish_yielding(request).await {
+        let result = match self.publish_queued_yielding(request).await {
             Ok(()) => result,
             Err(error) => Err(error),
         };
@@ -206,7 +210,7 @@ impl AccountRuntime {
             "account command phase"
         );
         let stop = super::head_refresh::RECEIVE_PREPARED
-            .scope(std::cell::Cell::new(false), self.apply_command(command))
+            .scope(std::cell::Cell::new(false), Box::pin(self.apply_command(command)))
             .await;
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::debug!(
@@ -237,7 +241,11 @@ impl AccountRuntime {
         if self.park_command(&mut command).await? {
             return Ok(false);
         }
-        self.refresh_networking_expiry().await;
+        // Include an expired view in this command's durable prefix without
+        // waiting for the subscription router inside its serial command slot.
+        if let Err(error) = self.stage_networking_expiry() {
+            self.note_networking_expiry(Err(error));
+        }
         if !admit(&command) {
             return Ok(false);
         }
@@ -266,22 +274,8 @@ impl AccountRuntime {
             let _ = reply.send(Err(SdkError::PairingCode("Busy")));
             return Ok(false);
         }
-        if !lifecycle {
-            let _phase =
-                super::command_phase::Phase::start("network_prepare", &command.request.method);
-            match self.prepare_network_step(&mut command).await {
-                Ok(None) => {}
-                Ok(Some(wait)) => {
-                    super::command_park::park_network(&self.id, command, reply, wait);
-                    return Ok(false);
-                }
-                Err(error) => {
-                    let _ = reply.send(Err(error));
-                    return Ok(false);
-                }
-            }
-        }
-        let Some((command, mut reply)) = self.defer_initial_receive(command, reply) else {
+        let Some((command, mut reply)) = self.prepare_dispatch(command, reply, lifecycle).await
+        else {
             return Ok(false);
         };
         if owned_command(&command.request.method) {
@@ -328,6 +322,32 @@ impl AccountRuntime {
             Dispatch::Park { .. } => Ok(false),
             Dispatch::Done(result) => Ok(self.complete_command(&command, result, reply)),
         }
+    }
+
+    async fn prepare_dispatch(
+        &mut self,
+        command: AccountCommand,
+        reply: CommandReply,
+        lifecycle: bool,
+    ) -> Option<(AccountCommand, CommandReply)> {
+        let (mut command, reply) =
+            if lifecycle { (command, reply) } else { self.defer_expiry_command(command, reply)? };
+        if !lifecycle {
+            let _phase =
+                super::command_phase::Phase::start("network_prepare", &command.request.method);
+            match self.prepare_network_step(&mut command).await {
+                Ok(None) => {}
+                Ok(Some(wait)) => {
+                    super::command_park::park_network(&self.id, command, reply, wait);
+                    return None;
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return None;
+                }
+            }
+        }
+        self.defer_initial_receive(command, reply)
     }
 
     async fn ordinary_dispatch(
@@ -379,7 +399,7 @@ impl AccountRuntime {
         if super::super::generated_typing::is_transient(&request.method, &request.body) {
             return;
         }
-        if let Err(error) = self.publish_yielding(request).await {
+        if let Err(error) = self.publish_queued_yielding(request).await {
             tracing::warn!(account_id = %self.id, %error,
                 "cancelled request publication deferred; account remains open");
         }
