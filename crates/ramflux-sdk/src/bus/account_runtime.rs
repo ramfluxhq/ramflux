@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as RoutingMutex};
 
 mod background;
+mod command_phase;
 mod commands;
 mod maintenance;
 use maintenance::Maintenance;
@@ -35,6 +36,7 @@ pub(crate) mod lifecycle_fence;
 mod publication_complete;
 mod publication_park;
 mod readers;
+mod ready_commands;
 pub(crate) mod session_thread;
 pub(super) mod uploads;
 pub(super) mod writer_slice;
@@ -94,6 +96,7 @@ struct AccountRuntime {
     deferred: std::collections::VecDeque<super::connection_manager::AccountWork>,
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
     publications: std::collections::VecDeque<publication_complete::Completion>,
+    ready_commands: ready_commands::Queue,
     /// After resume, redrive receive until this instant so a peer reply is not stuck behind
     /// the push safety sweep.
     resume_receive_until: Option<tokio::time::Instant>,
@@ -186,6 +189,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         deferred: std::collections::VecDeque::new(),
         ledger: None,
         publications: std::collections::VecDeque::new(),
+        ready_commands: ready_commands::Queue::default(),
         resume_receive_until: None,
         transient: TransientHost::default(),
         pairing: pairing_calls::Calls::default(),
@@ -381,8 +385,9 @@ impl AccountRuntime {
             .inspect(|_| {
                 self.preempt.borrow_and_update();
             })
-            .or_else(|_| self.receiver.try_recv())
-            .ok();
+            .ok()
+            .or_else(|| self.ready_commands.take())
+            .or_else(|| self.receiver.try_recv().ok());
         if command.is_some() {
             publication_park::set_final(false);
             self.note_command_taken();
@@ -488,56 +493,33 @@ impl AccountRuntime {
         Ok((transient, username))
     }
 
-    async fn claim_and_apply(&mut self, command: AccountCommand) -> Result<bool, SdkError> {
-        publication_park::set_final(false);
-        self.note_command_taken();
-        self.apply(command).await
-    }
-
-    /// Background prepare must not hold the mailbox closed for the residence budget.
-    /// A released actor keeps the real mailbox: a closed stand-in looks like shutdown.
-    async fn prepare_until_command(
-        &mut self,
-    ) -> Result<Option<(Option<tokio::time::Instant>, Option<tokio::time::Instant>)>, SdkError>
-    {
-        loop {
-            if background::files_released() {
-                return self.background_or_prepare().await;
-            }
-            match Box::pin(self.race_background_prepare()).await? {
-                PrepareRace::Stop => return Ok(None),
-                PrepareRace::Ready(deadlines) => return Ok(Some(deadlines)),
-                PrepareRace::Command(command) => {
-                    if Box::pin(self.claim_and_apply(*command)).await? {
-                        return Ok(None);
-                    }
+    /// Preparation can replace readers and session ownership across awaits. Keep its
+    /// future alive while claiming ordinary commands into a separate bounded queue.
+    async fn prepare_until_command(&mut self) -> Result<Option<PrepareDeadlines>, SdkError> {
+        if background::files_released() {
+            return self.background_or_prepare().await;
+        }
+        let (_standin_sender, standin) = mpsc::channel(1);
+        let mut mailbox = std::mem::replace(&mut self.receiver, standin);
+        let ready = self.ready_commands.sender();
+        let mut shutdown = self.shutdown.clone();
+        let result = {
+            let prepared = Box::pin(self.background_or_prepare());
+            tokio::pin!(prepared);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.changed() => break Ok(None),
+                    command = ready_commands::receive(&ready, &mut mailbox) => match command {
+                        Some((permit, command)) => ready_commands::retain(permit, command),
+                        None => break Ok(None),
+                    },
+                    result = &mut prepared => break result,
                 }
             }
-        }
-    }
-
-    async fn race_background_prepare(&mut self) -> Result<PrepareRace, SdkError> {
-        let (_, standin) = mpsc::channel(1);
-        let mut mailbox = std::mem::replace(&mut self.receiver, standin);
-        let mut shutdown = self.shutdown.clone();
-        let outcome = tokio::select! {
-            biased;
-            _ = shutdown.changed() => BackgroundRace::Stop,
-            command = mailbox.recv() => match command {
-                Some(command) => BackgroundRace::Command(Box::new(command)),
-                None => BackgroundRace::Stop,
-            },
-            prepared = Box::pin(self.background_or_prepare()) => BackgroundRace::Prepared(prepared),
         };
         self.receiver = mailbox;
-        match outcome {
-            BackgroundRace::Stop => Ok(PrepareRace::Stop),
-            BackgroundRace::Command(command) => Ok(PrepareRace::Command(command)),
-            BackgroundRace::Prepared(result) => match result? {
-                Some(deadlines) => Ok(PrepareRace::Ready(deadlines)),
-                None => Ok(PrepareRace::Stop),
-            },
-        }
+        result
     }
 
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
@@ -778,18 +760,6 @@ enum MaintenancePoll {
 }
 
 type PrepareDeadlines = (Option<tokio::time::Instant>, Option<tokio::time::Instant>);
-
-enum PrepareRace {
-    Stop,
-    Ready(PrepareDeadlines),
-    Command(Box<AccountCommand>),
-}
-
-enum BackgroundRace {
-    Stop,
-    Command(Box<AccountCommand>),
-    Prepared(Result<Option<PrepareDeadlines>, SdkError>),
-}
 
 async fn flush_if_open(account: &AccountRuntime, request: &LocalBusFrame) -> Result<(), SdkError> {
     if background::files_released() { Ok(()) } else { account.publish(request).await }

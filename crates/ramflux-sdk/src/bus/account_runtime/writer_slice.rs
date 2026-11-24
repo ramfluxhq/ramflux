@@ -58,8 +58,9 @@ impl AccountRuntime {
             .inspect(|_| {
                 self.preempt.borrow_and_update();
             })
-            .or_else(|_| self.receiver.try_recv())
-            .ok();
+            .ok()
+            .or_else(|| self.ready_commands.take())
+            .or_else(|| self.receiver.try_recv().ok());
         if command.is_some() {
             self.note_command_taken();
         }
@@ -78,6 +79,7 @@ impl AccountRuntime {
         };
         // Boxed so a page or directory attempt can service this command without
         // an infinitely sized future.
+        super::publication_park::set_final(false);
         Box::pin(self.apply(command)).await.map(|_| ())
     }
 

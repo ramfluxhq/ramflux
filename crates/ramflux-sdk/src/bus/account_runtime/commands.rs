@@ -267,6 +267,8 @@ impl AccountRuntime {
             return Ok(false);
         }
         if !lifecycle {
+            let _phase =
+                super::command_phase::Phase::start("network_prepare", &command.request.method);
             let mut shutdown = self.shutdown.clone();
             let mut preempt = self.preempt.clone();
             let gate = tokio::select! {
@@ -340,6 +342,7 @@ impl AccountRuntime {
         command_timeout: std::time::Duration,
         #[cfg(test)] receive_gate_hook: Option<super::ReceiveGateHook>,
     ) -> (Dispatch, bool, bool, bool) {
+        let _phase = super::command_phase::Phase::start("mutation_apply", &command.request.method);
         let mut stopping = false;
         let mut cancelled = false;
         let mut preempted = false;
@@ -390,6 +393,8 @@ impl AccountRuntime {
         result: Result<super::super::actor::ActorResponse, SdkError>,
         reply: tokio::sync::oneshot::Sender<Result<super::super::actor::ActorResponse, SdkError>>,
     ) -> bool {
+        let _phase =
+            super::command_phase::Phase::start("completion_prepare", &command.request.method);
         if super::super::generated_typing::is_transient(
             &command.request.method,
             &command.request.body,
