@@ -74,8 +74,14 @@ impl Supervisor {
         let mut body = state_body(policy, open && !epoch.locked);
         let fields = body.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?;
         fields.insert("generation".into(), epoch.generation.into());
-        if !reason.is_empty() {
-            fields.insert("reason".into(), reason.into());
+        match reason {
+            None => {
+                fields.insert("reason".into(), serde_json::Value::Null);
+            }
+            Some(reason) if !reason.is_empty() => {
+                fields.insert("reason".into(), reason.into());
+            }
+            Some(_) => {}
         }
         if open && !epoch.locked {
             fields.insert("state".into(), state.into());
@@ -330,12 +336,11 @@ fn read_policy(
 }
 
 fn state_body(policy: &AppLockPolicy, open: bool) -> serde_json::Value {
-    let (state, reason) = if open {
+    // An OFF account never reports app-lock `locked`, opened or not (no code is ever asked).
+    let (state, reason) = if open || !policy.enabled {
         ("unlocked", "authenticated")
-    } else if policy.enabled {
-        ("locked", "cold_start")
     } else {
-        ("locked", "manual")
+        ("locked", "cold_start")
     };
     serde_json::json!({
         "enabled": policy.enabled,
