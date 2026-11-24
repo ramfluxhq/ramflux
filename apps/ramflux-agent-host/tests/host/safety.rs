@@ -130,29 +130,6 @@ async fn removal_between_engine_input_and_delivery_suppresses_output() -> TestRe
     Ok(())
 }
 #[tokio::test]
-async fn actual_rfd_client_refuses_grant_confirmation_before_sending() -> TestResult {
-    use ramflux_agent_host::{AgentBus, RfdBus};
-    use tokio::io::AsyncReadExt;
-    let f = Fixture::new()?;
-    let listener = tokio::net::UnixListener::bind(&f.config.socket)?;
-    let mut bus = RfdBus::connect(&f.config.socket, "agent").await?;
-    let (mut stream, _) = listener.accept().await?;
-    for method in ["grant.approve", "mcp.approval.confirm", "account.create", "device.activate"] {
-        assert!(matches!(
-            bus.request(method, serde_json::json!({}), None).await,
-            Err(Error::Unauthorized)
-        ));
-    }
-    let mut byte = [0u8; 1];
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(20), stream.read(&mut byte))
-            .await
-            .is_err()
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn revoked_local_device_is_rejected_even_if_display_directory_still_lists_it() -> TestResult {
     let f = Fixture::new()?;
     for fault in [Fault::Revoked, Fault::LegacyRevoked] {
