@@ -389,7 +389,7 @@ async fn send_controls(
             .map(|(_, _, resolutions)| resolutions.clone())
             .unwrap_or_default(),
     };
-    writer.apply(move |account| note_control_result(account, plan, &outcome)).await?;
+    writer.apply(move |account| note_control_result(account, &plan, &outcome)).await?;
     result.map(|(sent, _, _)| sent)
 }
 
@@ -465,10 +465,10 @@ async fn submit_home_control(
 
 fn note_control_result(
     account: &mut LocalBusAccountState,
-    plan: Plan,
+    plan: &Plan,
     outcome: &ControlOutcome,
 ) -> Result<(), SdkError> {
-    if !current_control_result(account, &plan, outcome)? {
+    if !current_control_result(account, plan, outcome)? {
         return Ok(());
     }
     let now = now_unix_timestamp();
