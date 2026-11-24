@@ -329,7 +329,7 @@ pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
         && CONTACT_VERIFY_CAS_CONTRACT == "CONTACT-VERIFY-CAS-01"
         && CONTACT_VERIFY_CAS_REQUEST_TYPE == "ramflux.message.v1.ContactSafetyVerifyRequest"
         && CONTACT_VERIFY_CAS_RESPONSE_TYPE == "ramflux.message.v1.ContactSafetyVerifyResult"
-        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "36cf7b76679c625c0bc9a31fe20d8ce95b35523f"
+        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "4ac17e2eebee3cdcafe5b7e5748da00a08c8cb1c"
 }
 
 #[cfg(test)]
