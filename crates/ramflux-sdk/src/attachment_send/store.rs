@@ -235,7 +235,10 @@ impl Store {
             self.destroy_secret(&row)?;
             Self::abandon(&mut row);
             row.segment_digests.clear();
-            row.generation = row.generation.saturating_add(1);
+            row.upload_acks.clear();
+            row.manifest_hash = None;
+
+            row.generation = row.generation.checked_add(1).ok_or(Refusal::new(CODE_SEAL_FAILED))?;
             row.phase = if now < row.hard_deadline && row.plaintext_digest.is_some() {
                 Phase::Accepted
             } else {

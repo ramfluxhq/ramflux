@@ -5,7 +5,7 @@
 
 use ed25519_dalek::SigningKey;
 use ramflux_protocol::large_attachment::{
-    OwnerAttachmentOperation, OwnerBind, OwnerPut, OwnerReserve, QualifiedOwner,
+    OwnerAttachmentOperation, OwnerBind, OwnerReserve, QualifiedOwner,
 };
 
 use super::codes::{
@@ -18,7 +18,7 @@ use super::meta::{Phase, Row};
 use super::owner_wire;
 use super::plane::Plane;
 use super::preflight::{self, FileBound, IdentityLen};
-use super::seal_job::{self, segment_name_of};
+use super::seal_job;
 use super::store::Store;
 use super::targets::MediaDevice;
 
@@ -222,6 +222,7 @@ fn reserve_and_seal(input: &PublishInput<'_>, row: Row) -> Result<Row, Refusal> 
         return Err(Refusal::new(CODE_SEAL_FAILED));
     }
     let mut row = row;
+    row.upload_acks = vec![0; sealed.digests.len()];
     row.segment_digests = sealed.digests;
     row.manifest_hash = Some(sealed.hash);
     row.phase = Phase::Bound;
@@ -246,62 +247,21 @@ fn bind_remote(input: &PublishInput<'_>, row: Row) -> Result<Row, Refusal> {
     input.store.mark(row, Phase::Uploading)
 }
 
-fn upload_remote(input: &PublishInput<'_>, row: Row) -> Result<Row, Refusal> {
-    put_segments(input, &row)?;
-    let op = OwnerAttachmentOperation::commit(
-        input.audience,
-        row.object_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
-        row.manifest_hash.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
-        input.authority_generation,
-        row.upload_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
-        row.payload_generation,
-    )
-    .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-    owner_wire::submit(input.plane, &op, &[], input.owner, input.owner_key, input.now)?;
-    input.store.mark(row, Phase::Committed)
-}
-
-fn put_segments(input: &PublishInput<'_>, row: &Row) -> Result<(), Refusal> {
-    for (index, _) in row.segment_digests.iter().enumerate() {
-        let index = u32::try_from(index).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-        let name = segment_name_of(index);
-        let _held = super::budget::memory(
-            u64::from(ramflux_protocol::large_attachment::SEGMENT_BYTES) + u64::from(NETWORK_CHUNK),
-        )?;
-        let cipher = input.store.read_named(&row.prepare_id, &name)?;
-        put_slices(input, row, u64::from(index), &cipher)?;
-    }
-    Ok(())
-}
-
-fn put_slices(
-    input: &PublishInput<'_>,
-    row: &Row,
-    index: u64,
-    cipher: &[u8],
-) -> Result<(), Refusal> {
-    let mut offset = 0_usize;
-    while offset < cipher.len() {
-        let step = usize::try_from(NETWORK_CHUNK).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-        let end = offset.saturating_add(step).min(cipher.len());
-        let body = &cipher[offset..end];
-        let at = u64::try_from(offset).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-        let op = OwnerAttachmentOperation::put(&OwnerPut {
-            audience: input.audience,
-            object_id: row.object_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
-            manifest_hash: row.manifest_hash.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
-            authority_generation: input.authority_generation,
-            operation_id: row.upload_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
-            payload_generation: row.payload_generation,
-            segment_index: index,
-            offset: at,
-            body,
-        })
+fn upload_remote(input: &PublishInput<'_>, mut row: Row) -> Result<Row, Refusal> {
+    // A lost Commit reply is recovered from the relay without committing again.
+    if !super::upload::put_segments(input, &mut row)? {
+        let op = OwnerAttachmentOperation::commit(
+            input.audience,
+            row.object_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
+            row.manifest_hash.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
+            input.authority_generation,
+            row.upload_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
+            row.payload_generation,
+        )
         .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-        owner_wire::submit(input.plane, &op, body, input.owner, input.owner_key, input.now)?;
-        offset = end;
+        owner_wire::submit(input.plane, &op, &[], input.owner, input.owner_key, input.now)?;
     }
-    Ok(())
+    input.store.mark(row, Phase::Committed)
 }
 
 fn finish_grant(input: &PublishInput<'_>, row: Row) -> Result<Wrapped, Refusal> {
