@@ -145,7 +145,26 @@ fn activity_topic(key: &str) -> Option<&'static str> {
     }
 }
 
+fn group_confirmation(
+    client: &RamfluxClient,
+    encoded: &str,
+    events: &mut Vec<Projection>,
+) -> Result<(), SdkError> {
+    let group = String::from_utf8(
+        ramflux_protocol::decode_base64url(encoded)
+            .map_err(|_| SdkError::InboundRejected("group confirmation key invalid".into()))?,
+    )
+    .map_err(|_| SdkError::InboundRejected("group confirmation key invalid".into()))?;
+    if let Some(metadata) = client.shared_group_metadata(&group)? {
+        events.push(("group.changed".to_owned(), metadata, None));
+    }
+    Ok(())
+}
+
 fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Result<(), SdkError> {
+    if let Some(encoded) = key.strip_prefix(crate::client::shared_group::member_delivery::PREFIX) {
+        return group_confirmation(client, encoded, events);
+    }
     if let Some(encoded) = key.strip_prefix("group-invitation/") {
         events.push(("group.invitation".to_owned(), invitation_body(encoded), None));
         return Ok(());

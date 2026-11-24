@@ -76,7 +76,10 @@ impl RamfluxClient {
         }
         let own =
             self.device_branch.as_ref().is_some_and(|device| device.principal_id == principal);
-        let friend = self.friend_link_peer_is_accepted(principal)?;
+        // Native contact consent is keyed by the authenticated root, not its display principal.
+        // A re-added contact has no surviving pair to satisfy the recovery gate on its own.
+        let friend = self.friend_link_peer_is_accepted(remote.root_commitment())?
+            || self.friend_link_peer_is_accepted(principal)?;
         let paired = db.actor_state_exists(&RamfluxClient::pair_key(local, remote)?)?;
         let pending = self.pair_recovery_pending(local, remote)?;
         Ok(own || friend || paired || pending)
