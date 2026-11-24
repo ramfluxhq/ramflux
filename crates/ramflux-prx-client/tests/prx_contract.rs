@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "46e829e5245238150a96802a7cea2b0f1babe778";
+const PIN: &str = "d2f4d68e923c5095504707264d2f6a8aa681188a";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -2761,9 +2761,10 @@ async fn rec_ancestor_group_writable_refuses_turns_context_still_answers() {
     .await;
 }
 
-/// REC-CFG-1 (item 5 of the repin card): the group-writable directory is `<cfg>/workspace`, which
-/// is on the physical path to `<cfg>/workspace/memory`. Set after the state is built, with
-/// PRX's order intact, so only that directory is group-writable.
+/// REC-CFG-1 (item 5 of the repin card): the daemon runs with `OPENPRX_CONFIG_DIR=<dir>/cfg` and
+/// `OPENPRX_WORKSPACE=<dir>/workspace`; since PRX b004c7ac the workspace is `OPENPRX_WORKSPACE`, so
+/// the group-writable directory is `<dir>/workspace` (the one the gateway log prints), on the
+/// physical path to `<dir>/workspace/memory`. Set after the state is built, so only it is 0775.
 #[tokio::test]
 #[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
 async fn rec_cfg_workspace_group_writable_refuses_turns() {
@@ -2771,11 +2772,13 @@ async fn rec_cfg_workspace_group_writable_refuses_turns() {
         use std::os::unix::fs::PermissionsExt;
         let stub = ModelStub::start_completing(Duration::ZERO).await;
         let mut daemon = Daemon::prepare_unchecked_in(&state_base(), &stub.provider(), "");
-        // The harness does not create <cfg>/workspace (the daemon does); create it first.
-        let workspace = daemon.dir.path().join("cfg/workspace");
-        std::fs::create_dir_all(&workspace).expect("test: create cfg/workspace");
+        // OPENPRX_WORKSPACE is <dir>/workspace (created 0700 by the harness); make that one 0775.
+        let workspace = daemon.dir.path().join("workspace");
         std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o775))
-            .expect("test: chmod cfg/workspace");
+            .expect("test: chmod workspace");
+        let mode =
+            std::fs::metadata(&workspace).expect("test: stat workspace").permissions().mode();
+        assert_eq!(mode & 0o777, 0o775, "REC-CFG-1: the workspace PRX uses is group-writable");
         daemon.start();
         daemon.wait_ready().await;
         daemon.pair().await;
