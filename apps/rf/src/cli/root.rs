@@ -26,7 +26,7 @@ pub(crate) enum RootAction {
 pub(crate) struct RootSnapshot {
     #[arg(long)]
     pub(crate) data_root: PathBuf,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     /// Use the explicitly selected fixture custody shared with a fixture daemon.
     #[cfg(feature = "itest-memory-vault")]
@@ -38,13 +38,13 @@ pub(crate) struct RootSnapshot {
 pub(crate) struct RootCommit {
     #[arg(long)]
     pub(crate) data_root: PathBuf,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) conversation: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) message_id: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub(crate) sender: String,
     /// Use the explicitly selected fixture custody shared with a fixture daemon.
     #[cfg(feature = "itest-memory-vault")]
