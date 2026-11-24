@@ -19,7 +19,7 @@ use crate::custody::{self, load_account, load_data_account, retarget_agent_custo
 use ramflux_protocol::custody::{
     DeviceRef, DeviceSet, Envelope, decode_register_plan, object_hash,
 };
-use ramflux_protocol::{PrincipalKind, decode_base64url};
+use ramflux_protocol::decode_base64url;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -72,7 +72,6 @@ struct Journal {
 struct HumanRow {
     id: String,
     anchor: String,
-    human: bool,
 }
 
 /// Write the planned journal, or return the open one that already names `human`.
@@ -306,7 +305,7 @@ fn discover(
         return Ok(None);
     }
     let rows = human_rows(root)?;
-    let Some(here) = rows.iter().find(|row| row.id == human && row.human) else {
+    let Some(here) = rows.iter().find(|row| row.id == human) else {
         return Ok(None);
     };
     let files = move_files(root, human)?;
@@ -329,7 +328,7 @@ fn discover_source(
         return Ok(None);
     }
     let mut destinations = Vec::new();
-    for row in rows.iter().filter(|row| row.human && row.id != human && row.anchor == here.anchor) {
+    for row in rows.iter().filter(|row| row.id != human && row.anchor == here.anchor) {
         if move_files(root, &row.id)?.is_empty()
             && let Some(install) = fresh_enroll(root, &row.id, &here.anchor)?
         {
@@ -353,7 +352,7 @@ fn discover_destination(
         return Ok(None);
     };
     let mut sources = Vec::new();
-    for row in rows.iter().filter(|row| row.human && row.id != human && row.anchor == here.anchor) {
+    for row in rows.iter().filter(|row| row.id != human && row.anchor == here.anchor) {
         let files = move_files(root, &row.id)?;
         if !files.is_empty() {
             sources.push((row.id.clone(), files));
@@ -481,9 +480,10 @@ fn one_row(root: &Path, entry: &fs::DirEntry) -> Result<Option<HumanRow>, SdkErr
         return Ok(None);
     }
     let now = crate::custody::network_now()?;
-    let account = load_data_account(root, &id, now)?;
-    let human = account.record().body.principal_kind == PrincipalKind::Human;
-    Ok(Some(HumanRow { id, anchor: account.record().body.account_anchor.clone(), human }))
+    let Some(account) = custody::store::load_human_data_account(root, &id, now)? else {
+        return Ok(None);
+    };
+    Ok(Some(HumanRow { id, anchor: account.record().body.account_anchor.clone() }))
 }
 
 fn move_files(root: &Path, human: &str) -> Result<Vec<String>, SdkError> {
