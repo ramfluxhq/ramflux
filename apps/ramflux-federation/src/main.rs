@@ -250,7 +250,9 @@ fn load_mounted_identity(
 
 fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
     let (writer, guard) = tracing_appender::non_blocking(std::io::stdout());
-    tracing_subscriber::fmt().with_target(false).with_writer(writer).init();
+    let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).with_writer(writer).init();
     guard
 }
 
