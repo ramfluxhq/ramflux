@@ -58,6 +58,8 @@ pub(crate) struct Row {
     pub manifest_hash: Option<[u8; 32]>,
     pub payload_generation: u64,
     pub segment_digests: Vec<[u8; 32]>,
+    /// Durably acknowledged network slices, one bitmap per immutable cipher segment.
+    pub upload_acks: Vec<u8>,
     pub message_id: Option<String>,
     pub charged: u64,
     pub retired: bool,
@@ -93,6 +95,7 @@ impl Row {
             manifest_hash: None,
             payload_generation: 1,
             segment_digests: Vec::new(),
+            upload_acks: Vec::new(),
             message_id: None,
             charged: 0,
             retired: false,
