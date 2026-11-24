@@ -172,6 +172,12 @@ pub(crate) async fn deliver_pending(
 /// Startup and send-time sweep: finishes interrupted wipes and redelivers queued retirements.
 /// Best effort; a failure is retried at the next call.
 pub(crate) async fn sweep(account: &LocalBusAccountState, pin: &AuthorityPin) {
+    if let Err(error) =
+        retire::with_ctx(account, |ctx| retire::resume_deletes(ctx, super::unix_now()?))
+    {
+        tracing::warn!(%error, "attachment deletion retirement deferred");
+        return;
+    }
     let Ok(plane) = super::plane_for(account) else { return };
     let _ = retire::with_ctx(account, |ctx| ctx.store.cleanup_cancelled().map_err(SdkError::from));
     let _ = deliver_pending(account, plane, pin).await;

@@ -93,27 +93,7 @@ impl RamfluxClient {
         conversation: &str,
         delete: &ramflux_protocol::message::Delete,
     ) -> Result<(), SdkError> {
-        Self::verify_delete_authority(source, identity, conversation, delete)?;
-        let scope =
-            DeleteScope::try_from(delete.scope).map_err(|_| refused("delete scope invalid"))?;
-        if delete.targets.is_empty()
-            || delete.tombstone_id.is_empty()
-            || scope == DeleteScope::Unspecified
-        {
-            return Err(SdkError::InboundRejected(
-                "delete targets, scope and tombstone are required".into(),
-            ));
-        }
-        if scope == DeleteScope::Local {
-            self.require_native_operation(
-                source,
-                crate::client::identity_authority::NativeOperation::Sync,
-            )?;
-            self.require_native_operation(
-                &self.owned_device_identity()?,
-                crate::client::identity_authority::NativeOperation::Sync,
-            )?;
-        }
+        let scope = self.authorized_delete_scope(source, identity, conversation, delete)?;
         let db = self.account_db()?;
         db.write_transaction(|| {
             for target in &delete.targets {
@@ -173,6 +153,19 @@ impl RamfluxClient {
                     moderator,
                     identity: db.load_actor_state(&format!("routed/generated-identity/{id}"))?,
                 };
+                if scope == DeleteScope::Everyone {
+                    crate::attachment_send::request_delete(
+                        db,
+                        &id,
+                        crate::attachment_send::unix_now()?,
+                    )?;
+                } else {
+                    crate::attachment_send::fence_deleted(
+                        db,
+                        &id,
+                        crate::attachment_send::unix_now()?,
+                    )?;
+                }
                 self.install_generated_delete_fence(&fence)?;
                 if scope == DeleteScope::Local || source.root_commitment() == target.author_anchor {
                     self.retire_pending_generated_edit_for_delete(target)?;
@@ -188,6 +181,37 @@ impl RamfluxClient {
             }
             Ok(())
         })
+    }
+
+    fn authorized_delete_scope(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        identity: &ramflux_protocol::message::EventIdentity,
+        conversation: &str,
+        delete: &ramflux_protocol::message::Delete,
+    ) -> Result<DeleteScope, SdkError> {
+        Self::verify_delete_authority(source, identity, conversation, delete)?;
+        let scope =
+            DeleteScope::try_from(delete.scope).map_err(|_| refused("delete scope invalid"))?;
+        if delete.targets.is_empty()
+            || delete.tombstone_id.is_empty()
+            || scope == DeleteScope::Unspecified
+        {
+            return Err(SdkError::InboundRejected(
+                "delete targets, scope and tombstone are required".into(),
+            ));
+        }
+        if scope == DeleteScope::Local {
+            self.require_native_operation(
+                source,
+                crate::client::identity_authority::NativeOperation::Sync,
+            )?;
+            self.require_native_operation(
+                &self.owned_device_identity()?,
+                crate::client::identity_authority::NativeOperation::Sync,
+            )?;
+        }
+        Ok(scope)
     }
 
     fn verify_delete_authority(

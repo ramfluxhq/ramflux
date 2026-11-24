@@ -53,6 +53,7 @@ pub(crate) use hooks::Binding;
 pub(crate) use meta::{MAX_ATTACHMENTS, Phase, Recipient, Row};
 pub(crate) use plane::{OwnerCall, Plane, ReadCall, RegisterCall, RetireCall};
 pub(crate) use publish::{PublishInput, upload_all, wrap_all};
+pub(crate) use retire::{fence_deleted, request_delete};
 pub(crate) use store::Store;
 pub(crate) use targets::{MediaDevice, MediaScope, choose_targets};
 

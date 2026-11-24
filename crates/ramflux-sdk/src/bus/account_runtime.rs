@@ -584,6 +584,11 @@ impl AccountRuntime {
         self.maintain_agent_owner_contact().await;
         self.service_waiting_commands().await?;
         let activity = self.record_local_maintenance().await?;
+        if let Some(account) = self.state.accounts.get(&self.id)
+            && let Ok(pin) = crate::attachment_send::authority(&account.client)
+        {
+            crate::attachment_send::hooks::sweep(account, &pin).await;
+        }
         // The local pass may have adopted the new primary. A rebind staged before that
         // adoption stays unqueued; this tick sends it, and later ticks retry until it is.
         self.maintain_pending_rebinds();
