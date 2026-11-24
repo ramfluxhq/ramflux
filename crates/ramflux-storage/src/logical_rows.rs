@@ -87,6 +87,61 @@ pub fn load_account_db_key(
     Ok((path, key))
 }
 
+/// Loads the existing device-wrapped key through a query-only account index.
+/// Does not acquire a writer, create a wrap, or check an account code.
+///
+/// # Errors
+/// Returns an error for an invalid path, corrupt wrap, or failed key unwrapping.
+/// Returns `None` when app lock or an explicit account lock removed the device wrap.
+pub fn load_device_account_db_key(
+    data_root: &Path,
+    local_account_id: &str,
+    key_encryption_key: &[u8; 32],
+) -> Result<Option<(PathBuf, AccountDbKey)>, StorageError> {
+    single_component(local_account_id)?;
+    let index = Connection::open_with_flags(
+        data_root.join(ACCOUNT_INDEX_FILE),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    index.execute_batch("PRAGMA query_only=ON;")?;
+    let (relative, wrapped, nonce) = index.query_row(
+        "SELECT a.db_relative_path, d.wrapped_key, d.wrapped_key_nonce
+         FROM local_account a LEFT JOIN account_device_unlock d USING (local_account_id)
+         WHERE a.local_account_id = ?1",
+        params![local_account_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+            ))
+        },
+    )?;
+    let (Some(wrapped_key), Some(nonce)) = (wrapped, nonce) else {
+        return Ok(None);
+    };
+    let nonce = nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| StorageError::Integrity("device wrap nonce is not 12 bytes"))?;
+    let key = crate::unwrap_with_vault_secret(
+        key_encryption_key,
+        &WrappedAccountDbKey {
+            key_wrapping_provider: "platform-device-unlock".to_owned(),
+            key_wrapping_ref: String::new(),
+            nonce,
+            wrapped_key,
+        },
+    )?;
+    let path = rooted_database(data_root, &relative)?;
+    if path.file_name().and_then(|name| name.to_str()) != Some(ACCOUNT_DB_FILE) {
+        return Err(StorageError::Integrity(
+            "account database file name is not ramflux_local.sqlite",
+        ));
+    }
+    Ok(Some((path, key)))
+}
+
 /// Logical rows of the message, event, outbox, receipt and actor-state tables.
 ///
 /// One deferred transaction on a query-only connection. The caller sees one

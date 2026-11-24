@@ -28,9 +28,10 @@ pub(crate) struct RootSnapshot {
     pub(crate) data_root: PathBuf,
     #[arg(long)]
     pub(crate) account: String,
-    /// Environment variable holding the account code. Defaults to `RAMFLUX_ACCOUNT_PASSPHRASE`.
+    /// Use the explicitly selected fixture custody shared with a fixture daemon.
+    #[cfg(feature = "itest-memory-vault")]
     #[arg(long)]
-    pub(crate) passphrase_env: Option<String>,
+    pub(crate) itest_memory_vault: bool,
 }
 
 #[derive(Args)]
@@ -45,7 +46,8 @@ pub(crate) struct RootCommit {
     pub(crate) message_id: String,
     #[arg(long)]
     pub(crate) sender: String,
-    /// Environment variable holding the account code. Defaults to `RAMFLUX_ACCOUNT_PASSPHRASE`.
+    /// Use the explicitly selected fixture custody shared with a fixture daemon.
+    #[cfg(feature = "itest-memory-vault")]
     #[arg(long)]
-    pub(crate) passphrase_env: Option<String>,
+    pub(crate) itest_memory_vault: bool,
 }

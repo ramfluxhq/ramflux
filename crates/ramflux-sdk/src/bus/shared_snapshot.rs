@@ -8,13 +8,13 @@
 //! process already holds it, before any SQL write.
 
 use crate::SdkError;
-use crate::client::account::account_db_key_encryption_key;
+use crate::client::device_unlock::{self, DeviceBoundVaultSecret, DeviceSecret};
+use crate::custody::PrimaryVault;
 use ramflux_storage::{
     AccountDb, AccountIndex, DirectMessageWrite, MessageMetadata, StorageError,
-    load_account_db_key, logical_table_rows, read_existing_vault_secret,
+    load_device_account_db_key, logical_table_rows,
 };
 use std::path::{Path, PathBuf};
-use zeroize::Zeroizing;
 
 /// Message ids from one committed snapshot. Bodies stay in the database.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
@@ -43,17 +43,16 @@ pub struct DirectMessageCommit<'a> {
 ///
 /// # Errors
 /// Returns an error when the root is not a private absolute directory, the account
-/// code cannot unwrap the database key, or the snapshot cannot be read.
+/// device custody is unavailable, the account needs an unlock, or the snapshot cannot be read.
 #[must_use = "the snapshot is the only view of committed message ids"]
 pub fn read_committed_snapshot(
     data_root: &Path,
     account_id: &str,
-    account_code: &[u8],
+    vault: &dyn PrimaryVault,
 ) -> Result<CommittedSnapshot, SdkError> {
     let root = require_private_root(data_root)?;
     require_component("account id", account_id)?;
-    require_code(account_code)?;
-    let key = unwrap_account_key(&root, account_id, account_code)?;
+    let key = unwrap_account_key(&root, account_id, vault)?;
     let tables = logical_table_rows(&key.0, &key.1)?;
     Ok(CommittedSnapshot {
         account_id: account_id.to_owned(),
@@ -74,7 +73,7 @@ pub fn read_committed_snapshot(
 pub fn commit_direct_message(
     data_root: &Path,
     account_id: &str,
-    account_code: &[u8],
+    vault: &dyn PrimaryVault,
     message: DirectMessageCommit<'_>,
 ) -> Result<(), SdkError> {
     let root = require_private_root(data_root)?;
@@ -82,8 +81,7 @@ pub fn commit_direct_message(
     require_component("conversation id", message.conversation_id)?;
     require_component("message id", message.message_id)?;
     require_component("sender id", message.sender_id)?;
-    require_code(account_code)?;
-    let key = unwrap_account_key(&root, account_id, account_code)?;
+    let key = unwrap_account_key(&root, account_id, vault)?;
     let index = AccountIndex::open(&root)?;
     let database = AccountDb::open(&index, account_id, &key.1)?;
     let metadata = MessageMetadata::default();
@@ -120,11 +118,14 @@ pub fn shared_root_refusal(error: &SdkError) -> Option<&'static str> {
 fn unwrap_account_key(
     root: &Path,
     account_id: &str,
-    account_code: &[u8],
+    vault: &dyn PrimaryVault,
 ) -> Result<(PathBuf, ramflux_storage::AccountDbKey), SdkError> {
-    let secret = Zeroizing::new(read_existing_vault_secret(root, account_id)?);
-    let kek = Zeroizing::new(account_db_key_encryption_key(&secret, account_code)?);
-    Ok(load_account_db_key(root, account_id, &kek)?)
+    vault.preflight()?;
+    let source = DeviceBoundVaultSecret::bind(root, vault, account_id, DeviceSecret::Load)?;
+    let secret = source.existing_secret(root)?;
+    let kek = device_unlock::device_key_encryption_key(&secret);
+    load_device_account_db_key(root, account_id, &kek)?
+        .ok_or_else(device_unlock::account_code_required)
 }
 
 fn message_ids(rows: Option<&[String]>) -> Vec<String> {
@@ -133,13 +134,6 @@ fn message_ids(rows: Option<&[String]>) -> Vec<String> {
         .filter_map(|line| line.split('\t').next().filter(|id| !id.is_empty()))
         .map(str::to_owned)
         .collect()
-}
-
-fn require_code(account_code: &[u8]) -> Result<(), SdkError> {
-    if account_code.is_empty() || account_code.len() > 1024 {
-        return Err(invalid_input("account code length"));
-    }
-    Ok(())
 }
 
 fn require_component(label: &str, value: &str) -> Result<(), SdkError> {
@@ -191,4 +185,10 @@ fn unix_now() -> Result<i64, StorageError> {
         .map_err(|_| StorageError::Integrity("system clock is before the unix epoch"))?
         .as_secs();
     i64::try_from(seconds).map_err(|_| StorageError::Integrity("system clock exceeds i64"))
+}
+
+/// Selects the platform custody provider used by the local supervisor.
+#[must_use]
+pub fn shared_root_vault(config: &crate::LocalBusConfig) -> std::sync::Arc<dyn PrimaryVault> {
+    super::custody_setup::primary_provider(config)
 }

@@ -105,7 +105,7 @@ pub use bus::io::{
 };
 pub use bus::shared_snapshot::{
     CommittedSnapshot, DirectMessageCommit, commit_direct_message, read_committed_snapshot,
-    shared_root_refusal,
+    shared_root_refusal, shared_root_vault,
 };
 pub use bus::{
     AccountNetworkingReason, LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest,

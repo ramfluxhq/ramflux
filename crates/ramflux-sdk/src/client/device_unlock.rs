@@ -72,6 +72,17 @@ impl DeviceBoundVaultSecret {
             device_secret,
         })
     }
+
+    /// Read the existing file secret without creating it, for shared read-only access.
+    pub(crate) fn existing_secret(&self, root: &Path) -> Result<Zeroizing<[u8; 32]>, SdkError> {
+        let file =
+            Zeroizing::new(ramflux_storage::read_existing_vault_secret(root, &self.account_id)?);
+        let mut hasher = Zeroizing::new(blake3::Hasher::new());
+        hasher.update(b"ramflux.account_db_device_bound.v1");
+        hasher.update(&*file);
+        hasher.update(&*self.device_secret);
+        Ok(Zeroizing::new(*hasher.finalize().as_bytes()))
+    }
 }
 
 impl VaultSecretSource for DeviceBoundVaultSecret {
@@ -181,7 +192,7 @@ pub(crate) fn delete_device_secret(
     vault.delete(&device_unlock_reference(account_id))
 }
 
-fn device_key_encryption_key(vault_secret: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+pub(crate) fn device_key_encryption_key(vault_secret: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(blake3::derive_key("ramflux.account_db_device_kek.v1", vault_secret))
 }
 
