@@ -91,6 +91,8 @@ impl<'a> Visitor<'a> {
                 | "stop_reason"
                 | "check"
                 | "object_kind"
+                | "phase"
+                | "event"
         ) && !value.is_empty()
             && value.len() <= 128
             && value.bytes().all(|v| v.is_ascii_alphanumeric() || matches!(v, b'_' | b'.'))
