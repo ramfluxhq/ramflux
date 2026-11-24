@@ -31,6 +31,7 @@ pub(crate) mod pairing;
 #[path = "pairing_unsupported.rs"]
 pub(crate) mod pairing;
 pub(crate) mod prx;
+pub(crate) mod root;
 pub(crate) mod username;
 #[cfg(windows)]
 mod windows_console;

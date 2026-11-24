@@ -992,9 +992,12 @@ fn local_search_is_refused_before_native_supervisor_admission() {
 /// Test data roots must be private (0700) whatever the runner's umask; the
 /// C ABI refuses group/other-accessible roots (`data_root.rs`).
 pub(super) fn private_tempdir() -> tempfile::TempDir {
-    use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().expect("test: isolated data root");
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
-        .expect("test: private data root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("test: private data root");
+    }
     root
 }

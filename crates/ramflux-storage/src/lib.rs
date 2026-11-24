@@ -74,7 +74,9 @@ pub use account_db::receive::{ReceiveExpectation, ReceiveTransaction, RecoveryIn
 mod encryption;
 mod error;
 mod logical_rows;
-pub use logical_rows::{load_account_db_key, logical_table_rows, read_existing_vault_secret};
+pub use logical_rows::{
+    load_account_db_key, load_device_account_db_key, logical_table_rows, read_existing_vault_secret,
+};
 mod event_store;
 mod group_permissions;
 mod history_hash;

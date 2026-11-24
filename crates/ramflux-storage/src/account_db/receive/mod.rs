@@ -226,6 +226,16 @@ impl ReceiveTransaction<'_> {
     }
 }
 
+/// A SQL busy or locked outcome is the same typed refusal as the writer flock.
+/// The receive transaction has already rolled back, so no acknowledgement is durable.
+fn busy_writer(account: String, error: StorageError) -> StorageError {
+    if matches!(error, StorageError::AccountWriterBusy(_)) || !error.is_writer_busy() {
+        error
+    } else {
+        StorageError::AccountWriterBusy(account)
+    }
+}
+
 impl AccountDb {
     /// Live incarnation for `target`, or `None` when the ledger is unactivated (no table or row).
     ///
@@ -308,12 +318,14 @@ impl AccountDb {
         current_generation: u64,
         write: impl FnOnce(&ReceiveTransaction<'_>) -> Result<T, StorageError>,
     ) -> Result<T, StorageError> {
+        let account = self.local_account_id.clone();
         self.write_transaction(|| {
             let authority = self.admit_receive(expected, current_generation)?;
             let value = write(&authority)?;
             self.recheck_receive(expected, &authority)?;
             Ok(value)
         })
+        .map_err(|error| busy_writer(account, error))
     }
 
     /// Reconciles a page under the same fences as [`Self::receive_transaction`], without a writer.

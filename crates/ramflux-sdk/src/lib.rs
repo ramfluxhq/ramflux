@@ -103,6 +103,10 @@ pub use bus::io::{
     MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES, MAX_LOCAL_BUS_OBJECT_BYTES,
     MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES,
 };
+pub use bus::shared_snapshot::{
+    CommittedSnapshot, DirectMessageCommit, commit_direct_message, read_committed_snapshot,
+    shared_root_refusal, shared_root_vault,
+};
 pub use bus::{
     AccountNetworkingReason, LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest,
     LocalBusAccountBackupExportRequest, LocalBusAccountBackupImportRequest,
