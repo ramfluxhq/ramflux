@@ -1,25 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Isolate event refusals from host identity/storage failures and bound recent activity.
+//! Isolate event refusals from host identity/storage failures and bound replay receipts.
 use crate::{AgentHost, EngineProvider, Error, OutputRefusal, Result};
 use ramflux_sdk::{LocalBusFrame, SurfaceRefusalCode as Code};
 impl<E: EngineProvider> AgentHost<E> {
-    pub(crate) fn prune_rate_history(&mut self, now: u64) {
-        let interval = self.config.per_conversation_interval_ms;
-        self.state.last_reply_ms.retain(|_, at| now < at.saturating_add(interval));
-    }
-    pub(crate) fn rate_history_has_capacity(&self, conversation: &str) -> bool {
-        self.state.last_reply_ms.contains_key(conversation)
-            || self.state.last_reply_ms.len() < self.config.max_conversations
-                && serde_json::to_vec(&self.state.last_reply_ms).is_ok_and(|bytes| {
-                    bytes
-                        .len()
-                        .saturating_add(conversation.len().saturating_mul(6))
-                        .saturating_add(32)
-                        <= 65_536
-                })
-    }
     pub(crate) fn remember_action(&mut self, key: String) {
         if !self.state.handled_actions.contains(&key) {
             if self.state.handled_actions.len() >= 2048 {
@@ -36,7 +21,10 @@ impl<E: EngineProvider> AgentHost<E> {
     ) -> Result<()> {
         match result {
             Ok(()) => Ok(()),
-            Err(error) if error.stops_host() || matches!(error, Error::Bus | Error::Resync) => {
+            Err(error)
+                if error.stops_host()
+                    || matches!(error, Error::Bus | Error::Resync | Error::RateLimited { .. }) =>
+            {
                 Err(error)
             }
             Err(error) => {

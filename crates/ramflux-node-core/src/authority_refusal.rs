@@ -10,6 +10,11 @@ pub enum EnvelopeAuthorityReason {
     AuthorityMismatch,
     PayloadHashMismatch,
     StaleEpoch,
+    // Local dead-letter labels. Not authority proofs, and not sent on the
+    // envelope-authority wire. Existing rows keep the names already stored.
+    Limit,
+    Blocked,
+    Malformed,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

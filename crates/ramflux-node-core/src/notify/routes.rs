@@ -107,6 +107,9 @@ mod tests {
                     registered_at: now,
                     expires_at: now + 60,
                     route_generation: 0,
+                    route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+                    environment: crate::PushRouteEnvironment::Production,
+                    capability: crate::PushRouteCapability::Alert,
                 };
                 let rows = [route];
                 let bytes = if expected == "notify plaintext routes" {
@@ -162,6 +165,9 @@ mod tests {
             registered_at: now,
             expires_at: now + 60,
             route_generation: 0,
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: crate::PushRouteEnvironment::Production,
+            capability: crate::PushRouteCapability::Alert,
         };
         let db = redb::Database::open(&path)?;
         let write = db.begin_write()?;
@@ -211,6 +217,9 @@ mod tests {
             registered_at: now,
             expires_at: now + 60,
             route_generation: 0,
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: crate::PushRouteEnvironment::Production,
+            capability: crate::PushRouteCapability::Alert,
         };
         store.register_authenticated_push_route(&authority, &route)?;
         let expected = store.load_notify_routes(&authority.target_delivery_id)?;

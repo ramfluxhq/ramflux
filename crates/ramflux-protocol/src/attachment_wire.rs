@@ -41,6 +41,16 @@ impl From<Vec<u8>> for WireBytes {
 pub enum AttachmentCall {
     /// The relay's source authority: source name, generation, public key, home node.
     Authority,
+    /// Effective node policy and ciphertext accounting for the authenticated account.
+    AccountStatus,
+    /// Reconcile one segment's durable slice acknowledgements before upload resume.
+    UploadStatus {
+        upload_id: WireBytes,
+        object_id: WireBytes,
+        manifest_hash: WireBytes,
+        payload_generation: u64,
+        index: u32,
+    },
     /// Owner Reserve, Bind, PUT, Commit, or pending Retire. `signature` is the 64-byte
     /// requester proof signature over `proof`.
     Owner { operation: WireBytes, body: WireBytes, proof: WireBytes, signature: WireBytes },
@@ -84,6 +94,50 @@ pub struct AttachmentAuthorityReply {
     pub generation: u64,
     pub signing_public_key: String,
     pub home_node_id: String,
+}
+
+/// Effective limits, in bytes and seconds. Quota counts ciphertext, including AEAD tags.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentLimits {
+    pub max_plaintext_bytes: u64,
+    pub quota_bytes: u64,
+    pub network_chunk_bytes: u32,
+    pub segment_bytes: u32,
+    pub retention_seconds: u64,
+    pub pending_lease_seconds: u64,
+    pub pending_max_seconds: u64,
+}
+
+/// Disjoint ciphertext charges. Debt is released only after durable backend erasure.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentUsage {
+    pub used_bytes: u64,
+    pub reserved_bytes: u64,
+    pub cleanup_debt_bytes: u64,
+    pub charged_bytes: u64,
+    pub available_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentAccountStatus {
+    pub limits: AttachmentLimits,
+    pub usage: AttachmentUsage,
+}
+
+/// A bitmap covers one segment only; bit n acknowledges the durable slice at n * chunk bytes.
+/// A checkpoint is upload metadata, never read or grant authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentUploadStatus {
+    pub state: String,
+    pub payload_generation: u64,
+    pub index: u32,
+    pub received_bitmap: u8,
+    pub received_bytes: u64,
+    pub segment_length: u64,
+    pub network_chunk_bytes: u32,
+    pub lease_until: u64,
+    pub lease_hard_until: u64,
+    pub expires_at: Option<u64>,
 }
 
 #[cfg(test)]

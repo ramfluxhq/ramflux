@@ -5,7 +5,7 @@ use ramflux_sdk::{LocalBusClient, LocalBusFrame};
 use serde_json::Value;
 use std::{
     future::Future,
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,8 +24,12 @@ pub trait AgentBus {
 }
 pub struct RfdBus {
     client: LocalBusClient,
+    subscription: Option<LocalBusClient>,
+    socket: PathBuf,
     account: String,
     next: u64,
+    /// A human owner account must not be checked with the headless identity call.
+    confirm_identity: bool,
 }
 impl RfdBus {
     /// # Errors
@@ -33,9 +37,23 @@ impl RfdBus {
     pub async fn connect(socket: &Path, account: &str) -> Result<Self> {
         Ok(Self {
             client: LocalBusClient::connect(socket).await.map_err(|_| Error::Bus)?,
+            subscription: None,
+            socket: socket.to_owned(),
             account: account.into(),
             next: 0,
+            confirm_identity: true,
         })
+    }
+
+    /// Connects as the human custodian. An authentication race reconnects; it does not
+    /// treat that account as a headless participant.
+    ///
+    /// # Errors
+    /// Rejects an unavailable local socket.
+    pub async fn connect_owner(socket: &Path, account: &str) -> Result<Self> {
+        let mut bus = Self::connect(socket, account).await?;
+        bus.confirm_identity = false;
+        Ok(bus)
     }
 }
 impl AgentBus for RfdBus {
@@ -45,33 +63,6 @@ impl AgentBus for RfdBus {
         body: Value,
         operation: Option<&str>,
     ) -> Result<Value> {
-        // This is the complete capability surface of this host. Human approval decisions are
-        // observed through task.get; the headless account cannot grant or resolve them.
-        if !matches!(
-            method,
-            "account.status"
-                | "device.list"
-                | "device.refresh"
-                | "identity.directory"
-                | "conversation.directory"
-                | "group.members"
-                | "group.list"
-                | "message.read"
-                | "message.receive"
-                | "bus.subscribe"
-                | "message.submit"
-                | "group.send"
-                | "surface.send"
-                | "surface.get"
-                | "surface.resync"
-                | "task.get"
-                | "task.propose"
-                | "task.update"
-                | "mcp.server.add"
-                | "mcp.tool.started"
-        ) {
-            return Err(Error::Unauthorized);
-        }
         self.next = self.next.checked_add(1).ok_or(Error::Limit)?;
         let mut frame = LocalBusFrame::request(
             format!("agent-{}", self.next),
@@ -82,11 +73,18 @@ impl AgentBus for RfdBus {
         );
         frame.operation_id = operation.map(str::to_owned);
         frame.deadline_ms = Some(now_ms().saturating_add(30_000));
-        let response = self.client.request_frame_response(frame).await.map_err(|_| Error::Bus)?;
+        let response = match self.request_frame(method, frame).await {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("prx bus {method} failed: {error}");
+                return Err(Error::Bus);
+            }
+        };
         if response.kind == ramflux_sdk::LocalBusFrameKind::Error {
             let error = response
                 .error
                 .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::InvalidRequest))?;
+            eprintln!("prx bus {method} refused: {}", error.code);
             if error.code == "resync_required" {
                 return Err(Error::Resync);
             }
@@ -98,7 +96,8 @@ impl AgentBus for RfdBus {
             {
                 return Err(Error::SurfaceRefused(reason));
             }
-            if matches!(error.code.as_str(), "Unauthenticated" | "NotAuthenticated")
+            if self.confirm_identity
+                && matches!(error.code.as_str(), "Unauthenticated" | "NotAuthenticated")
                 && !matches!(method, "account.status" | "device.list" | "identity.directory")
             {
                 // A gateway authentication race is retryable while the local account is valid.
@@ -109,12 +108,16 @@ impl AgentBus for RfdBus {
                     .await
                 {
                     Err(error) if error.stops_host() => Err(error),
-                    Ok(()) | Err(_) => Err(Error::Bus),
+                    Ok(_) | Err(_) => Err(Error::Bus),
                 };
             }
             return Err(match error.code.as_str() {
-                "Unavailable" | "Busy" | "DeadlineExceeded" | "Unauthenticated"
-                | "NotAuthenticated" => Error::Bus,
+                "Unavailable"
+                | "Busy"
+                | "DeadlineExceeded"
+                | "Unauthenticated"
+                | "NotAuthenticated"
+                | "account_command_backpressure" => Error::Bus,
                 "AccountNotOpen" | "AccountLocked" | "AccountNotFound" => Error::IdentityLost,
                 "AccountRestorePending" => Error::AccountRestorePending,
                 "AccountRestoreFailed" => Error::AccountRestoreFailed,
@@ -127,7 +130,29 @@ impl AgentBus for RfdBus {
         Ok(response.body)
     }
     async fn next_event(&mut self) -> Result<LocalBusFrame> {
-        self.client.next_event().await.map_err(|_| Error::Bus)
+        self.subscription.as_mut().ok_or(Error::Bus)?.next_event().await.map_err(|_| Error::Bus)
+    }
+}
+impl RfdBus {
+    async fn request_frame(
+        &mut self,
+        method: &str,
+        frame: LocalBusFrame,
+    ) -> std::result::Result<LocalBusFrame, ramflux_sdk::SdkError> {
+        // A lagged subscription must not cancel the RPCs needed to apply its queued prefix.
+        // Both SDK connections retain their bounded queues; the applied cursor owns replay.
+        if method == "bus.subscribe" {
+            if self.subscription.is_none() {
+                self.subscription = Some(LocalBusClient::connect(&self.socket).await?);
+            }
+            return self
+                .subscription
+                .as_ref()
+                .ok_or_else(|| ramflux_sdk::SdkError::LocalBus("subscription unavailable".into()))?
+                .request_frame_response(frame)
+                .await;
+        }
+        self.client.request_frame_response(frame).await
     }
 }
 pub(crate) fn now_ms() -> u64 {

@@ -24,7 +24,7 @@ pub(crate) fn dispatch_daemon_bus_request(
 }
 
 pub(crate) fn local_bus_ok(response_body: serde_json::Value) -> LocalBusDispatchResult {
-    LocalBusDispatchResult { response_body, event: None }
+    LocalBusDispatchResult { response_body, event: None, owner_copy: None }
 }
 
 pub(crate) fn local_bus_account<'a>(

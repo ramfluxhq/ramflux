@@ -4,7 +4,11 @@
 mod cli;
 mod handlers;
 mod keychain;
+#[cfg(target_os = "linux")]
+mod linux_paths;
 mod logging;
+#[cfg(unix)]
+mod prx;
 mod utils;
 #[cfg(windows)]
 mod windows_paths;
@@ -12,7 +16,9 @@ mod windows_paths;
 use clap::Parser;
 use cli::{Cli, Command};
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) const DEFAULT_SOCKET: &str = "/tmp/ramflux/rfd.sock";
+#[cfg(not(target_os = "linux"))]
 pub(crate) const DEFAULT_DATA_ROOT: &str = "/tmp/ramflux/rfd-data";
 
 #[derive(Debug, thiserror::Error)]
@@ -55,33 +61,49 @@ async fn run() -> Result<(), RfError> {
     let cli = Cli::parse();
     #[cfg(windows)]
     let cli = windows_paths::with_defaults(cli)?;
+    #[cfg(target_os = "linux")]
+    let socket = linux_paths::resolve_socket(cli.socket)?;
+    #[cfg(not(target_os = "linux"))]
+    let socket = cli.socket;
+    #[cfg(target_os = "linux")]
+    {
+        if let Command::Daemon(ref command) = cli.command
+            && let cli::DaemonAction::Start(ref start) = command.action
+        {
+            linux_paths::require_resolved(
+                &start.data_root,
+                "the data directory is unset or not absolute",
+            )?;
+            let _ = linux_paths::state_dir()?;
+        }
+    }
     match cli.command {
         Command::Vault(command) => handlers::vault::handle(command).await,
-        Command::Node(command) => handlers::node::handle_node(cli.socket, command).await,
-        Command::Daemon(command) => handlers::daemon::handle_daemon(cli.socket, command).await,
-        Command::Account(command) => handlers::account::handle_account(cli.socket, command).await,
-        Command::Contact(command) => handlers::contact::handle_contact(cli.socket, command).await,
-        Command::Username(command) => handlers::username::handle(cli.socket, command).await,
-        Command::Device(command) => handlers::device::handle_device(cli.socket, command).await,
-        Command::Pairing(command) => handlers::pairing::handle(cli.socket, command).await,
-        Command::Agent(command) => handlers::agent::handle_agent(cli.socket, command).await,
-        Command::Transfer(command) => handlers::pairing::handle_transfer(cli.socket, command).await,
-        Command::Dm(command) => handlers::dm::handle_dm(cli.socket, command).await,
-        Command::Conversation(command) => {
-            handlers::conversation_ops::handle(cli.socket, command).await
-        }
-        Command::Group(command) => handlers::group::handle_group(cli.socket, command).await,
-        Command::Object(command) => handlers::object::handle_object(cli.socket, command).await,
-        Command::Call(command) => handlers::call::handle_call(cli.socket, command).await,
-        Command::Bot(command) => handlers::bot::handle_bot(cli.socket, command).await,
-        Command::Mcp(command) => handlers::mcp::handle_mcp(cli.socket, command).await,
-        Command::Grant(command) => handlers::grant::handle_grant(cli.socket, command).await,
+        Command::Node(command) => handlers::node::handle_node(socket, command).await,
+        Command::Daemon(command) => handlers::daemon::handle_daemon(socket, command).await,
+        Command::Account(command) => handlers::account::handle_account(socket, command).await,
+        Command::Contact(command) => handlers::contact::handle_contact(socket, command).await,
+        Command::Username(command) => handlers::username::handle(socket, command).await,
+        Command::Device(command) => handlers::device::handle_device(socket, command).await,
+        Command::Pairing(command) => handlers::pairing::handle(socket, command).await,
+        Command::Agent(command) => handlers::agent::handle_agent(socket, command).await,
+        Command::Prx(command) => handlers::prx::handle(command).await,
+        Command::Transfer(command) => handlers::pairing::handle_transfer(socket, command).await,
+        Command::Dm(command) => handlers::dm::handle_dm(socket, command).await,
+        Command::Conversation(command) => handlers::conversation_ops::handle(socket, command).await,
+        Command::Group(command) => handlers::group::handle_group(socket, command).await,
+        Command::Object(command) => handlers::object::handle_object(socket, command).await,
+        Command::Call(command) => handlers::call::handle_call(socket, command).await,
+        Command::Bot(command) => handlers::bot::handle_bot(socket, command).await,
+        Command::Mcp(command) => handlers::mcp::handle_mcp(socket, command).await,
+        Command::Grant(command) => handlers::grant::handle_grant(socket, command).await,
         Command::Keychain(command) => handlers::keychain::handle_keychain(command),
-        Command::A2i(command) => handlers::a2i::handle_a2i(cli.socket, command).await,
-        Command::Surface(command) => handlers::surface::handle_surface(cli.socket, command).await,
-        Command::Task(command) => handlers::task::handle_task(cli.socket, command).await,
+        Command::A2i(command) => handlers::a2i::handle_a2i(socket, command).await,
+        Command::Surface(command) => handlers::surface::handle_surface(socket, command).await,
+        Command::Task(command) => handlers::task::handle_task(socket, command).await,
         Command::Admin(command) => handlers::admin::handle_admin(command),
-        Command::Diag(command) => handlers::diag::handle(cli.socket, command).await,
-        Command::Attachment(command) => handlers::attachment::handle(cli.socket, command).await,
+        Command::Diag(command) => handlers::diag::handle(socket, command).await,
+        Command::Root(command) => handlers::root::handle(&command),
+        Command::Attachment(command) => handlers::attachment::handle(socket, command).await,
     }
 }

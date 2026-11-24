@@ -238,7 +238,11 @@ impl<E: EngineProvider> AgentHost<E> {
                             )
                             .await?;
                         }
-                        Err(Error::EngineUnavailable | Error::EngineTimeout) => {}
+                        Err(
+                            Error::EngineUnavailable
+                            | Error::EngineTimeout
+                            | Error::RateLimited { .. },
+                        ) => {}
                         Err(error) if error.stops_host() => return Err(error),
                         Err(_) => {
                             self.fail_approval(
@@ -722,8 +726,7 @@ mod tests {
             rules: vec![Rule { pattern: "unused".into(), reply: "unused".into(), surface: None }],
             engine: None,
             poll_interval_ms: 250,
-            per_conversation_interval_ms: 1_000,
-            max_conversations: 8,
+            max_pending_turns: 8,
         };
         let mut host = AgentHost::new(config, TestEngine::default())?;
         host.state.principal_id = "agent-principal".into();
@@ -843,14 +846,9 @@ mod tests {
             session_scope: crate::PrxSessionScope::PerConversation,
             request_timeout_s: 1,
             max_in_flight_per_conversation: 1,
-            authorization: crate::PrxAuthorization::Supervised,
             turn_timeout_s: 120,
             approval_timeout_s: 600,
             agent_name: None,
-            provider: None,
-            model: None,
-            max_concurrent_turns: None,
-            max_cost_per_day_cents: None,
             erase_session_on_delete: false,
         };
         config.rules.clear();
@@ -914,7 +912,7 @@ mod tests {
             let mut steps = approval_steps("1970-01-01T00:00:01Z");
             steps.push(step(
                 hyper::Method::DELETE,
-                "/api/sessions/session-1/approvals/decision-1",
+                "/api/sessions/conversation/approvals/decision-1",
                 hyper::StatusCode::OK,
                 json!({}),
             ));
@@ -949,10 +947,10 @@ mod tests {
         use hyper::{Method, StatusCode};
         let mut steps = approval_steps("1970-01-01T00:05:00Z");
         steps.extend([
-            step(Method::POST, "/api/sessions/session-1/approvals/decision-1", StatusCode::CONFLICT, json!({"error":"expired"})),
-            step(Method::DELETE, "/api/sessions/session-1/approvals/decision-1", StatusCode::CONFLICT, json!({"error":"expired"})),
-            step(Method::POST, "/api/sessions", StatusCode::CREATED, json!({"session_id":"session-2"})),
-            step(Method::POST, "/api/sessions/session-2/message?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
+            step(Method::POST, "/api/sessions/conversation/approvals/decision-1", StatusCode::CONFLICT, json!({"error":"expired"})),
+            step(Method::DELETE, "/api/sessions/conversation/approvals/decision-1", StatusCode::CONFLICT, json!({"error":"expired"})),
+            step(Method::POST, "/api/sessions", StatusCode::CREATED, json!({"session_id":"rf-6b0fdd516d927d410a24ad61c2562a55"})),
+            step(Method::POST, "/api/sessions/rf-6b0fdd516d927d410a24ad61c2562a55/message?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
             step(Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({"status":"succeeded","http_status":200,"result":{"status":"ok","reply":"other conversation answered"}})),
         ]);
         let server = FakePrx::start(steps).await?;
@@ -994,10 +992,10 @@ mod tests {
         use hyper::{Method, StatusCode};
         let mut steps = approval_steps("1970-01-01T00:05:00Z");
         steps.extend([
-            step(Method::POST, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, json!({})),
-            step(Method::POST, "/api/sessions/session-1/approvals/decision-1/resume?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
+            step(Method::POST, "/api/sessions/conversation/approvals/decision-1", StatusCode::OK, json!({})),
+            step(Method::POST, "/api/sessions/conversation/approvals/decision-1/resume?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
             step(Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({"status":"succeeded","http_status":200,"result":{"status":"awaiting_approval","reply":"no approval needed","decision_id":"decision-2"}})),
-            step(Method::GET, "/api/sessions/session-1/approvals/decision-2", StatusCode::OK, approval_view("decision-2", "1970-01-01T00:05:00Z")),
+            step(Method::GET, "/api/sessions/conversation/approvals/decision-2", StatusCode::OK, approval_view("decision-2", "1970-01-01T00:05:00Z")),
         ]);
         let server = FakePrx::start(steps).await?;
         let (_root, mut host) = prx_host(&server)?;
@@ -1041,7 +1039,7 @@ mod tests {
         let mut steps = approval_steps("1970-01-01T00:05:00Z");
         steps.push(step(
             hyper::Method::DELETE,
-            "/api/sessions/session-1/approvals/decision-1",
+            "/api/sessions/conversation/approvals/decision-1",
             hyper::StatusCode::OK,
             json!({}),
         ));
@@ -1073,9 +1071,9 @@ mod tests {
         use hyper::{Method, StatusCode};
         let mut steps = approval_steps("1970-01-01T00:05:00Z");
         steps.extend([
-            step(Method::DELETE, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, json!({})),
-            step(Method::POST, "/api/sessions", StatusCode::CREATED, json!({"session_id":"session-2"})),
-            step(Method::POST, "/api/sessions/session-2/message?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
+            step(Method::DELETE, "/api/sessions/conversation/approvals/decision-1", StatusCode::OK, json!({})),
+            step(Method::POST, "/api/sessions", StatusCode::CREATED, json!({"session_id":"rf-6b0fdd516d927d410a24ad61c2562a55"})),
+            step(Method::POST, "/api/sessions/rf-6b0fdd516d927d410a24ad61c2562a55/message?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
             step(Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({"status":"succeeded","http_status":200,"result":{"status":"ok","reply":"recovered"}})),
         ]);
         steps
@@ -1175,11 +1173,11 @@ mod tests {
                 Method::POST,
                 "/api/sessions",
                 StatusCode::CREATED,
-                json!({"session_id":"session-1"}),
+                json!({"session_id":"conversation"}),
             ),
             step(
                 Method::POST,
-                "/api/sessions/session-1/message?mode=async",
+                "/api/sessions/conversation/message?mode=async",
                 StatusCode::ACCEPTED,
                 accepted("job-1"),
             ),

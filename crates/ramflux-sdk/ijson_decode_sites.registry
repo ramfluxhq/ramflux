@@ -52,7 +52,6 @@ crates/ramflux-sdk/src/bus/creation_client.rs | exchange_for | 1 | D | admitted-
 crates/ramflux-sdk/src/bus/credentials.rs | call | 1 | C | admission=crates/ramflux-sdk/src/bus/io.rs#read_local_bus_frame#1,crates/ramflux-sdk/src/bus/io.rs#read_json_after_discriminator#1
 crates/ramflux-sdk/src/bus/custody_setup.rs | apply | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/custody_setup.rs | begin_native | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/daemon.rs | dispatch_local_bus_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/daemon.rs | read_local_bus_account_manifest | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/daemon.rs | read_local_bus_account_manifest | 2 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/dispatch/account.rs | account_request | 1 | D | admitted-before-persist; stored row is not an ingress decoder
@@ -202,6 +201,8 @@ crates/ramflux-sdk/src/bus/shared_group_sync/mod.rs | federation_route | 1 | E |
 crates/ramflux-sdk/src/bus/shared_group_sync/mod.rs | ownership_transfer | 1 | E | excluded=local group actor value; outside the signed-envelope closure
 crates/ramflux-sdk/src/bus/shared_group_sync/mod.rs | verified_member | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/state.rs | restore_gateway_resume_checkpoint | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/subscription.rs | prepare_follow | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/subscription.rs | prepare_follow | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/subscription.rs | start | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/subscription.rs | start | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/subscription.rs | tail | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -368,7 +369,6 @@ crates/ramflux-sdk/src/prekey.rs | sdk_gateway_request_json | 1 | E | excluded=t
 crates/ramflux-sdk/src/prekey.rs | sdk_gateway_request_json | 2 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-sdk/src/prekey.rs | sdk_http_json_request | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-sdk/src/prekey.rs | sdk_http_json_request_with_deadline | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
-crates/ramflux-sdk/src/prekey.rs | sdk_quic_gateway_request | 1 | C | admission=crates/ramflux-sdk/src/prekey.rs#sdk_quic_gateway_request#1
 crates/ramflux-sdk/src/prekey.rs | sdk_tcp_tls_gateway_request | 1 | C | admission=crates/ramflux-sdk/src/prekey.rs#sdk_tcp_tls_gateway_request#1
 crates/ramflux-sdk/src/prekey/http_async.rs | request | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-sdk/src/prekey/manifest.rs | deserialize | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
@@ -381,8 +381,31 @@ crates/ramflux-sdk/src/client/surface/generated.rs | event | 1 | D | admitted-be
 crates/ramflux-sdk/src/client/surface/generated.rs | rpc | 1 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
 crates/ramflux-sdk/src/client/surface/history_generated.rs | to_generated | 1 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
 crates/ramflux-sdk/src/client/surface/history_generated.rs | to_generated | 2 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
-crates/ramflux-sdk/src/prekey.rs | sdk_policy_gateway_request | 1 | C | admission=crates/ramflux-sdk/src/prekey.rs#sdk_policy_gateway_request#1
 crates/ramflux-sdk/src/bus/username_directory.rs | prepare | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/username_directory.rs | prepare | 2 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/username_directory/retry.rs | delivery_retry | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/username_directory/submission.rs | prepare | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/account_local.rs | confirm | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/agent_directory.rs | hosted_agents | 1 | C | admission=crates/ramflux-sdk/src/prekey.rs#policy_gateway_exchange#1,crates/ramflux-sdk/src/prekey.rs#quic_gateway_exchange#1
+crates/ramflux-sdk/src/bus/daemon.rs | open_subscription | 1 | C | admission=crates/ramflux-sdk/src/bus/io.rs#read_local_bus_frame#1
+crates/ramflux-sdk/src/bus/dispatch/a2i.rs | acknowledge_a2i | 1 | C | admission=crates/ramflux-sdk/src/bus/io.rs#read_local_bus_frame#1
+crates/ramflux-sdk/src/bus/dispatch/a2i.rs | append_a2i | 1 | C | admission=crates/ramflux-sdk/src/bus/io.rs#read_local_bus_frame#1
+crates/ramflux-sdk/src/c_abi/v2/credential.rs | answer | 1 | A | admission=original credential-request LocalBusFrame bytes before callback correlation
+crates/ramflux-sdk/src/c_abi/v2/credential.rs | correlate | 1 | C | admission=crates/ramflux-sdk/src/c_abi/v2/credential.rs#answer#1
+crates/ramflux-sdk/src/c_abi/v2/runtime.rs | handle_public | 1 | E | excluded=SDK-owned in-process response and event projection; no signed envelope admission
+crates/ramflux-sdk/src/c_abi/v2/username.rs | loose_ids | 1 | E | excluded=local username ceremony correlation IDs; not signed envelope admission
+crates/ramflux-sdk/src/c_abi/v2/username.rs | strict_request | 1 | E | excluded=local username ceremony PublicRequest; outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/client/a2i.rs | control_domain | 1 | E | excluded=enum conversion from an in-memory domain name
+crates/ramflux-sdk/src/client/a2i.rs | signed_native_a2i | 1 | E | excluded=constant event-type enum in locally constructed outbound A2I object
+crates/ramflux-sdk/src/client/a2i.rs | subject_value | 1 | E | excluded=application subject in locally constructed outbound A2I object; no Envelope/Ack/Nack decoder
+crates/ramflux-sdk/src/client/agent_activity.rs | parse_marker | 1 | E | excluded=bounded application activity marker inside already authenticated native message
+crates/ramflux-sdk/src/client/surface/card_session/approval.rs | pending_row | 1 | D | admitted-before-persist; task approval binding from owned actor-state projection
+crates/ramflux-sdk/src/client/surface/card_session/body.rs | parse | 1 | E | excluded=bounded local card session DTO reserialized from a Value; not signed envelope ingress
+crates/ramflux-sdk/src/client/surface/card_session/package.rs | bundled | 1 | E | excluded=compile-time bundled card-library acceptance policy
+crates/ramflux-sdk/src/custody/agent_creation/host_revoked.rs | marked_account_anchor | 1 | D | admitted-before-persist; local own-host-revocation marker already shape-checked
+crates/ramflux-sdk/src/custody/agent_creation/host_revoked.rs | marker_bytes_ok | 1 | D | admitted-before-persist; shape validation of local own-host-revocation marker
+crates/ramflux-sdk/src/custody/agent_creation/reassociate.rs | decoded_agent | 1 | D | admitted-before-persist; previously verified agent record from creation journal
+crates/ramflux-sdk/src/custody/agent_creation/reassociate.rs | load_journal | 1 | D | admitted-before-persist; validated local reassociation journal
+crates/ramflux-sdk/src/prekey.rs | policy_gateway_exchange | 1 | A | strict=parse_i_json; admission=original native directory response bytes over gateway policy transport
+crates/ramflux-sdk/src/prekey.rs | quic_gateway_exchange | 1 | A | strict=parse_i_json; admission=original native directory response bytes over QUIC or TCP gateway exchange
+crates/ramflux-sdk/src/prx_host/runtime.rs | read_runtime | 1 | E | excluded=bounded private PRX runtime locator DTO; no signed envelope admission

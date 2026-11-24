@@ -21,6 +21,18 @@ enum Class {
 
 const DURABLE_INGRESS: &[(&str, Class)] = &[
     (
+        "submit_target.rs:ack_home_forward",
+        Class::NonIngress(
+            "writes acknowledgement for an already admitted forward; no envelope delivery",
+        ),
+    ),
+    (
+        "submit_target.rs:post",
+        Class::NonIngress(
+            "router mesh client for submits already checked by session edge; no local envelope persistence",
+        ),
+    ),
+    (
         "call_intent.rs:verify_submission",
         Class::NonIngress("verifies a signed call intent; no envelope persist"),
     ),
@@ -103,7 +115,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
     let edge_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Edge).count();
-    assert_eq!((non_ingress_count, edge_count), (12, 4));
+    assert_eq!((non_ingress_count, edge_count), (14, 4));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");

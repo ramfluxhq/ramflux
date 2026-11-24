@@ -272,10 +272,13 @@ async fn transient_identity_recheck_refusals_after_an_authentication_race_remain
 #[tokio::test]
 async fn contact02_r2_start_uses_the_real_adapter_capabilities_and_keeps_manual_policy()
 -> TestResult {
+    const MAX_STARTUP_FRAME_BYTES: usize = 65_536;
     let f = Fixture::new()?;
     let listener = tokio::net::UnixListener::bind(&f.config.socket)?;
     let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+        let (mut rpc_socket, _) = listener.accept().await?;
+        let mut subscription = None;
         for method in [
             "account.status",
             "device.list",
@@ -284,8 +287,20 @@ async fn contact02_r2_start_uses_the_real_adapter_capabilities_and_keeps_manual_
             "conversation.directory",
             "group.list",
         ] {
-            let length = socket.read_u32().await?;
-            let mut bytes = vec![0; usize::try_from(length)?];
+            let socket = if method == "bus.subscribe" {
+                if subscription.is_none() {
+                    let (socket, _) = listener.accept().await?;
+                    subscription = Some(socket);
+                }
+                subscription.as_mut().ok_or("missing subscription")?
+            } else {
+                &mut rpc_socket
+            };
+            let length = usize::try_from(socket.read_u32().await?)?;
+            if length > MAX_STARTUP_FRAME_BYTES {
+                return Err("oversized startup frame".into());
+            }
+            let mut bytes = vec![0; length.min(MAX_STARTUP_FRAME_BYTES)];
             socket.read_exact(&mut bytes).await?;
             let mut frame: LocalBusFrame = serde_json::from_slice(&bytes)?;
             assert_eq!(frame.method, method, "startup may not overwrite operator policy");
@@ -310,6 +325,7 @@ async fn contact02_r2_start_uses_the_real_adapter_capabilities_and_keeps_manual_
             socket.write_all(&bytes).await?;
         }
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        }).await?
     });
     let mut bus = RfdBus::connect(&f.config.socket, "agent").await?;
     let mut host = ramflux_agent_host::AgentHost::new(

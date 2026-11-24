@@ -16,6 +16,14 @@ struct Meta {
     peer: String,
     touched: u64,
 }
+pub(super) fn require_peer(peer: &str) -> Result<(), NodeCoreError> {
+    if peer.is_empty() || peer.len() > 256 || matches!(peer, "unspecified" | "legacy") {
+        return Err(NodeCoreError::Unauthorized(
+            "foreign custody pin requires a verified source node".into(),
+        ));
+    }
+    Ok(())
+}
 fn capacity() -> NodeCoreError {
     NodeCoreError::Capacity { resource: "foreign custody pins" }
 }
@@ -50,6 +58,26 @@ pub(super) fn insert(
 ) -> Result<(), NodeCoreError> {
     insert_bounded(tx, peer, anchor, bytes, now, MAX_ANCHORS, MAX_PEER, MAX_BYTES)
 }
+type PinRow = (String, Vec<u8>, Meta);
+fn pin_rows(tx: &redb::WriteTransaction) -> Result<Vec<PinRow>, NodeCoreError> {
+    let mut rows = Vec::new();
+    {
+        let table = tx.open_table(FOREIGN).map_err(storage)?;
+        let metadata = tx.open_table(META).map_err(storage)?;
+        for row in table.iter().map_err(storage)? {
+            let (key, value) = row.map_err(storage)?;
+            let meta = metadata
+                .get(key.value())
+                .map_err(storage)?
+                .map(|v| serde_json::from_slice::<Meta>(v.value()).map_err(storage))
+                .transpose()?
+                .ok_or_else(|| storage("foreign custody pin owner missing"))?;
+            require_peer(&meta.peer)?;
+            rows.push((key.value().to_owned(), value.value().to_vec(), meta));
+        }
+    }
+    Ok(rows)
+}
 #[expect(
     clippy::too_many_arguments,
     reason = "testable quota policy at one atomic transaction boundary"
@@ -64,24 +92,11 @@ fn insert_bounded(
     max_peer: usize,
     max_bytes: usize,
 ) -> Result<(), NodeCoreError> {
-    if peer.len() > 256 || bytes.len() > max_bytes.min(MAX_ROW_BYTES) {
+    require_peer(peer)?;
+    if bytes.len() > max_bytes.min(MAX_ROW_BYTES) {
         return Err(capacity());
     }
-    let mut rows = Vec::new();
-    {
-        let table = tx.open_table(FOREIGN).map_err(storage)?;
-        let metadata = tx.open_table(META).map_err(storage)?;
-        for row in table.iter().map_err(storage)? {
-            let (key, value) = row.map_err(storage)?;
-            let meta = metadata
-                .get(key.value())
-                .map_err(storage)?
-                .map(|v| serde_json::from_slice::<Meta>(v.value()).map_err(storage))
-                .transpose()?
-                .unwrap_or(Meta { peer: "legacy".into(), touched: 0 });
-            rows.push((key.value().to_owned(), value.value().to_vec(), meta));
-        }
-    }
+    let rows = pin_rows(tx)?;
     let owner = rows
         .iter()
         .find(|(k, _, _)| k == anchor)

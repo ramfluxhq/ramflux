@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at f1d430cedee6277829f4b3826c2e451ca6858cbc>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 238fa1706eb81dc43da11ea5d9607883f9ba7681>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "f1d430cedee6277829f4b3826c2e451ca6858cbc";
+const PIN: &str = "238fa1706eb81dc43da11ea5d9607883f9ba7681";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -94,11 +94,25 @@ fn state_base() -> PathBuf {
 }
 
 /// G6 budget admission refuses an unpriced model, so the stub's model gets a price row; the
-/// prices are dummies and the stub charges nothing.
+/// prices are dummies and the stub charges nothing. The operator also declares its chat facts.
 fn priced(provider: &str, extra: &str) -> String {
     format!(
-        "{extra}\n[cost.prices.\"{provider}/stub-model\"]\ninput = 1.0\noutput = 1.0\ncache_read = 0.0\ncache_write = 0.0\n"
+        "{extra}\n[[providers.models]]\nprovider = \"{provider}\"\nmodel = \"stub-model\"\noperations = [\"chat\"]\n\n[cost.prices.\"{provider}/stub-model\"]\ninput = 1.0\noutput = 1.0\ncache_read = 0.0\ncache_write = 0.0\n"
     )
+}
+
+/// Local catalog-only models exercised by the agent CRUD and concurrent-edit rows.
+fn local_agent_models(extra: &str) -> String {
+    use std::fmt::Write as _;
+    let mut config = extra.to_owned();
+    for model in ["codellama", "llama3", "m", "mistral", "llama3-8b", "gemma", "phi"] {
+        writeln!(
+            config,
+            "\n[[providers.models]]\nprovider = \"ollama\"\nmodel = \"{model}\"\noperations = [\"chat\"]"
+        )
+        .expect("test: append local model declaration");
+    }
+    config
 }
 
 /// The temporary directory for the daemon and the harness: `RAMFLUX_PRX_TMPDIR`, else
@@ -546,9 +560,8 @@ async fn bounded<F: std::future::Future<Output = ()>>(body: F) {
         .expect("test: contract test exceeded its deadline");
 }
 
-/// The tokens K-AC2-1 accepts at the pin. `host_bootstrap_v1`, `stream_frames_v1` and
-/// `run_approvals_v1` are advertised and not called. `targeted_agents_v1` stays out
-/// unless the daemon enables it.
+/// The tokens K-AC2-1 accepts at the pin. `host_bootstrap_v1` is advertised and not
+/// called. `targeted_agents_v1` stays out unless the daemon enables it.
 const LANDED_AT_PIN: [&str; 19] = [
     CAPABILITIES_V1,
     AGENT_CATALOG_V1,
@@ -913,7 +926,7 @@ async fn k_ac1a_agent_rows() {
         // Pairing is refused while Main is readonly (PRX gates POST /pair by Main's level), so
         // pair first, then set Main to readonly for K-AC1a-6 and the rows after it.
         // A hand-written agent (not rf-derived) that the list must also return.
-        let mut daemon = Daemon::prepare(HAND_WRITTEN_AGENT);
+        let mut daemon = Daemon::prepare(&local_agent_models(HAND_WRITTEN_AGENT));
         daemon.start();
         daemon.wait_ready().await;
         daemon.pair().await;
@@ -1176,7 +1189,7 @@ async fn k_ac1a_10_targeted_agents_across_restart() {
 #[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
 async fn apply_helper_against_real_concurrent_changes() {
     bounded(async {
-        let mut daemon = Daemon::prepare("");
+        let mut daemon = Daemon::prepare(&local_agent_models(""));
         daemon.start();
         daemon.wait_ready().await;
         daemon.pair().await;
@@ -1661,7 +1674,8 @@ async fn k_b1_turn_context_and_agent_checks_with_targeting_off() {
     bounded(async {
         let fast = ModelStub::start(Duration::ZERO).await;
         let hold = ModelStub::start(Duration::from_secs(600)).await;
-        let mut daemon = Daemon::prepare_with_provider(&fast.provider(), "");
+        let mut daemon =
+            Daemon::prepare_with_provider(&fast.provider(), &priced(&hold.provider(), ""));
         daemon.start();
         daemon.wait_ready().await;
         daemon.pair().await;
@@ -1761,8 +1775,10 @@ async fn k_b1_busy_and_agent_states_with_targeting_on() {
     bounded(async {
         let fast = ModelStub::start(Duration::ZERO).await;
         let hold = ModelStub::start(Duration::from_secs(600)).await;
-        let mut daemon =
-            Daemon::prepare_with_provider(&fast.provider(), "targeted_agents = true\n");
+        let mut daemon = Daemon::prepare_with_provider(
+            &fast.provider(),
+            &priced(&hold.provider(), "targeted_agents = true\n"),
+        );
         daemon.start();
         daemon.wait_ready().await;
         daemon.pair().await;
@@ -2541,7 +2557,7 @@ async fn k_op2_storage_refusal_when_user_messages_are_not_recorded() {
 async fn k_op1_agent_put_with_custom_endpoint_answers_428() {
     bounded(async {
         let stub = ModelStub::start(Duration::ZERO).await;
-        let mut daemon = Daemon::prepare_with_provider("openrouter", "");
+        let mut daemon = Daemon::prepare_with_provider("openrouter", &priced(&stub.provider(), ""));
         daemon.start();
         daemon.wait_ready().await;
         daemon.pair().await;

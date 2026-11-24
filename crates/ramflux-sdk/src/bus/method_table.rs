@@ -54,10 +54,17 @@ methods! {
     LocalRead(Always) => Actor: ["account.config.get", "diag.residue"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin", "username.mutate", "profile.update"];
-    LocalRead(Always) => Actor: ["a2i.list_pending", "device.pair.status", "device.transfer.status"];
+    LocalRead(Always) => Actor: ["a2i.list_pending", "agent.approval.list", "agent.job.list", "agent.job.sessions", "device.pair.status", "device.transfer.status"];
     LocalMutation(Always) => Actor: [
         "account.config.set",
         "a2i.acknowledge",
+        "agent.approval.decide",
+        "agent.approval.publish",
+        "agent.job.pause",
+        "agent.job.remove",
+        "agent.job.resume",
+        "agent.job.session",
+        "agent.progress",
         "attachment.enable",
         "attachment.import.begin",
         "attachment.import.cancel",
@@ -75,9 +82,18 @@ methods! {
         "bot.revoke",
         "bot.trust.add",
         "call.media.session",
+        "card.session.dispose",
+        "card.session.event",
+        "card.session.open",
+        "card.session.present",
+        "card.session.resume",
+        "card.session.slot",
+        "card.session.suspend",
+        "card.session.update",
         "contact.block",
         "contact.card.export",
         "contact.decline",
+        "contact.requests.decline",
         "contact.reject",
         "contact.remove",
         "contact.requests.policy.set",
@@ -126,12 +142,15 @@ methods! {
     LocalMutation(Always) => Lifecycle: [
         "account.lock",
         "account.passphrase.rotate",
+        "account.sign_out",
         "account.unlock",
     ];
     LocalMutation(Always) => Supervisor: [
+        "account.app_lock.configure",
         "account.backup.export",
         "account.backup.import",
         "account.export_agent_credentials",
+        "account.remove_local",
         "account.switch",
         "daemon.stop",
         "node.confirm",
@@ -182,6 +201,7 @@ methods! {
         "task.list",
     ];
     LocalRead(Always) => Supervisor: [
+        "account.app_lock.state",
         "account.list",
         "daemon.status",
         "node.list",
@@ -205,6 +225,7 @@ methods! {
         "group.create",
         "group.member.add",
         "group.member.kick",
+        "group.leave",
         "group.member.remove",
         "group.name.set",
         "group.owner.transfer",
@@ -224,6 +245,7 @@ methods! {
         "object.revoke",
         "object.share",
         "object.transfer.resume",
+        "card.session.submit",
         "surface.action",
         "surface.request_resync",
         "surface.resync",

@@ -38,8 +38,7 @@ impl Fixture {
                 ],
                 engine: None,
                 poll_interval_ms: 250,
-                per_conversation_interval_ms: 1000,
-                max_conversations: 128,
+                max_pending_turns: 128,
             },
             root,
         })

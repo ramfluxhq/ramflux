@@ -80,6 +80,7 @@ fn overflow_operations() -> anyhow::Result<Vec<GatewayClientFrame>> {
                 call_context: None,
                 signed_request,
                 envelope,
+                target_node: None,
             },
         },
     ];

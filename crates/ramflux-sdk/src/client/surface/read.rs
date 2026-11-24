@@ -28,26 +28,16 @@ impl RamfluxClient {
         let Some(mut view) = db.client_record("surface", id)? else {
             return Ok(Value::Null);
         };
-        let author = view
-            .get("author_principal_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("surface author missing"))?;
-        // Re-checked on every read: a cached identity cannot keep a card renderable.
-        let render_allowed = self.surface_author_is_own_agent(author)?;
-        let authored_locally = self.surface_authored_locally(author);
-        view["render_allowed"] = json!(render_allowed);
         if let Some((record, state)) = self.surface_state_ref(id)? {
-            view["snapshot"] = if render_allowed || authored_locally {
-                serde_json::to_value(state.content())?
-            } else {
-                Value::Null
-            };
+            view["render_allowed"] = json!(open_surface_renders(&state));
+            view["snapshot"] = serde_json::to_value(state.content())?;
             view["author_device_id"] = json!(record.author_device_id);
             view["streams"] = json!(state.stream_states());
             view["created_at"] = json!(record.created_at);
             view["posted_at"] = json!(record.created_at);
             view["updated_at"] = json!(record.updated_at);
         } else {
+            view["render_allowed"] = json!(false);
             view["snapshot"] = Value::Null;
         }
         if let (Some(author), Some(text)) =
@@ -126,14 +116,6 @@ impl RamfluxClient {
         }
         Ok(view)
     }
-    fn surface_authored_locally(&self, author: &str) -> bool {
-        self.device_branch.as_ref().is_some_and(|local| local.principal_id == author)
-            || self
-                .born_v3_account
-                .as_ref()
-                .is_some_and(|local| local.record().body.principal_id == author)
-            || self.reader_principal_id.as_deref() == Some(author)
-    }
     pub(crate) fn surface_list(
         &self,
         conversation: &str,
@@ -210,6 +192,12 @@ impl RamfluxClient {
             reference["fallback_text"].as_str().unwrap_or("[Surface unavailable]").to_owned(),
         )))
     }
+}
+fn open_surface_renders(state: &ramflux_protocol::SurfaceState) -> bool {
+    !state.is_closed()
+        && state.version() != 0
+        && state.hash().is_some()
+        && state.content().is_some()
 }
 pub(crate) fn surface_metadata(view: &Value) -> Value {
     let mut out = serde_json::Map::new();

@@ -132,12 +132,27 @@ pub(super) async fn run(bootstrap: Bootstrap) {
     // Retired-session configuration remains available for checkpointing while retrying,
     // but a stopped account must retain no established-session capability metadata.
     *handle.shared.metadata.write().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    update(&handle, |snapshot| {
-        snapshot.state = NetworkingState::NetworkingPending;
+    settle_stopped(&handle, &config);
+}
+
+/// A stopped worker keeps today's pending observation. A revoked branch does not:
+/// pending and a retry schedule are what status was copying over `suspended`.
+fn settle_stopped(handle: &ConnectionHandle, config: &GatewaySessionConfig) {
+    let revoked = super::super::host_branch::marked_on(config);
+    update(handle, |snapshot| {
         snapshot.active_transport_kind = None;
         snapshot.session_id = None;
         snapshot.generation = new_generation();
         snapshot.phase = ConnectionPhase::Stopped;
+        if !revoked {
+            snapshot.state = NetworkingState::NetworkingPending;
+            return;
+        }
+        snapshot.state = NetworkingState::Suspended;
+        snapshot.cause = None;
+        snapshot.retry_after_ms = None;
+        snapshot.next_retry_at_ms = None;
+        snapshot.last_reason = Some("branch_revoked".into());
     });
 }
 
@@ -161,6 +176,9 @@ async fn run_account(
     let mut networks = config.network_monitor.subscribe();
     'account: loop {
         if *stopping.borrow() {
+            break;
+        }
+        if stop_marked_host(config, handle) {
             break;
         }
         if !wait_for_network(&mut networks, stopping).await {
@@ -244,7 +262,7 @@ async fn run_account(
         };
         retire_resident(handle, &resident, reason, generation);
         let why = resident.terminal_why.clone();
-        drop(resident);
+        resident.shutdown_transport().await;
         if matches!(reason, DisconnectReason::Stop | DisconnectReason::Lock) {
             break;
         }
@@ -255,6 +273,15 @@ async fn run_account(
         }
         reconnect_after_retirement(handle, retry, reason, why.as_deref(), generation);
     }
+}
+
+fn stop_marked_host(config: &GatewaySessionConfig, handle: &ConnectionHandle) -> bool {
+    if !super::super::host_branch::marked_on(config) {
+        return false;
+    }
+    super::super::host_branch::suspend_marked(config);
+    handle.signal_stop();
+    true
 }
 
 /// A retired resident session waits out the reconnect cooldown. The snapshot names

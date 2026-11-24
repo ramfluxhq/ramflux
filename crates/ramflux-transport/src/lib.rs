@@ -32,6 +32,7 @@ mod mesh_request_deadline;
 mod mesh_tls;
 mod perf_metrics;
 mod policy;
+mod public_well_known;
 mod quic_errors;
 mod quic_gateway;
 /// Dormant checked QUIC resource policy; constructing a plan starts no runtime.
@@ -39,6 +40,7 @@ pub mod rawq_budget;
 #[cfg(test)]
 mod rawq_budget_tests;
 mod relay_quic_pool;
+mod test_node_endpoints;
 mod tls_config;
 mod types;
 
@@ -89,7 +91,7 @@ pub use mesh_quic::{
     mesh_quic_get_json_with_peer_ca_pems_async, mesh_quic_post_json_with_peer_ca_pems,
     mesh_quic_post_json_with_peer_ca_pems_and_instance,
     mesh_quic_post_json_with_peer_ca_pems_async, mesh_quic_post_postcard_with_peer_ca_pems_async,
-    mesh_quic_post_raw_with_peer_ca_pems_async,
+    mesh_quic_post_raw_with_peer_ca_pems_async, mesh_quic_post_signed_envelope,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use mesh_quic_limited::mesh_quic_exchange_raw_response_frame;
@@ -101,10 +103,16 @@ pub use mesh_request_deadline::{
     MeshRequestDeadline, mesh_request_deadline, mesh_socket_request_deadline,
 };
 pub use mesh_tls::{
-    MeshTlsAcceptedStream, MeshTlsServer, MeshTlsServerStream, authenticate_tcp_stream,
-    authenticate_tcp_stream_with_pem_roots, extract_spiffe_uri_from_certificate,
+    MeshTlsAcceptedStream, MeshTlsServer, MeshTlsServerStream, authenticate_federation_tcp_stream,
+    authenticate_tcp_stream, authenticate_tcp_stream_with_pem_roots,
+    extract_spiffe_uri_from_certificate,
 };
 pub use perf_metrics::{MeshHttpPerfSnapshot, mesh_perf_reset, mesh_perf_snapshot};
+pub use public_well_known::{
+    checked_mesh_address, checked_mesh_address_until, fetch_server_well_known,
+    fetch_server_well_known_until, public_mesh_endpoint,
+};
+pub use test_node_endpoints::{TestNodeEndpoints, test_node_discovery_origin, test_node_endpoints};
 
 /// Worst-case wall-clock budget for a router post, including QUIC probing and HTTP fallback.
 #[must_use]
@@ -122,8 +130,9 @@ pub use quic_gateway::{
     GatewaySessionFrameFuture, GatewaySessionFrameSink, GatewaySessionFrameSource,
     GatewaySessionTransport, GatewayTcpTlsStream, QuicConnectPhase, QuicGatewayBidiStream,
     QuicGatewayClient, QuicRequestPhase, RelayClientQuicConfig, TcpTlsGatewayBidiStream,
-    TcpTlsGatewayClient, read_gateway_session_json, read_quic_json_frame, relay_client_quic_health,
-    write_gateway_session_json, write_quic_json_frame, write_quic_json_message,
+    TcpTlsGatewayClient, drain_abandoned_quic, read_gateway_session_json, read_quic_json_frame,
+    relay_client_quic_health, write_gateway_session_json, write_quic_json_frame,
+    write_quic_json_message,
 };
 pub use relay_quic_pool::{
     RelayQuicBindFamily, RelayQuicCapacity, RelayQuicPool, RelayQuicPoolConfig, RelayQuicPoolKey,

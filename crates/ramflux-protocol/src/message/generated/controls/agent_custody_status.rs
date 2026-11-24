@@ -21,6 +21,10 @@ pub struct AgentCustodyStatus {
     pub receipt_json: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
     #[prost(message, optional, tag = "7")]
     pub error: ::core::option::Option<AgentFailure>,
+    /// `register_plan_hash` of the frozen plan. `agent.creation.decide` repeats it.
+    /// Empty when this status has no plan. The phone does not hash the plan itself.
+    #[prost(string, tag = "8")]
+    pub request_hash: ::prost::alloc::string::String,
 }
 impl serde::Serialize for AgentCustodyStatus {
     #[allow(deprecated)]
@@ -49,6 +53,9 @@ impl serde::Serialize for AgentCustodyStatus {
             len += 1;
         }
         if self.error.is_some() {
+            len += 1;
+        }
+        if !self.request_hash.is_empty() {
             len += 1;
         }
         let mut struct_ser =
@@ -82,6 +89,9 @@ impl serde::Serialize for AgentCustodyStatus {
         if let Some(v) = self.error.as_ref() {
             struct_ser.serialize_field("error", v)?;
         }
+        if !self.request_hash.is_empty() {
+            struct_ser.serialize_field("requestHash", &self.request_hash)?;
+        }
         struct_ser.end()
     }
 }
@@ -104,6 +114,8 @@ impl<'de> serde::Deserialize<'de> for AgentCustodyStatus {
             "receipt_json",
             "receiptJson",
             "error",
+            "request_hash",
+            "requestHash",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
@@ -114,6 +126,7 @@ impl<'de> serde::Deserialize<'de> for AgentCustodyStatus {
             RequestJson,
             ReceiptJson,
             Error,
+            RequestHash,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -142,6 +155,7 @@ impl<'de> serde::Deserialize<'de> for AgentCustodyStatus {
                             "requestJson" | "request_json" => Ok(GeneratedField::RequestJson),
                             "receiptJson" | "receipt_json" => Ok(GeneratedField::ReceiptJson),
                             "error" => Ok(GeneratedField::Error),
+                            "requestHash" | "request_hash" => Ok(GeneratedField::RequestHash),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -166,6 +180,7 @@ impl<'de> serde::Deserialize<'de> for AgentCustodyStatus {
                 let mut request_json__ = None;
                 let mut receipt_json__ = None;
                 let mut error__ = None;
+                let mut request_hash__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -232,6 +247,12 @@ impl<'de> serde::Deserialize<'de> for AgentCustodyStatus {
                             }
                             error__ = map_.next_value()?;
                         }
+                        GeneratedField::RequestHash => {
+                            if request_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("requestHash"));
+                            }
+                            request_hash__ = Some(map_.next_value()?);
+                        }
                     }
                 }
                 Ok(AgentCustodyStatus {
@@ -242,6 +263,7 @@ impl<'de> serde::Deserialize<'de> for AgentCustodyStatus {
                     request_json: request_json__,
                     receipt_json: receipt_json__,
                     error: error__,
+                    request_hash: request_hash__.unwrap_or_default(),
                 })
             }
         }

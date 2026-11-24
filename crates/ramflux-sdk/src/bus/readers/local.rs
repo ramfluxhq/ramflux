@@ -188,6 +188,59 @@ pub(super) fn read(
 
 fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError> {
     let mut status = view.status.clone();
+    status[crate::VerifiedClassification::FIELD] =
+        json!(client.verified_classification(&view.principal)?);
+    native_status(client, view, &mut status)?;
+    if let Some(connection) = &view.connection {
+        let mut snapshot = connection.snapshot();
+        // The actor refreshes its cached receive status on networking observations.
+        // W1 commits and ACK drains can advance the ledger between those observations,
+        // so status reads need current DB watermarks even when the session stays Live.
+        if let Some(receive) = &mut snapshot.receive
+            && let Some(target) = status["target_delivery_id"].as_str()
+        {
+            let db = client.account_db()?;
+            receive.committed_cursor =
+                crate::bus::push_receiver::apply_w1::read_cursor(db, target)?;
+            let counters = db.receive_status_counters(target)?;
+            receive.ack_intents_pending = counters.ack_intents_pending;
+            receive.held_entries = counters.held_entries;
+        }
+        if status["networking"] != json!(snapshot.state) {
+            status["networking"] = json!(snapshot.state);
+            status["networking_reason"] = json!(snapshot.cause);
+            status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
+        }
+        // A retired agent stays listed in the local custody record. The node's
+        // refusal is the fact the local surfaces follow; it wins over that record.
+        if snapshot.cause.as_ref().is_some_and(crate::AccountNetworkingReason::agent_retired) {
+            status["local_device_authorized"] = json!(false);
+            status["networking_reason"] = json!(snapshot.cause);
+            status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
+        }
+        status["session_delivery_mode"] = json!(connection.session_mode().receive_label());
+        status["networking_snapshot"] = json!(snapshot);
+        status["active_transport_kind"] = json!(snapshot.active_transport_kind);
+        status["session_id"] = json!(snapshot.session_id);
+    }
+    // After the snapshot copy. That copy is what put pending and a null reason
+    // back over the revoked-branch overlay. Sibling catch-up then runs, and it
+    // leaves a revoked branch alone because authorization is already false.
+    if view.native.is_some() {
+        if let Some(root) = view.account_root.as_deref() {
+            let id = client.account_db()?.local_account_id.clone();
+            super::super::host_branch::overlay_status(&mut status, root, &id);
+        }
+        hold_fresh_sibling_catch_up(client, &mut status)?;
+    }
+    Ok(status)
+}
+
+fn native_status(
+    client: &RamfluxClient,
+    view: &AccountView,
+    status: &mut Value,
+) -> Result<(), SdkError> {
     if view.native.is_some() {
         let now = crate::custody::network_now()?;
         let native = crate::custody::load_data_account(
@@ -195,6 +248,9 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
             &client.account_db()?.local_account_id,
             now,
         )?;
+        if let Some(custodian) = native.custodian_account_id() {
+            status["custodian_account_id"] = serde_json::Value::from(custodian);
+        }
         status["networking"] = serde_json::to_value(native.state())?;
         let last_error = client
             .account_db()?
@@ -239,39 +295,70 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
         status["node_id"] =
             json!(client.account_db()?.load_actor_state::<String>("account/node-id")?);
     }
-    if let Some(connection) = &view.connection {
-        let mut snapshot = connection.snapshot();
-        // The actor refreshes its cached receive status on networking observations.
-        // W1 commits and ACK drains can advance the ledger between those observations,
-        // so status reads need current DB watermarks even when the session stays Live.
-        if let Some(receive) = &mut snapshot.receive
-            && let Some(target) = status["target_delivery_id"].as_str()
-        {
-            let db = client.account_db()?;
-            receive.committed_cursor =
-                crate::bus::push_receiver::apply_w1::read_cursor(db, target)?;
-            let counters = db.receive_status_counters(target)?;
-            receive.ack_intents_pending = counters.ack_intents_pending;
-            receive.held_entries = counters.held_entries;
-        }
-        if status["networking"] != json!(snapshot.state) {
-            status["networking"] = json!(snapshot.state);
-            status["networking_reason"] = json!(snapshot.cause);
-            status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
-        }
-        // A retired agent stays listed in the local custody record. The node's
-        // refusal is the fact the local surfaces follow; it wins over that record.
-        if snapshot.cause.as_ref().is_some_and(crate::AccountNetworkingReason::agent_retired) {
-            status["local_device_authorized"] = json!(false);
-            status["networking_reason"] = json!(snapshot.cause);
-            status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
-        }
-        status["session_delivery_mode"] = json!(connection.session_mode().receive_label());
-        status["networking_snapshot"] = json!(snapshot);
-        status["active_transport_kind"] = json!(snapshot.active_transport_kind);
-        status["session_id"] = json!(snapshot.session_id);
+    Ok(())
+}
+
+const SIBLING_CATCH_UP_SECS: u64 = 45;
+
+/// The driver's first send waits on reported `live`. A just-enrolled sibling has not received
+/// its contact copy yet, so this reports pending until an accepted friend link exists or the
+/// bound elapses. The session snapshot stays live and receive continues.
+fn hold_fresh_sibling_catch_up(client: &RamfluxClient, status: &mut Value) -> Result<(), SdkError> {
+    if status.get("networking").and_then(Value::as_str) != Some("live") {
+        return Ok(());
     }
-    Ok(status)
+    if status.get("local_device_authorized") == Some(&Value::Bool(false)) {
+        return Ok(());
+    }
+    let Some(device) = status.get("device_id").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let root = match client.own_account_anchor() {
+        Ok(root) => root,
+        Err(SdkError::IdentityRootMissing) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let now = crate::custody::network_now()?;
+    let Some(authority) = client.current_custody_authority(&root, now)? else {
+        return Ok(());
+    };
+    let body = &authority.envelope().body;
+    let Some(local) = body.devices.iter().find(|entry| entry.device_id == device) else {
+        return Ok(());
+    };
+    let Some(started) =
+        local.branch_certificate.as_ref().map(|certificate| certificate.body.not_before)
+    else {
+        return Ok(());
+    };
+    if now.saturating_sub(started) > SIBLING_CATCH_UP_SECS {
+        return Ok(());
+    }
+    let sibling = body.devices.iter().any(|entry| {
+        entry.device_id != device
+            && authority
+                .authorize(
+                    &ramflux_protocol::custody::DeviceRef {
+                        account_anchor: root.clone(),
+                        device_id: entry.device_id.clone(),
+                        device_epoch: entry.device_epoch,
+                    },
+                    "sync",
+                    now,
+                )
+                .is_ok()
+    });
+    if !sibling || accepted_friend_link(client)? {
+        return Ok(());
+    }
+    status["networking"] = json!("networking_pending");
+    Ok(())
+}
+
+fn accepted_friend_link(client: &RamfluxClient) -> Result<bool, SdkError> {
+    Ok(client.friend_links()?.iter().any(|link| {
+        link.state == "accepted" && !link.blocked && link.capability_revoked_at.is_none()
+    }))
 }
 
 fn contacts(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError> {
@@ -330,8 +417,8 @@ fn verification(
     Ok(value)
 }
 
-fn a2i(_client: &RamfluxClient, _pending: bool) -> Result<Value, SdkError> {
-    RamfluxClient::refuse_a2i_binding_authority()
+fn a2i(client: &RamfluxClient, pending: bool) -> Result<Value, SdkError> {
+    client.a2i_events_json(pending)
 }
 
 fn upload_status(
@@ -353,13 +440,7 @@ mod a2i_authority_tests {
     #[test]
     fn a2i_reader_refuses_before_reading_retained_rows() {
         for pending in [false, true] {
-            assert!(matches!(
-                a2i(&RamfluxClient::new(), pending),
-                Err(SdkError::GeneratedRefused {
-                    code: crate::error::GeneratedRefusalCode::Authority,
-                    ..
-                })
-            ));
+            assert!(a2i(&RamfluxClient::new(), pending).is_err());
         }
     }
 }

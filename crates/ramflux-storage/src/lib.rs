@@ -21,7 +21,10 @@ pub use account_generation::GenerationReclamationLease;
 pub use account_writer::AccountWriterLease;
 #[cfg(test)]
 mod account_writer_tests;
-pub use account_index::{AccountGenerationSelection, BackupIndexInstall, CodeAttempts};
+pub use account_index::{
+    APP_LOCK_MAX_TIMEOUT_MS, AccountGenerationSelection, AppLockPolicy, BackupIndexInstall,
+    CodeAttempts,
+};
 mod clock;
 mod constants;
 mod conversation_helpers;
@@ -71,7 +74,9 @@ pub use account_db::receive::{ReceiveExpectation, ReceiveTransaction, RecoveryIn
 mod encryption;
 mod error;
 mod logical_rows;
-pub use logical_rows::{load_account_db_key, logical_table_rows, read_existing_vault_secret};
+pub use logical_rows::{
+    load_account_db_key, load_device_account_db_key, logical_table_rows, read_existing_vault_secret,
+};
 mod event_store;
 mod group_permissions;
 mod history_hash;

@@ -5,6 +5,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) use crate::{DEFAULT_DATA_ROOT, DEFAULT_SOCKET};
 
 mod a2i;
@@ -24,6 +25,8 @@ mod dm;
 mod grant;
 mod group;
 mod keychain;
+mod prx;
+mod root;
 mod vault;
 pub(crate) use vault::*;
 mod mcp;
@@ -46,6 +49,8 @@ pub(crate) use conversation_ops::*;
 pub(crate) use daemon::*;
 pub(crate) use device::*;
 pub(crate) use diag::*;
+pub(crate) use prx::*;
+pub(crate) use root::*;
 mod pairing;
 mod transfer;
 pub(crate) use dm::*;
@@ -65,6 +70,10 @@ pub(crate) use transfer::*;
     about = "Ramflux reference CLI over the local SDK bus"
 )]
 pub(crate) struct Cli {
+    #[cfg(target_os = "linux")]
+    #[arg(long, global = true)]
+    pub(crate) socket: Option<PathBuf>,
+    #[cfg(not(target_os = "linux"))]
     #[arg(long, global = true, default_value = DEFAULT_SOCKET)]
     pub(crate) socket: PathBuf,
     #[command(subcommand)]
@@ -83,6 +92,8 @@ pub(crate) enum Command {
     Pairing(PairingCommand),
     /// Agent accounts: create, decide, list, show, edit, access, delete, status (desktop bus).
     Agent(AgentCommand),
+    /// Find or start the local PRX daemon.
+    Prx(PrxCommand),
     /// Full-account primary transfer preview (default-off).
     Transfer(TransferCommand),
     Dm(DmCommand),
@@ -102,6 +113,8 @@ pub(crate) enum Command {
     Admin(AdminCommand),
     /// Plaintext residue diagnostics.
     Diag(DiagCommand),
+    /// Shared-root snapshot and one fenced direct-message commit.
+    Root(RootCommand),
     Attachment(AttachmentCommand),
 }
 

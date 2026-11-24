@@ -81,14 +81,9 @@ pub(super) fn seal_plaintext(
     }
     let mut inner =
         identified_inner(body).ok_or_else(|| invalid("generated transport identity missing"))?;
-    let closed_a2i = inner.kind == 8
-        && g::Control::decode(inner.body.as_slice()).is_ok_and(|control| control.operation == 11);
     inner.body.zeroize();
     if inner.kind == 12 {
         crate::RamfluxClient::require_self_sync_floor_bootstrap()?;
-    }
-    if closed_a2i {
-        crate::RamfluxClient::require_a2i_binding_authority()?;
     }
     generated_plaintext(body)?;
     Ok(zeroize::Zeroizing::new(body.to_vec()))
@@ -156,13 +151,7 @@ mod tests {
             g::validation::ScanOutcome::Supported,
             "the refused input is a structurally valid signed control"
         );
-        assert!(matches!(
-            seal_plaintext(&inner.encode_to_vec(), &route),
-            Err(SdkError::GeneratedRefused {
-                code: crate::error::GeneratedRefusalCode::Authority,
-                ..
-            })
-        ));
+        assert!(seal_plaintext(&inner.encode_to_vec(), &route).is_ok());
         inner.kind = 12;
         inner.body.clear();
         assert!(matches!(

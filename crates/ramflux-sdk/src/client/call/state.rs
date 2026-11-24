@@ -17,6 +17,13 @@ struct PeerMedia {
     answered: bool,
 }
 
+/// An answer tapped while media is still held.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HeldAnswer {
+    None,
+    Requested,
+}
+
 #[derive(Clone, PartialEq)]
 pub(crate) struct LiveCall {
     pub row: CallRow,
@@ -51,8 +58,48 @@ pub(crate) struct LiveCall {
     /// Calls start held. Media stays blocked until the
     /// gateway accepts a resolve of that reference.
     pub(crate) media_held: bool,
+    /// The callee asked to answer while media was still held. Promoted once a resolution releases it.
+    pub(crate) held_answer: HeldAnswer,
     #[cfg(feature = "test-support")]
     pub(crate) last_control_error: Option<String>,
+}
+
+/// One outcome for every device of the person. A device that lost the answer still records
+/// `completed` once the hangup names the call's end.
+pub(crate) fn revise_person_row(row: &mut CallRow, control: &CallControl) -> bool {
+    let reason = person_reason(row.end_reason.as_deref(), row.answered_at.is_some(), &control.body);
+    if row.end_reason.as_deref() == Some(reason) && row.ended_at == Some(control.created_at) {
+        return false;
+    }
+    row.seq = row.seq.saturating_add(1);
+    row.end_reason = Some(reason.to_owned());
+    if reason != "failed" {
+        row.failure_reason = None;
+        row.peer_reason = None;
+    }
+    row.ended_at = Some(control.created_at);
+    true
+}
+
+fn person_reason(current: Option<&str>, answered: bool, body: &CallAction) -> &'static str {
+    if answered || matches!(current, Some("answered_elsewhere" | "completed")) {
+        return "completed";
+    }
+    match current {
+        Some("declined") => "declined",
+        Some("busy") => "busy",
+        Some("cancelled") => "cancelled",
+        Some("missed") => "missed",
+        Some("timeout") => "timeout",
+        Some("failed") => "failed",
+        _ => {
+            if matches!(body, CallAction::Timeout) {
+                "missed"
+            } else {
+                "cancelled"
+            }
+        }
+    }
 }
 
 pub(super) fn invalid(message: &str) -> SdkError {
@@ -201,6 +248,7 @@ impl LiveCall {
             gateway_generation: None,
             gateway_answered: false,
             media_held: true,
+            held_answer: HeldAnswer::None,
             #[cfg(feature = "test-support")]
             last_control_error: None,
         }
@@ -325,9 +373,7 @@ impl LiveCall {
         }
     }
     pub fn control(&mut self, body: CallAction, now: i64) -> Result<CallControl, SdkError> {
-        if self.call_ref.is_some()
-            && !matches!(body, CallAction::Invite { .. } | CallAction::AnsweredElsewhere)
-        {
+        if self.holds_media_for(&body) {
             let peer = self.media_peer().clone();
             self.hold_media_for(&peer);
         }
@@ -348,6 +394,56 @@ impl LiveCall {
             signature: String::new(),
         })
     }
+    /// A media grant already in hand stays until its correlated decision replaces it.
+    /// Continue actions must not take a ringing or answered grant back while that
+    /// decision is in flight. Answer and hangup still require a new decision.
+    fn holds_media_for(&self, body: &CallAction) -> bool {
+        if self.call_ref.is_none()
+            || matches!(body, CallAction::Invite { .. } | CallAction::AnsweredElsewhere)
+        {
+            return false;
+        }
+        let continue_action = matches!(
+            body,
+            CallAction::Ack { .. }
+                | CallAction::Ready { .. }
+                | CallAction::Rekey { .. }
+                | CallAction::RekeyAck { .. }
+        );
+        !(continue_action && (!self.media_held || self.gateway_answered))
+    }
+
+    /// Remember an answer that arrived before the gateway released media.
+    pub(crate) fn request_answer(&mut self) {
+        self.held_answer = HeldAnswer::Requested;
+    }
+
+    /// Send the remembered answer once media is released. A held or expired call stays ringing.
+    /// # Errors
+    /// Returns the answer error when the released call can no longer be answered.
+    pub(crate) fn queue_requested_answer(&mut self, now: i64) -> Result<(), SdkError> {
+        if self.held_answer != HeldAnswer::Requested
+            || self.media_held
+            || self.row.state != "incoming_ringing"
+        {
+            return Ok(());
+        }
+        if self.expired(now) {
+            self.held_answer = HeldAnswer::None;
+            return Ok(());
+        }
+        self.answer(now)
+    }
+
+    /// Signaling equality ignores a remembered answer so an in-flight resolution is still installed.
+    pub(crate) fn same_signaling(&self, other: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = other.clone();
+        left.held_answer = HeldAnswer::None;
+        right.held_answer = HeldAnswer::None;
+        left == right
+    }
+
     pub fn answer(&mut self, now: i64) -> Result<(), SdkError> {
         if self.media_held {
             return Err(invalid("call resolution missing"));
@@ -363,8 +459,46 @@ impl LiveCall {
         )?;
         self.pending.push(answer);
         self.set_state("connecting", now)?;
+        self.held_answer = HeldAnswer::None;
         Ok(())
     }
+
+    /// The first answer selects that callee and tells every other invited device.
+    fn apply_answer(
+        &mut self,
+        control: &CallControl,
+        base_key: &str,
+        now: i64,
+    ) -> Result<bool, SdkError> {
+        if self.expired(now) {
+            self.expire(now)?;
+            return Ok(false);
+        }
+        if self.row.state != "outgoing_ringing" {
+            if control.callee == self.callee {
+                return Err(invalid("answer cannot replace an active key"));
+            }
+            // The first answer already queued an authenticated terminal notice for siblings.
+            return Ok(false);
+        }
+        self.receive_key = Some(decode_key(base_key)?);
+        self.send_key = self
+            .offer_keys
+            .remove(&control.callee)
+            .ok_or_else(|| invalid("answer has no fresh offer key"))?;
+        self.offer_keys.clear();
+        self.select_callee(control.callee.clone());
+        self.set_state("connecting", now)?;
+        for loser in
+            self.invited.clone().into_iter().filter(|peer| peer != &self.callee).collect::<Vec<_>>()
+        {
+            let mut other = self.control(CallAction::AnsweredElsewhere, now)?;
+            other.callee = loser;
+            self.pending.push(other);
+        }
+        Ok(true)
+    }
+
     pub fn apply(&mut self, c: &CallControl, now: i64) -> Result<bool, SdkError> {
         if c.call_id != self.row.call_id
             || c.conversation_id != self.row.conversation_id
@@ -384,43 +518,16 @@ impl LiveCall {
             return Err(invalid("control endpoint not invited"));
         }
         if self.row.state == "ended" {
+            if self.adopt_later_end(c) {
+                return Ok(false);
+            }
             return Err(invalid("call already ended"));
         }
         self.seen.insert(c.sender.clone(), c.seq);
         match &c.body {
             CallAction::Ringing if self.row.state == "outgoing_ringing" => {}
             CallAction::Answer { base_key } if self.local == self.caller => {
-                if self.expired(now) {
-                    self.expire(now)?;
-                    return Ok(false);
-                }
-                if self.row.state != "outgoing_ringing" {
-                    if c.callee == self.callee {
-                        return Err(invalid("answer cannot replace an active key"));
-                    }
-                    // The first answer already queued an authenticated terminal notice for siblings.
-                    return Ok(false);
-                }
-                self.receive_key = Some(decode_key(base_key)?);
-                self.send_key = self
-                    .offer_keys
-                    .remove(&c.callee)
-                    .ok_or_else(|| invalid("answer has no fresh offer key"))?;
-                self.offer_keys.clear();
-                self.select_callee(c.callee.clone());
-                self.set_state("connecting", now)?;
-                for loser in self
-                    .invited
-                    .clone()
-                    .into_iter()
-                    .filter(|peer| peer != &self.callee)
-                    .collect::<Vec<_>>()
-                {
-                    let mut other = self.control(CallAction::AnsweredElsewhere, now)?;
-                    other.callee = loser;
-                    self.pending.push(other);
-                }
-                return Ok(true);
+                return self.apply_answer(c, base_key, now);
             }
             CallAction::Ack { allocation }
                 if self.local == self.callee
@@ -434,7 +541,7 @@ impl LiveCall {
                 self.remember_consent(consent)?;
             }
             CallAction::AnsweredElsewhere if self.local == self.callee => {
-                self.finish("answered_elsewhere", now)?;
+                self.finish("answered_elsewhere", c.created_at)?;
             }
             CallAction::Reject | CallAction::Busy if self.row.state == "outgoing_ringing" => {
                 // One device refusing does not suppress another ringing sibling.
@@ -442,16 +549,23 @@ impl LiveCall {
                 if self.invited.is_empty() {
                     self.finish(
                         if matches!(c.body, CallAction::Busy) { "busy" } else { "declined" },
-                        now,
+                        c.created_at,
                     )?;
                 }
             }
             CallAction::Failed => {
-                self.finish_peer_failure(VoiceCallFailureReason::SignalingUnavailable, now)?;
+                self.finish_peer_failure(
+                    VoiceCallFailureReason::SignalingUnavailable,
+                    c.created_at,
+                )?;
             }
             CallAction::Hangup | CallAction::Timeout => {
                 if self.local == self.caller && c.callee != self.callee {
                     return Ok(false);
+                }
+                // The selected device's terminal is the clock every other device stores.
+                if self.local == self.caller {
+                    self.relay_terminal(c)?;
                 }
                 let reason = if matches!(c.body, CallAction::Timeout) {
                     if self.local == self.caller { "timeout" } else { "missed" }
@@ -462,7 +576,7 @@ impl LiveCall {
                 } else {
                     "declined"
                 };
-                self.finish(reason, now)?;
+                self.finish(reason, c.created_at)?;
             }
             _ => return Err(invalid("control invalid for current state")),
         }
@@ -479,8 +593,13 @@ impl LiveCall {
         self.retry_at = 0;
         self.retry_attempts = 0;
         let action = if reject { CallAction::Reject } else { CallAction::Hangup };
-        if self.local == self.caller && self.row.state == "outgoing_ringing" {
-            for target in self.invited.clone() {
+        if self.local == self.caller {
+            let targets = if self.invited.is_empty() {
+                vec![self.callee.clone()]
+            } else {
+                self.invited.clone()
+            };
+            for target in targets {
                 let mut control = self.control(action.clone(), now)?;
                 control.callee = target;
                 self.pending.push(control);
@@ -593,6 +712,35 @@ impl LiveCall {
         }
         Ok(())
     }
+    /// A caller Hangup or Timeout is the person's end, including after this device already stopped.
+    pub(crate) fn accepts_authoritative_end(&self, control: &CallControl) -> bool {
+        self.row.state == "ended"
+            && control.sender == self.caller
+            && control.callee == self.local
+            && matches!(control.body, CallAction::Hangup | CallAction::Timeout)
+    }
+
+    /// Copy the terminal clock to every invited device except the one that produced it.
+    fn relay_terminal(&mut self, source: &CallControl) -> Result<(), SdkError> {
+        let targets =
+            self.invited.iter().filter(|peer| *peer != &source.callee).cloned().collect::<Vec<_>>();
+        for target in targets {
+            let mut control = self.control(CallAction::Hangup, source.created_at)?;
+            control.callee = target;
+            self.pending.push(control);
+        }
+        Ok(())
+    }
+
+    /// The hangup clock replaces a device-local end. An answered sibling becomes `completed`.
+    fn adopt_later_end(&mut self, control: &CallControl) -> bool {
+        if !self.accepts_authoritative_end(control) {
+            return false;
+        }
+        revise_person_row(&mut self.row, control);
+        true
+    }
+
     pub fn finish(&mut self, reason: &str, now: i64) -> Result<(), SdkError> {
         self.local_generation = self
             .local_generation
@@ -600,6 +748,7 @@ impl LiveCall {
             .ok_or_else(|| invalid("local call generation exhausted"))?;
         self.peer_media.clear();
         self.media_held = true;
+        self.held_answer = HeldAnswer::None;
         self.set_state("ended", now)?;
         self.row.end_reason = Some(reason.into());
         self.row.failure_reason = None;

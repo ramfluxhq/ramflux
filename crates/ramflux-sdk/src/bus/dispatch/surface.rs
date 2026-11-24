@@ -134,14 +134,15 @@ fn read_surface_inner(client: &RamfluxClient, request: &LocalBusFrame) -> Result
             } else if request.body["conversation_id"].is_string()
                 || request.body["author_principal_id"].is_string()
             {
-                let reference = client.resolve_surface_reference(
-                    required(&request.body, "surface_id")?,
-                    request.body["conversation_id"].as_str(),
-                    request.body["author_principal_id"].as_str(),
-                )?;
-                reference.map_or(Ok(Value::Null), |reference| {
-                    client.surface_get_ref(&reference, after, action)
-                })
+                let surface_id = required(&request.body, "surface_id")?;
+                let conversation = request.body["conversation_id"].as_str();
+                let author = request.body["author_principal_id"].as_str();
+                let reference =
+                    client.resolve_surface_reference(surface_id, conversation, author)?;
+                match reference {
+                    Some(reference) => client.surface_get_ref(&reference, after, action),
+                    None => Ok(Value::Null),
+                }
             } else {
                 client.surface_get(required(&request.body, "surface_id")?, after, action)
             }

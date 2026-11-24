@@ -50,6 +50,7 @@ mod attachment_send;
 pub use attachment_send::PlaintextDigester;
 mod agent_record;
 pub mod custody;
+pub mod prx_host;
 mod prx_owner;
 mod surface;
 pub use surface::{SurfaceSendRequest, new_surface_message_id};
@@ -101,6 +102,10 @@ mod time;
 pub use bus::io::{
     MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES, MAX_LOCAL_BUS_OBJECT_BYTES,
     MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES,
+};
+pub use bus::shared_snapshot::{
+    CommittedSnapshot, DirectMessageCommit, commit_direct_message, read_committed_snapshot,
+    shared_root_refusal, shared_root_vault,
 };
 pub use bus::{
     AccountNetworkingReason, LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest,
@@ -187,12 +192,12 @@ pub use gateway::{
     GatewayAuthFrame, GatewayCallFuture, GatewayClientFrame, GatewayCursor, GatewayCustodyConfig,
     GatewayDirectMessage, GatewayInboxEntry, GatewayOpenFrame, GatewayOwnDeviceFanoutDelivery,
     GatewayOwnDeviceFanoutFrame, GatewayOwnDeviceFanoutResponse, GatewayPlaintextDelivery,
-    GatewayPushProvider, GatewayPushRouteDeregistration, GatewayPushRouteDeregistrationFrame,
-    GatewayPushRouteFrame, GatewayPushRouteRefusal, GatewayPushRouteRegistration,
-    GatewayQuicEndpointConfig, GatewayResumeFrame, GatewayServerFrame, GatewaySessionAccess,
-    GatewaySessionConfig, GatewaySessionEngine, GatewaySessionEstablishedFrame,
-    GatewaySessionState, GatewaySessionTransportKind, GatewaySubmitFrame,
-    GatewayTcpTlsEndpointConfig, PushRouteRetry,
+    GatewayPushProvider, GatewayPushRouteCapability, GatewayPushRouteDeregistration,
+    GatewayPushRouteDeregistrationFrame, GatewayPushRouteEnvironment, GatewayPushRouteFrame,
+    GatewayPushRouteRefusal, GatewayPushRouteRegistration, GatewayQuicEndpointConfig,
+    GatewayResumeFrame, GatewayServerFrame, GatewaySessionAccess, GatewaySessionConfig,
+    GatewaySessionEngine, GatewaySessionEstablishedFrame, GatewaySessionState,
+    GatewaySessionTransportKind, GatewaySubmitFrame, GatewayTcpTlsEndpointConfig, PushRouteRetry,
 };
 pub use group::SdkGroupSenderKeyDistribution;
 pub use object::{OBJECT_PUT_PROTOCOL_VERSION, SdkObjectKeySlot, SdkObjectSharePackage};
@@ -211,6 +216,7 @@ mod task_refusal;
 mod task_warnings;
 pub use task_refusal::TaskRefusalCode;
 
+pub use client::identity_authority::VerifiedClassification;
 pub use client::identity_authority::profile_read::VerifiedIdentityProfile;
 
 #[cfg(test)]

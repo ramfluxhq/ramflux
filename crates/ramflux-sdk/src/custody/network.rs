@@ -146,6 +146,7 @@ impl CustodyConnection<GatewayTcpTlsStream> {
     }
 
     /// Publish, register and establish a session using the current locally verified v3 record.
+    /// A caller that must finish sooner uses [`Self::connect_until`].
     /// # Errors
     /// Rejects missing custody state, keychain failure, node-pin changes, exporter failure and
     /// non-Busy router refusals. Busy retries use fresh TLS/challenges, bounded jittered
@@ -154,13 +155,25 @@ impl CustodyConnection<GatewayTcpTlsStream> {
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
     ) -> Result<Self, SdkError> {
-        Box::pin(Self::connect_inner(config, vault, false)).await
+        Box::pin(Self::connect_inner(config, vault, false, None)).await
     }
     pub(crate) async fn connect_for_proof(
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
     ) -> Result<Self, SdkError> {
-        Box::pin(Self::connect_inner(config, vault, true)).await
+        Box::pin(Self::connect_inner(config, vault, true, None)).await
+    }
+
+    /// Same session as [`Self::connect`]. Busy retries stop at `deadline`.
+    /// # Errors
+    /// Same refusals as [`Self::connect`]. A Busy hint that does not fit `deadline` is returned
+    /// immediately instead of sleeping past it.
+    pub(crate) async fn connect_until(
+        config: CustodyNetworkConfig,
+        vault: Arc<dyn PrimaryVault>,
+        deadline: tokio::time::Instant,
+    ) -> Result<Self, SdkError> {
+        Box::pin(Self::connect_inner(config, vault, false, Some(deadline))).await
     }
     /// Stage D R2 (contract 7.5): the rebind publication of a paused agent. The connection is
     /// proof-only and its single proof action is the rebind `AgentPublish`. No `Register` and no
@@ -220,6 +233,7 @@ impl CustodyConnection<GatewayTcpTlsStream> {
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
         proof_only: bool,
+        admission_deadline: Option<tokio::time::Instant>,
     ) -> Result<Self, SdkError> {
         let endpoint = (
             config.gateway_address,
@@ -228,6 +242,9 @@ impl CustodyConnection<GatewayTcpTlsStream> {
             config.timeout,
         );
         let mut retry = super::retry::AdmissionRetry::default();
+        if let Some(deadline) = admission_deadline {
+            retry.limit(deadline);
+        }
         let ((), connection) =
             Box::pin(Self::connect_with_mode(config, vault, &mut retry, proof_only, || async {
                 let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(

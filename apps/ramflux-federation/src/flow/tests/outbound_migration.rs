@@ -50,15 +50,12 @@ fn outbound_spool_accepted_before_commit_still_delivers_without_extra_hop()
     ));
     drop(store);
     let store = ramflux_node_core::FederationRedbStore::open(&spool_path)?;
-    let mut trust = ramflux_node_core::FederationTrustState::new();
-    trust.set_node_signing_seed([9; 32]);
-    let trust = crate::SharedFederationTrustState::new(trust);
     let mut attempts = 0;
     let shutdown = tokio_util::sync::CancellationToken::new();
     retry_outbound_spool_with(&store, 101, 64, &shutdown, |entry| {
         attempts += 1;
         assert_eq!(entry.forward, retained);
-        let forward = refresh_spooled_forward(&entry.forward, &trust, |envelope| {
+        let forward = refresh_spooled_forward(&entry.forward, [9; 32], |envelope| {
             // The production authority-refresh endpoint uses Federation origin;
             // already accepted sends must not reacquire Gateway source admission.
             core.authenticated_envelope_source_from(

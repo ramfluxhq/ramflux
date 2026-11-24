@@ -123,6 +123,25 @@ pub enum ApiCode {
     PurgePending,
     /// The idempotency key is missing or outside 16..=128 printable ASCII bytes.
     IdempotencyKeyRequired,
+    /// `410 snapshot_expired`: the snapshot page token is no longer valid.
+    SnapshotExpired,
+    /// `409 approval_decided`: this approval already has a decision.
+    ApprovalDecided,
+    /// `409 approval_run_mismatch`: the approval does not belong to this run.
+    ApprovalRunMismatch,
+    /// `404 approval_unknown`: no such approval.
+    ApprovalUnknown,
+    /// `410 approval_expired`: the approval wait ended. The call never started.
+    ApprovalExpired,
+    /// Cron control answered 404. PRX's body is uncoded; the client maps it here.
+    CronJobUnknown,
+    /// `404 xin_task_unknown`.
+    XinTaskUnknown,
+    /// `404 xin_goal_unknown`.
+    XinGoalUnknown,
+    /// `400 model_capabilities_unknown`: the model is outside the catalog and is
+    /// not declared. Nothing was written.
+    ModelCapabilitiesUnknown,
     Unknown(String),
 }
 
@@ -159,6 +178,15 @@ impl ApiCode {
             "history_pending" => Self::HistoryPending,
             "purge_pending" => Self::PurgePending,
             "idempotency_key_required" => Self::IdempotencyKeyRequired,
+            "snapshot_expired" => Self::SnapshotExpired,
+            "approval_decided" => Self::ApprovalDecided,
+            "approval_run_mismatch" => Self::ApprovalRunMismatch,
+            "approval_unknown" => Self::ApprovalUnknown,
+            "approval_expired" => Self::ApprovalExpired,
+            "cron_job_unknown" => Self::CronJobUnknown,
+            "xin_task_unknown" => Self::XinTaskUnknown,
+            "xin_goal_unknown" => Self::XinGoalUnknown,
+            "model_capabilities_unknown" => Self::ModelCapabilitiesUnknown,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -426,6 +454,8 @@ mod tests {
             ("history_pending", ApiCode::HistoryPending),
             ("purge_pending", ApiCode::PurgePending),
             ("idempotency_key_required", ApiCode::IdempotencyKeyRequired),
+            ("snapshot_expired", ApiCode::SnapshotExpired),
+            ("model_capabilities_unknown", ApiCode::ModelCapabilitiesUnknown),
         ];
         for (wire, expected) in cases {
             let body = format!(r#"{{"error":{{"code":"{wire}","message":"m"}}}}"#);

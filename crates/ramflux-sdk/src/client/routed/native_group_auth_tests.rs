@@ -427,8 +427,11 @@ async fn stranger_snapshot_waits_for_creator_consent_before_native_group_deliver
         target.accept_peer(&source)?;
         source.accept_peer(&target)?;
         target.receive(envelope, 1).await?;
-        assert!(target.client.account_db()?.shared_group_state(GROUP)?.is_some(),
-            "accepted creator contact supplies the signed snapshot's existing implicit-consent policy");
+        target.client.decide_group_invitation(GROUP, true, &target.config.target_delivery_id)?;
+        assert!(
+            target.client.account_db()?.shared_group_state(GROUP)?.is_some(),
+            "explicitly accepting the stored invitation must install the signed group"
+        );
         target.client.accept_shared_group_state(&state, &target.config.target_delivery_id)?;
         let approved =
             change(&source, GroupStateChange::SetName { name: "approved group".into() })?;

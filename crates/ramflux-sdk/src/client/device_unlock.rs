@@ -72,6 +72,17 @@ impl DeviceBoundVaultSecret {
             device_secret,
         })
     }
+
+    /// Read the existing file secret without creating it, for shared read-only access.
+    pub(crate) fn existing_secret(&self, root: &Path) -> Result<Zeroizing<[u8; 32]>, SdkError> {
+        let file =
+            Zeroizing::new(ramflux_storage::read_existing_vault_secret(root, &self.account_id)?);
+        let mut hasher = Zeroizing::new(blake3::Hasher::new());
+        hasher.update(b"ramflux.account_db_device_bound.v1");
+        hasher.update(&*file);
+        hasher.update(&*self.device_secret);
+        Ok(Zeroizing::new(*hasher.finalize().as_bytes()))
+    }
 }
 
 impl VaultSecretSource for DeviceBoundVaultSecret {
@@ -181,7 +192,7 @@ pub(crate) fn delete_device_secret(
     vault.delete(&device_unlock_reference(account_id))
 }
 
-fn device_key_encryption_key(vault_secret: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+pub(crate) fn device_key_encryption_key(vault_secret: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(blake3::derive_key("ramflux.account_db_device_kek.v1", vault_secret))
 }
 
@@ -195,18 +206,30 @@ pub(crate) fn store_device_wrap(
     vault_secret: &[u8; 32],
     key: &AccountDbKey,
 ) -> Result<(), SdkError> {
-    let kek = device_key_encryption_key(vault_secret);
-    let (nonce, wrapped_key) = wrap_with_vault_secret(&kek, key.bytes())?;
     index.store_device_wrapped_db_key(
         account_id,
-        &WrappedAccountDbKey {
-            key_wrapping_provider: "platform-device-unlock".to_owned(),
-            key_wrapping_ref: device_unlock_reference(account_id),
-            nonce,
-            wrapped_key,
-        },
+        &wrapped_device_key(account_id, vault_secret, key)?,
     )?;
     Ok(())
+}
+
+/// Builds the device wrap without writing it.
+///
+/// # Errors
+/// Returns an error when the key cannot be wrapped.
+pub(crate) fn wrapped_device_key(
+    account_id: &str,
+    vault_secret: &[u8; 32],
+    key: &AccountDbKey,
+) -> Result<WrappedAccountDbKey, SdkError> {
+    let kek = device_key_encryption_key(vault_secret);
+    let (nonce, wrapped_key) = wrap_with_vault_secret(&kek, key.bytes())?;
+    Ok(WrappedAccountDbKey {
+        key_wrapping_provider: "platform-device-unlock".to_owned(),
+        key_wrapping_ref: device_unlock_reference(account_id),
+        nonce,
+        wrapped_key,
+    })
 }
 
 /// Opens the device wrap. An account without one (explicitly locked) needs its code.
@@ -243,12 +266,15 @@ pub(crate) fn guard_code_attempt(index: &AccountIndex, account_id: &str) -> Resu
         let ready_at = attempts.last_attempt_at.unwrap_or(0).saturating_add(wait);
         if now < ready_at {
             let retry_after_secs = ready_at.saturating_sub(now);
+            let retry_after_ms =
+                u64::try_from(retry_after_secs).map_or(0, |wait| wait.saturating_mul(1_000));
             return Err(refusal(
                 "UnlockRetryLater",
                 "too many wrong account codes; wait before the next try",
                 serde_json::json!({
                     "reason_code": "unlock_retry_later",
                     "retry_after_secs": retry_after_secs,
+                    "retry_after_ms": retry_after_ms,
                 }),
             ));
         }

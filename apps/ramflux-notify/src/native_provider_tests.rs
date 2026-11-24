@@ -56,6 +56,9 @@ impl NativeWebPush {
                 registered_at: now,
                 expires_at: now + 172_800,
                 route_generation: 0,
+                route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+                environment: ramflux_node_core::PushRouteEnvironment::Production,
+                capability: ramflux_node_core::PushRouteCapability::Alert,
             },
         )?;
         Ok(Self { system, peer, target: device.target, _temp: temp })

@@ -65,9 +65,36 @@ pub(crate) async fn handle_account(
             .await?,
         ),
         AccountAction::Unlock(unlock) => handle_account_unlock(&mut bus, unlock, &OsKeychain).await,
+        AccountAction::AppLock(command) => handle_app_lock(&mut bus, command).await,
         AccountAction::Recover(_) | AccountAction::Create(_) => Err(RfError::Message(
             "Account ceremonies require the exclusive ceremony client.".into(),
         )),
+    }
+}
+
+async fn handle_app_lock(
+    bus: &mut LocalBusClient,
+    command: AccountAppLockCommand,
+) -> Result<(), RfError> {
+    match command.action {
+        AccountAppLockAction::State(selector) => print_json(
+            &bus.request(
+                Some(selector.account),
+                "account",
+                "account.app_lock.state",
+                serde_json::json!({}),
+            )
+            .await?,
+        ),
+        AccountAppLockAction::Set(set) => print_json(
+            &bus.request(
+                Some(set.account),
+                "account",
+                "account.app_lock.configure",
+                serde_json::json!({"enabled": set.enabled, "timeout_ms": set.timeout_ms}),
+            )
+            .await?,
+        ),
     }
 }
 

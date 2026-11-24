@@ -8,13 +8,13 @@
 //! rules), the agent's self-signing key, the branch recertification, `verify_record` on the new
 //! `DeviceSet` against the transferred human record, `verify_agent_profile`, the authority file and
 //! its pins (`custody::store::replace_rebound_authority`), and the creation and inventory files.
-//! FIXTURE: as in `rebind_plan_tests` (the transferred human record is passed in memory; no node).
+//! FIXTURE: as in `rebind_plan_tests`, with the transferred human head persisted before commit; no node.
 //! The "crash before the commit point" is simulated by moving the record back to `authorized` after a
 //! completed commit: the authority and the range are already in place, which is the state a crash
 //! leaves between the authority write and the commit point.
 use super::rebind::RebindBinding;
 use super::rebind_plan_tests::{
-    REQUEST_REBIND, Rebind, begin, new_primary_decision, now_of, setup,
+    REQUEST_REBIND, Rebind, begin, new_primary_decision, now_of, setup as plan_setup,
 };
 use super::tests::{HUMAN, capable};
 use super::{
@@ -36,6 +36,19 @@ use ramflux_protocol::{PrincipalKind, decode_base64url, encode_base64url};
 use std::path::PathBuf;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+/// Commit fixtures install the approved human head on disk before authorizing the rebind.
+fn setup() -> Result<Rebind, Box<dyn std::error::Error>> {
+    let setup = plan_setup()?;
+    crate::custody::store::replace_rebound_authority(
+        &setup.fixture.root.0,
+        HUMAN,
+        &setup.transferred,
+        None,
+        now_of(&setup),
+    )?;
+    Ok(setup)
+}
 
 /// The desktop has the new primary's approval applied: the request is `authorized`.
 fn authorize(setup: &Rebind) -> TestResult {

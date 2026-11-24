@@ -5,6 +5,42 @@
 use super::{Carrier, Outcome, Payload, PayloadKind, Receipt, SurfaceSender, key};
 use crate::{RamfluxClient, SdkError};
 use serde_json::json;
+
+fn same_stored_document(
+    proved: &ramflux_protocol::SurfaceState,
+    state: &ramflux_protocol::SurfaceState,
+) -> bool {
+    proved.version() == state.version()
+        && proved.hash() == state.hash()
+        && proved.content() == state.content()
+        && proved.conversation_id() == state.conversation_id()
+}
+
+/// A covered wire is acknowledged only when it is the stored document.
+/// Any other proof, including a hash or component edited after signing, is `integrity`.
+fn covered_outcome(
+    carrier: &Carrier,
+    event: &ramflux_protocol::SurfaceEvent,
+    state: &ramflux_protocol::SurfaceState,
+) -> Result<Outcome, SdkError> {
+    match ramflux_protocol::SurfaceState::validate_proof(event) {
+        Ok(proved) if same_stored_document(&proved, state) => {
+            Outcome::accepted(&carrier.author_principal_id, state)
+        }
+        Err(ramflux_protocol::SurfaceReject::Version { expected: 1, actual })
+            if actual == event.version() && actual < state.version() && !event.is_resync() =>
+        {
+            if event.validate_carried_components().is_err() {
+                return Ok(Outcome::protocol_rejected(&ramflux_protocol::SurfaceReject::Integrity));
+            }
+            Outcome::accepted(&carrier.author_principal_id, state)
+        }
+        Ok(_) | Err(_) => {
+            Ok(Outcome::protocol_rejected(&ramflux_protocol::SurfaceReject::Integrity))
+        }
+    }
+}
+
 impl RamfluxClient {
     pub(crate) fn project_surface_message(
         &self,
@@ -64,16 +100,6 @@ impl RamfluxClient {
         if let Payload::Rpc(kind, rpc) = &payload {
             return self.apply_surface_rpc(&carrier, *kind, rpc, outbound, sender.group_epoch);
         }
-        let local_author = self
-            .device_branch
-            .as_ref()
-            .is_some_and(|local| local.principal_id == carrier.author_principal_id);
-        if !outbound
-            && !local_author
-            && !self.surface_author_is_own_agent(&carrier.author_principal_id)?
-        {
-            return self.project_surface_fallback_only(&carrier, &payload, message, sender);
-        }
         // A payload claim can never reserve another principal's logical-message id.
         let fingerprint =
             ramflux_protocol::hash_base64url("ramflux.surface.delivery.v1", &carrier.bytes()?);
@@ -101,13 +127,8 @@ impl RamfluxClient {
                 Some(action.version())
             }
         };
-        let covered = carrier.sender_principal_id == carrier.author_principal_id
-            && matches!(&payload,Payload::Event(event) if event.version()<=self.surface_snapshot_floor(&carrier.surface_reference()?)?);
-        let mut outcome = if covered {
-            let (_, state) = self
-                .surface_state_ref(&carrier.surface_reference()?)?
-                .ok_or_else(|| super::invalid("snapshot floor has no surface state"))?;
-            Outcome::accepted(&carrier.author_principal_id, &state)?
+        let mut outcome = if let Some(outcome) = self.covered_author_event(&carrier, &payload)? {
+            outcome
         } else {
             self.apply_surface_payload(&carrier, payload, outbound, sender.group_epoch)?
         };
@@ -137,9 +158,33 @@ impl RamfluxClient {
                 &Receipt { fingerprint, result: outcome.clone() },
             )?;
         }
-        self.store_surface_message_reference(&carrier, message, sender, &outcome, false)?;
+        self.store_surface_message_reference(&carrier, message, sender, &outcome)?;
         Ok(outcome)
     }
+
+    /// An author event at or below the snapshot floor is already delivered only when it is the
+    /// stored document. A different wire is the same typed refusal a first admission would return.
+    fn covered_author_event(
+        &self,
+        carrier: &Carrier,
+        payload: &Payload,
+    ) -> Result<Option<Outcome>, SdkError> {
+        let Payload::Event(event) = payload else {
+            return Ok(None);
+        };
+        if carrier.sender_principal_id != carrier.author_principal_id {
+            return Ok(None);
+        }
+        let reference = carrier.surface_reference()?;
+        if event.version() > self.surface_snapshot_floor(&reference)? {
+            return Ok(None);
+        }
+        let (_, state) = self
+            .surface_state_ref(&reference)?
+            .ok_or_else(|| super::invalid("snapshot floor has no surface state"))?;
+        Ok(Some(covered_outcome(carrier, event, &state)?))
+    }
+
     fn replay_surface_delivery(
         &self,
         carrier: &Carrier,
@@ -166,56 +211,8 @@ impl RamfluxClient {
             return Ok(None);
         }
         let result = self.refresh_surface_outcome(carrier, receipt.result)?;
-        self.store_surface_message_reference(carrier, message, sender, &result, false)?;
+        self.store_surface_message_reference(carrier, message, sender, &result)?;
         Ok(Some(result))
-    }
-    fn project_surface_fallback_only(
-        &self,
-        carrier: &Carrier,
-        payload: &Payload,
-        message: &str,
-        sender: SurfaceSender<'_>,
-    ) -> Result<Outcome, SdkError> {
-        let conversation = carrier.conversation_id.as_str();
-        if carrier.sender_principal_id != carrier.author_principal_id {
-            return self.reject_surface_delivery(
-                conversation,
-                message,
-                sender,
-                "surface_author_not_owned",
-            );
-        }
-        let Payload::Event(event) = payload else {
-            return self.reject_surface_delivery(
-                conversation,
-                message,
-                sender,
-                "surface_author_not_owned",
-            );
-        };
-        let fallback_key = key("fallback-only", &carrier.surface_reference()?);
-        let mut retained = self
-            .account_db()?
-            .load_actor_state::<serde_json::Value>(&fallback_key)?
-            .unwrap_or_else(|| json!({"text":"","version":0}));
-        if let Some(text) = &event.frame().fallback_text
-            && retained.get("version").and_then(serde_json::Value::as_u64).unwrap_or(0)
-                <= event.version()
-        {
-            retained = json!({"text":text,"version":event.version()});
-            self.account_db()?.persist_actor_state(&fallback_key, &retained)?;
-        }
-        let text = retained.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
-        let outcome = Outcome {
-            accepted: true,
-            fallback_text: super::fallback::render(&carrier.author_principal_id, text),
-            renderer_error: None,
-            reason_code: None,
-            retryable: false,
-            queued: false,
-        };
-        self.store_surface_message_reference(carrier, message, sender, &outcome, true)?;
-        Ok(outcome)
     }
     fn reject_surface_delivery(
         &self,
@@ -234,9 +231,8 @@ impl RamfluxClient {
         message: &str,
         sender: SurfaceSender<'_>,
         result: &Outcome,
-        fallback_only: bool,
     ) -> Result<(), SdkError> {
-        self.account_db()?.persist_message_actor_state(message,&key("message",message),&json!({"surface_ref":carrier.surface_reference()?,"surface_id":carrier.surface_id,"conversation_id":carrier.conversation_id,"group_id":self.account_db()?.client_record("conversation",&carrier.conversation_id)?.and_then(|v|v["group_id"].as_str().map(str::to_owned)),"group_epoch":sender.group_epoch,"accepted":result.accepted,"fallback_only":fallback_only,"fallback_text":result.fallback_text,"kind":carrier.payload_kind}))?;
+        self.account_db()?.persist_message_actor_state(message,&key("message",message),&json!({"surface_ref":carrier.surface_reference()?,"surface_id":carrier.surface_id,"conversation_id":carrier.conversation_id,"group_id":self.account_db()?.client_record("conversation",&carrier.conversation_id)?.and_then(|v|v["group_id"].as_str().map(str::to_owned)),"group_epoch":sender.group_epoch,"accepted":result.accepted,"fallback_only":false,"fallback_text":result.fallback_text,"kind":carrier.payload_kind}))?;
         if result.accepted
             && let Some(epoch) = sender.group_epoch
         {

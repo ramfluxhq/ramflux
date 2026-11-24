@@ -102,8 +102,7 @@ async fn case() -> TestResult {
         fixture.manifest.principal_commitment.clone(),
     );
     let db = account.client.account_db()?;
-    db.install_receive_ledger_schema()?;
-    db.seed_receive_epoch_for_test("t", "e")?;
+    db.install_receive_ledger_schema().and_then(|()| db.seed_receive_epoch_for_test("t", "e"))?;
     let before = hold_then_advance(db)?;
     let erasure_generation = db.privacy_erasure_generation()?;
 
@@ -141,6 +140,7 @@ async fn case() -> TestResult {
         head_rx,
         deferred: std::collections::VecDeque::new(),
         ledger: None,
+        resume_receive_until: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
         pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
         username: crate::bus::account_runtime::username_calls::Calls::default(),
@@ -241,6 +241,7 @@ fn runtime_with_pending(
             head_rx,
             deferred: std::collections::VecDeque::new(),
             ledger: None,
+            resume_receive_until: None,
             transient: crate::bus::account_runtime::TransientHost::default(),
             pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
             username: crate::bus::account_runtime::username_calls::Calls::default(),

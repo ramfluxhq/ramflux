@@ -459,9 +459,8 @@ pub(in crate::client) async fn deliver(
         own.root_commitment(),
     )
     .await?;
-    let peer =
-        crate::client::contact::fetch_verified_device_manifest(engine.config(), &intent.peer_root)
-            .await?;
+    let home = crate::client::recipient_home::foreign_target(client, &intent.peer_root)?;
+    let peer = client.peer_device_manifest(engine.config(), &intent.peer_root).await?;
     client.persist_fetched_identity_directory(&own_manifest)?;
     client.persist_fetched_identity_directory(&peer)?;
     if own_manifest.custody.is_none() {
@@ -493,7 +492,7 @@ pub(in crate::client) async fn deliver(
             }
             intent.delivered.remove(&recipient);
         }
-        let result = send_one(client, engine, intent, &device, &bytes).await;
+        let result = send_one(client, engine, intent, &device, &bytes, home.as_deref()).await;
         if let Err(error) = result {
             complete = false;
             tracing::debug!(%error,"contact control recipient deferred");
@@ -521,6 +520,7 @@ async fn send_one(
     intent: &Intent,
     device: &crate::prekey::SdkDeviceManifestEntry,
     body: &[u8],
+    target_node: Option<&str>,
 ) -> Result<(), SdkError> {
     let id =
         format!("contact_{}", ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?));
@@ -544,13 +544,19 @@ async fn send_one(
         .seal_routed_as(engine, &message, body, crate::client::routed::Route::control())
         .await?;
     // Control carrier; no Direct report payload.
-    engine
-        .submit_envelope(crate::dm::gateway_generated_envelope_from_sealed(
-            &engine.sealing_config()?,
-            &mut message,
-            sealed,
-        )?)
-        .await?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &engine.sealing_config()?,
+        &mut message,
+        sealed,
+    )?;
+    if let Some(target) = target_node {
+        let submitted = engine.submit_classified_to(envelope, Some(target.to_owned())).await?;
+        if let Err(refusal) = submitted {
+            return Err(SdkError::GatewaySessionRejected(refusal.reason().to_owned()));
+        }
+        return Ok(());
+    }
+    engine.submit_envelope(envelope).await?;
     Ok(())
 }
 

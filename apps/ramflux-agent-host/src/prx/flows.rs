@@ -1,38 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Admission-limit publish and session history erase for the typed PRX client.
-//! The console job adapter stays on its own HTTP stack. These calls run only when
-//! the host config asked for limits or for erase-on-delete.
+//! Session history erase for the typed PRX client.
 
 use super::{Error, MAX_ERASE_RECEIPTS, PrxEngine, Result, StoredHistory};
-use ramflux_prx_client::{AgentLimits, AgentName, HistoryErased};
+use ramflux_prx_client::HistoryErased;
 
 impl PrxEngine {
-    pub(super) async fn publish_configured(&self) -> Result<()> {
-        if self.limit_turns.is_none() && self.limit_cost.is_none() {
-            return Ok(());
-        }
-        let Some(client) = &self.typed else {
-            return Err(Error::Config);
-        };
-        let name = self.prx_agent.as_deref().ok_or(Error::Config)?;
-        let provider = self.prx_provider.as_deref().ok_or(Error::Config)?;
-        let model = self.prx_model.as_deref().ok_or(Error::Config)?;
-        let agent = AgentName::parse(name).map_err(|_| Error::Config)?;
-        let caps = client.capabilities().await.map_err(|error| prx_failure(&error))?;
-        let limits = AgentLimits {
-            max_concurrent_turns: self.limit_turns,
-            max_cost_per_day_cents: self.limit_cost,
-        };
-        let spec =
-            ramflux_prx_client::NamedLimits { provider, model, tool_names: &[], limits: &limits };
-        ramflux_prx_client::publish_named_limits(client, &caps, &agent, &spec)
-            .await
-            .map_err(|error| prx_failure(&error))?;
-        Ok(())
-    }
-
     /// Erases the PRX session stored for this conversation. A missing session, a missing
     /// client, or a remote refusal leaves the host running. The stored id is the console id
     /// PRX assigned, or the caller key this host sent for a named agent.
@@ -43,9 +17,7 @@ impl PrxEngine {
         let Some(client) = &self.typed else {
             return Ok(());
         };
-        let Some(session) = self.state.sessions.get(conversation_id).cloned() else {
-            return Ok(());
-        };
+        let session = super::caller_session_key(conversation_id);
         if self.state.history_erased.len() >= MAX_ERASE_RECEIPTS {
             return Err(Error::State);
         }
@@ -84,16 +56,6 @@ fn stored_rows(erased: &[HistoryErased]) -> Vec<StoredHistory> {
             forgotten_touched: row.forgotten.map(|item| item.touched),
         })
         .collect()
-}
-
-fn prx_failure(error: &ramflux_prx_client::PrxError) -> Error {
-    match error {
-        ramflux_prx_client::PrxError::Unavailable | ramflux_prx_client::PrxError::Timeout => {
-            Error::EngineUnavailable
-        }
-        ramflux_prx_client::PrxError::Config { .. } => Error::Config,
-        _ => Error::EngineRejected,
-    }
 }
 
 fn erase_failure(error: &ramflux_prx_client::PrxError) -> String {

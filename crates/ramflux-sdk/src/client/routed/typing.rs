@@ -129,6 +129,7 @@ impl RamfluxClient {
             },
             committed_a0: Some(report.a0_bytes),
             metadata_commitment: None,
+            suppress_wake: true,
         };
         let mut message = message.clone();
         let envelope = crate::dm::gateway_ephemeral_envelope_from_sealed(

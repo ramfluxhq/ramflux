@@ -48,6 +48,7 @@ fn input<'a>(
         wake_id: id,
         collapse_key: key,
         token: token_topic.0,
+        route_tag: "AAAAAAAAAAAAAAAAAAAAAA",
         topic: token_topic.1,
         expires_at: window.0,
         now: window.1,
@@ -256,10 +257,17 @@ fn all_provider_payloads_and_headers_exclude_message_identifiers() -> Result<(),
         &[
             "aps",
             "aps.alert",
-            "aps.alert.body",
-            "aps.alert.title",
+            "aps.alert.loc-args",
+            "aps.alert.loc-key",
+            "aps.mutable-content",
+            "aps.sound",
             "class",
             "collapse_key",
+            "rf",
+            "rf.c",
+            "rf.t",
+            "rf.v",
+            "rf.w",
             "wake_id",
         ],
     );
@@ -271,7 +279,10 @@ fn all_provider_payloads_and_headers_exclude_message_identifiers() -> Result<(),
         (2_000, 1_000),
         ProviderWireMode::ApnsVoip,
     ))?;
-    assert_exact_keys(&parse(&voip)?, &["aps", "class", "wake_id"]);
+    assert_exact_keys(
+        &parse(&voip)?,
+        &["aps", "class", "rf", "rf.c", "rf.t", "rf.v", "rf.w", "wake_id"],
+    );
     let fcm = build_provider_parts(&input(
         WakeClass::CallWake,
         &id,
@@ -290,6 +301,7 @@ fn all_provider_payloads_and_headers_exclude_message_identifiers() -> Result<(),
             "message.android.ttl",
             "message.data",
             "message.data.class",
+            "message.data.rf",
             "message.data.wake_id",
             "message.token",
         ],
@@ -335,6 +347,9 @@ fn apns_push(
             registered_at: 1_000,
             expires_at: 9_000,
             route_generation: 1,
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: ramflux_node_core::PushRouteEnvironment::Production,
+            capability: ramflux_node_core::DevicePushRoute::capability_for(&provider),
         },
         credential: ramflux_node_core::ProviderCredential::Apns(
             ramflux_node_core::ApnsProviderCredential {
@@ -380,12 +395,13 @@ fn apns_route_topic_and_body_follow_push_mode() -> Result<(), Box<dyn std::error
     ))
     .map_err(build_box)?;
     let alert_json = parse(&alert).map_err(|_| "alert json")?;
-    assert_eq!(alert_json.pointer("/aps/alert/title").and_then(Value::as_str), Some("Ramflux"));
     assert_eq!(
-        alert_json.pointer("/aps/alert/body").and_then(Value::as_str),
-        Some("You have a new Ramflux update.")
+        alert_json.pointer("/aps/alert/loc-key").and_then(Value::as_str),
+        Some("RF_PUSH_MESSAGE")
     );
-    assert!(alert_json.pointer("/aps/mutable-content").is_none());
+    assert!(alert_json.pointer("/aps/alert/title").is_none());
+    assert!(alert_json.pointer("/aps/alert/body").is_none());
+    assert_eq!(alert_json.pointer("/aps/mutable-content").and_then(Value::as_u64), Some(1));
     assert_eq!(header(&alert.headers, "apns-topic"), Some("app.example"));
     assert_eq!(header(&alert.headers, "apns-push-type"), Some("alert"));
     let voip = build_provider_parts(&input(

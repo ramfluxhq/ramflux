@@ -249,6 +249,9 @@ fn server_retention_signed_push_control_rejects_forgery_expiry_and_selector_inje
         registration: PushRouteRegistration {
             provider: PushProviderKind::Fcm,
             token: "opaque-token".into(),
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: PushRouteEnvironment::Production,
+            capability: PushRouteCapability::Alert,
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,

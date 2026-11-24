@@ -34,7 +34,7 @@ impl Fixture {
         Self::configured_exports(with_node, false)
     }
     pub(super) fn configured_exports(with_node: bool, allow: bool) -> Self {
-        let root = tempfile::tempdir().expect("test: isolated data root");
+        let root = private_tempdir();
         if with_node {
             seed_node(root.path());
         }
@@ -214,7 +214,7 @@ fn event_overflow_is_explicit_and_cannot_consume_completion_credit() {
 
 #[test]
 fn preadmission_cancel_never_reaches_the_supervisor() {
-    let root = tempfile::tempdir().expect("test: isolated root");
+    let root = private_tempdir();
     seed_node(root.path());
     let client =
         Client::start(LocalBusConfig::new("", root.path())).expect("test: start supervisor");
@@ -225,12 +225,7 @@ fn preadmission_cancel_never_reaches_the_supervisor() {
     let bytes = crate::bus::inprocess::encode_request(frame).expect("test: encoded mutation");
     client
         .commands
-        .try_send(Command {
-            id: 1,
-            deadline_ms: None,
-            bytes: zeroize::Zeroizing::new(bytes),
-            operation: Arc::clone(&operation),
-        })
+        .try_send(Command::carrier(1, zeroize::Zeroizing::new(bytes), Arc::clone(&operation), None))
         .map_err(|_| "send failed")
         .expect("test: queue cancelled operation");
     let until = Instant::now() + Duration::from_secs(10);
@@ -556,7 +551,7 @@ fn close_timeout_retains_handle_until_real_supervisor_releases_writer() {
             self.0.notify_one();
         }
     }
-    let root = tempfile::tempdir().expect("test: isolated root");
+    let root = private_tempdir();
     let (entered, entered_rx) = std::sync::mpsc::sync_channel(1);
     let release = ReleaseOnDrop(Arc::new(tokio::sync::Notify::new()));
     let client = Client::start_delayed(
@@ -847,7 +842,7 @@ fn typing_submit_is_admitted_without_the_raw_message_capability() {
     let (code, operation) = admit(disguised);
     assert_eq!(code, 12, "a top-level typing flag cannot carry plaintext");
     assert_eq!(operation, 0);
-    let rooted = tempfile::tempdir().expect("test: isolated data root");
+    let rooted = private_tempdir();
     let config = serde_json::to_vec(&json!({
         "data_root": rooted.path(),
         "allow_raw_messages": true,
@@ -992,4 +987,14 @@ fn local_search_is_refused_before_native_supervisor_admission() {
         0,
         "refused search must leave the real supervisor usable"
     );
+}
+
+/// Test data roots must be private (0700) whatever the runner's umask; the
+/// C ABI refuses group/other-accessible roots (`data_root.rs`).
+pub(super) fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().expect("test: isolated data root");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("test: private data root");
+    root
 }

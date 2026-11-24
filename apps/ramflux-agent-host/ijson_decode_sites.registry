@@ -9,4 +9,4 @@ apps/ramflux-agent-host/src/prx.rs | request | 1 | E | excluded=target type is o
 apps/ramflux-agent-host/src/prx.rs | restore | 1 | E | excluded=agent-host PRX response decoding; outside the signed-envelope closure
 apps/ramflux-agent-host/src/runner_output.rs | recover_outputs | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-agent-host/src/runner_surface.rs | derive_action_outputs | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-agent-host/src/prx.rs | classify_too_many | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-agent-host/src/prx_sync/store.rs | load | 1 | D | admitted-before-persist; local PRX sync mirror, not signed envelope ingress

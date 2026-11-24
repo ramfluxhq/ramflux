@@ -20,7 +20,7 @@ defines the exact dormant/interim behavior after each separately merged card. Ev
 
 This proposal is consumed under the current product-only development policy.
 External integration-repository changes, workflow changes, pins and per-card
-external gates are excluded. QA+sd001 e2e later is controller-owned; it is not a
+external gates are excluded. Deployment end-to-end verification is separate; it is not a
 per-card acceptance gate. Product in-crate fixture conversion remains owned by
 03/04, preserving the assertions and ownership listed below.
 
@@ -687,7 +687,7 @@ real async mesh and owner acknowledgements for integration cases. Inject failure
 commit boundary. Unit clock/source fixtures must obey the quotas they test; a directory
 ledger injected into a helper alone does not establish end-to-end expiry behavior.
 
-QA+sd001 e2e later is controller-owned. Contact first-DM/quota fallback,
+Deployment end-to-end verification is separate. Contact first-DM/quota fallback,
 group first-contact and agent restart scenarios retain their business assertions;
 external fixture/workflow/pin work is excluded from these product cards.
 Unit, SDK, in-process transport and controller e2e evidence remain separate claims.
@@ -696,7 +696,7 @@ Unit, SDK, in-process transport and controller e2e evidence remain separate clai
 
 Adopt 02 → (03 ∥ 04) → 05 for implementation. Cards 03/04 may develop
 in parallel after 02. Product in-crate native-fixture conversion remains owned by
-03/04. QA+sd001 e2e later is controller-owned, without an external fixture/pin
+03/04. Deployment end-to-end verification is separate, without an external fixture/pin
 prerequisite. These tables describe coherent dormant/component boundaries,
 not atomic activation across a deployed fleet.
 
@@ -705,7 +705,7 @@ not atomic activation across a deployed fleet.
 | DM-FS-V3-02 | Shared wire types and canonical encoding in `ramflux-protocol`: SignedNativePrekeyBase, SignedNativeOpk, OwnerPrekeyUpdate, PrekeyPublicationSnapshot, PublicPrekeyView, PrekeyLeaseIntent/Result, OwnerPrekeyStatus, NativePrekeyRequest, frames/header/deadline and typed refusals. Cryptographic signing/X3DH/ratchet/transcript helpers and fixed positive/negative vectors in `ramflux-crypto`, plus SDK component adapters. No networking/profile activation. |
 | DM-FS-V3-03 | Depends on 02. Canonical private actor, per-bootstrap vault access, identity-seed/event migration and retirement, rotation/expiry/erasure, unlock/backup/sync/restore component behavior behind `dm_fs_v3.rotation_enabled=false`. New path cannot derive keys; physical old native builder/caller deletion waits for 05's atomic source activation. Remove/refuse production non-native SDK bootstrap and replace affected product in-crate legacy fixtures in the same card. |
 | DM-FS-V3-04 | Depends on 02; parallel with 03. Native directory, common publication transaction, H2 ordinary-publish refusal, non-native prekey refusal, mode-specific public reads, durable leases/results/publish quotas, read-only owner status and configured byte caps. `node.prekey_lease.strict=false` accepts current old-format native custody Register (identical retries are uncharged/no-write) and preserves old-format fetch/Lookup/Peer/manifest reads; strict PublicPrekeyView, new-profile admission and live leasing stay dormant until 05. |
-| DM-FS-V3-05 | Depends on 02–04. Status → conditional Register → OpenSession, signed ordinary frames, own-device/group wiring, activation/grace/floors and complete end-to-end failure policy. In one product commit remove old native rebuild APIs/callers and send-header path, enable both activation defaults, and update runtime docs. Product activation tests must pass on the fully wired tree; QA+sd001 e2e later is controller-owned. |
+| DM-FS-V3-05 | Depends on 02–04. Status → conditional Register → OpenSession, signed ordinary frames, own-device/group wiring, activation/grace/floors and complete end-to-end failure policy. In one product commit remove old native rebuild APIs/callers and send-header path, enable both activation defaults, and update runtime docs. Product activation tests must pass on the fully wired tree; Deployment end-to-end verification is separate. |
 
 ### Behavior on main after each separately merged card
 
@@ -715,7 +715,7 @@ not atomic activation across a deployed fleet.
 | 03 (04 not required yet) | `dm_fs_v3.rotation_enabled=false`; existing native vault-derived SPK is still published with the existing native Register/old header. Do not rotate, erase or migrate that live state while the node has no update path. New actor/provider is exercised only in gated component tests. Retain old native constructors unchanged solely for this OFF path until 05. Non-native SDK manifest/prekey bootstrap is removed/refused, with its product in-crate fixtures converted to born-v3 in this same card. | Current native Register remains accepted; no dependency on an unmerged 04 wire endpoint. | Product native fixture assertions remain intact; converted fixtures preserve their business assertions. Flag-OFF reconnect/restart cannot silently select the dormant actor. |
 | 04 (after product native-fixture conversion) | Existing native old-format SDK still works; no activation or new lease emission required. Node component development does not require the new private actor. | `node.prekey_lease.strict=false`: common authenticated native Register accepts the old native bundle; an identical retry is an uncharged, no-write success after current proof/authority checks, and OpenSession still validates that bundle. Public fetch (`handle_mvp1_prekey_fetch` → `custody_prekey_response`), Lookup, Peer and manifests keep returning the existing verified old-format native bundle unchanged, so first DMs keep working. PublicPrekeyView is strict-only (component tests now, production at 05). No new-profile floor or FS branch reservation is pinned for that branch yet. H2 closes every ordinary native publish carrier; non-native prekey/lease paths are refused. New lease/strict-profile endpoints report profile inactive, rather than partially activating. | Existing born-v3 clients register/reconnect and converted product fixtures pass; the pre-03 native SDK is a compatibility test, not permission to run obsolete non-native fixtures. Node component tests exercise strict mode separately. |
 | 03 + 04, before 05 | Both defaults remain OFF; live native old-format state stays intact. The new provider and new wire cannot be selected in production. | Lenient native Register/no-op retries and unchanged old-format public reads remain available; common auth, H2 and appropriate existing resource enforcement are present without requiring new SDK frames or dormant FS reservations. | Main stays product CI green without manual partial-feature settings or an unmerged dependency. |
-| 05 | One commit changes `dm_fs_v3.rotation_enabled=true` and `node.prekey_lease.strict=true`, wires the provider/transport, removes old native builders/callers and old send path, and starts migration/activation A. Only new-profile send; bounded old receive grace. | Strict new-profile Register/OpenSession/lease; no old-profile native registration or non-native fallback. | Deploy node support first, then the matching SDK. A source commit is not a distributed fleet transaction: old SDKs encountering strict nodes receive update-required during rollout, never silent downgrade. QA+sd001 e2e later is controller-owned. |
+| 05 | One commit changes `dm_fs_v3.rotation_enabled=true` and `node.prekey_lease.strict=true`, wires the provider/transport, removes old native builders/callers and old send path, and starts migration/activation A. Only new-profile send; bounded old receive grace. | Strict new-profile Register/OpenSession/lease; no old-profile native registration or non-native fallback. | Deploy node support first, then the matching SDK. A source commit is not a distributed fleet transaction: old SDKs encountering strict nodes receive update-required during rollout, never silent downgrade. Deployment end-to-end verification is separate. |
 
 ### Concrete flag homes and early-activation refusal
 
@@ -755,7 +755,7 @@ obsolete identities is attended new-device recovery; flags do not make them nati
 
 The product config/creator and test inventory below is retained from the
 approved design. External fixture inventories and cutover requirements are
-superseded by current owner policy: QA+sd001 e2e later, controller-owned.
+superseded by current owner policy: deployment end-to-end verification.
 
 **One disposition rule:** convert every stateful/networked or production-behavior
 legacy account/prekey fixture listed below to born-v3, preserving its
@@ -776,7 +776,7 @@ its former non-native setup is removed.
 
 #### External fixture boundary
 
-QA+sd001 e2e later is controller-owned. The historical external fixture inventory
+Deployment end-to-end verification is separate. The historical external fixture inventory
 is not an implementation requirement for 02–05. Product creator/config removal
 and product fixture ownership below remain required.
 

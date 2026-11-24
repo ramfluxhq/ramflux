@@ -9,8 +9,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod backup;
+mod files;
 pub use backup::{AccountGenerationSelection, BackupIndexInstall};
+mod app_lock;
 mod device_unlock;
+pub use app_lock::{APP_LOCK_MAX_TIMEOUT_MS, AppLockPolicy};
 pub use device_unlock::CodeAttempts;
 mod operations;
 mod search;
@@ -59,6 +62,7 @@ impl AccountIndex {
         index.install_operation_schema()?;
         index.install_backup_schema()?;
         index.install_device_unlock_schema()?;
+        index.install_app_lock_schema()?;
         Ok(index)
     }
 
@@ -125,6 +129,76 @@ impl AccountIndex {
         )?;
         if changed == 0 {
             return Err(StorageError::AccountAlreadyExists(local_account_id.to_owned()));
+        }
+        Ok(LocalAccountRecord {
+            local_account_id: local_account_id.to_owned(),
+            principal_commitment: principal_commitment.to_owned(),
+            db_relative_path,
+            object_dir_relative_path,
+            account_state: "active".to_owned(),
+        })
+    }
+
+    /// The one live (`host_revoked = 0`) account id for this anchor, if any.
+    /// # Errors
+    /// Returns [`StorageError::Integrity`] when more than one live row shares the anchor.
+    pub fn live_account_id(
+        &self,
+        principal_commitment: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let rows = self.connection.rows(
+            "SELECT local_account_id FROM local_account
+              WHERE principal_commitment = ?1 AND host_revoked = 0",
+            params![principal_commitment],
+        )?;
+        if rows.len() > 1 {
+            return Err(StorageError::Integrity("two live local accounts share one anchor"));
+        }
+        match rows.first() {
+            None => Ok(None),
+            Some(row) => Ok(Some(row.get(0)?)),
+        }
+    }
+
+    /// Inserts a new live account beside a retained same-anchor row.
+    ///
+    /// The retained row stays `active` and keeps its anchor. One transaction marks
+    /// that row `host_revoked` and inserts the new live row. A crash rolls both
+    /// back. The partial unique index still allows only one live row per anchor.
+    /// # Errors
+    /// Returns [`StorageError::AccountNotFound`] when `retained_id` is not the live
+    /// row for this anchor, and [`StorageError::AccountAlreadyExists`] when the new
+    /// id is already reserved. A unique failure rolls the mark back.
+    pub fn reserve_beside_retained(
+        &self,
+        local_account_id: &str,
+        principal_commitment: &str,
+        retained_id: &str,
+    ) -> Result<LocalAccountRecord, StorageError> {
+        if local_account_id.is_empty() || retained_id.is_empty() || local_account_id == retained_id
+        {
+            return Err(StorageError::AccountAlreadyExists(local_account_id.to_owned()));
+        }
+        let (db_relative_path, object_dir_relative_path, key_ref) =
+            Self::account_record(local_account_id);
+        let _writer = self.prepare_account_directories(local_account_id)?;
+        let insert = BesideOwned {
+            new_id: local_account_id.to_owned(),
+            principal: principal_commitment.to_owned(),
+            retained: retained_id.to_owned(),
+            db_path: db_relative_path.clone(),
+            object_path: object_dir_relative_path.clone(),
+            key_ref,
+            created: unix_now(),
+        };
+        let outcome =
+            self.connection.call_immediate_result(move |tx| beside_mark_and_insert(tx, &insert))?;
+        if let Err(error) = outcome {
+            return Err(match error {
+                BesideMiss::Retained => StorageError::AccountNotFound(retained_id.to_owned()),
+                BesideMiss::Id => StorageError::AccountAlreadyExists(local_account_id.to_owned()),
+                BesideMiss::Sql(error) => StorageError::Sqlite(error),
+            });
         }
         Ok(LocalAccountRecord {
             local_account_id: local_account_id.to_owned(),
@@ -275,14 +349,69 @@ impl AccountIndex {
         Ok(())
     }
 
+    /// Clears the active pointer when it names `local_account_id`. A different pointer is kept.
+    ///
+    /// The stored value is SQL NULL. [`Self::active_account`] reads that NULL as no active account.
+    ///
     /// # Errors
-    /// Returns an error when validation, serialization, storage, or state checks fail.
+    /// Returns storage errors.
+    pub fn clear_active_account(&self, local_account_id: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE active_account_state
+                SET active_local_account_id = NULL, updated_at = ?2
+              WHERE singleton_id = 1 AND active_local_account_id = ?1",
+            params![local_account_id, unix_now()],
+        )?;
+        Ok(())
+    }
+
+    /// Moves the active pointer off `local_account_id`.
+    ///
+    /// Another on-disk account becomes active: an unlocked row wins, then the lowest id.
+    /// When none remains, the pointer is cleared. A pointer that names a different account
+    /// is left unchanged.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn release_active_account(&self, local_account_id: &str) -> Result<(), StorageError> {
+        if self.active_account()?.as_deref() != Some(local_account_id) {
+            return Ok(());
+        }
+        match self.successor_account(local_account_id)? {
+            Some(next) => self.set_active_account(&next),
+            None => self.clear_active_account(local_account_id),
+        }
+    }
+
+    /// The active account, or `None` when the singleton row is missing or its id is SQL NULL.
+    ///
+    /// # Errors
+    /// Returns an error when the index cannot be read. A NULL id is not an error.
     pub fn active_account(&self) -> Result<Option<String>, StorageError> {
-        Ok(self
+        let stored = self
             .connection
             .query_row(
                 "SELECT active_local_account_id FROM active_account_state WHERE singleton_id = 1",
                 [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(stored.flatten())
+    }
+
+    /// Another account that can own the active pointer. Removed rows are not candidates.
+    fn successor_account(&self, except: &str) -> Result<Option<String>, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT local_account_id
+                   FROM local_account
+                  WHERE local_account_id <> ?1
+                    AND account_state <> 'removed'
+                  ORDER BY CASE account_state WHEN 'active' THEN 0 ELSE 1 END,
+                           local_account_id
+                  LIMIT 1",
+                params![except],
                 |row| row.get(0),
             )
             .optional()?)
@@ -318,10 +447,9 @@ pub(crate) fn migrate_account_index(connection: &Connection) -> Result<(), Stora
             key_wrapping_ref TEXT NOT NULL,
             account_state TEXT NOT NULL CHECK (account_state IN ('active','locked','removed','pending_rekey')),
             created_at INTEGER NOT NULL,
-            last_opened_at INTEGER
+            last_opened_at INTEGER,
+            host_revoked INTEGER NOT NULL DEFAULT 0 CHECK (host_revoked IN (0, 1))
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_local_account_principal
-            ON local_account(principal_commitment);
         CREATE TABLE IF NOT EXISTS active_account_state (
             singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
             active_local_account_id TEXT,
@@ -343,6 +471,73 @@ pub(crate) fn migrate_account_index(connection: &Connection) -> Result<(), Stora
     )?;
     add_local_account_column_if_missing(connection, "wrapped_key", "BLOB")?;
     add_local_account_column_if_missing(connection, "wrapped_key_nonce", "BLOB")?;
+    add_local_account_column_if_missing(
+        connection,
+        "host_revoked",
+        "INTEGER NOT NULL DEFAULT 0 CHECK (host_revoked IN (0, 1))",
+    )?;
+    // v1 stores have no second principal index. Drop the old full unique index
+    // and install the live-row index under a new name. `IF NOT EXISTS` would
+    // have left a pre-existing full index in place.
+    connection.execute_batch(
+        "DROP INDEX IF EXISTS idx_local_account_principal;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_local_account_principal_live
+             ON local_account(principal_commitment) WHERE host_revoked = 0;",
+    )?;
+    Ok(())
+}
+
+struct BesideOwned {
+    new_id: String,
+    principal: String,
+    retained: String,
+    db_path: String,
+    object_path: String,
+    key_ref: String,
+    created: i64,
+}
+
+enum BesideMiss {
+    Retained,
+    Id,
+    Sql(rusqlite::Error),
+}
+
+fn beside_mark_and_insert(
+    tx: &rusqlite::Transaction<'_>,
+    insert: &BesideOwned,
+) -> Result<(), BesideMiss> {
+    let marked = tx
+        .execute(
+            "UPDATE local_account SET host_revoked = 1
+              WHERE local_account_id = ?1 AND principal_commitment = ?2 AND host_revoked = 0",
+            rusqlite::params![insert.retained, insert.principal],
+        )
+        .map_err(BesideMiss::Sql)?;
+    if marked != 1 {
+        return Err(BesideMiss::Retained);
+    }
+    let changed = tx
+        .execute(
+            "INSERT INTO local_account (
+                local_account_id, principal_commitment, display_label, db_relative_path,
+                object_dir_relative_path, key_wrapping_provider, key_wrapping_ref,
+                account_state, created_at, last_opened_at, host_revoked
+            ) VALUES (?1, ?2, NULL, ?3, ?4, 'platform-local-vault', ?5, 'active', ?6, NULL, 0)
+            ON CONFLICT(local_account_id) DO NOTHING",
+            rusqlite::params![
+                insert.new_id,
+                insert.principal,
+                insert.db_path,
+                insert.object_path,
+                insert.key_ref,
+                insert.created
+            ],
+        )
+        .map_err(BesideMiss::Sql)?;
+    if changed != 1 {
+        return Err(BesideMiss::Id);
+    }
     Ok(())
 }
 

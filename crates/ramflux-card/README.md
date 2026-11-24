@@ -24,8 +24,8 @@ one catalog and one renderer path.
 
 The example documents the shape; an empty component list is not an admitted
 surface. `surface_ref` is the snapshot's `surfaceId`. The SDK must authenticate
-the conversation and author and set `render_allowed` from its own-agent read
-gate. A supplied boolean is not proof of authority. This crate validates the
+the conversation and author and set `render_allowed` from the stored open
+snapshot. A supplied boolean is not proof of authority. This crate validates the
 signed snapshot commitment and protocol state; it has no account registry,
 network, signing credentials, approval authority or attachment access. Closure
 or loss of `render_allowed` retires an existing session and removes its tree and
@@ -59,14 +59,21 @@ peer `theme`, `host`, script and unknown fields are refused.
 
 The resolver owns graph expansion, input ownership, expressions, checks and
 action declarations. Rust resolves display calls before the library runs.
-`resolve_for_locale` supports launch locales `en` and `zh-CN`, including nested
-`formatString`, grouped numbers, currency, TR35 date tokens and plural category
-selection. Unknown locale identifiers, malformed dates/patterns and unsupported
-patterns refuse. Both locales use three-digit numeric groups, `.` decimals,
-zero number decimals by default and two currency decimals (JPY/KRW use zero).
-Date-only values use midnight UTC, RFC3339 values retain their encoded offset,
-and integer timestamps are Unix milliseconds. Formats are display only; raw
-values drive checks and egress. No JS `Intl` or second expression evaluator.
+`resolve_for_locale` never fails because a locale tag is unknown. String
+catalogs fall back exact tag, then language (Traditional Chinese is not treated
+as Simplified), then `zh-TW` / `zh-HK` / `zh-Hant` to `zh-CN` only when the card
+ships no Traditional Chinese strings, then `en`. Numbers, dates and plurals use
+CLDR (ICU4X 2.1, Unicode-3.0) for `ar`, `de`, `en`, `es`, `fr`, `hi`, `id`,
+`it`, `ja`, `ko`, `pt-BR`, `ru`, `tr`, `zh-CN` and `zh-TW`. A language-only tag
+uses that launch locale (`zh-Hant` uses `zh-TW`, bare `zh` uses `zh-CN`); any
+other tag uses `en`. The resolved tree reports `locale` (string catalog),
+`format_locale` (CLDR tag) and `direction` (`rtl` for Arabic, otherwise `ltr`).
+Currency symbols stay on the launch table because ICU4X 2.1 has no stable
+currency formatter: English USD is `$` and Chinese USD is `US$`. Malformed
+dates and unsupported pattern tokens still refuse. Date-only values use
+midnight UTC, RFC3339 values retain their encoded offset, and integer
+timestamps are Unix milliseconds. Formats are display only; raw values drive
+checks and egress. No JS `Intl` or second expression evaluator.
 
 The signed base remains immutable. Session drafts hold at most 32 owned
 pointers/4 KiB and are never persisted or sent as model updates. Signed updates
@@ -78,7 +85,9 @@ are cancelled on a signed update. Every accepted edit increments `editSeq`.
 ## Native tree and events
 
 `ramflux.card.tree.v1` is a flat preorder tree with session, signed version/hash,
-edit sequence, tree version, root key, nodes and a complete host-slot array.
+edit sequence, tree version, root key, nodes, a complete host-slot array, and
+`locale`, `format_locale` and `direction`. Mutation batches carry the same three
+fields so a locale switch is visible when no node changes.
 Keys canonically encode `[component_id, source_instance, route]`; edges are keys.
 Every node corresponds to exactly one resolver instance. The library handles
 all 20 kinds: Text, Icon, Row, Column, List, Card, Tabs, Modal, Divider, Button,
@@ -165,13 +174,20 @@ clears old callbacks/sheets, retains consumed submits and drafts, and rebuilds
 with a fresh token identity using the same cumulative execution budget.
 
 The offline `card-pack` tool signs the linted `library/form.js` from a 32-byte
-Ed25519 operator seed and release metadata. The SDK bundles the ABI 5 development
+Ed25519 seed (`SigningKey::from_bytes`) plus release metadata. The seed is an
+operator file and is never committed. The SDK bundles the ABI 5 development
 package at release 1:3; its seed was generated outside the repository and removed
-after packaging. Only the public verification key is committed. This development
-key must not ship as a production release key; production signing-key custody and
-rotation remain an owner release-process decision. The ABI 4 development package
-at release 1:2 is retired. ABI 5 requires fresh artifacts; old artifacts fail
-admission. `card-render PACKAGE_PREFIX ENVELOPE [UPDATED]`
+after packaging. Only the public verification key is committed. Do not ship that
+development key in a release. Production custody is an owner decision: an offline
+seed, used only by `card-pack`.
+
+The ABI 4 development key is retired. Its descriptor pin
+`56436c14b29b5b4f2b2c4672ffd346a3406ed8f2f4a832487b6a9f68d38cafa9`
+(host ABI 4, catalog `rf-card/v1`, release 1:2) is not admitted. SDK
+`include/card/policy.json` `exact_descriptor_sha256` admits only the ABI 5
+descriptor `0b50eae6d66a57455d21b3854e2de6d58da90740bd4303db60d7f427b984792d`.
+ABI 5 requires fresh artifacts; old artifacts fail admission.
+`card-render PACKAGE_PREFIX ENVELOPE [UPDATED]`
 loads `.qjb`, `.descriptor.json`, `.sig`, `.pub` and the independently pinned
 `.policy.json` and prints the actual tree/mount/update batches. It accepts only
 local operator files and performs no authentication on their behalf. Production
@@ -192,6 +208,20 @@ boundary retained. Web uses the same Rust core in a dedicated worker. The web
 preview maps semantic nodes with text/native controls, stages mutations and
 forwards host slots; it does not implement SDK approval/link/image authority or
 native Modal sheets. Mobile and desktop hosts are separate modules.
+
+## Host fixtures
+
+`host-fixtures/` publishes one card input and one expected document for every
+catalog kind and every `variant` enum. `index.json` lists kind, variant,
+fixture and expected path. Trees are `ramflux.card.tree.v1` from
+`CardSession::open` against the signed library in
+`crates/ramflux-sdk/include/card/`. A catalog variant the runtime refuses has
+a `*.refusal.json` instead of a tree. The directory does not specify sizes,
+spacing, colors or accessibility chrome.
+
+Locale rows stay `en`. `LOCALE_FIXTURE_HOOK` in `src/bin/card_fixtures/cases.rs`
+is where further locales are added after the resolver accepts them. Regenerate
+with `cargo run -p ramflux-card --bin card-fixtures -- --write`.
 
 ## Validation
 

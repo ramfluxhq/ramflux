@@ -25,7 +25,6 @@ pub enum EngineFailure {
     ApprovalUnavailable,
     ApprovalTimeout,
     ApprovalDeclined,
-    AuthorizationMismatch,
     /// PRX HTTP 429 `agent_busy`. `retry_after_secs` is the `Retry-After` delta-seconds header.
     AgentBusy {
         retry_after_secs: Option<u64>,
@@ -59,9 +58,6 @@ impl EngineFailure {
             Self::ApprovalDeclined => {
                 Cow::Borrowed("The requested operation was declined. [approval_declined]")
             }
-            Self::AuthorizationMismatch => Cow::Borrowed(
-                "PRX requested approval in full authorization mode. [authorization_mismatch]",
-            ),
             Self::AgentBusy { retry_after_secs } => admission_reply(
                 "The agent is at its concurrency limit.",
                 "agent_busy",
@@ -202,6 +198,16 @@ pub enum EngineEvent {
         reason: EngineFailure,
     },
 }
+/// One `POST /api/sessions/{id}/approvals/{approval_id}` outcome.
+/// `code: None` is HTTP 200. A `Some` code is a typed PRX refusal.
+pub struct RunApprovalPost {
+    pub approval_id: String,
+    pub run_id: String,
+    pub decision: String,
+    pub code: Option<String>,
+    pub cause: Option<String>,
+}
+
 pub trait EngineProvider {
     /// Whether a conversation has provider work that needs a busy hint rather than a new turn.
     #[must_use]
@@ -236,6 +242,11 @@ pub trait EngineProvider {
     /// Rejects corrupt provider state or exhausted bounds.
     fn poll(&mut self, _now_ms: u64) -> impl Future<Output = Result<Vec<EngineEvent>>> {
         async { Ok(Vec::new()) }
+    }
+    /// `false` while this engine must not spend another job-status request.
+    /// Engines that do not share a remote quota stay ready on every call.
+    fn job_poll_ready(&self) -> bool {
+        true
     }
     /// Apply a human-authenticated approval decision.
     ///
@@ -290,13 +301,6 @@ pub trait EngineProvider {
     fn acknowledge(&mut self, _event: &EngineEvent) -> Result<()> {
         Ok(())
     }
-    /// Install configured admission limits. The default provider has none.
-    ///
-    /// # Errors
-    /// Rejects a limits configuration whose PRX write fails.
-    fn publish_limits(&mut self) -> impl Future<Output = Result<()>> + '_ {
-        async { Ok(()) }
-    }
     /// Erase every agent's turns in the provider session mapped to this conversation.
     /// The default provider has no session.
     ///
@@ -307,6 +311,18 @@ pub trait EngineProvider {
         _conversation_id: &'a str,
     ) -> impl Future<Output = Result<()>> + 'a {
         async { Ok(()) }
+    }
+    /// Post one owner decision for a PRX run approval.
+    ///
+    /// # Errors
+    /// The default provider has no PRX client.
+    fn post_run_approval<'a>(
+        &'a mut self,
+        _session: &'a str,
+        _approval_id: &'a str,
+        _decision: &'a str,
+    ) -> impl Future<Output = Result<RunApprovalPost>> + 'a {
+        async { Err(Error::EngineRejected) }
     }
     /// # Errors
     /// Rejects invalid plans. The default provider has no action behavior.

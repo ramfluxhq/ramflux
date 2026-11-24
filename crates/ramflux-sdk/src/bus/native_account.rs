@@ -54,6 +54,8 @@ pub(super) fn unlock(
     let root = state.config.data_root.clone();
     let repair_vault = super::custody_setup::primary_provider(&state.config);
     let mut client = RamfluxClient::new();
+    // Share the supervisor index. A second connection keeps the inode lock, so park cannot close it.
+    client.account_index.clone_from(&state.account_index);
     client.open_account_index(&root)?;
     client.bind_device_unlock(
         &root,
@@ -109,6 +111,17 @@ pub(super) fn unlock(
             crate::custody::network_now()?,
         )?;
     }
+    admit_native_account(state, id, client, anchor, device, delivery)
+}
+
+fn admit_native_account(
+    state: &mut LocalBusDaemonState,
+    id: &str,
+    client: RamfluxClient,
+    anchor: String,
+    device: String,
+    delivery: String,
+) -> Result<LocalBusCreatedAccount, SdkError> {
     let endpoint = GatewayQuicEndpointConfig {
         bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
         gateway_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -134,7 +147,6 @@ pub(super) fn unlock(
     account.activation_pending = true;
     account.native_setup = Some(state.config.clone());
     // The owning runtime starts networking after installing its bounded writer channel.
-    // NativeUnlock pumps the first admission outcome after installing that channel.
     let result = response(&account)?;
     account.client.bind_process_media_ownership(state.config.media_ownership())?;
     state.accounts.insert(id.into(), account);
@@ -161,6 +173,7 @@ pub(super) fn locked_status(
     status["account_id"] = id.into();
     status["state"] = "locked".into();
     status["networking"] = serde_json::to_value(native.state())?;
+    super::host_branch::overlay_status(&mut status, root, id);
     Ok(status)
 }
 
@@ -177,8 +190,8 @@ pub(super) fn status_at(
     now: u64,
 ) -> Result<serde_json::Value, SdkError> {
     let native = account.client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
-    let current =
-        crate::custody::load_data_account(account.client.account_index()?.root(), account_id, now)?;
+    let root = account.client.account_index()?.root().to_path_buf();
+    let current = crate::custody::load_data_account(&root, account_id, now)?;
     let authorized = !current.authority_blocked()
         && !current.branch_pending()
         && current
@@ -217,11 +230,15 @@ pub(super) fn status_at(
         "active_transport_kind":account.engine.as_ref().map(|engine|engine.active_transport_kind().wire_name()),
         "pending_deliveries":account.pending_deliveries.len(),
     });
+    if let Some(custodian) = native.custodian_account_id() {
+        status["custodian_account_id"] = serde_json::Value::from(custodian);
+    }
     if let Some(AccountNetworkingReason::NodeBusy { capacity: Some(hint), .. }) =
         reason.as_ref().map(|view| &view.cause)
     {
         status["networking_hint"] = crate::custody::capacity_hint::message(hint).into();
     }
+    super::host_branch::overlay_status(&mut status, &root, account_id);
     Ok(status)
 }
 
@@ -287,6 +304,28 @@ pub(super) async fn finish_connection(account: &mut LocalBusAccountState) -> Res
     Ok(())
 }
 
+fn fetched_directory_revokes(
+    root: &std::path::Path,
+    account_id: &str,
+    local: &crate::custody::BornAccount,
+    manifest: &crate::prekey::SdkDeviceManifestResponse,
+) -> Result<bool, SdkError> {
+    let Some(custody) = manifest.custody.as_ref() else {
+        return Ok(false);
+    };
+    let now = crate::custody::network_now()?;
+    let verified = ramflux_crypto::custody::verify_publication(
+        &ramflux_protocol::custody::CustodyAuthority {
+            publication: custody.publication.clone(),
+            custodian_publication: custody.custodian_publication.clone(),
+        },
+        now,
+    )?;
+    crate::custody::agent_creation::note_if_verified_revokes(
+        root, account_id, local, &verified, now,
+    )
+}
+
 pub(super) async fn refresh_public_authority(
     account: &mut LocalBusAccountState,
 ) -> Result<(), SdkError> {
@@ -320,6 +359,9 @@ pub(super) async fn refresh_public_authority(
         if let Some(manifest) = manifest.map(|manifest| manifest.fetched_from(started)) {
             if manifest.principal_commitment != anchor || manifest.custody.is_none() {
                 return Err(SdkError::CustodyModeDowngrade);
+            }
+            if fetched_directory_revokes(root, id, &native, &manifest)? {
+                return Err(SdkError::PairingCode("PublicationPending"));
             }
             account.client.persist_fetched_identity_directory(&manifest)?;
         } else if native.state() == crate::custody::CreationState::Live {

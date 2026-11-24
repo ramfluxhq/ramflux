@@ -25,19 +25,57 @@ disabled; the daemon continues to start. Hold and dead-letter diagnostics includ
 the envelope, source device and target delivery identifiers. Unrouted inbound
 entries also emit an info-level hold with a reason.
 
-## Born-v3 DM attachments
+## Prepared file attachments
 
-Create both accounts through `rf account create` after selecting and confirming
-their node, then complete contact consent. Send with the usual DM recipient
-selectors and `--attach /path/to/file --relay-url quic://HOST:PORT
---attachment-chunk-size 1024`. Use the selected node profile's `relay.quic_addr`
-for `HOST:PORT` (`rf node list` shows the profiles). Keep the profile's node
-identity and certificate pin; the relay address can be an IP address and need
-not equal the node id. Do not substitute the discovery HTTP or gateway address.
+Create and confirm a node, create both accounts, and exchange contact cards so
+each peer home is pinned. Large attachments stay disabled until an explicit
+enable. Account creation does not enable them. After the node is live, pin the
+home relay authority once per account:
 
-The receiver runs `rf dm read --account=ACCOUNT --conversation=CONVERSATION`.
-It synchronizes and reads the durable typed message model. Media references appear
-in the message content; use `rf object fetch` for attachment transfer state.
+```sh
+rf attachment enable --account ACCOUNT --from-node
+```
+
+`--from-node` reads that authority through the live gateway. A later enable
+with a different pin is refused as a duplicate operation. Until this pin
+exists, a prepare begin refuses with `large_attachments`.
+
+Send a file with `rf dm send` or `rf group send` and repeated `--attach PATH`
+(at most sixteen files, one prepare each). Do not pass `--relay-url` or
+`--attachment-chunk-size`. Those flags are retired: the command returns a
+content refusal and does not read them. Do not combine `--attach` with
+`--media-ref`.
+
+The CLI streams each file in 512 KiB chunks, finishes with the plaintext byte
+length and the lowercase hex BLAKE3 of those bytes (no domain separator), then
+calls `conversation.send` with
+`{conversation_id, text, prepares:[{prepare_id}]}`. A group send also supplies
+`group_id`. The retired `attachments` field, and a mix of `prepares` with
+prebuilt `media`, are refused.
+
+The peer enables the same way before importing a remote file, because import
+reads the pinned relay authority. Retrieve the exact plaintext with:
+
+```sh
+rf attachment import --account ACCOUNT --message MESSAGE_ID --index 0 --output PATH
+```
+
+`--media-ref` is the separate prebuilt r4 MediaRef path and does not upload
+bytes. See "Prepared attachment references" below.
+
+## Object relay fetch
+
+`rf object fetch`, `rf object get` and `rf object list` are a separate object
+path. They are not how a `--attach` send is retrieved. Keep the selected node
+profile's identity and certificate pin. The relay address can be an IP address
+and need not equal the node id. Do not substitute the discovery HTTP or gateway
+address for that profile.
+
+The receiver can still run `rf dm read --account=ACCOUNT --conversation=CONVERSATION`.
+It synchronizes and reads the durable typed message model. On this object path,
+media references appear in the message content and `rf object fetch` reports
+transfer state.
+
 Pass `--wait 240` to poll deferred fetches within a caller-owned budget in seconds.
 The default, `--wait 0`, makes one read. While waiting, a generic failure exits
 immediately; `attachment fetch deferred; retry object.fetch` exits with status 1
@@ -182,9 +220,12 @@ The r4 manifest requires verified layer-4 support from the recipient or group
 cohort. Missing or insufficient declarations return `PeerUpgradeRequired`; the
 sender does not replace media with its caption. Plain messages retain layer 3.
 
-`dm send --attach` and its `--relay-url` metadata are retired and return a typed
-Content refusal. Use prepared references; legacy relay/grant fields are never
-translated into the generated message.
+`--attach` is the live prepare path in "Prepared file attachments". `--relay-url`
+and `--attachment-chunk-size` on `dm send` and `group send` are retired: they
+return a content refusal and are not read. `--media-ref` stays the prebuilt r4
+MediaRef path. It does not upload bytes, and it must not be combined with
+`--attach`. Legacy relay and grant fields are never translated into the
+generated message.
 
 
 Message deletion uses the authenticated account as the author or current group moderator.

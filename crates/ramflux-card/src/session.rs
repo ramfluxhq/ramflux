@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! Session-local drafts, lifecycle and version-fenced semantic events.
 use crate::{
-    CardError, CardRuntime, CardSpec, MutationBatch, SignedPackage, Tree,
+    CardError, CardLifecycle, CardRuntime, CardSpec, MutationBatch, SignedPackage, Tree,
     projection::{self, LocalState},
     spec::MAX_SAFE_INTEGER,
 };
@@ -54,6 +54,10 @@ pub enum EventResult {
         action: Box<ResolvedAction>,
         batch: MutationBatch,
     },
+    /// The tree stays mounted. The host must not apply the action.
+    Refused {
+        reason: &'static str,
+    },
 }
 pub struct CardSession {
     id: u64,
@@ -68,15 +72,21 @@ pub struct CardSession {
     budget: std::rc::Rc<std::cell::RefCell<crate::budget::Budget>>,
     retired: bool,
     draft_conflict: bool,
+    read_only: Option<CardLifecycle>,
 }
 impl CardSession {
     /// Open an authorized snapshot through the shared resolver and verified library.
     /// # Errors
     /// Refuses invalid state, package, budgets or exhausted session identifiers.
     pub fn open(
-        spec: CardSpec,
+        mut spec: CardSpec,
         package: SignedPackage,
     ) -> Result<(Self, MutationBatch), CardError> {
+        let life = spec.displayed_lifecycle();
+        if life != CardLifecycle::Open {
+            spec.lifecycle.clone_from(&life);
+            spec.generating = false;
+        }
         spec.validate()?;
         let id = fresh_id()?;
         let budget = crate::budget::Budget::new();
@@ -87,23 +97,25 @@ impl CardSession {
             CardRuntime::with_budget(&package, candidate.clone(), std::rc::Rc::clone(&budget))?;
         let tree = vm.render(&candidate)?;
         let batch = tree.diff(None, 0, 1)?;
-        Ok((
-            Self {
-                id,
-                spec,
-                package,
-                vm: Some(vm),
-                tree: Some(tree),
-                version: 1,
-                edit_seq: 0,
-                local,
-                queue: VecDeque::new(),
-                budget,
-                retired: false,
-                draft_conflict: false,
-            },
-            batch,
-        ))
+        let mut session = Self {
+            id,
+            spec,
+            package,
+            vm: Some(vm),
+            tree: Some(tree),
+            version: 1,
+            edit_seq: 0,
+            local,
+            queue: VecDeque::new(),
+            budget,
+            retired: false,
+            draft_conflict: false,
+            read_only: None,
+        };
+        if life != CardLifecycle::Open {
+            session.seal(&life);
+        }
+        Ok((session, batch))
     }
     #[must_use]
     pub const fn id(&self) -> u64 {
@@ -133,17 +145,18 @@ impl CardSession {
     /// Replace a signed base; retain drafts only for identical input identity/base.
     /// # Errors
     /// Refuses rollback, identity changes, invalid candidates or engine failures.
-    /// Authority loss retires the session and cancels all requests immediately.
+    /// Authority loss keeps the last tree and retires the session.
+    /// A closed snapshot is projected once, then sealed read-only.
     pub fn update(&mut self, mut spec: CardSpec) -> Result<MutationBatch, CardError> {
-        if !spec.render_allowed || spec.snapshot.closed {
-            self.retired = true;
-            return self.suspend();
-        }
         if spec.conversation_id != self.spec.conversation_id
             || spec.author_principal_id != self.spec.author_principal_id
             || spec.surface_ref != self.spec.surface_ref
         {
             return Err(CardError::Invalid("session identity"));
+        }
+        if self.retired || !spec.render_allowed {
+            self.retired = true;
+            return self.paint(&spec, &CardLifecycle::Retired);
         }
         if spec.signed_version < self.spec.signed_version
             || (spec.signed_version == self.spec.signed_version
@@ -152,14 +165,29 @@ impl CardSession {
             return Err(CardError::Invalid("signed rollback"));
         }
         spec.host.clone_from(&self.spec.host);
-        spec.validate()?;
-        if spec.signed_version == self.spec.signed_version {
+        let life = spec.displayed_lifecycle();
+        spec.lifecycle.clone_from(&life);
+        if life != CardLifecycle::Open {
+            spec.generating = false;
+        }
+        let same_base = spec.signed_version == self.spec.signed_version;
+        if life != CardLifecycle::Open && (self.vm.is_none() || same_base) {
+            return self.paint(&spec, &life);
+        }
+        if life == CardLifecycle::Open && same_base {
             if !self.is_active() {
                 return Err(CardError::Inactive);
             }
-            let tree = self.tree.as_ref().ok_or(CardError::Inactive)?;
-            return tree.diff(Some(tree), self.version, self.version);
+            return self.paint(&spec, &CardLifecycle::Open);
         }
+        let batch = self.project_forward(spec)?;
+        if life != CardLifecycle::Open {
+            self.seal(&life);
+        }
+        Ok(batch)
+    }
+    fn project_forward(&mut self, mut spec: CardSpec) -> Result<MutationBatch, CardError> {
+        spec.validate()?;
         let drafts = retain_drafts(&self.spec, &spec)?;
         let conflict = drafts.len() != self.spec.drafts.len();
         spec.drafts = drafts;
@@ -178,9 +206,52 @@ impl CardSession {
                 .is_some_and(|tabs| *index < tabs.len())
         });
         let batch = self.commit(spec, local, self.edit_seq)?;
-        // Host conflict notice is a typed result through the session's read API.
         self.draft_conflict = conflict;
         Ok(batch)
+    }
+    fn paint(&mut self, spec: &CardSpec, life: &CardLifecycle) -> Result<MutationBatch, CardError> {
+        let Some(mut tree) = self.tree.clone() else {
+            self.seal(life);
+            return Err(CardError::Inactive);
+        };
+        let generating = spec.generating && life == &CardLifecycle::Open;
+        tree.generating = generating.into();
+        tree.lifecycle.clone_from(life);
+        tree.replacement_ref =
+            (life == &CardLifecycle::Superseded).then(|| spec.replacement_ref.clone()).flatten();
+        projection::apply_facts(&mut tree, &spec.approval_facts);
+        let batch = tree.diff(self.tree.as_ref(), self.version, self.version)?;
+        self.spec.generating = generating;
+        self.spec.lifecycle.clone_from(life);
+        self.spec.replacement_ref.clone_from(&tree.replacement_ref);
+        self.spec.approval_facts.clone_from(&spec.approval_facts);
+        self.tree = Some(tree);
+        if life != &CardLifecycle::Open {
+            self.seal(life);
+        }
+        Ok(batch)
+    }
+    fn seal(&mut self, life: &CardLifecycle) {
+        self.vm = None;
+        self.queue.clear();
+        self.local.modals.clear();
+        self.local.cancel_link();
+        self.read_only = Some(life.clone());
+        if life == &CardLifecycle::Retired {
+            self.retired = true;
+        }
+    }
+    /// Typed reason when the mounted tree no longer accepts actions.
+    #[must_use]
+    pub fn refusal(&self) -> Option<&'static str> {
+        self.read_only.as_ref().and_then(CardLifecycle::refusal)
+    }
+    /// Current tree as a batch, including lifecycle when no node changed.
+    /// # Errors
+    /// Refuses a session that has no tree.
+    pub fn shown_batch(&self) -> Result<MutationBatch, CardError> {
+        let tree = self.tree.as_ref().ok_or(CardError::Inactive)?;
+        tree.diff(Some(tree), self.version, self.version)
     }
     /// Whether the last signed update discarded conflicting drafts.
     #[must_use]
@@ -236,6 +307,12 @@ impl CardSession {
         let Some(event) = self.queue.pop_front() else {
             return Ok(None);
         };
+        if let Some(reason) = self.refusal() {
+            if self.token_matches(&event.token) {
+                return Ok(Some(EventResult::Refused { reason }));
+            }
+            return Ok(Some(EventResult::StaleDropped));
+        }
         if !self.current(&event.token) {
             return Ok(Some(EventResult::StaleDropped));
         }
@@ -342,6 +419,12 @@ impl CardSession {
         &mut self,
         reply: &crate::HostSlotReply,
     ) -> Result<EventResult, CardError> {
+        if let Some(reason) = self.refusal() {
+            if self.token_matches(&reply.token) {
+                return Ok(EventResult::Refused { reason });
+            }
+            return Ok(EventResult::StaleDropped);
+        }
         if !self.current(&reply.token) {
             return Ok(EventResult::StaleDropped);
         }
@@ -371,12 +454,14 @@ impl CardSession {
         Ok(EventResult::Edited { batch: self.commit(self.spec.clone(), local, self.edit_seq)? })
     }
 
-    fn current(&self, token: &EventToken) -> bool {
-        self.is_active()
-            && token.session == self.id
+    fn token_matches(&self, token: &EventToken) -> bool {
+        token.session == self.id
             && token.signed_version == self.spec.signed_version
             && token.edit_seq == self.edit_seq
             && token.tree_version == self.version
+    }
+    fn current(&self, token: &EventToken) -> bool {
+        self.is_active() && self.token_matches(token)
     }
     /// Remove every mounted node/slot and invalidate queued events, releasing the VM.
     /// # Errors
@@ -400,7 +485,7 @@ impl CardSession {
     /// # Errors
     /// Refuses retired/active sessions, limits and execution failures.
     pub fn resume(&mut self) -> Result<MutationBatch, CardError> {
-        if self.retired || self.is_active() {
+        if self.retired || self.read_only.is_some() || self.is_active() {
             return Err(CardError::Inactive);
         }
         // Drop the failed VM before reserving a new resident slot. Preserve the shared
@@ -452,10 +537,10 @@ fn advance(value: u64, name: &'static str) -> Result<u64, CardError> {
 fn retain_drafts(old: &CardSpec, new: &CardSpec) -> Result<SurfaceDrafts, CardError> {
     let before = old
         .snapshot
-        .resolve_for_locale(&SurfaceDrafts::new(), ramflux_protocol::a2ui::DisplayLocale::En)?;
+        .resolve_for_locale(&SurfaceDrafts::new(), ramflux_protocol::a2ui::DisplayLocale::en())?;
     let after = new
         .snapshot
-        .resolve_for_locale(&SurfaceDrafts::new(), ramflux_protocol::a2ui::DisplayLocale::En)?;
+        .resolve_for_locale(&SurfaceDrafts::new(), ramflux_protocol::a2ui::DisplayLocale::en())?;
     let mut retained = SurfaceDrafts::new();
     for (pointer, value) in &old.drafts {
         let input = before
@@ -476,7 +561,7 @@ fn retain_drafts(old: &CardSpec, new: &CardSpec) -> Result<SurfaceDrafts, CardEr
             candidate.insert(pointer.clone(), value.clone());
             if new
                 .snapshot
-                .resolve_for_locale(&candidate, ramflux_protocol::a2ui::DisplayLocale::En)
+                .resolve_for_locale(&candidate, ramflux_protocol::a2ui::DisplayLocale::en())
                 .is_ok_and(|resolved| {
                     resolved
                         .inputs
@@ -680,8 +765,15 @@ pub(crate) mod tests {
         );
         let mut revoked = fixture();
         revoked.render_allowed = false;
-        s.update(revoked).expect("test: authority loss cancels tree");
-        assert!(s.tree().is_none() && !s.is_active(), "authority loss removes tree");
+        s.update(revoked).expect("test: authority loss keeps the last tree");
+        let kept = s.tree().expect("test: retired tree remains mounted");
+        assert_eq!(
+            kept.lifecycle,
+            CardLifecycle::Retired,
+            "authority loss marks the kept tree retired"
+        );
+        assert!(!kept.nodes.is_empty(), "authority loss keeps the last nodes");
+        assert!(!s.is_active(), "retired sessions are inactive");
         assert!(s.resume().is_err(), "retired sessions cannot resurrect");
     }
     #[test]

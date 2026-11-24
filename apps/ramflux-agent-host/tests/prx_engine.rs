@@ -6,7 +6,7 @@ mod support;
 use hyper::StatusCode;
 use ramflux_agent_host::{
     ConversationInput, EngineEvent, EngineFailure, EngineInput, EngineProvider, Error, Intent,
-    PrxAuthorization, PrxConfig, PrxEngine, PrxSessionScope,
+    PrxConfig, PrxEngine, PrxSessionScope,
 };
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
@@ -23,14 +23,9 @@ fn engine(server: &FakePrx, timeout_s: u64) -> TestResult<(tempfile::TempDir, Pr
         session_scope: PrxSessionScope::PerConversation,
         request_timeout_s: timeout_s,
         max_in_flight_per_conversation: 1,
-        authorization: PrxAuthorization::Supervised,
         turn_timeout_s: 120,
         approval_timeout_s: 600,
         agent_name: None,
-        provider: None,
-        model: None,
-        max_concurrent_turns: None,
-        max_cost_per_day_cents: None,
         erase_session_on_delete: false,
     };
     Ok((root, PrxEngine::new(&config, 8)?))
@@ -61,11 +56,11 @@ async fn ok_reply_strips_image_markers_and_checkpoint_has_no_token() -> TestResu
             hyper::Method::POST,
             "/api/sessions",
             StatusCode::CREATED,
-            json!({"session_id":"session-1"}),
+            json!({"session_id":"conversation"}),
         ),
         step(
             hyper::Method::POST,
-            "/api/sessions/session-1/message?mode=async",
+            "/api/sessions/conversation/message?mode=async",
             StatusCode::ACCEPTED,
             accepted("job-1"),
         ),
@@ -98,15 +93,15 @@ async fn ok_reply_strips_image_markers_and_checkpoint_has_no_token() -> TestResu
 #[tokio::test]
 async fn human_approval_resumes_as_another_detached_job() -> TestResult {
     let server = FakePrx::start(vec![
-        step(hyper::Method::POST, "/api/sessions", StatusCode::CREATED, json!({"session_id":"session-1"})),
-        step(hyper::Method::POST, "/api/sessions/session-1/message?mode=async", StatusCode::ACCEPTED, accepted("job-1")),
+        step(hyper::Method::POST, "/api/sessions", StatusCode::CREATED, json!({"session_id":"conversation"})),
+        step(hyper::Method::POST, "/api/sessions/conversation/message?mode=async", StatusCode::ACCEPTED, accepted("job-1")),
         step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({
             "status":"succeeded","http_status":200,
             "result":{"status":"awaiting_approval","reply":"Approve tool `filesystem.write`?","decision_id":"decision-1"}
         })),
-        step(hyper::Method::GET, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, approval_view("decision-1", "1970-01-01T00:05:00Z")),
-        step(hyper::Method::POST, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, json!({"approved":true})),
-        step(hyper::Method::POST, "/api/sessions/session-1/approvals/decision-1/resume?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
+        step(hyper::Method::GET, "/api/sessions/conversation/approvals/decision-1", StatusCode::OK, approval_view("decision-1", "1970-01-01T00:05:00Z")),
+        step(hyper::Method::POST, "/api/sessions/conversation/approvals/decision-1", StatusCode::OK, json!({"approved":true})),
+        step(hyper::Method::POST, "/api/sessions/conversation/approvals/decision-1/resume?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
         step(hyper::Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({
             "status":"succeeded","http_status":200,"result":{"status":"ok","reply":"done"}
         })),
@@ -129,14 +124,14 @@ async fn human_approval_resumes_as_another_detached_job() -> TestResult {
 #[tokio::test]
 async fn decline_deletes_the_pending_prx_decision() -> TestResult {
     let server = FakePrx::start(vec![
-        step(hyper::Method::POST, "/api/sessions", StatusCode::CREATED, json!({"session_id":"session-1"})),
-        step(hyper::Method::POST, "/api/sessions/session-1/message?mode=async", StatusCode::ACCEPTED, accepted("job-1")),
+        step(hyper::Method::POST, "/api/sessions", StatusCode::CREATED, json!({"session_id":"conversation"})),
+        step(hyper::Method::POST, "/api/sessions/conversation/message?mode=async", StatusCode::ACCEPTED, accepted("job-1")),
         step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({
             "status":"succeeded","http_status":200,
             "result":{"status":"awaiting_approval","reply":"Approve `shell`?","decision_id":"decision-1"}
         })),
-        step(hyper::Method::GET, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, approval_view("decision-1", "1970-01-01T00:05:00Z")),
-        step(hyper::Method::DELETE, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, json!({"approved":false})),
+        step(hyper::Method::GET, "/api/sessions/conversation/approvals/decision-1", StatusCode::OK, approval_view("decision-1", "1970-01-01T00:05:00Z")),
+        step(hyper::Method::DELETE, "/api/sessions/conversation/approvals/decision-1", StatusCode::OK, json!({"approved":false})),
     ])
     .await?;
     let (_root, mut engine) = engine(&server, 2)?;
@@ -155,17 +150,17 @@ async fn conversation_removal_cancels_the_job() -> TestResult {
             hyper::Method::POST,
             "/api/sessions",
             StatusCode::CREATED,
-            json!({"session_id":"session-1"}),
+            json!({"session_id":"conversation"}),
         ),
         step(
             hyper::Method::POST,
-            "/api/sessions/session-1/message?mode=async",
+            "/api/sessions/conversation/message?mode=async",
             StatusCode::ACCEPTED,
             accepted("job-1"),
         ),
         step(
             hyper::Method::POST,
-            "/api/jobs/job-1/cancel",
+            "/api/sessions/conversation/runs/run-job-1/cancel",
             StatusCode::OK,
             json!({"job_id":"job-1"}),
         ),
@@ -180,17 +175,57 @@ async fn conversation_removal_cancels_the_job() -> TestResult {
 }
 
 #[tokio::test]
+async fn ack_without_urls_polls_by_job_id_and_cancels_the_run() -> TestResult {
+    let server = FakePrx::start(vec![
+        step(
+            hyper::Method::POST,
+            "/api/sessions",
+            StatusCode::CREATED,
+            json!({"session_id":"conversation"}),
+        ),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/conversation/message?mode=async",
+            StatusCode::ACCEPTED,
+            json!({"job_id":"job-1","run_id":"run-job-1"}),
+        ),
+        step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({"status":"running"})),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/conversation/runs/run-job-1/cancel",
+            StatusCode::OK,
+            json!({}),
+        ),
+    ])
+    .await?;
+    let (_root, mut engine) = engine(&server, 2)?;
+    assert!(matches!(
+        submit(&mut engine).await?.as_slice(),
+        [EngineEvent::Intents { intents, .. }] if intents.is_empty()
+    ));
+    assert!(engine.poll(2).await?.is_empty());
+    engine.cancel("conversation").await?;
+    let seen = server.seen().await;
+    assert!(seen.iter().any(|line| line == "GET /api/jobs/job-1"));
+    assert!(
+        seen.iter().any(|line| line == "POST /api/sessions/conversation/runs/run-job-1/cancel")
+    );
+    assert!(seen.iter().all(|line| !(line.contains("/api/jobs/") && line.contains("/cancel"))));
+    Ok(())
+}
+
+#[tokio::test]
 async fn missing_session_is_recreated_once() -> TestResult {
     let server = FakePrx::start(vec![
         step(
             hyper::Method::POST,
             "/api/sessions",
             StatusCode::CREATED,
-            json!({"session_id":"session-old"}),
+            json!({"session_id":"conversation"}),
         ),
         step(
             hyper::Method::POST,
-            "/api/sessions/session-old/message?mode=async",
+            "/api/sessions/conversation/message?mode=async",
             StatusCode::NOT_FOUND,
             json!({"error":"missing"}),
         ),
@@ -198,11 +233,11 @@ async fn missing_session_is_recreated_once() -> TestResult {
             hyper::Method::POST,
             "/api/sessions",
             StatusCode::CREATED,
-            json!({"session_id":"session-new"}),
+            json!({"session_id":"conversation"}),
         ),
         step(
             hyper::Method::POST,
-            "/api/sessions/session-new/message?mode=async",
+            "/api/sessions/conversation/message?mode=async",
             StatusCode::ACCEPTED,
             accepted("job-1"),
         ),
@@ -241,20 +276,25 @@ async fn detached_job_deadline_cancels_and_frees_the_conversation() -> TestResul
             hyper::Method::POST,
             "/api/sessions",
             StatusCode::CREATED,
-            json!({"session_id":"session-1"}),
+            json!({"session_id":"conversation"}),
         ),
         step(
             hyper::Method::POST,
-            "/api/sessions/session-1/message?mode=async",
+            "/api/sessions/conversation/message?mode=async",
             StatusCode::ACCEPTED,
             accepted("job-1"),
         ),
         step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({"status":"running"})),
         step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({"status":"running"})),
-        step(hyper::Method::POST, "/api/jobs/job-1/cancel", StatusCode::OK, json!({})),
         step(
             hyper::Method::POST,
-            "/api/sessions/session-1/message?mode=async",
+            "/api/sessions/conversation/runs/run-job-1/cancel",
+            StatusCode::OK,
+            json!({}),
+        ),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/conversation/message?mode=async",
             StatusCode::ACCEPTED,
             accepted("job-2"),
         ),
@@ -283,11 +323,11 @@ async fn detached_job_deadline_cancels_and_frees_the_conversation() -> TestResul
 #[tokio::test]
 async fn restart_restores_sessions_jobs_results_and_original_deadline() -> TestResult {
     let server = FakePrx::start(vec![
-        step(hyper::Method::POST, "/api/sessions", StatusCode::CREATED, json!({"session_id":"session-1"})),
-        step(hyper::Method::POST, "/api/sessions/session-1/message?mode=async", StatusCode::ACCEPTED, accepted("job-1")),
+        step(hyper::Method::POST, "/api/sessions", StatusCode::CREATED, json!({"session_id":"conversation"})),
+        step(hyper::Method::POST, "/api/sessions/conversation/message?mode=async", StatusCode::ACCEPTED, accepted("job-1")),
         step(hyper::Method::GET, "/api/jobs/job-1", StatusCode::OK, json!({"status":"succeeded","http_status":200,"result":{"status":"ok","reply":"restored reply"}})),
-        step(hyper::Method::POST, "/api/sessions/session-1/message?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
-        step(hyper::Method::POST, "/api/jobs/job-2/cancel", StatusCode::OK, json!({})),
+        step(hyper::Method::POST, "/api/sessions/conversation/message?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
+        step(hyper::Method::POST, "/api/sessions/conversation/runs/run-job-2/cancel", StatusCode::OK, json!({})),
     ]).await?;
     let (_root, mut original) = engine(&server, 1)?;
     submit(&mut original).await?;
@@ -323,7 +363,7 @@ async fn pending_decision_holds_new_turns_and_removal_revokes_it() -> TestResult
     let mut steps = approval_steps("1970-01-01T00:05:00Z");
     steps.push(step(
         hyper::Method::DELETE,
-        "/api/sessions/session-1/approvals/decision-1",
+        "/api/sessions/conversation/approvals/decision-1",
         StatusCode::OK,
         json!({}),
     ));
@@ -348,35 +388,6 @@ async fn pending_decision_holds_new_turns_and_removal_revokes_it() -> TestResult
 }
 
 #[tokio::test]
-async fn full_authorization_declines_unexpected_approvals_without_human_task() -> TestResult {
-    let mut steps = approval_steps("1970-01-01T00:05:00Z");
-    steps.push(step(
-        hyper::Method::DELETE,
-        "/api/sessions/session-1/approvals/decision-1",
-        StatusCode::OK,
-        json!({}),
-    ));
-    let server = FakePrx::start(steps).await?;
-    let (root, _) = engine(&server, 1)?;
-    let config: PrxConfig = serde_json::from_value(
-        json!({"base_url":server.base_url,"token_file":root.path().join("prx.token"),"session_scope":"per_conversation","request_timeout_s":1,"max_in_flight_per_conversation":1,"authorization":"full"}),
-    )?;
-    assert_eq!(config.turn_timeout_s, 120);
-    assert_eq!(config.approval_timeout_s, 600);
-    let mut engine = PrxEngine::new(&config, 8)?;
-    submit(&mut engine).await?;
-    assert!(matches!(
-        engine.poll(2).await?.as_slice(),
-        [EngineEvent::VisibleFailure { reason: EngineFailure::AuthorizationMismatch, .. }]
-    ));
-    assert!(server.seen().await.iter().any(|s| s.starts_with("DELETE ")));
-    assert!(
-        !server.seen().await.iter().any(|s| s.contains("/approvals/") && s.starts_with("POST "))
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn failed_authoritative_view_never_prompts_from_the_llm_reply() -> TestResult {
     let mut steps = approval_steps("1970-01-01T00:05:00Z");
     if let Some(view) = steps.last_mut() {
@@ -384,7 +395,7 @@ async fn failed_authoritative_view_never_prompts_from_the_llm_reply() -> TestRes
     }
     steps.push(step(
         hyper::Method::DELETE,
-        "/api/sessions/session-1/approvals/decision-1",
+        "/api/sessions/conversation/approvals/decision-1",
         StatusCode::CONFLICT,
         json!({}),
     ));
@@ -404,18 +415,23 @@ async fn resumed_job_has_its_own_bounded_turn_deadline() -> TestResult {
     steps.extend([
         step(
             hyper::Method::POST,
-            "/api/sessions/session-1/approvals/decision-1",
+            "/api/sessions/conversation/approvals/decision-1",
             StatusCode::OK,
             json!({}),
         ),
         step(
             hyper::Method::POST,
-            "/api/sessions/session-1/approvals/decision-1/resume?mode=async",
+            "/api/sessions/conversation/approvals/decision-1/resume?mode=async",
             StatusCode::ACCEPTED,
             accepted("job-2"),
         ),
         step(hyper::Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({"status":"running"})),
-        step(hyper::Method::POST, "/api/jobs/job-2/cancel", StatusCode::OK, json!({})),
+        step(
+            hyper::Method::POST,
+            "/api/sessions/conversation/runs/run-job-2/cancel",
+            StatusCode::OK,
+            json!({}),
+        ),
     ]);
     let server = FakePrx::start(steps).await?;
     let (_root, mut engine) = engine(&server, 1)?;
@@ -428,7 +444,7 @@ async fn resumed_job_has_its_own_bounded_turn_deadline() -> TestResult {
         engine.poll(120_100).await?.as_slice(),
         [EngineEvent::VisibleFailure { reason: EngineFailure::TurnTimeout, .. }]
     ));
-    assert!(server.seen().await.iter().any(|s| s.ends_with("job-2/cancel")));
+    assert!(server.seen().await.iter().any(|s| s.ends_with("runs/run-job-2/cancel")));
     Ok(())
 }
 
@@ -451,9 +467,9 @@ async fn absent_prx_expiry_uses_the_configured_bound() -> TestResult {
 async fn resume_retries_only_resume_after_the_approval_post_succeeds() -> TestResult {
     let mut steps = approval_steps("1970-01-01T00:05:00Z");
     steps.extend([
-        step(hyper::Method::POST, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, json!({})),
-        Step { delay_ms: 1500, ..step(hyper::Method::POST, "/api/sessions/session-1/approvals/decision-1/resume?mode=async", StatusCode::SERVICE_UNAVAILABLE, json!({"error":"temporarily unavailable"})) },
-        step(hyper::Method::POST, "/api/sessions/session-1/approvals/decision-1/resume?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
+        step(hyper::Method::POST, "/api/sessions/conversation/approvals/decision-1", StatusCode::OK, json!({})),
+        Step { delay_ms: 1500, ..step(hyper::Method::POST, "/api/sessions/conversation/approvals/decision-1/resume?mode=async", StatusCode::SERVICE_UNAVAILABLE, json!({"error":"temporarily unavailable"})) },
+        step(hyper::Method::POST, "/api/sessions/conversation/approvals/decision-1/resume?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
         step(hyper::Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({"status":"succeeded","http_status":200,"result":{"status":"ok","reply":"resumed"}})),
     ]);
     let server = FakePrx::start(steps).await?;
@@ -468,7 +484,7 @@ async fn resume_retries_only_resume_after_the_approval_post_succeeds() -> TestRe
     let seen = server.seen().await;
     assert_eq!(
         seen.iter()
-            .filter(|r| r.as_str() == "POST /api/sessions/session-1/approvals/decision-1")
+            .filter(|r| r.as_str() == "POST /api/sessions/conversation/approvals/decision-1")
             .count(),
         1
     );
@@ -482,21 +498,21 @@ async fn resume_retry_budget_is_bounded_and_permanent_refusals_are_not_retried()
         let mut steps = approval_steps("1970-01-01T00:05:00Z");
         steps.push(step(
             hyper::Method::POST,
-            "/api/sessions/session-1/approvals/decision-1",
+            "/api/sessions/conversation/approvals/decision-1",
             StatusCode::OK,
             json!({}),
         ));
         for _ in 0..attempts {
             steps.push(step(
                 hyper::Method::POST,
-                "/api/sessions/session-1/approvals/decision-1/resume?mode=async",
+                "/api/sessions/conversation/approvals/decision-1/resume?mode=async",
                 status,
                 json!({"error":"unavailable"}),
             ));
         }
         steps.push(step(
             hyper::Method::DELETE,
-            "/api/sessions/session-1/approvals/decision-1",
+            "/api/sessions/conversation/approvals/decision-1",
             StatusCode::OK,
             json!({}),
         ));
@@ -513,7 +529,7 @@ async fn resume_retry_budget_is_bounded_and_permanent_refusals_are_not_retried()
         let seen = server.seen().await;
         assert_eq!(
             seen.iter()
-                .filter(|r| r.as_str() == "POST /api/sessions/session-1/approvals/decision-1")
+                .filter(|r| r.as_str() == "POST /api/sessions/conversation/approvals/decision-1")
                 .count(),
             1
         );
@@ -571,41 +587,6 @@ async fn unavailable_prx_is_silent_and_logs_once_without_bearer_on_stderr() -> T
             assert!(submit(&mut engine).await?.is_empty());
         }
         assert!(!serde_json::to_string(&engine.checkpoint()?)?.contains("test-prx-token"));
-        let mut steps = approval_steps("1970-01-01T00:05:00Z");
-        steps.extend([
-            step(hyper::Method::DELETE, "/api/sessions/session-1/approvals/decision-1", StatusCode::OK, json!({})),
-            step(hyper::Method::POST, "/api/sessions/session-1/message?mode=async", StatusCode::ACCEPTED, accepted("job-2")),
-            step(hyper::Method::GET, "/api/jobs/job-2", StatusCode::OK, json!({"status":"succeeded","http_status":200,"result":{"status":"awaiting_approval","decision_id":"decision-2","reply":"test-prx-token"}})),
-            step(hyper::Method::DELETE, "/api/sessions/session-1/approvals/decision-2", StatusCode::OK, json!({"error":"test-prx-token"})),
-        ]);
-        let server = FakePrx::start(steps).await?;
-        let (root, _) = crate::engine(&server, 1)?;
-        let config = PrxConfig {
-            base_url: server.base_url.clone(),
-            token_file: root.path().join("prx.token"),
-            session_scope: PrxSessionScope::PerConversation,
-            request_timeout_s: 1,
-            max_in_flight_per_conversation: 1,
-            authorization: PrxAuthorization::Full,
-            turn_timeout_s: 120,
-            approval_timeout_s: 600,
-            agent_name: None,
-            provider: None,
-            model: None,
-            max_concurrent_turns: None,
-            max_cost_per_day_cents: None,
-            erase_session_on_delete: false,
-        };
-        let mut full = PrxEngine::new(&config, 8)?;
-        for now in [2, 3] {
-            submit(&mut full).await?;
-            let events = full.poll(now).await?;
-            assert!(matches!(
-                events.as_slice(),
-                [EngineEvent::VisibleFailure { reason: EngineFailure::AuthorizationMismatch, .. }]
-            ));
-            full.acknowledge(&events[0])?;
-        }
         return Ok(());
     }
     let output = std::process::Command::new(std::env::current_exe()?)
@@ -619,7 +600,6 @@ async fn unavailable_prx_is_silent_and_logs_once_without_bearer_on_stderr() -> T
     assert!(output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert_eq!(stderr.matches("agent host PRX engine is unavailable").count(), 1);
-    assert_eq!(stderr.matches("agent host PRX authorization mismatch").count(), 1);
     assert!(!stderr.contains("test-prx-token"));
     assert!(!String::from_utf8(output.stdout)?.contains("test-prx-token"));
     Ok(())

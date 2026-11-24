@@ -28,16 +28,28 @@ impl BusStream for MemoryStream {
         true
     }
 
+    fn accepts_credential_prompt(&self) -> bool {
+        // Connect samples this once, before the host can register a callback.
+        // Unlock reads that registration directly.
+        false
+    }
+
     fn matches_peer(&self, _expected: PeerCred) -> Result<(), SdkError> {
         // This stream can only be minted inside the host process; it has no listener.
         Ok(())
     }
 }
 
+pub(crate) struct LifecycleRequest {
+    pub resume: bool,
+    pub reply: std::sync::mpsc::SyncSender<Result<(), SdkError>>,
+}
+
 pub(crate) async fn serve(
     config: LocalBusConfig,
     stream: DuplexStream,
     mut shutdown: watch::Receiver<bool>,
+    mut lifecycle: tokio::sync::mpsc::Receiver<LifecycleRequest>,
     ready: oneshot::Sender<Result<(), SdkError>>,
     #[cfg(test)] gate: Option<ShutdownGate>,
 ) -> Result<(), SdkError> {
@@ -73,12 +85,16 @@ pub(crate) async fn serve(
     ));
     let mut stopping = supervisor.stop_requested();
     let mut connection_finished = false;
+    let mut lifecycle_open = true;
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
             _ = stopping.changed() => break,
             _ = &mut connection => { connection_finished = true; break; },
             () = supervisor.reap_lifecycle_tasks() => {},
+            request = lifecycle.recv(), if lifecycle_open => {
+                lifecycle_open = drive_lifecycle(&supervisor, request).await;
+            },
         }
     }
     let explicit_stop = *stopping.borrow();
@@ -116,6 +132,20 @@ pub(crate) async fn serve(
     stop_result
 }
 
+async fn drive_lifecycle(
+    supervisor: &std::rc::Rc<Supervisor>,
+    request: Option<LifecycleRequest>,
+) -> bool {
+    let Some(request) = request else { return false };
+    let result = if request.resume {
+        supervisor.resume_for_background().await
+    } else {
+        supervisor.suspend_for_background().await
+    };
+    let _ = request.reply.send(result);
+    true
+}
+
 pub(crate) fn method_names() -> Vec<&'static str> {
     let mut names = super::method_table::METHODS
         .iter()
@@ -142,6 +172,7 @@ pub(crate) fn method_names() -> Vec<&'static str> {
         "agent.operation.get",
         "agent.list",
         "agent.get",
+        "agent.host.manage",
         "agent.persona.edit",
         "agent.access.set",
         "agent.watch",

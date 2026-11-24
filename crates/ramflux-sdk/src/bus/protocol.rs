@@ -28,6 +28,11 @@ pub struct LocalBusConfig {
     pub builtin_nodes: Vec<NodeProfile>,
     pub socket_path: PathBuf,
     pub data_root: PathBuf,
+    /// Shared by every actor of this process. True while files are released for the background.
+    pub(crate) background: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// In-process unlock reads this at request time. Socket daemons leave it false.
+    /// The C ABI client replaces it with the host callback's registration flag.
+    pub(crate) credential_callback: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Test-only custody retry budget for this daemon's thread (production is always 90 s).
     #[cfg(test)]
     pub test_retry_budget: Option<std::time::Duration>,
@@ -418,14 +423,9 @@ pub struct LocalBusMessageAttachmentInput {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusFederationRoute {
-    pub federation_url: String,
     pub source_node_id: String,
     pub target_node_id: String,
     pub required_capability: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub admin_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recipient_prekey_url: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -1112,6 +1112,8 @@ impl LocalBusConfig {
             builtin_nodes: Vec::new(),
             socket_path: socket_path.into(),
             data_root: data_root.into(),
+            background: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            credential_callback: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             test_retry_budget: None,
             #[cfg(test)]

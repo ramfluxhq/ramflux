@@ -139,6 +139,7 @@ struct CAbiEventQueue {
 struct CAbiError {
     code: RamfluxErrorCode,
     message: String,
+    status: Option<i32>,
 }
 
 type CAbiResult<T> = Result<T, CAbiError>;
@@ -913,6 +914,49 @@ fn confirm_abi_code(reason: crate::CustodyConfirmReason) -> RamfluxErrorCode {
     }
 }
 
+// The invalid-argument tail is a macro so `sdk_error_code` stays under the line limit
+// and the match stays exhaustive.
+macro_rules! sdk_invalid_argument {
+    () => {
+        SdkError::OperationReconciliationRequired(_)
+            | SdkError::AgentCreationRefused(_)
+            | SdkError::AgentNotRetired
+            | SdkError::PrxCall(_)
+            | SdkError::EditConflict { .. }
+            | SdkError::PinLimitReached
+            | SdkError::RestoreSetupRequired
+            | SdkError::CustodySetupInvalid
+            | SdkError::CustodyExpired
+            | SdkError::CustodyAccountConflict
+            | SdkError::CustodyPublicationFailed
+            | SdkError::SurfaceRefused { .. }
+            | SdkError::SurfaceProtocol(_)
+            | SdkError::GroupRefused { .. }
+            | SdkError::TaskRefused { .. }
+            | SdkError::TaskDeliveryTooLarge { .. }
+            | SdkError::SurfaceDeliveryTooLarge { .. }
+            | SdkError::ContactConfirmationRequired(_)
+            | SdkError::ContactInput(_)
+            | SdkError::AccountNotOpen(_)
+            | SdkError::AccountRestorePending(_)
+            | SdkError::AccountRestoreFailed { .. }
+            | SdkError::AccountManifestUnreadable
+            | SdkError::LocalBus(_)
+            | SdkError::LocalBusRefused { .. }
+            | SdkError::InboundRejected(_)
+            | SdkError::PayloadTooLarge
+            | SdkError::ReplayMismatch
+            | SdkError::InvalidOfflineRetention(_)
+            | SdkError::PassphrasePolicy(_)
+            | SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. }
+            | SdkError::PairRecoveryRequired
+            | SdkError::PairingField(_)
+            | SdkError::PairingCode(_)
+    };
+}
+
 // `Search` stays unsupported: legacy entrypoints do not expose local search.
 macro_rules! sdk_invalid_argument {
     () => {
@@ -973,9 +1017,15 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::CustodyModeDowngrade
         | SdkError::AgentCustodyUnsupported
         | SdkError::UsernameDirectoryRefused(_) => RamfluxErrorCode::UnsupportedVersion,
-        SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable) => {
-            RamfluxErrorCode::PermissionDenied
-        }
+        SdkError::CustodyVaultUnavailable
+        | SdkError::CustodyVault(_)
+        | SdkError::AttachmentDeleted
+        | SdkError::Sync(_)
+        | SdkError::CapabilityDenied(_)
+        | SdkError::GrantInvalidated
+        | SdkError::RemoteAppApprovalRequired
+        | SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)
+        | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
         SdkError::CustodyRandomUnavailable
         | SdkError::HistoryEvidence(_)
         | SdkError::Crypto(_)
@@ -1004,17 +1054,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::TaskDeliveryTimeout => RamfluxErrorCode::TransportUnavailable,
         #[rustfmt::skip]
         SdkError::Protocol(_) | SdkError::Json(_) | SdkError::InvalidGatewayCursor(_) => RamfluxErrorCode::InvalidCanonicalJson,
-        SdkError::PriorityWriterAccess | SdkError::WriterPause | SdkError::Io(_) => {
-            RamfluxErrorCode::Internal
-        }
-        SdkError::CustodyVaultUnavailable
-        | SdkError::CustodyVault(_)
-        | SdkError::AttachmentDeleted
-        | SdkError::Sync(_)
-        | SdkError::CapabilityDenied(_)
-        | SdkError::GrantInvalidated
-        | SdkError::RemoteAppApprovalRequired
-        | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
+        #[rustfmt::skip]
+        SdkError::PriorityWriterAccess | SdkError::WriterPause | SdkError::Io(_) => RamfluxErrorCode::Internal,
         SdkError::AccountCommandBackpressure
         | SdkError::ContactInput(crate::ContactReason::LookupRateLimited)
         | SdkError::ContactRequestCapacity(_)
@@ -1165,7 +1206,11 @@ fn current_millis() -> u128 {
 
 impl CAbiError {
     fn new(code: RamfluxErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self { code, message: message.into(), status: None }
+    }
+
+    pub(super) fn with_status(status: i32, message: impl Into<String>) -> Self {
+        Self { code: RamfluxErrorCode::Internal, message: message.into(), status: Some(status) }
     }
 }
 

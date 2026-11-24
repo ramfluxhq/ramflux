@@ -200,7 +200,14 @@ pub(crate) async fn bind_transfer_and_observe(
 
     // Five client connections: the human publication before and after the transfer, the agent's
     // activation, the rebind's proof-only publication and the agent's activation after state B.
-    node.publish_current(&phone_root, &phone_id, &phone_device, phone_vault.clone()).await?;
+    node.publish_current(
+        &phone_root,
+        &phone_id,
+        &phone_device,
+        phone_vault.clone(),
+        t.pair.phone.client.account_db()?,
+    )
+    .await?;
 
     let at = now()?;
     let created = desk_create(&t.pair, desk_vault.as_ref(), at)?;
@@ -222,7 +229,14 @@ pub(crate) async fn bind_transfer_and_observe(
 
     // The transfer P0 -> P1 is published to the node by the old primary's connection.
     let transferred = transfer_primary(t, at + 10)?;
-    node.publish_current(&phone_root, &phone_id, &phone_device, phone_vault.clone()).await?;
+    node.publish_current(
+        &phone_root,
+        &phone_id,
+        &phone_device,
+        phone_vault.clone(),
+        t.pair.phone.client.account_db()?,
+    )
+    .await?;
     let primary = transferred.body.master_certificate.body.primary_device_ref.clone();
     let observed = super::super::observe_primary(&desk_store, &primary)?;
     let entry = observed
@@ -356,8 +370,14 @@ async fn bind_agent(
     let desk_root = root_of(&t.pair.laptop)?;
     let desk_id = t.pair.laptop.client.account_db()?.local_account_id.clone();
     let desk_vault = vault_of(&t.pair.laptop.client)?;
-    node.publish_current(&phone_root, &phone_id, &phone_device, vault_of(&t.pair.phone.client)?)
-        .await?;
+    node.publish_current(
+        &phone_root,
+        &phone_id,
+        &phone_device,
+        vault_of(&t.pair.phone.client)?,
+        t.pair.phone.client.account_db()?,
+    )
+    .await?;
     let created = desk_create(&t.pair, desk_vault.as_ref(), at)?;
     phone_decides(&mut t.pair, router, &created, true, at).await?;
     let desk_store = store_of(&desk_root, &desk_id)?;
@@ -391,8 +411,14 @@ async fn transfer_and_send(
     let phone_id = t.pair.phone.client.account_db()?.local_account_id.clone();
     let phone_device = t.pair.phone.client.owned_device_identity()?.device_id().to_owned();
     let transferred = transfer_primary(t, at + 10)?;
-    node.publish_current(&phone_root, &phone_id, &phone_device, vault_of(&t.pair.phone.client)?)
-        .await?;
+    node.publish_current(
+        &phone_root,
+        &phone_id,
+        &phone_device,
+        vault_of(&t.pair.phone.client)?,
+        t.pair.phone.client.account_db()?,
+    )
+    .await?;
     let desk_root = root_of(&t.pair.laptop)?;
     let desk_id = t.pair.laptop.client.account_db()?.local_account_id.clone();
     let desk_store = store_of(&desk_root, &desk_id)?;
@@ -521,6 +547,7 @@ fn a_desktop_offline_during_the_transfer_completes_when_it_returns() -> TestResu
             &phone_id,
             &phone_device,
             vault_of(&t.pair.phone.client)?,
+            t.pair.phone.client.account_db()?,
         )
         .await?;
         let new_root = root_of(&t.new_primary)?;
@@ -732,8 +759,14 @@ async fn two_transfers(t: &mut Transfer) -> TestResult {
     let phone_root = root_of(&t.pair.phone)?;
     let phone_id = t.pair.phone.client.account_db()?.local_account_id.clone();
     let phone_device = t.pair.phone.client.owned_device_identity()?.device_id().to_owned();
-    node.publish_current(&phone_root, &phone_id, &phone_device, vault_of(&t.pair.phone.client)?)
-        .await?;
+    node.publish_current(
+        &phone_root,
+        &phone_id,
+        &phone_device,
+        vault_of(&t.pair.phone.client)?,
+        t.pair.phone.client.account_db()?,
+    )
+    .await?;
     let primary: DeviceRef = second.body.master_certificate.body.primary_device_ref.clone();
     let observed = observe_primary(&desk_store, &primary)?;
     let entry = observed

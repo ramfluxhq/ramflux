@@ -31,6 +31,24 @@ pub struct Tree {
     pub root_key: String,
     pub nodes: Vec<Node>,
     pub host_slots: Vec<HostSlot>,
+    /// String-catalog tag after fallback.
+    #[serde(default = "english_tag")]
+    pub locale: String,
+    /// CLDR locale used for numbers, dates and plurals.
+    #[serde(default = "english_tag")]
+    pub format_locale: String,
+    /// `rtl` for Arabic, otherwise `ltr`.
+    #[serde(default = "ltr_direction")]
+    pub direction: String,
+    /// The author still has an open text stream on this card.
+    #[serde(default, skip_serializing_if = "crate::host_view::omitted_false")]
+    pub generating: crate::host_view::OmittedFalse,
+    /// Closed, retired and superseded trees stay renderable.
+    #[serde(default, skip_serializing_if = "crate::host_view::lifecycle_is_open")]
+    pub lifecycle: crate::CardLifecycle,
+    /// Client reference of the card that replaced this one, when verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_ref: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -50,6 +68,28 @@ pub struct MutationBatch {
     pub edit_seq: u64,
     pub mutations: Vec<Mutation>,
     pub host_slots: Vec<HostSlot>,
+    /// String-catalog tag after fallback. Present even when no node changed.
+    #[serde(default = "english_tag")]
+    pub locale: String,
+    /// CLDR locale used for numbers, dates and plurals.
+    #[serde(default = "english_tag")]
+    pub format_locale: String,
+    /// `rtl` for Arabic, otherwise `ltr`.
+    #[serde(default = "ltr_direction")]
+    pub direction: String,
+    /// Copied even when no node changed, so a close or final record is visible.
+    #[serde(default, skip_serializing_if = "crate::host_view::omitted_false")]
+    pub generating: crate::host_view::OmittedFalse,
+    #[serde(default, skip_serializing_if = "crate::host_view::lifecycle_is_open")]
+    pub lifecycle: crate::CardLifecycle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_ref: Option<String>,
+}
+fn english_tag() -> String {
+    "en".to_owned()
+}
+fn ltr_direction() -> String {
+    "ltr".to_owned()
 }
 impl Tree {
     pub(crate) fn parse(bytes: &[u8], spec: &CardSpec) -> Result<Self, CardError> {
@@ -133,6 +173,12 @@ impl Tree {
             edit_seq: self.edit_seq,
             mutations,
             host_slots: self.host_slots.clone(),
+            locale: self.locale.clone(),
+            format_locale: self.format_locale.clone(),
+            direction: self.direction.clone(),
+            generating: self.generating.clone(),
+            lifecycle: self.lifecycle.clone(),
+            replacement_ref: self.replacement_ref.clone(),
         };
         if batch.mutations.len() > 512 || serde_json::to_vec(&batch)?.len() > MAX_TREE {
             return Err(CardError::Limit("mutation batch"));

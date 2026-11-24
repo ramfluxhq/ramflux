@@ -4,7 +4,7 @@
 //! Request-scoped profile verification and warning-only public-name collision lookup.
 use super::{invalid, record_key};
 use crate::{RamfluxClient, SdkError};
-use ramflux_protocol::{ActorType, DeviceSetStatus, PrincipalKind, SignedDeviceSetRecord};
+use ramflux_protocol::{DeviceSetStatus, PrincipalKind, SignedDeviceSetRecord};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -36,14 +36,6 @@ impl VerifiedProfileFacts {
             Ok(None) => self.active_devices.contains(device),
             Err(_) => false,
         }
-    }
-    pub(crate) fn matches_role(&self, device: &str, role: ActorType) -> bool {
-        self.matches_device(device)
-            && matches!(
-                (role, self.profile.kind),
-                (ActorType::Human, PrincipalKind::Human)
-                    | (ActorType::Bot, PrincipalKind::Bot | PrincipalKind::HeadlessAi)
-            )
     }
 }
 #[derive(Default)]

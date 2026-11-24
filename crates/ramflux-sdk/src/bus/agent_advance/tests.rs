@@ -530,10 +530,13 @@ async fn agent_delete_closes_the_running_session_before_removing_local_state() -
             let setup = authorized_request("req-delete", &nodes)?;
             let now = setup.fixture.now;
             let supervisor = crate::bus::supervisor::Supervisor::new(setup.config.clone())?;
-            supervisor
-                .activate_native(HUMAN, human_passphrase(), Some(DEFAULT_NODE.into()))
-                .await?;
-            supervisor.advance_agent_creations(HUMAN, now + 2).await?;
+            Box::pin(supervisor.activate_native(
+                HUMAN,
+                human_passphrase(),
+                Some(DEFAULT_NODE.into()),
+            ))
+            .await?;
+            Box::pin(supervisor.advance_agent_creations(HUMAN, now + 2)).await?;
             assert!(supervisor.account_is_open(&setup.account_id), "the agent is connected");
             let (anchor, _records) = complete_with_record(&setup, "req-delete")?;
             let directory = setup.fixture.root.0.join("custody_accounts").join(&setup.account_id);
@@ -546,14 +549,14 @@ async fn agent_delete_closes_the_running_session_before_removing_local_state() -
                     confirmed,
                 };
             for refused in [mutation(&anchor, None), mutation(&anchor, Some(false))] {
-                supervisor.close_agent_before_delete(HUMAN, &refused).await?;
+                Box::pin(supervisor.close_agent_before_delete(HUMAN, &refused)).await?;
                 assert!(
                     supervisor.account_is_open(&setup.account_id),
                     "an unconfirmed delete keeps the session"
                 );
             }
             let unknown = mutation(&ramflux_protocol::encode_base64url([7_u8; 32]), Some(true));
-            supervisor.close_agent_before_delete(HUMAN, &unknown).await?;
+            Box::pin(supervisor.close_agent_before_delete(HUMAN, &unknown)).await?;
             assert!(
                 supervisor.account_is_open(&setup.account_id),
                 "a delete of another agent keeps the session"
@@ -562,7 +565,8 @@ async fn agent_delete_closes_the_running_session_before_removing_local_state() -
 
             let mut confirmed = delete_frame(&anchor, true);
             // `respond` reports a refusal as an error frame in `Ok`, never as an `Err`.
-            let reply = crate::bus::agent_methods::respond(&mut confirmed, &supervisor).await?;
+            let reply =
+                Box::pin(crate::bus::agent_methods::respond(&mut confirmed, &supervisor)).await?;
             let frame: serde_json::Value = serde_json::from_slice(&reply)?;
             assert_eq!(
                 frame["kind"], "error",

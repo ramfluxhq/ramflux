@@ -100,16 +100,14 @@ whose signed set is now unavailable still reads stale.
 
 Task actor metadata exposes the actual `actor_kind` alongside
 `actor_kind_verified`. A signed public profile and a current member device are
-required for verification. A relation-derived human role cannot attest a signed
-bot/headless-AI kind as human. Existing task relation authorization is unchanged;
-this flag authenticates metadata, not a new permission or proof of personhood.
-Actor-bearing journal events and message metadata include `actor_kind` (null if
-no current authenticated device/profile) alongside the role-aware boolean. A
-non-null kind with `actor_kind_verified:false` means an authenticated kind does
-not match the action's role class; for example a headless requester on a
-Human-class action. Actorless lifecycle compaction/removal events have neither
-claim. Legacy journal entries may omit `actor_kind`; consumers treat that as
-unknown and must not infer a kind from the role or the boolean alone.
+required for verification. The flag does not depend on the task relation
+(requester, assignee, or acceptor). It authenticates metadata, not a permission
+or proof of personhood. Actor-bearing journal events and message metadata
+include `actor_kind` (null if no current authenticated device/profile) alongside
+that boolean. A non-null kind with `actor_kind_verified:false` means the device
+is not on the signed profile. Actorless lifecycle compaction/removal events have
+neither claim. Entries that omit `actor_kind` are unknown; consumers must not
+infer a kind from the relation or the boolean alone.
 
 The profile code borrows the same root signer as device-set signing; it creates
 no new signing authority or root-seed storage. The planned primary/external

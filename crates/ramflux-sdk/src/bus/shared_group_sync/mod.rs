@@ -38,6 +38,7 @@ pub(super) async fn dispatch(
     }
     if method != "group.create"
         && method != "group.name.set"
+        && method != "group.leave"
         && !matches!(
             method,
             "group.member.add"
@@ -131,6 +132,32 @@ pub(super) async fn dispatch(
     Ok(Some(result))
 }
 
+fn leave_change(
+    account: &LocalBusAccountState,
+    previous: Option<&ramflux_crypto::VerifiedGroupState>,
+) -> Result<Option<GroupStateChange>, SdkError> {
+    let state = previous.ok_or(StorageError::GroupPermissionDenied)?;
+    let own = account.client.owned_device_identity()?;
+    let member = state
+        .view()
+        .members
+        .iter()
+        .find(|member| {
+            member.identity.root_commitment == own.root_commitment()
+                && member.identity.device_id == own.device_id()
+        })
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    if member.role == ramflux_protocol::group_state::SharedGroupRole::Owner {
+        return Err(SdkError::LocalBus(
+            "the owner leaves only after transferring ownership".into(),
+        ));
+    }
+    Ok(Some(GroupStateChange::Remove {
+        root_commitment: member.identity.root_commitment.clone(),
+        device_id: member.identity.device_id.clone(),
+    }))
+}
+
 fn local_actor_matches(account: &LocalBusAccountState, actor: &str) -> bool {
     actor == account.gateway_config.device_id
         || (account.client.born_v3_account.is_some()
@@ -144,6 +171,9 @@ async fn requested_change(
     body: &Value,
     method: &str,
 ) -> Result<Option<GroupStateChange>, SdkError> {
+    if method == "group.leave" {
+        return leave_change(account, previous);
+    }
     if method == "group.create" {
         let creator = required(body, "creator_id")?;
         let valid = if account.client.born_v3_account.is_some() {
@@ -174,12 +204,29 @@ async fn native_group_primary(
     let Some(native) = account.client.born_v3_account.as_deref().cloned() else {
         return Ok(None);
     };
+    if session_agent_retired(account) {
+        return Err(SdkError::AgentCreationRefused("agent_retired"));
+    }
+    let host =
+        super::couriers::primary::custodian_directory(&native, &account.gateway_config).await?;
     let setup = account.native_setup.as_ref().ok_or(SdkError::CustodyVaultUnavailable)?;
     let vault = super::custody_setup::primary_provider(setup);
-    tokio::task::spawn_blocking(move || native.group_primary(vault.as_ref()))
-        .await
-        .map_err(|_| SdkError::CustodyVaultUnavailable)?
-        .map(Some)
+    tokio::task::spawn_blocking(move || {
+        native.group_operation_signer(vault.as_ref(), host.as_ref())
+    })
+    .await
+    .map_err(|_| SdkError::CustodyVaultUnavailable)?
+    .map(Some)
+}
+
+fn session_agent_retired(account: &LocalBusAccountState) -> bool {
+    account.connection.as_ref().is_some_and(|connection| {
+        connection
+            .snapshot()
+            .cause
+            .as_ref()
+            .is_some_and(crate::AccountNetworkingReason::agent_retired)
+    })
 }
 fn selected_change(
     previous: &ramflux_crypto::VerifiedGroupState,
@@ -283,24 +330,12 @@ async fn verified_member(
     let expected = explicit
         .or_else(|| address.as_ref().map(|(root, _)| root.as_str()))
         .or_else(|| principal_selection.as_ref().map(|(root, _)| root.as_str()));
-    let manifest = if let Some(federation) = body.get("federation").filter(|value| !value.is_null())
-    {
-        let federation: LocalBusFederationRoute = serde_json::from_value(federation.clone())?;
-        let url = federation.recipient_prekey_url.ok_or_else(|| {
-            SdkError::LocalBus("federated group member requires recipient_prekey_url".into())
-        })?;
-        let remote =
-            crate::client::contact::RemoteManifest { url: &url, timeout: account.timeouts.http };
-        let root = account
-            .client
-            .resolve_federated_target_principal_commitment_async(remote, expected, device)
-            .await?;
-        crate::client::contact::fetch_verified_device_manifest_from_url_async(remote, &root).await?
-    } else {
-        let root =
-            account.client.resolve_target_principal_commitment(gateway, expected, device).await?;
-        crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?
-    };
+    let federation = body
+        .get("federation")
+        .filter(|value| !value.is_null())
+        .map(|value| serde_json::from_value::<LocalBusFederationRoute>(value.clone()))
+        .transpose()?;
+    let manifest = member_manifest(account, gateway, expected, device, federation.as_ref()).await?;
     let root = manifest.principal_commitment.clone();
     let member =
         manifest.devices.iter().find(|m| m.device_id == device).ok_or_else(|| {
@@ -322,6 +357,38 @@ async fn verified_member(
     };
     account.client.persist_identity_directory(&manifest)?;
     Ok(identity)
+}
+
+async fn member_manifest(
+    account: &LocalBusAccountState,
+    gateway: &GatewaySessionConfig,
+    expected: Option<&str>,
+    device: &str,
+    federation: Option<&LocalBusFederationRoute>,
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let hint = expected.unwrap_or("");
+    let caller = federation.map(|route| route.target_node_id.as_str());
+    let foreign = if hint.is_empty() {
+        None
+    } else {
+        crate::client::recipient_home::foreign_target(&account.client, hint)?
+    };
+    let base = if foreign.is_some() || caller.is_some() {
+        crate::client::recipient_home::directory_base(&account.client, hint, caller, true).await?
+    } else {
+        None
+    };
+    let root = if let Some(base) = base.as_deref() {
+        let remote =
+            crate::client::contact::RemoteManifest { url: base, timeout: account.timeouts.http };
+        account
+            .client
+            .resolve_federated_target_principal_commitment_async(remote, expected, device)
+            .await?
+    } else {
+        account.client.resolve_target_principal_commitment(gateway, expected, device).await?
+    };
+    account.client.peer_device_manifest(gateway, &root).await
 }
 
 fn cached_principal_member(

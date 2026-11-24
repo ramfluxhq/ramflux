@@ -15,6 +15,20 @@ enum Class {
 }
 
 const DURABLE_INGRESS: &[(&str, Class)] = &[
+    ("router_engine.rs:submit_envelope_with_source", Class::Ingress),
+    ("router_engine.rs:submit_envelope_mesh_with_source", Class::Ingress),
+    ("router_engine.rs:submit_envelope_mesh_async_with_source", Class::Ingress),
+    ("router_runtime.rs:submit_envelope_from_source", Class::Ingress),
+    ("router_runtime.rs:submit_envelope_mesh_from_source", Class::Ingress),
+    ("router_runtime.rs:submit_envelope_mesh_async_from_source", Class::Ingress),
+    (
+        "cross_node_forward.rs:forward",
+        Class::NonIngress("mesh HTTP client; delivery admission is in federation flow"),
+    ),
+    (
+        "router_runtime.rs:forward_cross_node",
+        Class::NonIngress("delegates admitted forward to federation mesh client"),
+    ),
     (
         "durable_mode.rs:rejected_security",
         Class::NonIngress("typed refusal construction; no envelope persist"),
@@ -55,9 +69,9 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         Class::NonIngress("maps peer id to origin; no envelope persist"),
     ),
     ("handlers.rs:handle_mvp0_envelope", Class::Ingress),
-    ("handlers.rs:handle_mvp0_envelope_mesh_from", Class::Ingress),
-    ("handlers.rs:handle_mvp0_envelope_from", Class::Ingress),
-    ("handlers.rs:handle_mvp0_envelope_async_from", Class::Ingress),
+    ("ingress_decode.rs:handle_mvp0_envelope_mesh_from", Class::Ingress),
+    ("ingress_decode.rs:handle_mvp0_envelope_from", Class::Ingress),
+    ("ingress_decode.rs:handle_mvp0_envelope_async_from", Class::Ingress),
     (
         "home_migration.rs:configured",
         Class::NonIngress("constructs a migration service from node identity"),
@@ -113,7 +127,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     let edge_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Edge).count();
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
-    assert_eq!((ingress_count, edge_count, non_ingress_count), (18, 6, 14));
+    assert_eq!((ingress_count, edge_count, non_ingress_count), (24, 6, 16));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");
@@ -215,9 +229,9 @@ fn exercise_router_control(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match entry {
         "handlers.rs:handle_mvp0_envelope"
-        | "handlers.rs:handle_mvp0_envelope_from"
-        | "handlers.rs:handle_mvp0_envelope_mesh_from"
-        | "handlers.rs:handle_mvp0_envelope_async_from" => {
+        | "ingress_decode.rs:handle_mvp0_envelope_from"
+        | "ingress_decode.rs:handle_mvp0_envelope_mesh_from"
+        | "ingress_decode.rs:handle_mvp0_envelope_async_from" => {
             control_handler_submit(entry, handle, envelope, runtime)?;
         }
         "router_engine.rs:submit_envelope" | "router_runtime.rs:submit_envelope_from" => {
@@ -374,6 +388,19 @@ fn exercise_router_control(
                 "{entry} unmarked drain must pass the mode guard, outcome={outcome:?}"
             );
         }
+        "router_engine.rs:submit_envelope_with_source"
+        | "router_engine.rs:submit_envelope_mesh_with_source"
+        | "router_engine.rs:submit_envelope_mesh_async_with_source"
+        | "router_runtime.rs:submit_envelope_from_source"
+        | "router_runtime.rs:submit_envelope_mesh_from_source"
+        | "router_runtime.rs:submit_envelope_mesh_async_from_source" => {
+            control_submit_ok(
+                entry,
+                source_submit(entry, handle, envelope, runtime),
+                CONTROL_FOREIGN_AUTH,
+                |outcome| outcome.as_str(),
+            );
+        }
         other => return Err(format!("unknown router ingress {other}").into()),
     }
     Ok(())
@@ -398,7 +425,7 @@ fn control_handler_submit(
         }
         #[cfg(not(feature = "itest-http"))]
         "handlers.rs:handle_mvp0_envelope" => {}
-        "handlers.rs:handle_mvp0_envelope_mesh_from" => {
+        "ingress_decode.rs:handle_mvp0_envelope_mesh_from" => {
             control_submit_ok(
                 entry,
                 crate::handlers::handle_mvp0_envelope_mesh_from(
@@ -411,7 +438,7 @@ fn control_handler_submit(
             );
         }
         #[cfg(feature = "itest-http")]
-        "handlers.rs:handle_mvp0_envelope_from" => {
+        "ingress_decode.rs:handle_mvp0_envelope_from" => {
             control_submit_ok(
                 entry,
                 crate::handlers::handle_mvp0_envelope_from(
@@ -424,8 +451,8 @@ fn control_handler_submit(
             );
         }
         #[cfg(not(feature = "itest-http"))]
-        "handlers.rs:handle_mvp0_envelope_from" => {}
-        "handlers.rs:handle_mvp0_envelope_async_from" => {
+        "ingress_decode.rs:handle_mvp0_envelope_from" => {}
+        "ingress_decode.rs:handle_mvp0_envelope_async_from" => {
             control_submit_ok(
                 entry,
                 runtime.block_on(crate::handlers::handle_mvp0_envelope_async_from(
@@ -551,9 +578,9 @@ fn exercise_router_ingress(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match entry {
         "handlers.rs:handle_mvp0_envelope"
-        | "handlers.rs:handle_mvp0_envelope_from"
-        | "handlers.rs:handle_mvp0_envelope_mesh_from"
-        | "handlers.rs:handle_mvp0_envelope_async_from" => {
+        | "ingress_decode.rs:handle_mvp0_envelope_from"
+        | "ingress_decode.rs:handle_mvp0_envelope_mesh_from"
+        | "ingress_decode.rs:handle_mvp0_envelope_async_from" => {
             refuse_handler_ingress(entry, handle, envelope, runtime)
         }
         "router_engine.rs:submit_envelope"
@@ -580,6 +607,19 @@ fn exercise_router_ingress(
         | "handlers.rs:mesh_fanout_response"
         | "serve.rs:submit_raw_envelope"
         | "migration_drain.rs:forward" => refuse_edge_ingress(entry, handle, envelope, runtime),
+        "router_engine.rs:submit_envelope_with_source"
+        | "router_engine.rs:submit_envelope_mesh_with_source"
+        | "router_engine.rs:submit_envelope_mesh_async_with_source"
+        | "router_runtime.rs:submit_envelope_from_source"
+        | "router_runtime.rs:submit_envelope_mesh_from_source"
+        | "router_runtime.rs:submit_envelope_mesh_async_from_source" => {
+            assert_eq!(
+                source_submit(entry, handle, envelope, runtime)?,
+                "rejected_security:delivery_mode_refused",
+                "{entry}"
+            );
+            Ok(())
+        }
         other => Err(format!("unknown router ingress {other}").into()),
     }
 }
@@ -1396,7 +1436,7 @@ fn refuse_handler_ingress(
         }
         #[cfg(not(feature = "itest-http"))]
         "handlers.rs:handle_mvp0_envelope" => {}
-        "handlers.rs:handle_mvp0_envelope_mesh_from" => {
+        "ingress_decode.rs:handle_mvp0_envelope_mesh_from" => {
             let response = crate::handlers::handle_mvp0_envelope_mesh_from(
                 &body,
                 handle,
@@ -1408,7 +1448,7 @@ fn refuse_handler_ingress(
             );
         }
         #[cfg(feature = "itest-http")]
-        "handlers.rs:handle_mvp0_envelope_from" => {
+        "ingress_decode.rs:handle_mvp0_envelope_from" => {
             let response = crate::handlers::handle_mvp0_envelope_from(
                 &body,
                 handle,
@@ -1417,8 +1457,8 @@ fn refuse_handler_ingress(
             assert_eq!(response.outcome, "rejected_security:delivery_mode_refused", "{entry}");
         }
         #[cfg(not(feature = "itest-http"))]
-        "handlers.rs:handle_mvp0_envelope_from" => {}
-        "handlers.rs:handle_mvp0_envelope_async_from" => {
+        "ingress_decode.rs:handle_mvp0_envelope_from" => {}
+        "ingress_decode.rs:handle_mvp0_envelope_async_from" => {
             let response = runtime.block_on(crate::handlers::handle_mvp0_envelope_async_from(
                 &body,
                 handle,
@@ -1875,4 +1915,61 @@ fn is_public_function(line: &str) -> bool {
     ]
     .iter()
     .any(|prefix| line.starts_with(prefix))
+}
+
+/// Exercise each source-bearing wrapper independently, including its actual origin argument.
+fn source_submit(
+    entry: &str,
+    handle: &crate::router_runtime::RouterHandle,
+    envelope: &ramflux_protocol::Envelope,
+    runtime: &tokio::runtime::Runtime,
+) -> anyhow::Result<String> {
+    use crate::router_engine::SubmitIngress;
+    let origin = ramflux_node_core::RouterEnvelopeOrigin::Gateway;
+    let ingress = SubmitIngress { origin, verified_source_node_id: None };
+    match entry {
+        "router_engine.rs:submit_envelope_with_source" => {
+            crate::router_engine::submit_envelope_with_source(
+                handle.state(),
+                handle.store(),
+                no_forward(),
+                envelope.clone(),
+                Instant::now(),
+                ingress,
+            )
+            .map(|r| r.outcome)
+        }
+        "router_engine.rs:submit_envelope_mesh_with_source" => {
+            crate::router_engine::submit_envelope_mesh_with_source(
+                handle.state(),
+                handle.store(),
+                no_forward(),
+                envelope.clone(),
+                Instant::now(),
+                ingress,
+            )
+            .map(|r| r.delivery.outcome)
+        }
+        #[cfg(feature = "itest-http")]
+        "router_runtime.rs:submit_envelope_from_source" => handle
+            .submit_envelope_from_source(envelope.clone(), Instant::now(), origin, None)
+            .map(|r| r.outcome),
+        #[cfg(not(feature = "itest-http"))]
+        "router_runtime.rs:submit_envelope_from_source" => {
+            handle.submit_envelope_from(envelope.clone(), Instant::now(), origin).map(|r| r.outcome)
+        }
+        "router_runtime.rs:submit_envelope_mesh_from_source" => handle
+            .submit_envelope_mesh_from_source(envelope.clone(), Instant::now(), origin, None)
+            .map(|r| r.delivery.outcome),
+        "router_engine.rs:submit_envelope_mesh_async_with_source"
+        | "router_runtime.rs:submit_envelope_mesh_async_from_source" => runtime
+            .block_on(handle.submit_envelope_mesh_async_from_source(
+                envelope.clone(),
+                Instant::now(),
+                origin,
+                None,
+            ))
+            .map(|r| r.delivery.outcome),
+        _ => anyhow::bail!("unknown source-bearing ingress {entry}"),
+    }
 }

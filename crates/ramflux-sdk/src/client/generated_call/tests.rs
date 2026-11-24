@@ -59,7 +59,7 @@ fn control(action: call_action::Value) -> CallControl {
 }
 
 fn call(action: call_action::Value) -> Call {
-    Call { control: Some(control(action)) }
+    Call { payload: Some(ramflux_protocol::message::call::Payload::Control(control(action))) }
 }
 
 fn round_trip(action: call_action::Value, event_id: &[u8]) -> TestResult {
@@ -110,7 +110,12 @@ fn all_thirteen_call_actions_and_native_lease_fields_round_trip() -> TestResult 
     let mut forged = signed.clone();
     forged.signature.clear();
     assert!(RamfluxClient::authorize_generated_call_action_signer("alice", &forged).is_err());
-    assert!(RamfluxClient::validate_generated_call(&Call { control: Some(forged) }).is_err());
+    assert!(
+        RamfluxClient::validate_generated_call(&Call {
+            payload: Some(ramflux_protocol::message::call::Payload::Control(forged))
+        })
+        .is_err()
+    );
     assert!(RamfluxClient::authorize_generated_call_action_signer("mallory", &signed).is_err());
     Ok(())
 }

@@ -116,6 +116,7 @@ mod tests {
                     body: serde_json::json!({"ok":true}),
                     events: vec![],
                     nodes: None,
+                    owner_copy: None,
                 }));
                 drop(guard);
                 let guard = own(&registry, 256)?;

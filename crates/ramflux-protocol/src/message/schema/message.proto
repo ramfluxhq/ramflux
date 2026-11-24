@@ -369,6 +369,9 @@ message AgentCustodyStatus {
   optional bytes request_json = 5;
   optional bytes receipt_json = 6;
   optional AgentFailure error = 7;
+  // `register_plan_hash` of the frozen plan. `agent.creation.decide` repeats it.
+  // Empty when this status has no plan. The phone does not hash the plan itself.
+  string request_hash = 8;
 }
 // The result arms of this module: list (page), get and edit (record), watch (ack) and creation
 // custody. Arms 4-8 belong to later agent stages.
@@ -383,7 +386,8 @@ message AgentConfigResult {
 
 // The agent record (AGENT-CONFIG-01 contract 1). `host`, `config`, `revision`, `observation` and
 // `cleanup` belong to the bound-runtime stages: they are present in the message but always absent or
-// empty in this module. `access` is RF-owned and validated by the record store.
+// empty in this module. `access` is RF-owned and validated by the record store. `base` is the stored
+// event identity that `agent.access.set` must send back unchanged.
 message AgentRecord {
   string agent_anchor = 1;
   string custodian_anchor = 2;
@@ -396,6 +400,7 @@ message AgentRecord {
   string cleanup = 9;
   AgentAccessPolicy access = 10;
   string role = 11;
+  EventIdentity base = 12;
 }
 
 // The owner metadata broadcast (contract 4): RF-owned persona, access and identity, ordered by the
@@ -1469,10 +1474,49 @@ message TaskHistoryExport {
   repeated TaskOwnPacket packets = 1;
   TaskExportMetadata metadata = 2;
 }
+message CallSummaryParticipant {
+  string principal_id = 1;
+  string device_id = 2;
+}
+enum CallSummaryOutcome {
+  CALL_SUMMARY_OUTCOME_UNSPECIFIED = 0;
+  CALL_SUMMARY_OUTCOME_COMPLETED = 1;
+  CALL_SUMMARY_OUTCOME_MISSED = 2;
+  CALL_SUMMARY_OUTCOME_DECLINED = 3;
+  CALL_SUMMARY_OUTCOME_CANCELLED = 4;
+  CALL_SUMMARY_OUTCOME_ANSWERED_ELSEWHERE = 5;
+  CALL_SUMMARY_OUTCOME_FAILED = 6;
+}
+enum CallSummaryFailure {
+  CALL_SUMMARY_FAILURE_UNSPECIFIED = 0;
+  CALL_SUMMARY_FAILURE_AUTHORITY_UNAVAILABLE = 1;
+  CALL_SUMMARY_FAILURE_AUTHORITY_REFUSED = 2;
+  CALL_SUMMARY_FAILURE_RELAY_UNAVAILABLE = 3;
+  CALL_SUMMARY_FAILURE_MEDIA_LEASE_EXPIRED = 4;
+  CALL_SUMMARY_FAILURE_DAEMON_RESTARTED = 5;
+  CALL_SUMMARY_FAILURE_SIGNALING_UNAVAILABLE = 6;
+}
+// Public conversation record. No signature, root key, call_start, call_ref, base key, lease or media generation.
+message CallSummary {
+  bytes call_id = 1;
+  CallSummaryParticipant caller = 2;
+  string callee_principal_id = 3;
+  optional string answered_device_id = 4;
+  repeated string ringing_device_ids = 5;
+  CallSummaryOutcome outcome = 6;
+  CallSummaryFailure failure = 7;
+  uint64 duration_seconds = 8;
+  int64 created_at = 9;
+  optional int64 answered_at = 10;
+  int64 ended_at = 11;
+}
 message Call {
   reserved 1, 2;
   reserved "operation", "signal";
-  CallControl control = 16;
+  oneof payload {
+    CallControl control = 16;
+    CallSummary summary = 17;
+  }
 }
 message SelfSync {
   uint32 operation = 1;

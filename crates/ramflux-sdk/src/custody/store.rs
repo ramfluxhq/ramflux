@@ -14,9 +14,12 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 mod genesis;
+mod group_participant;
 mod networking;
 pub(crate) mod pairing;
 mod publication;
+mod revoked_reserve;
+pub(crate) use revoked_reserve::with_anchor_ceremony;
 mod verification_cache;
 pub(crate) use verification_cache::PublicAuthorityCache;
 #[cfg(test)]
@@ -413,11 +416,53 @@ impl BornAccount {
         })
     }
 
+    /// Human-primary lease for custody: pairing, recovery, transfer, device revoke and
+    /// home declaration. Group operations use [`Self::group_operation_signer`].
     pub(crate) fn group_primary(
         &self,
         vault: &dyn PrimaryVault,
     ) -> Result<super::PrimarySigningLease, SdkError> {
         self.primary_lease(vault, false)
+    }
+    /// Signer for group create, invite, membership and settings changes. A human signs
+    /// on the device named by the master certificate. A hosted agent signs with its own
+    /// self-signing key on the device that hosts it. A retired agent, or one whose
+    /// approving primary or host desktop is no longer active, is refused.
+    ///
+    /// `host` is the custodian's current directory record. A hosted agent with `None`
+    /// is refused before a lease exists. A human passes `None`.
+    ///
+    /// # Errors
+    /// `PairingCode("PrimaryRequired")` when a human is not on its primary device.
+    /// `AgentCreationRefused("agent_retired")` when the hosted agent or its host is no
+    /// longer operable. Other failures match the custody lease.
+    pub(crate) fn group_operation_signer(
+        &self,
+        vault: &dyn PrimaryVault,
+        host: Option<&VerifiedRecord>,
+    ) -> Result<super::PrimarySigningLease, SdkError> {
+        self.refuse_hosted_agent(host)?;
+        self.primary_lease(vault, self.hosts_agent_locally()?)
+    }
+    /// Same hosted-agent admission as [`Self::group_operation_signer`], without a
+    /// signing lease. Call invites use it so a retired agent, or a host desktop the
+    /// directory no longer lists as active, is refused before a call row exists.
+    ///
+    /// # Errors
+    /// `AgentCreationRefused("agent_retired")` when the hosted agent must not publish.
+    pub(crate) fn refuse_hosted_agent(
+        &self,
+        host: Option<&ramflux_crypto::custody::VerifiedRecord>,
+    ) -> Result<(), SdkError> {
+        group_participant::admit(self, host)
+    }
+    /// Account anchor of the custodian when this device hosts the agent.
+    pub(crate) fn hosted_human_anchor(&self) -> Result<Option<String>, SdkError> {
+        group_participant::hosted_human_anchor(self)
+    }
+    /// Data root that holds this account's custody directory.
+    pub(crate) fn data_root(&self) -> Result<&Path, SdkError> {
+        group_participant::data_root(self)
     }
     /// The signer of this account's contact card and contact consent. A human signs on its
     /// primary device. An agent's record names its custodian's primary phone as primary, and that
@@ -612,6 +657,14 @@ impl BornAccount {
     pub(crate) fn primary_vault_ref(&self) -> &str {
         &self.stored.primary_vault_ref
     }
+    /// Vault reference of a headless participant's one-use data passphrase, when one was stored.
+    #[must_use]
+    pub(crate) fn provisioning_vault_ref(&self) -> Option<&str> {
+        self.stored
+            .agent_provisioning_vault_ref
+            .as_deref()
+            .filter(|reference| !reference.is_empty())
+    }
     #[must_use]
     pub(crate) fn publication(&self) -> ramflux_protocol::custody::Publication {
         ramflux_protocol::custody::Publication {
@@ -700,7 +753,7 @@ pub(crate) fn reserve_pairing_account(
     id: &str,
     anchor: &str,
 ) -> Result<PathBuf, SdkError> {
-    genesis::reserve_account(root, id, anchor)
+    revoked_reserve::reserve_for_ceremony(root, id, anchor)
 }
 
 /// Production vault-ref allocator (`custody_vault_reference.v1`). Same bytes as genesis.
@@ -724,6 +777,37 @@ pub(crate) fn custody_vault_reference(
         ]
         .concat(),
     ))
+}
+
+/// Removes `custody_accounts/{id}`. A symlink at the directory or any child is refused.
+///
+/// # Errors
+/// `Storage(Integrity("account erase symlink"))` when the path or a child is a symlink
+/// or the path is not a directory. A missing directory succeeds.
+pub(crate) fn remove_custody_tree(root: &Path, id: &str) -> Result<(), SdkError> {
+    let dir = directory(root, id)?;
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+            return Err(erase_symlink());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_symlink() {
+            return Err(erase_symlink());
+        }
+    }
+    match fs::remove_dir_all(&dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other.map_err(SdkError::from),
+    }
+}
+
+fn erase_symlink() -> SdkError {
+    SdkError::Storage(ramflux_storage::StorageError::Integrity("account erase symlink"))
 }
 
 pub(crate) fn account_exists(root: &Path, id: &str) -> Result<bool, SdkError> {
@@ -915,6 +999,21 @@ pub(crate) async fn load_account_after_install(
 pub(crate) fn load_data_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {
     read_account(root, id, now, false, None)
 }
+/// Select human data accounts without trying to authorize paused agents against a new primary.
+/// The decoded kind only excludes rows; every included human still receives full verification.
+pub(super) fn load_human_data_account(
+    root: &Path,
+    id: &str,
+    now: u64,
+) -> Result<Option<BornAccount>, SdkError> {
+    if read_stored(root, id)?.record.body.principal_kind != ramflux_protocol::PrincipalKind::Human {
+        return Ok(None);
+    }
+    let account = load_data_account(root, id, now)?;
+    // Recheck the verified kind in case the authority file changed between reads.
+    Ok((account.record().body.principal_kind == ramflux_protocol::PrincipalKind::Human)
+        .then_some(account))
+}
 pub(crate) fn load_account_with_cache(
     root: &Path,
     id: &str,
@@ -976,7 +1075,8 @@ fn read_account(
 /// through the atomic write that creation uses. Replaying the same record changes nothing.
 /// # Errors
 /// `CustodySetupInvalid` for a missing or foreign account; `PairingCode("HeadChanged")` when the
-/// pins do not advance; verification and I/O failures pass through.
+/// pins do not advance or the local human is not the approved custodian; verification and I/O
+/// failures pass through.
 pub(crate) fn replace_rebound_authority(
     root: &Path,
     account_id: &str,
@@ -992,8 +1092,10 @@ pub(crate) fn replace_rebound_authority(
         return Err(invalid());
     }
     let verified = verify_record(record, now, None, custodian)?;
+    let custodian_publication = current_custodian_publication(root, &stored, custodian, now)?;
     if ramflux_protocol::custody::object_hash(&stored.record)?
         == ramflux_protocol::custody::object_hash(record)?
+        && stored.custodian_publication == custodian_publication
     {
         return Ok(());
     }
@@ -1003,7 +1105,27 @@ pub(crate) fn replace_rebound_authority(
     }
     stored.record = record.clone();
     stored.compacted_ids = None;
+    stored.custodian_publication = custodian_publication;
     genesis::replace_public(&path, &ramflux_protocol::canonical_json_bytes(&stored)?)
+}
+
+fn current_custodian_publication(
+    root: &Path,
+    stored: &StoredAuthority,
+    custodian: Option<&VerifiedRecord>,
+    now: u64,
+) -> Result<Option<Box<ramflux_protocol::custody::Publication>>, SdkError> {
+    let Some(human_id) = stored.custodian_account_id.as_deref() else {
+        return Ok(None);
+    };
+    let human = load_account(root, human_id, now)?;
+    let approved = custodian.ok_or_else(invalid)?;
+    if ramflux_protocol::custody::object_hash(human.record())?
+        != ramflux_protocol::custody::object_hash(approved.envelope())?
+    {
+        return Err(SdkError::PairingCode("HeadChanged"));
+    }
+    Ok(Some(Box::new(human.publication())))
 }
 
 /// The stored record of one account, decoded and NOT verified. A rebind uses it: the stored agent
@@ -1014,6 +1136,60 @@ pub(crate) fn stored_record_unverified(
     account_id: &str,
 ) -> Result<Envelope<DeviceSet>, SdkError> {
     Ok(read_stored(root, account_id)?.record)
+}
+
+/// Point an agent account at a different local human id.
+///
+/// The signed record, pins and vault references stay. A second call with the same
+/// destination changes nothing. A pointer that names neither account is refused.
+///
+/// # Errors
+/// `CustodySetupInvalid` when the account is not a headless agent, or the stored pointer is a
+/// third account. Storage failures pass through.
+pub(crate) fn retarget_agent_custodian(
+    root: &Path,
+    agent_account_id: &str,
+    from_human: &str,
+    to_human: &str,
+) -> Result<(), SdkError> {
+    valid_id(agent_account_id)?;
+    valid_id(from_human)?;
+    valid_id(to_human)?;
+    if from_human == to_human {
+        return Err(invalid());
+    }
+    let mut stored = read_stored(root, agent_account_id)?;
+    if stored.record.body.principal_kind != ramflux_protocol::PrincipalKind::HeadlessAi {
+        return Err(invalid());
+    }
+    match stored.custodian_account_id.as_deref() {
+        Some(current) if current == to_human => return Ok(()),
+        Some(current) if current == from_human => {}
+        _ => return Err(invalid()),
+    }
+    stored.custodian_account_id = Some(to_human.to_owned());
+    let path = directory(root, agent_account_id)?.join("authority.json");
+    genesis::replace_public(&path, &ramflux_protocol::canonical_json_bytes(&stored)?)
+}
+
+/// Human id named by an agent account's stored authority.
+///
+/// A missing authority is `Ok(None)`. This read does not create a directory.
+///
+/// # Errors
+/// `CustodySetupInvalid` for an invalid id or a corrupt authority. I/O failures pass through.
+pub(crate) fn stored_custodian_id(
+    root: &Path,
+    account_id: &str,
+) -> Result<Option<String>, SdkError> {
+    valid_id(account_id)?;
+    let path = directory(root, account_id)?.join("authority.json");
+    match fs::File::open(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+        Ok(file) => drop(file),
+    }
+    Ok(read_stored(root, account_id)?.custodian_account_id)
 }
 
 fn read_stored(root: &Path, account_id: &str) -> Result<StoredAuthority, SdkError> {

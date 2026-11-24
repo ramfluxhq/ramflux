@@ -241,6 +241,43 @@ async fn restore_local_bus_account_impl(
 pub(crate) struct LocalBusDispatchResult {
     pub(crate) response_body: serde_json::Value,
     pub(crate) event: Option<LocalBusFrame>,
+    /// Set when the publishing actor stored a row that the owner's actor must commit.
+    pub(crate) owner_copy: Option<Box<super::actor::OwnerActivity>>,
+}
+
+async fn dispatch_agent_methods(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    match request.method.as_str() {
+        "agent.progress"
+        | "agent.approval.publish"
+        | "agent.approval.decide"
+        | "agent.approval.list" => crate::bus::dispatch::agent_activity::dispatch(request, state),
+        "agent.job.list" | "agent.job.pause" | "agent.job.resume" | "agent.job.remove"
+        | "agent.job.session" | "agent.job.sessions" => {
+            crate::bus::dispatch::agent_jobs::dispatch(request, state).await
+        }
+        other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
+    }
+}
+
+fn open_subscription(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+    connection: &mut LocalBusConnectionState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusSubscriptionOpenRequest = serde_json::from_value(request.body.clone())?;
+    if request.body.get("attended_frontend").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+        let account_id = request_account_id(request)?.to_owned();
+        state.attended_accounts.insert(account_id.clone());
+        connection.attended_account_id = Some(account_id);
+    }
+    connection.topics.extend(body.topics);
+    if let Some(account_id) = request.account_id.clone() {
+        state.register_subscription(connection, account_id);
+    }
+    Ok(local_bus_ok(serde_json::json!({ "subscribed": true })))
 }
 
 pub(crate) async fn dispatch_local_bus_request(
@@ -252,25 +289,7 @@ pub(crate) async fn dispatch_local_bus_request(
         return Err(SdkError::LocalBus("expected request frame".to_owned()));
     }
     match request.method.as_str() {
-        "subscription.open" => {
-            let body: LocalBusSubscriptionOpenRequest =
-                serde_json::from_value(request.body.clone())?;
-            if request
-                .body
-                .get("attended_frontend")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
-                let account_id = request_account_id(request)?.to_owned();
-                state.attended_accounts.insert(account_id.clone());
-                connection.attended_account_id = Some(account_id);
-            }
-            connection.topics.extend(body.topics);
-            if let Some(account_id) = request.account_id.clone() {
-                state.register_subscription(connection, account_id);
-            }
-            Ok(local_bus_ok(serde_json::json!({ "subscribed": true })))
-        }
+        "subscription.open" => open_subscription(request, state, connection),
         #[cfg(all(
             feature = "itest-memory-vault",
             ramflux_itest,
@@ -305,6 +324,20 @@ pub(crate) async fn dispatch_local_bus_request(
         }
         "surface.send" | "surface.action" | "surface.resync" | "surface.request_resync" => {
             crate::bus::dispatch::surface::dispatch_surface(request, state, connection).await
+        }
+        other => dispatch_local_bus_remainder(request, state, connection, other).await,
+    }
+}
+
+async fn dispatch_local_bus_remainder(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+    connection: &mut LocalBusConnectionState,
+    method: &str,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    match method {
+        method if method.starts_with("card.") => {
+            crate::bus::dispatch::card_session::dispatch(request, state).await
         }
         method if method.starts_with("message.") => {
             Box::pin(dispatch_message_bus_request(request, state, connection)).await
@@ -342,6 +375,7 @@ pub(crate) async fn dispatch_local_bus_request(
         method if method.starts_with("diag.") => {
             crate::bus::dispatch::residue::dispatch_residue(request, state)
         }
+        method if method.starts_with("agent.") => dispatch_agent_methods(request, state).await,
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
 }

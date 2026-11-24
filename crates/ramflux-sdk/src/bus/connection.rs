@@ -25,11 +25,16 @@ pub(super) async fn serve(
     let root_lease = super::data_root_lock::DataRootLock::acquire(&config.data_root)?;
     crate::custody::reconcile_incomplete_markers(&config.data_root, &root_lease)?;
     let _ = std::fs::remove_dir_all(object_get_spool_dir(&config.data_root));
-    if let Some(parent) = config.socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if config.socket_path.exists() {
-        std::fs::remove_file(&config.socket_path)?;
+    #[cfg(unix)]
+    super::socket_dir::prepare(&config.socket_path).await?;
+    #[cfg(not(unix))]
+    {
+        if let Some(parent) = config.socket_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if config.socket_path.exists() {
+            std::fs::remove_file(&config.socket_path)?;
+        }
     }
     let listener = crate::platform::listener::bind(&config.socket_path)?;
     let owner = listener.owner()?;
@@ -106,12 +111,14 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     supervisor: Rc<Supervisor>,
     id: u64,
 ) -> Result<(), SdkError> {
+    let credential_prompts = stream.accepts_credential_prompt();
     let generations = stream.subscription_generations();
     let (reader, writer) = stream.into_halves();
     let (outbound, receiver) = super::outbound::LocalBusOutbound::channel(64, generations);
     let credential_input =
         super::credentials::connection(supervisor.config.data_root.clone(), id, outbound.clone());
     let reader_credentials = credential_input.channel();
+    let host_credentials = Arc::clone(&reader_credentials);
     let RequestReader { task: reader_task, mut frames, mut disconnected } =
         spawn_request_reader(reader, reader_credentials, id);
     let (secrets, secret_receiver) = mpsc::channel::<zeroize::Zeroizing<Vec<u8>>>(1);
@@ -124,8 +131,8 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     ));
     let _cleanup =
         ConnectionTasks { reader: reader_task.abort_handle(), writer: writer_task.abort_handle() };
-    let mut connection = LocalBusConnectionState::new(id, outbound.clone());
-    connection.credential_channel = Some(credential_input.channel());
+    let mut connection = LocalBusConnectionState::new(id, outbound.clone())
+        .with_credentials(credential_input.channel(), credential_prompts);
     let mut requests = JoinSet::new();
     let mut inflight = BTreeSet::new();
     let mut ceremony: Option<crate::custody::CreationCeremony> = None;
@@ -133,63 +140,51 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     let result = loop {
         tokio::select! {
             _ = disconnected.changed() => break Ok(()),
-            () = tokio::time::sleep_until(ceremony.as_ref().map_or_else(|| tokio::time::Instant::now()+std::time::Duration::from_secs(3600), |c| c.deadline().into())), if ceremony.as_ref().is_some_and(|pending| !pending.is_expired()) => { if let Some(pending) = ceremony.as_mut() { pending.expire(); } },
+            () = tokio::time::sleep_until(ceremony_deadline(ceremony.as_ref())), if ceremony_pending(ceremony.as_ref()) => {
+                if let Some(pending) = ceremony.as_mut() {
+                    pending.expire();
+                }
+            },
             frame = frames.recv(), if requests.len() < 64 => {
-                let mut incoming = match frame {
-                    None => break Ok(()),
-                    Some(frame) => match frame {
-                    Ok(request) => request,
-                    Err(SdkError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => break Ok(()),
-                    Err(error) => break Err(error),
+                let step = admit_frame(
+                    frame,
+                    &mut AdmitState {
+                        supervisor: &supervisor,
+                        host_credentials: &host_credentials,
+                        ceremony: &mut ceremony,
+                        recovery: &mut recovery,
+                        disconnected: &mut disconnected,
+                        secrets: &secrets,
+                        outbound: &outbound,
+                        inflight: &mut inflight,
+                        connection: &mut connection,
+                        requests: &mut requests,
                     },
-                };
-                if super::custody_setup::handles(&incoming.frame()?.method)
-                    || super::agent_methods::handles(&incoming.frame()?.method)
-                {
-                    let bytes = custody_response(
-                        &mut incoming,
-                        &supervisor,
-                        &mut ceremony,
-                        &mut recovery,
-                        &mut disconnected,
-                    )
-                    .await?;
-                    tokio::time::timeout(Duration::from_secs(10),secrets.send(bytes)).await.map_err(|_|closed())?.map_err(|_|closed())?;
-                    continue;
+                )
+                .await?;
+                if let Admit::Done(done) = step {
+                    break done;
                 }
-                let mut request = incoming.take()?;
-                if let Err(error) = super::requests::deadline(&request) {
-                    outbound.send(rejected_request(&mut request, &error)).await.map_err(|_| closed())?;
-                    continue;
-                }
-                if request.kind != LocalBusFrameKind::Request {
-                    outbound.send(rejected_request(&mut request, &SdkError::LocalBus("expected request frame".to_owned()))).await.map_err(|_| closed())?;
-                    continue;
-                }
-                if !inflight.insert(request.request_id.clone()) {
-                    outbound.send(rejected_request(&mut request, &SdkError::LocalBus("duplicate in-flight request_id".to_owned()))).await.map_err(|_| closed())?;
-                    continue;
-                }
-                if subscription_method(&request.method) {
-                    if let Err(error)=configure_subscription(&supervisor,&mut connection,&request).await {
-                        outbound.send(rejected_request(&mut request, &error)).await.map_err(|_|closed())?;
-                    }
-                    inflight.remove(&request.request_id);
-                    continue;
-                }
-                let mut context = connection.clone();
-                context.pending_events.clear();
-                context.outbound = context.outbound.for_account(request.account_id.as_deref());
-                requests.spawn_local(super::requests::respond(request, Rc::clone(&supervisor), context));
             }
-            Some(result) = requests.join_next(), if !requests.is_empty() => {
-                match result {
-                    Ok((id, result)) => { inflight.remove(&id); if let Err(error) = result { break Err(error); } }
-                    Err(error) => break Err(SdkError::LocalBus(format!("request task failed: {error}"))),
+            Some(finished) = requests.join_next(), if !requests.is_empty() => {
+                if let Some(error) = task_error(finished, &mut inflight) {
+                    break Err(error);
                 }
             }
         }
     };
+    finish_connection(credential_input, requests, &supervisor, id, reader_task, writer_task).await;
+    result
+}
+
+async fn finish_connection(
+    credential_input: super::credentials::ConnectionInput,
+    mut requests: JoinSet<(String, Result<(), SdkError>)>,
+    supervisor: &Rc<Supervisor>,
+    id: u64,
+    reader_task: tokio::task::JoinHandle<()>,
+    writer_task: tokio::task::JoinHandle<Result<(), SdkError>>,
+) {
     credential_input.close();
     requests.abort_all();
     while requests.join_next().await.is_some() {}
@@ -198,7 +193,140 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     let _ = reader_task.await;
     writer_task.abort();
     let _ = writer_task.await;
-    result
+}
+
+enum Admit {
+    Stay,
+    Done(Result<(), SdkError>),
+}
+
+struct AdmitState<'a> {
+    supervisor: &'a Rc<Supervisor>,
+    host_credentials:
+        &'a Arc<crate::custody::pairing::private_credential::PrivateCredentialChannel>,
+    ceremony: &'a mut Option<crate::custody::CreationCeremony>,
+    recovery: &'a mut Option<crate::custody::RecoveryCeremony>,
+    disconnected: &'a mut watch::Receiver<bool>,
+    secrets: &'a mpsc::Sender<zeroize::Zeroizing<Vec<u8>>>,
+    outbound: &'a super::outbound::LocalBusOutbound,
+    inflight: &'a mut BTreeSet<String>,
+    connection: &'a mut LocalBusConnectionState,
+    requests: &'a mut JoinSet<(String, Result<(), SdkError>)>,
+}
+
+fn ceremony_pending(ceremony: Option<&crate::custody::CreationCeremony>) -> bool {
+    ceremony.is_some_and(|pending| !pending.is_expired())
+}
+
+fn ceremony_deadline(ceremony: Option<&crate::custody::CreationCeremony>) -> tokio::time::Instant {
+    ceremony.map_or_else(
+        || tokio::time::Instant::now() + std::time::Duration::from_secs(3600),
+        |pending| pending.deadline().into(),
+    )
+}
+
+fn task_error(
+    finished: Result<(String, Result<(), SdkError>), tokio::task::JoinError>,
+    inflight: &mut BTreeSet<String>,
+) -> Option<SdkError> {
+    match finished {
+        Ok((id, Ok(()))) => {
+            inflight.remove(&id);
+            None
+        }
+        Ok((id, Err(error))) => {
+            inflight.remove(&id);
+            Some(error)
+        }
+        Err(error) => Some(SdkError::LocalBus(format!("request task failed: {error}"))),
+    }
+}
+
+async fn admit_frame(
+    frame: Option<Result<super::custody_setup::Incoming, SdkError>>,
+    state: &mut AdmitState<'_>,
+) -> Result<Admit, SdkError> {
+    let mut incoming = match frame {
+        None => return Ok(Admit::Done(Ok(()))),
+        Some(Ok(request)) => request,
+        Some(Err(SdkError::Io(error))) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Ok(Admit::Done(Ok(())));
+        }
+        Some(Err(error)) => return Ok(Admit::Done(Err(error))),
+    };
+    if let Some(bytes) = local_method(
+        &mut incoming,
+        state.supervisor,
+        state.host_credentials,
+        state.ceremony,
+        state.recovery,
+        state.disconnected,
+    )
+    .await?
+    {
+        tokio::time::timeout(Duration::from_secs(10), state.secrets.send(bytes))
+            .await
+            .map_err(|_| closed())?
+            .map_err(|_| closed())?;
+        return Ok(Admit::Stay);
+    }
+    let mut request = incoming.take()?;
+    if let Err(error) = super::requests::deadline(&request) {
+        state.outbound.send(rejected_request(&mut request, &error)).await.map_err(|_| closed())?;
+        return Ok(Admit::Stay);
+    }
+    if request.kind != LocalBusFrameKind::Request {
+        let error = SdkError::LocalBus("expected request frame".to_owned());
+        state.outbound.send(rejected_request(&mut request, &error)).await.map_err(|_| closed())?;
+        return Ok(Admit::Stay);
+    }
+    if !state.inflight.insert(request.request_id.clone()) {
+        let error = SdkError::LocalBus("duplicate in-flight request_id".to_owned());
+        state.outbound.send(rejected_request(&mut request, &error)).await.map_err(|_| closed())?;
+        return Ok(Admit::Stay);
+    }
+    if subscription_method(&request.method) {
+        if let Err(error) =
+            configure_subscription(state.supervisor, state.connection, &request).await
+        {
+            state
+                .outbound
+                .send(rejected_request(&mut request, &error))
+                .await
+                .map_err(|_| closed())?;
+        }
+        state.inflight.remove(&request.request_id);
+        return Ok(Admit::Stay);
+    }
+    let mut context = state.connection.clone();
+    context.pending_events.clear();
+    context.outbound = context.outbound.for_account(request.account_id.as_deref());
+    state.requests.spawn_local(super::requests::respond(
+        request,
+        Rc::clone(state.supervisor),
+        context,
+    ));
+    Ok(Admit::Stay)
+}
+
+async fn local_method(
+    incoming: &mut super::custody_setup::Incoming,
+    supervisor: &Rc<Supervisor>,
+    channel: &Arc<crate::custody::pairing::private_credential::PrivateCredentialChannel>,
+    ceremony: &mut Option<crate::custody::CreationCeremony>,
+    recovery: &mut Option<crate::custody::RecoveryCeremony>,
+    disconnected: &mut watch::Receiver<bool>,
+) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, SdkError> {
+    let method = incoming.frame()?.method.clone();
+    if method == "agent.host.manage" {
+        return Ok(Some(super::host_manage::respond(incoming, Arc::clone(channel)).await?));
+    }
+    if super::custody_setup::handles(&method) || super::agent_methods::handles(&method) {
+        return Ok(Some(
+            custody_response(incoming, supervisor, ceremony, recovery, disconnected).await?,
+        ));
+    }
+    Ok(None)
 }
 
 struct RequestReader {
@@ -303,16 +431,62 @@ pub(super) async fn configure_subscription(
         return supervisor.subscribe_stream(request.clone(), connection).await;
     }
     let body: LocalBusSubscriptionOpenRequest = serde_json::from_value(request.body.clone())?;
+    // Phones follow the journal with bus.subscribe. Live topics stay on this
+    // ephemeral router so account start-up can publish. A journal topic is refused.
+    let journal = open_named_journal(supervisor, connection, request, &body.topics).await?;
+    if matches!(journal, super::supervisor::OpenJournal::Resync) {
+        supervisor.clear_stream(connection.connection_id);
+        return Ok(());
+    }
     connection.topics.extend(body.topics);
     if let Some(account) = request.account_id.clone() {
         supervisor.subscribe(connection, account);
     }
     connection
         .outbound
-        .send(local_bus_response(request, serde_json::json!({"subscribed":true})))
+        .send(local_bus_response(request, serde_json::json!({"subscribed": true})))
         .await
         .map_err(|_| closed())?;
+    if let super::supervisor::OpenJournal::Ready(follow) = journal {
+        supervisor
+            .install_stream(connection.connection_id, super::subscription::spawn_tail(*follow));
+    }
     Ok(())
+}
+
+/// Journal replay is `bus.subscribe`. Live event names stay on the ephemeral router.
+async fn open_named_journal(
+    supervisor: &Supervisor,
+    connection: &LocalBusConnectionState,
+    request: &LocalBusFrame,
+    topics: &[String],
+) -> Result<super::supervisor::OpenJournal, SdkError> {
+    if !asks_for_journal(topics) {
+        return Ok(super::supervisor::OpenJournal::Unavailable);
+    }
+    let opened = supervisor.prepare_open_journal(request, connection).await?;
+    // A wildcard before the account reader exists would otherwise acknowledge and deliver nothing.
+    if matches!(opened, super::supervisor::OpenJournal::Unavailable)
+        && topics.iter().any(|topic| topic == "*")
+    {
+        return Err(SdkError::LocalBus("unsupported reader request".to_owned()));
+    }
+    Ok(opened)
+}
+
+fn asks_for_journal(topics: &[String]) -> bool {
+    topics.iter().any(|topic| !topic.is_empty() && !ephemeral_subscription_topic(topic))
+}
+
+/// Topics the subscription router delivers without reading the account journal.
+fn ephemeral_subscription_topic(topic: &str) -> bool {
+    matches!(
+        topic,
+        "state.changed"
+            | "account.restore.finished"
+            | "mcp.approval.request"
+            | ramflux_protocol::message::TRANSIENT_TOPIC
+    )
 }
 
 fn rejected_request(request: &mut LocalBusFrame, error: &SdkError) -> LocalBusFrame {

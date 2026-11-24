@@ -109,6 +109,9 @@ pub(crate) fn retire_agent_material(
     vault: &dyn PrimaryVault,
     agent: &str,
 ) -> Result<(), SdkError> {
+    if super::reassociate::store_is_fenced(store)? {
+        return Err(SdkError::AgentCreationRefused("reassociation_pending"));
+    }
     let records = store.records()?;
     let account_id = account_of_agent(&records, agent)?
         .ok_or(SdkError::AgentCreationRefused("agent_not_found"))?;

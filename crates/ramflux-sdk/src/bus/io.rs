@@ -98,7 +98,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
             details: body.get("details").cloned().map(Box::new),
-            retry_after_ms: None,
+            retry_after_ms: refused_retry_after_ms(body),
             cause: None,
         };
     }
@@ -146,6 +146,14 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
     }
 }
 
+fn refused_retry_after_ms(body: &serde_json::Value) -> Option<u64> {
+    body.get("retry_after_ms").and_then(serde_json::Value::as_u64).or_else(|| {
+        body.get("retry_after_secs")
+            .and_then(serde_json::Value::as_i64)
+            .map(|secs| u64::try_from(secs).map_or(0, |wait| wait.saturating_mul(1_000)))
+    })
+}
+
 fn bus_reason_code(error: &SdkError) -> Option<String> {
     Some(match error {
         SdkError::AccountCommandBackpressure => "account_command_backpressure".into(),
@@ -157,7 +165,10 @@ fn bus_reason_code(error: &SdkError) -> Option<String> {
         SdkError::CustodyConfirmRejected(reason) => reason.token().to_owned(),
         SdkError::CustodyExpired => "deadline".into(),
         SdkError::ContactConfirmationRequired(_) => "root_replacement_confirmation_required".into(),
-        SdkError::ContactHomeNodeUnsupported => "invalid_card".into(),
+        SdkError::PairingCode(code) => {
+            let token = pairing_https_token(code)?;
+            token.to_owned()
+        }
         _ if local_bus_error_code(error) == "transfer_requires_sync" => {
             "head_or_removal_floor_mismatch".into()
         }
@@ -182,8 +193,20 @@ fn bus_error_details(error: &SdkError) -> Option<Box<serde_json::Value>> {
         SdkError::EditConflict { target, expected, received } => Some(Box::new(
             serde_json::json!({"target": target, "expected": expected, "received": received}),
         )),
+        SdkError::PairingCode(code) => {
+            pairing_https_token(code).map(|token| Box::new(serde_json::json!({"pairing": token})))
+        }
         _ => None,
     }
+}
+
+/// Static pairing HTTPS tokens. Other pairing codes keep their existing empty details.
+fn pairing_https_token(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "UntrustedPeer" => "UntrustedPeer",
+        "ResumeRequired" => "ResumeRequired",
+        _ => return None,
+    })
 }
 
 fn generated_error_body(error: &crate::bindings::AdapterError) -> LocalBusErrorBody {
@@ -217,6 +240,9 @@ fn redirected_bus_code(error: &SdkError) -> Option<&'static str> {
     }
     if matches!(error, SdkError::LocalBusRefused { code, .. } if code == "transfer_requires_sync") {
         return Some("transfer_requires_sync");
+    }
+    if matches!(error, SdkError::LocalBusRefused { code, .. } if code == "ClientSuspended") {
+        return Some("ClientSuspended");
     }
     if let SdkError::GroupRefused { operation, .. } = error {
         return Some(operation.error_code());
@@ -278,6 +304,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         | SdkError::Crypto(CryptoError::Protocol(
             ramflux_protocol::ProtocolError::GroupStateLimit(_),
         )) => "GroupStateCapacity",
+        SdkError::PairingCode(code) => code,
         other => delivery_error_code(other),
     }
 }
@@ -364,7 +391,8 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         E::ObjectOwnershipUnverified { .. } => "ObjectOwnershipUnverified",
         E::SchemaResetRequired { .. } | E::RawWireResetRequired => "SchemaResetRequired",
         E::AccountSchemaTooNew { .. } => "AccountSchemaTooNew",
-        E::Io(_) | E::Sqlite(_) => "storage_unavailable",
+        E::Io(_) => "storage_unavailable",
+        E::Sqlite(error) => sqlite_unavailable_code(error),
         E::Integrity(_)
         | E::Protocol(_)
         | E::AmbiguousDeviceId(_)
@@ -401,6 +429,17 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         | E::WriterPause
         | E::PairingField(_)
         | E::MuteUntilOutOfRange => "ValidationFailed",
+    }
+}
+
+fn sqlite_unavailable_code(error: &impl std::fmt::Display) -> &'static str {
+    let rendered = error.to_string();
+    if rendered.contains("idx_local_account_principal")
+        || rendered.contains("local_account.principal_commitment")
+    {
+        "storage_unavailable_principal"
+    } else {
+        "storage_unavailable"
     }
 }
 

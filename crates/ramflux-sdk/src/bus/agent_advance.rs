@@ -8,8 +8,9 @@ use super::supervisor::Supervisor;
 use crate::SdkError;
 use crate::custody::agent_creation::{
     AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentStep, AgentSteps,
-    RebindBinding, advance_all, agent_account_id, is_retired_agent_account, observe_primary,
-    paused_agent_binding,
+    RebindBinding, advance_all, advance_primary, advance_reassociation, agent_account_id,
+    fresh_plan_ready, is_retired_agent_account, observe_primary, paused_agent_binding,
+    plan_reassociation, rebind_awaits_owner, release_completed_sources,
 };
 use crate::custody::{CustodyConnection, CustodyNetworkConfig};
 use crate::gateway::GatewayQuicEndpointConfig;
@@ -202,6 +203,17 @@ async fn rebind_network(
     })
 }
 
+enum Settle {
+    Continue,
+    Follow(String),
+    Hold,
+}
+
+fn refused(human: &str, error: SdkError) -> SdkError {
+    tracing::warn!(account = %human, reason = %error, "agent reassociation refused");
+    error
+}
+
 impl Supervisor {
     /// Refuses an agent account that must not be unlocked or activated. Stage E0 (decision r20): an
     /// agent whose rebind is pending (R) or committed (C) is refused with the typed reason
@@ -265,6 +277,13 @@ impl Supervisor {
         if !self.account_is_open(human) {
             return Ok(Vec::new());
         }
+        match self.settle_reassociation(human, now).await? {
+            Settle::Hold => return Ok(Vec::new()),
+            Settle::Follow(destination) => {
+                return Box::pin(self.advance_agent_creations(&destination, now)).await;
+            }
+            Settle::Continue => {}
+        }
         // Opening the store creates its directory, which must not happen for an account that has
         // never created an agent: the directory is what makes an account look present on disk.
         let root = self.config.data_root.clone();
@@ -276,13 +295,7 @@ impl Supervisor {
         // Stage D2: observe the human's current primary first, so the rebind inventory is current
         // before any step runs. Complete agents are not advanced (advance only handles pending
         // requests), so the pause is recorded in the inventory and read by stage D3.
-        let primary = crate::custody::load_account(&root, human, now)?
-            .record()
-            .body
-            .master_certificate
-            .body
-            .primary_device_ref
-            .clone();
+        let primary = advance_primary(&root, human, now)?;
         // Stage D3: an agent whose binding moved to a new primary is paused. Its open session is
         // closed through the account.lock path, and the advance below never activates it.
         for entry in observe_primary(&store, &primary)? {
@@ -293,7 +306,8 @@ impl Supervisor {
             // the new primary. A refusal (the desktop left the human) keeps the agent paused, and the
             // next advance tries again.
             if entry.binding == RebindBinding::RebindPending
-                && entry.request_id.is_none()
+                && fresh_plan_ready(&root, &store, &entry.agent_account_id)?
+                && rebind_awaits_owner(&store, &entry)?
                 && let Some(actor) =
                     self.account_actor(human).filter(super::actor::AccountActor::is_open)
             {
@@ -337,6 +351,65 @@ impl Supervisor {
         Err(SdkError::CustodySetupInvalid)
     }
 
+    /// Move one human's agent inventory onto the account created by a fresh pairing, or resume
+    /// that journal. The source and each agent are drained first. The destination is not locked.
+    ///
+    /// `Hold` means the journal is still open, so this account must not activate or publish.
+    /// `Follow` is the destination, whose own advance sends the fresh plans.
+    async fn settle_reassociation(&self, human: &str, now: u64) -> Result<Settle, SdkError> {
+        let root = self.config.data_root.clone();
+        release_completed_sources(&root, human).map_err(|error| refused(human, error))?;
+        let index = self.index.clone();
+        let source_unlocked =
+            move |id: &str| index.account(id).is_ok_and(|row| row.account_state == "active");
+        let Some(planned) = plan_reassociation(&root, human, &source_unlocked)
+            .map_err(|error| refused(human, error))?
+        else {
+            return Ok(Settle::Continue);
+        };
+        self.lock_account_session(&planned.source).await.map_err(|error| refused(human, error))?;
+        for agent in &planned.agents {
+            self.lock_account_session(agent).await.map_err(|error| refused(human, error))?;
+        }
+        if !advance_reassociation(&root, human, now).map_err(|error| refused(human, error))? {
+            return Ok(Settle::Hold);
+        }
+        if planned.destination != human {
+            return Ok(Settle::Follow(planned.destination));
+        }
+        Ok(Settle::Continue)
+    }
+
+    /// Resume durable approved repairs without another read or unlock from the user.
+    pub(super) async fn maintain_agent_repairs(&self) {
+        let humans: Vec<String> = self
+            .accounts
+            .borrow()
+            .iter()
+            .filter(|(_, actor)| actor.is_open())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for human in humans {
+            match ready_repair(&self.config.data_root, &human) {
+                Ok(true) => {
+                    let Ok(now) = super::custody_setup::now() else { continue };
+                    match self.advance_agent_creations(&human, now).await {
+                        Ok(outcomes) => {
+                            for (_, result) in outcomes {
+                                if let Err(error) = result {
+                                    tracing::warn!(%error, "agent repair advance deferred");
+                                }
+                            }
+                        }
+                        Err(error) => tracing::warn!(%error, "agent repair scan deferred"),
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "agent repair readiness deferred"),
+            }
+        }
+    }
+
     /// Trigger (b) of decision r10: after a human account unlocks, finish what its pending agent
     /// creations still need. A failure leaves the requests pending for the next trigger.
     pub(super) async fn advance_after_unlock(&self, human: &str) {
@@ -344,6 +417,29 @@ impl Supervisor {
             let _ = self.advance_agent_creations(human, now).await;
         }
     }
+}
+
+fn ready_repair(root: &Path, human: &str) -> Result<bool, SdkError> {
+    if !root.join("custody_accounts").join(human).join("agent_creation").is_dir() {
+        return Ok(false);
+    }
+    let store = AgentCreationStore::open(root.to_path_buf(), human)?;
+    for entry in store.rebind_entries()? {
+        if !matches!(entry.binding, RebindBinding::RebindPending | RebindBinding::Committed) {
+            continue;
+        }
+        let Some(request) = entry.request_id else { continue };
+        let Some(record) = store.load(&request)? else { continue };
+        if matches!(
+            record.state,
+            AgentCreationState::Authorized
+                | AgentCreationState::PublicationPending
+                | AgentCreationState::PublicationUnknown
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

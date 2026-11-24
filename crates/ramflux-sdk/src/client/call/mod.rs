@@ -3,6 +3,7 @@
 
 mod control;
 mod handoff;
+pub(crate) mod history;
 pub(crate) mod intent;
 mod lease;
 pub(crate) mod state;

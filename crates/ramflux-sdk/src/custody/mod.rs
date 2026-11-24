@@ -32,9 +32,14 @@ pub(crate) use store::{
     PublicAuthorityCache, accept_publication, account_exists, custody_vault_reference,
     export_agent_credentials, failed_setup, failed_setup_error, list_accounts,
     load_account_with_cache, load_data_account, pending_head_fence_blocks,
-    reconcile_incomplete_markers, reserve_pairing_account,
+    reconcile_incomplete_markers, remove_custody_tree, reserve_pairing_account,
+    retarget_agent_custodian, stored_custodian_id, with_anchor_ceremony,
 };
 pub(crate) use store::{finish_recovery, pending_restore};
+#[cfg(feature = "c-abi")]
+pub(crate) use vault::agent_key_unavailable;
+#[cfg(target_os = "linux")]
+pub use vault::linux::LinuxDesktopVault;
 pub(crate) use vault::require_vault_reference;
 pub use vault::{
     AgentDecisionSigning, BranchCredentials, CustodyVaultReason, DEVICE_UNLOCK_PREFIX,

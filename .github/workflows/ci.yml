@@ -5,7 +5,9 @@ on:
   # start a second identical run per push.
   push:
     branches: ["main"]
+  # Owner workflow 2026-11-23: CI gates only the next -> main promotion and main itself; next is verified by real runs.
   pull_request:
+    branches: ["main"]
   workflow_dispatch:
     inputs:
       mutants_base:
@@ -1486,7 +1488,7 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           repository: openprx/prx
-          ref: f1d430cedee6277829f4b3826c2e451ca6858cbc
+          ref: 238fa1706eb81dc43da11ea5d9607883f9ba7681
           path: prx
           persist-credentials: false
 
@@ -1505,7 +1507,7 @@ jobs:
       - name: Build prx at the pinned commit
         working-directory: prx
         env:
-          PRX_BUILD_COMMIT: f1d430cedee6277829f4b3826c2e451ca6858cbc
+          PRX_BUILD_COMMIT: 238fa1706eb81dc43da11ea5d9607883f9ba7681
         run: cargo build --bin prx
 
       - name: Contract tests against the real daemon

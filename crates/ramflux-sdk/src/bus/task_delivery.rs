@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Ordinary gateway submission and bounded executor-confirmation retries.
+use crate::gateway::access::ClassifiedSubmit;
 use crate::prelude::*;
 pub(super) const SUBMIT_ALLOWANCE: Duration = Duration::from_secs(15);
 pub(super) struct Destination {
@@ -62,13 +63,24 @@ async fn submit(
                     target_node_id = %destination.route.target_node_id,
                     "forwarding task control to federation"
                 );
-                RamfluxClient::forward_task_envelope_until(
-                    destination.route.clone(),
-                    envelope,
+                let target = (!destination.route.target_node_id.is_empty())
+                    .then(|| destination.route.target_node_id.clone());
+                match tokio::time::timeout_at(
                     deadline,
+                    engine.submit_classified_to(envelope, target),
                 )
                 .await
-                .map(|_| ())
+                {
+                    Ok(Ok(Ok(_))) => Ok(()),
+                    Ok(Ok(Err(refusal))) => {
+                        Err(SdkError::GatewaySessionRejected(refusal.reason().to_owned()))
+                    }
+                    Ok(Err(error)) => Err(error),
+                    Err(_) => {
+                        account.retire_session(&engine)?;
+                        Err(SdkError::TaskDeliveryTimeout)
+                    }
+                }
             }
             Err(error) => Err(error),
         }
@@ -137,6 +149,7 @@ mod tests {
     struct HangingLegacyGateway {
         last: Option<GatewayClientFrame>,
         stall_heartbeat: bool,
+        submit_arrived: Option<Arc<tokio::sync::Notify>>,
     }
 
     impl GatewaySessionFrameSink for HangingLegacyGateway {
@@ -146,6 +159,12 @@ mod tests {
                     serde_json::from_slice(frame)
                         .map_err(|error| TransportError::Quic(error.to_string()))?,
                 );
+                if let Some(GatewayClientFrame::Submit { submit }) = &self.last
+                    && let Some(arrived) = &self.submit_arrived
+                {
+                    assert_eq!(submit.target_node.as_deref(), Some("b"), "federated target lost");
+                    arrived.notify_one();
+                }
                 Ok(())
             })
         }
@@ -174,22 +193,6 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn federated_submit_respects_the_shared_deadline_and_returns_the_actor_engine()
     -> Result<(), Box<dyn std::error::Error>> {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let url = format!("http://{}", listener.local_addr()?);
-        let (arrived, mut observed) = tokio::sync::oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
-        let server = std::thread::spawn(move || -> std::io::Result<()> {
-            let (mut socket, _) = listener.accept()?;
-            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
-            let mut buffer = [0; 4096];
-            let _ = socket.read(&mut buffer)?;
-            let _ = arrived.send(());
-            // Release-controlled peer; this generous wall guard only bounds cleanup.
-            let _ = released.recv_timeout(Duration::from_secs(5));
-            let _ = socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n");
-            Ok(())
-        });
         let mut account = Box::pin(crate::client::native_test_support::Fixture::with_principal(
             "federated-submit-deadline",
             "device-sender",
@@ -197,9 +200,14 @@ mod tests {
         ))
         .await?
         .into_bus();
+        let arrived = Arc::new(tokio::sync::Notify::new());
         account.install_test_session(GatewaySessionEngine::with_test_transport(
             account.gateway_config.clone(),
-            Box::new(HangingLegacyGateway { last: None, stall_heartbeat: false }),
+            Box::new(HangingLegacyGateway {
+                last: None,
+                stall_heartbeat: false,
+                submit_arrived: Some(Arc::clone(&arrived)),
+            }),
         ));
         let message = GatewayDirectMessage {
             conversation_id: "task".into(),
@@ -219,12 +227,9 @@ mod tests {
         )?;
         let destination = Destination {
             route: LocalBusFederationRoute {
-                federation_url: url,
                 source_node_id: "a".into(),
                 target_node_id: "b".into(),
                 required_capability: "task".into(),
-                admin_token: None,
-                recipient_prekey_url: None,
             },
 
             device_id: "remote-device".into(),
@@ -234,7 +239,7 @@ mod tests {
         let envelope = Delivery { envelope, federation: Some(destination) };
         let (result, account) = LocalSet::new()
             .run_until(async move {
-                let task = tokio::task::spawn_local(async move {
+                let mut task = tokio::task::spawn_local(async move {
                     let result = submit_until(
                         &mut account,
                         vec![envelope],
@@ -243,28 +248,22 @@ mod tests {
                     .await;
                     (result, account)
                 });
-                let guard = std::time::Instant::now();
-                while observed.try_recv().is_err() {
-                    assert!(!task.is_finished(), "submit ended before the HTTP barrier");
-                    assert!(guard.elapsed() < Duration::from_secs(10), "HTTP barrier not reached");
-                    tokio::task::yield_now().await;
+                tokio::select! {
+                    () = arrived.notified() => {},
+                    outcome = &mut task => return Err(format!("submit ended before the gateway barrier: {}", outcome.is_ok()).into()),
                 }
                 assert_eq!(started.elapsed(), Duration::ZERO);
                 tokio::time::advance(Duration::from_secs(1)).await;
-                task.await
+                Ok::<_, Box<dyn std::error::Error>>(task.await?)
             })
             .await?;
-        let _ = release.send(());
         assert!(matches!(result, Err(SdkError::TaskDeliveryTimeout)), "{result:?}");
         assert_eq!(started.elapsed(), Duration::from_secs(1));
         assert!(
-            account.has_pooled_engine(),
-            "HTTP timeout must not discard the unrelated gateway session"
+            !account.has_pooled_engine(),
+            "a timed-out gateway exchange must return the actor without reusing its uncertain session"
         );
-        tokio::task::spawn_blocking(move || {
-            server.join().map_err(|_| std::io::Error::other("stub panicked"))?
-        })
-        .await??;
+        account.connection.as_ref().ok_or("test: returned connection")?.stop().await;
         Ok(())
     }
 
@@ -285,7 +284,11 @@ mod tests {
         config.last_seen_inbox_seq = 41;
         account.install_test_session(GatewaySessionEngine::with_test_transport(
             config,
-            Box::new(HangingLegacyGateway { last: None, stall_heartbeat: true }),
+            Box::new(HangingLegacyGateway {
+                last: None,
+                stall_heartbeat: true,
+                submit_arrived: None,
+            }),
         ));
         // D1: acquisition waits for admission, rather than issuing a heartbeat
         // on a borrowed engine. Hold that actual admission boundary.
@@ -301,12 +304,9 @@ mod tests {
         }))?;
         let destination = Destination {
             route: LocalBusFederationRoute {
-                federation_url: "http://127.0.0.1:1".into(),
                 source_node_id: "a".into(),
                 target_node_id: "b".into(),
                 required_capability: "task".into(),
-                admin_token: None,
-                recipient_prekey_url: None,
             },
 
             device_id: "remote".into(),
@@ -351,7 +351,11 @@ mod tests {
         config.last_seen_inbox_seq = 41;
         account.install_test_session(GatewaySessionEngine::with_test_transport(
             config,
-            Box::new(HangingLegacyGateway { last: None, stall_heartbeat: false }),
+            Box::new(HangingLegacyGateway {
+                last: None,
+                stall_heartbeat: false,
+                submit_arrived: None,
+            }),
         ));
         let envelope: ramflux_protocol::Envelope = serde_json::from_value(serde_json::json!({
             "schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2",

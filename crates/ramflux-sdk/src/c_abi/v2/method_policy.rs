@@ -33,6 +33,8 @@ policies! {
     "a2i.append" => ("a2i", true, true, false, false),
     "a2i.list" => ("a2i", false, true, false, false),
     "a2i.list_pending" => ("a2i", false, true, false, false),
+    "account.app_lock.configure" => ("account", false, false, false, false),
+    "account.app_lock.state" => ("account", false, false, false, false),
     "account.backup.cancel" => ("account", true, false, false, false),
     "account.backup.create" => ("account", true, false, false, false),
     "account.backup.export" => ("account", true, true, false, true),
@@ -58,15 +60,28 @@ policies! {
     "account.recover.begin" => ("account", true, true, false, false),
     "account.recover.cancel" => ("account", false, false, false, false),
     "account.recover.confirm" => ("account", true, true, false, false),
+    "account.remove_local" => ("account", true, false, false, false),
     "account.restore.install" => ("account", true, false, false, false),
     "account.restore.verify" => ("account", true, false, false, false),
+    "account.sign_out" => ("account", true, true, false, false),
     "account.status" => ("account", false, true, false, false),
     "account.switch" => ("account", true, true, false, false),
     "account.unlock" => ("account", true, true, false, false),
     "agent.access.set" => ("agent", false, false, false, false),
+    "agent.approval.decide" => ("agent", false, false, false, false),
+    "agent.approval.list" => ("agent", false, false, false, false),
+    "agent.approval.publish" => ("agent", false, false, false, false),
+    "agent.job.list" => ("agent", false, false, false, false),
+    "agent.job.pause" => ("agent", false, false, false, false),
+    "agent.job.remove" => ("agent", false, false, false, false),
+    "agent.job.resume" => ("agent", false, false, false, false),
+    "agent.job.session" => ("agent", false, false, false, false),
+    "agent.job.sessions" => ("agent", false, false, false, false),
+    "agent.progress" => ("agent", false, false, false, false),
     "agent.create" => ("agent", false, false, false, true),
     "agent.creation.decide" => ("agent", false, false, false, true),
     "agent.get" => ("agent", false, false, false, false),
+    "agent.host.manage" => ("agent", false, false, false, false),
     "agent.list" => ("agent", false, false, false, false),
     "agent.operation.get" => ("agent", false, false, false, false),
     "agent.persona.edit" => ("agent", false, false, false, false),
@@ -97,6 +112,15 @@ policies! {
     "call.list" => ("call", false, true, false, false),
     "call.media.session" => ("call", true, true, false, false),
     "call.reject" => ("call", true, true, false, false),
+    "card.session.dispose" => ("card", false, true, false, false),
+    "card.session.event" => ("card", true, true, false, false),
+    "card.session.open" => ("card", false, true, false, false),
+    "card.session.present" => ("card", false, true, false, false),
+    "card.session.resume" => ("card", false, true, false, false),
+    "card.session.slot" => ("card", true, true, false, false),
+    "card.session.submit" => ("card", true, true, false, false),
+    "card.session.suspend" => ("card", false, true, false, false),
+    "card.session.update" => ("card", false, true, false, false),
     "contact.accept" => ("contact", true, true, false, false),
     "contact.add" => ("contact", true, true, false, false),
     "contact.block" => ("contact", true, true, false, false),
@@ -108,6 +132,7 @@ policies! {
     "contact.rejected" => ("contact", false, true, false, false),
     "contact.remove" => ("contact", true, true, false, false),
     "contact.request" => ("contact", true, true, false, false),
+    "contact.requests.decline" => ("contact", true, true, false, false),
     "contact.requests.list" => ("contact", false, true, false, false),
     "contact.requests.policy.get" => ("contact", false, true, false, false),
     "contact.requests.policy.set" => ("contact", true, true, false, false),
@@ -155,6 +180,7 @@ policies! {
     "group.invitation.accept" => ("group", true, true, false, false),
     "group.invitation.decline" => ("group", true, true, false, false),
     "group.invitations.list" => ("group", false, true, false, false),
+    "group.leave" => ("group", true, true, false, false),
     "group.list" => ("group", false, true, false, false),
     "group.member.add" => ("group", true, true, false, false),
     "group.member.kick" => ("group", true, true, false, false),
@@ -252,16 +278,11 @@ policies! {
     "profile.update" => ("profile", true, true, false, false),
 }
 
-// Search stays unavailable to native hosts until its separate ABI integration is admitted.
+// Search and daemon shutdown stay unavailable. Username methods and the
+// profile alias are executable. The master phrase is not a bus field.
 pub(super) const DENIED_METHODS: &[&str] = &[
-    // Generic media-key export is refused before admission, with or without
-    // `allow_secret_exports`. The in-process handoff is not a bus method.
+// Generic media-key export is refused before admission, regardless of export permission.
     "call.media.session",
-    "username.mutate",
-    "username.status",
-    "username.resolve",
-    "username.contact.add",
-    "profile.update",
     "daemon.stop",
     "search.cancel",
     "search.cursor.close",
@@ -292,9 +313,9 @@ pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
     "ramflux.message.v1.ContactSafetyVerifyResult";
 /// blake3 of the generated message descriptor set.
 pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
-    "d18147ce9e60d3ed594f27edcd4322b0c12dea72914d72eb912005c94cc146d5";
+    "50108989877d6e1601743d5d242862d4e130155bf3bd1b3fd28b213426b42686";
 /// Immutable product commit whose tree contains this CAS policy and descriptor.
-pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "5d9281898913f2104e2a077865979059bc3e3c51";
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "36cf7b76679c625c0bc9a31fe20d8ce95b35523f";
 
 pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
     let mut rows = METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify");
@@ -310,7 +331,7 @@ pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
         && CONTACT_VERIFY_CAS_CONTRACT == "CONTACT-VERIFY-CAS-01"
         && CONTACT_VERIFY_CAS_REQUEST_TYPE == "ramflux.message.v1.ContactSafetyVerifyRequest"
         && CONTACT_VERIFY_CAS_RESPONSE_TYPE == "ramflux.message.v1.ContactSafetyVerifyResult"
-        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "5d9281898913f2104e2a077865979059bc3e3c51"
+        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "36cf7b76679c625c0bc9a31fe20d8ce95b35523f"
 }
 
 #[cfg(test)]

@@ -152,11 +152,10 @@ fn failure_outputs_preserve_structured_codes_and_erase_diagnostics() {
 }
 
 #[test]
-fn concurrent_opens_reserve_a_previously_missing_root() {
-    let root = tempfile::tempdir().expect("test: root parent");
-    let missing = root.path().join("new-root");
+fn concurrent_opens_reserve_an_existing_root() {
+    let root = super::tests::private_tempdir();
     let config = std::sync::Arc::new(
-        serde_json::to_vec(&json!({"data_root":missing,"allow_secret_exports":true}))
+        serde_json::to_vec(&json!({"data_root":root.path(),"allow_secret_exports":true}))
             .expect("test: config"),
     );
     let (finished, outcomes) = std::sync::mpsc::sync_channel(2);
@@ -205,7 +204,7 @@ fn concurrent_opens_reserve_a_previously_missing_root() {
 
 #[test]
 fn closed_command_channel_returns_closed_before_atomic_shutdown_flags() {
-    let root = tempfile::tempdir().expect("test: isolated supervisor");
+    let root = super::tests::private_tempdir();
     let mut client = super::runtime::Client::start(crate::LocalBusConfig::new("", root.path()))
         .expect("test: real supervisor");
     let (sender, receiver) = tokio::sync::mpsc::channel(1);

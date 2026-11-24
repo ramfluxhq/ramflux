@@ -11,16 +11,18 @@ use serde_json::json;
 
 pub struct AgentHost<E> {
     pub(crate) config: Config,
+    /// Human account that owns this agent, when `account.status` names a different custodian.
+    owner_account: Option<String>,
     pub(crate) engine: E,
     pub(crate) store: CheckpointStore,
     pub(crate) state: Checkpoint,
+    pub(crate) held_owner: Vec<crate::runner_retry::HeldOwner>,
 }
 struct IntentDelivery<'a> {
     conversation_id: &'a str,
     message_id: &'a str,
     intents: Vec<Intent>,
     seq: u64,
-    now_ms: u64,
 }
 impl<E: EngineProvider> AgentHost<E> {
     /// # Errors
@@ -38,8 +40,7 @@ impl<E: EngineProvider> AgentHost<E> {
         }
         engine.restore(state.engine.as_ref())?;
         state.engine = engine.checkpoint()?;
-        if !crate::runner_deferred::valid(&state)
-            || !crate::runner_approval::valid(&state)
+        if !crate::runner_approval::valid(&state)
             || state.handled_actions.len() > 2048
             || state.pending.as_ref().is_some_and(|p| {
                 !matches!(
@@ -55,7 +56,7 @@ impl<E: EngineProvider> AgentHost<E> {
         {
             return Err(Error::State);
         }
-        Ok(Self { config, engine, store, state })
+        Ok(Self { config, owner_account: None, engine, store, state, held_owner: Vec::new() })
     }
     pub(crate) fn save_state(&mut self) -> Result<()> {
         self.state.engine = self.engine.checkpoint()?;
@@ -74,13 +75,42 @@ impl<E: EngineProvider> AgentHost<E> {
         &self.state
     }
 
+    /// The human custodian, when this agent account names one.
+    #[must_use]
+    pub fn owner_account(&self) -> Option<&str> {
+        self.owner_account.as_deref()
+    }
+
+    /// Cancels every stored PRX run by its session and run id.
+    ///
+    /// A locked account makes the next `start` return [`Error::IdentityLost`] before
+    /// `account.locked` is applied, so the process exit calls this as well.
+    ///
+    /// # Errors
+    /// Returns a provider or checkpoint error. A remote cancel that cannot be confirmed is not an error.
+    pub async fn cancel_live_runs(&mut self) -> Result<()> {
+        let conversations = self.engine.active_conversations();
+        for conversation_id in &conversations {
+            self.engine.cancel(conversation_id).await?;
+        }
+        self.state.approvals.clear();
+        self.save_state()
+    }
+
+    /// Posts one owner approval decision. The agent bus is not required.
+    ///
+    /// # Errors
+    /// Returns a transport failure. A coded PRX refusal is `Ok`.
+    pub async fn post_owner_decision(&mut self, event: &LocalBusFrame) -> Result<()> {
+        crate::runner_run_approval::post_owner_decision(&mut self.engine, event).await
+    }
+
     /// Bind the headless identity and replay from the last durably applied cursor.
     /// # Errors
     /// Rejects revoked/human accounts, unavailable snapshots, stream gaps and state I/O failures.
     pub async fn start(&mut self, bus: &mut impl AgentBus) -> Result<()> {
-        participant::identity(bus, &mut self.state, &self.config.account_id).await?;
-        self.engine.publish_limits().await?;
-        self.normalize_deferred()?;
+        self.owner_account =
+            participant::identity(bus, &mut self.state, &self.config.account_id).await?;
         let topics = json!([
             "message.received",
             "group.message.received",
@@ -91,7 +121,8 @@ impl<E: EngineProvider> AgentHost<E> {
             "identity.device_branch.revoked",
             "surface.changed",
             "task.changed",
-            "account.locked"
+            "account.locked",
+            "agent.approval"
         ]);
         let subscription = bus
             .request("bus.subscribe", json!({"topics":topics,"since_seq":self.state.cursor}), None)
@@ -151,7 +182,6 @@ impl<E: EngineProvider> AgentHost<E> {
             self.save_state()?;
             return Err(Error::IdentityLost);
         }
-        self.prune_rate_history(now_ms);
         let result = self.apply_event(bus, &event, seq, now_ms).await;
         self.finish_event(result, &event, seq)
     }
@@ -179,11 +209,12 @@ impl<E: EngineProvider> AgentHost<E> {
             self.message(bus, event, seq, now_ms).await?;
         }
         if event.method == "surface.changed" {
-            self.surface_action(bus, event, seq, now_ms).await?;
+            self.surface_action(bus, event, seq).await?;
         }
         if matches!(event.method.as_str(), "conversation.changed" | "group.changed") {
             self.cancel_removed_conversations(bus).await?;
         }
+        crate::runner_run_approval::forward(bus, &mut self.engine, event).await?;
         self.state.cursor = Some(seq);
         self.save_state()
     }
@@ -203,26 +234,11 @@ impl<E: EngineProvider> AgentHost<E> {
             return Ok(());
         }
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
-        let Some(conversation) = participant::conversation(
-            bus,
-            &self.state,
-            conversation_id,
-            self.config.max_conversations,
-        )
-        .await?
+        let Some(conversation) =
+            participant::conversation(bus, &self.state, conversation_id).await?
         else {
             return Ok(());
         };
-        if !self.engine.is_busy(conversation_id)
-            && self.state.last_reply_ms.get(conversation_id).is_some_and(|last| {
-                now_ms < last.saturating_add(self.config.per_conversation_interval_ms)
-            })
-        {
-            return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::RateLimited));
-        }
-        if !self.rate_history_has_capacity(conversation_id) {
-            return Err(Error::Limit);
-        }
         let Some(message) = crate::message_input::read(bus, conversation_id, message_id).await?
         else {
             return Ok(());
@@ -267,9 +283,7 @@ impl<E: EngineProvider> AgentHost<E> {
             let acknowledged = event.clone();
             match event {
                 EngineEvent::Intents { conversation_id, message_id, intents } => {
-                    if intents.is_empty() {
-                        self.state.last_reply_ms.insert(conversation_id.clone(), now_ms);
-                    } else {
+                    if !intents.is_empty() {
                         self.emit_intents(
                             bus,
                             IntentDelivery {
@@ -277,7 +291,6 @@ impl<E: EngineProvider> AgentHost<E> {
                                 message_id: &message_id,
                                 intents,
                                 seq,
-                                now_ms,
                             },
                         )
                         .await?;
@@ -332,7 +345,6 @@ impl<E: EngineProvider> AgentHost<E> {
                                         .into(),
                                 )],
                                 seq,
-                                now_ms,
                             },
                         )
                         .await?;
@@ -369,7 +381,7 @@ impl<E: EngineProvider> AgentHost<E> {
         bus: &mut impl AgentBus,
         event: &EngineEvent,
         seq: u64,
-        now_ms: u64,
+        _now_ms: u64,
     ) -> Result<()> {
         let EngineEvent::VisibleFailure { conversation_id, message_id, reason } = event else {
             return Err(Error::State);
@@ -381,7 +393,6 @@ impl<E: EngineProvider> AgentHost<E> {
                 message_id,
                 intents: vec![Intent::ReplyText(reason.reply().into())],
                 seq,
-                now_ms,
             },
         )
         .await?;
@@ -394,15 +405,7 @@ impl<E: EngineProvider> AgentHost<E> {
     async fn cancel_removed_conversations(&mut self, bus: &mut impl AgentBus) -> Result<()> {
         let conversations = self.engine.active_conversations();
         for conversation_id in conversations {
-            if participant::conversation(
-                bus,
-                &self.state,
-                &conversation_id,
-                self.config.max_conversations,
-            )
-            .await?
-            .is_none()
-            {
+            if participant::conversation(bus, &self.state, &conversation_id).await?.is_none() {
                 self.engine.erase_history(&conversation_id).await?;
                 self.engine.cancel(&conversation_id).await?;
                 self.state.approvals.remove(&conversation_id);
@@ -416,15 +419,10 @@ impl<E: EngineProvider> AgentHost<E> {
         bus: &mut impl AgentBus,
         delivery: IntentDelivery<'_>,
     ) -> Result<()> {
-        let IntentDelivery { conversation_id, message_id, intents, seq, now_ms } = delivery;
+        let IntentDelivery { conversation_id, message_id, intents, seq } = delivery;
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
-        let Some(conversation) = participant::conversation(
-            bus,
-            &self.state,
-            conversation_id,
-            self.config.max_conversations,
-        )
-        .await?
+        let Some(conversation) =
+            participant::conversation(bus, &self.state, conversation_id).await?
         else {
             self.engine.cancel(conversation_id).await?;
             self.state.approvals.remove(conversation_id);
@@ -444,7 +442,6 @@ impl<E: EngineProvider> AgentHost<E> {
                         surface_id: intents.first().and_then(Intent::surface_id).map(str::to_owned),
                         reason,
                     });
-                    self.state.last_reply_ms.insert(conversation_id.into(), now_ms);
                     return self.store.save(&self.state);
                 }
                 Err(error) => return Err(error),
@@ -482,7 +479,6 @@ impl<E: EngineProvider> AgentHost<E> {
             plan,
             needs_rederive: None,
         });
-        self.state.last_reply_ms.insert(conversation_id.into(), now_ms);
         self.save_state()?;
         self.recover_pending(bus).await?;
         Ok(())
@@ -491,6 +487,19 @@ impl<E: EngineProvider> AgentHost<E> {
     /// # Errors
     /// Returns on stream loss/revocation so the caller can reconnect or stop without acting.
     pub async fn run(&mut self, bus: &mut impl AgentBus) -> Result<()> {
+        self.run_paired(bus, &mut None::<crate::RfdBus>).await
+    }
+
+    /// Same loop as [`Self::run`], plus the human owner's approval journal.
+    /// An owner decision is posted on `bus` (the agent), not on the owner socket.
+    ///
+    /// # Errors
+    /// Returns on stream loss or revocation so the caller can reconnect or stop.
+    pub async fn run_paired<O: AgentBus>(
+        &mut self,
+        bus: &mut impl AgentBus,
+        owner: &mut Option<O>,
+    ) -> Result<()> {
         let mut tick =
             tokio::time::interval(std::time::Duration::from_millis(self.config.poll_interval_ms));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -498,9 +507,65 @@ impl<E: EngineProvider> AgentHost<E> {
         tick.tick().await;
         loop {
             tokio::select! {
-                event=bus.next_event()=>self.apply(bus,event?,crate::bus::now_ms()).await?,
-                _=tick.tick()=>self.poll(bus, crate::bus::now_ms()).await?,
+                event = bus.next_event() => {
+                    self.apply(bus, event?, crate::bus::now_ms()).await?;
+                }
+                event = owner_event(owner) => {
+                    if let Some(frame) = event {
+                        let frame = frame?;
+                        if frame.kind == LocalBusFrameKind::Event && frame.method == "stream.lagged"
+                        {
+                            return Err(Error::Resync);
+                        }
+                        match crate::runner_run_approval::forward(bus, &mut self.engine, &frame).await
+                        {
+                            Ok(()) => {}
+                            Err(error) if error.stops_host() => return Err(error),
+                            Err(Error::RateLimited { retry_after_ms }) => {
+                                self.hold_owner(frame, retry_after_ms);
+                            }
+                            Err(error) => {
+                                eprintln!("prx approval forward deferred: {error}");
+                                self.hold_owner(frame, 3_000);
+                            }
+                        }
+                    }
+                }
+                _ = tick.tick() => {
+                    let now_ms = crate::bus::now_ms();
+                    self.flush_held_owner(bus).await?;
+                    if self.engine.job_poll_ready() {
+                        self.poll(bus, now_ms).await?;
+                    } else {
+                        self.poll_with(bus, now_ms, false).await?;
+                    }
+                }
             }
         }
+    }
+}
+
+/// Tails the owner journal from the start so a decision made before this socket attached is posted.
+///
+/// # Errors
+/// Returns a bus failure. A pruned cursor resubscribes at the current head.
+pub async fn subscribe_owner(owner: &mut impl AgentBus) -> Result<()> {
+    let topics = json!(["agent.approval"]);
+    match owner.request("bus.subscribe", json!({"topics": topics, "since_seq": 0}), None).await {
+        Ok(_) => Ok(()),
+        Err(Error::Resync) => {
+            owner.request("bus.subscribe", json!({"topics": topics}), None).await?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn owner_event<O: AgentBus>(owner: &mut Option<O>) -> Option<Result<LocalBusFrame>> {
+    if let Some(owner) = owner.as_mut() {
+        Some(owner.next_event().await)
+    } else {
+        std::future::pending::<()>().await;
+        None
     }
 }

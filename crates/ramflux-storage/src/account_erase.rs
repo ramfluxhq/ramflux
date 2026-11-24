@@ -40,8 +40,7 @@ pub(crate) fn set_open_race_hook(hook: Option<OpenRaceHook>) {
 }
 
 impl AccountIndex {
-    /// Tombstones an account under an exclusive writer lease, then removes its root payload
-    /// (dormant; nothing calls it yet).
+    /// Tombstones an account under an exclusive writer lease, then removes its root payload.
     ///
     /// The lease is taken before the tombstone, so a refused erase leaves the state and
     /// the wrapped key unchanged. The tombstone sets `removed` and clears the wrapped key.
@@ -72,6 +71,7 @@ impl AccountIndex {
             params![local_account_id, REMOVED],
         )?;
         self.erase_device_unlock(local_account_id)?;
+        self.erase_app_lock(local_account_id)?;
         remove_root_payload(&self.root().join("accounts").join(local_account_id))?;
         crate::FileVaultSecretSource::new(self.root()).remove_erased_owner(local_account_id)
     }

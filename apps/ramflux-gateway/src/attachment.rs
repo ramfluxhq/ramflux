@@ -79,7 +79,10 @@ fn oversize(call: &AttachmentCall) -> bool {
         AttachmentCall::Retire { retirement, signature } => {
             retirement.0.len() > 512 || signature.0.len() != 64
         }
-        AttachmentCall::Authority => false,
+        AttachmentCall::UploadStatus { upload_id, object_id, manifest_hash, .. } => {
+            upload_id.0.len() != 32 || object_id.0.len() != 32 || manifest_hash.0.len() != 32
+        }
+        AttachmentCall::Authority | AttachmentCall::AccountStatus => false,
     }
 }
 

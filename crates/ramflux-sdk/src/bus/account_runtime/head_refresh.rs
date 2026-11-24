@@ -165,7 +165,6 @@ impl AccountRuntime {
         let network_deadline = admitted_at + self.timeouts.network_wait;
         // Every NEW send authorization needs an authority fetched after this command began.
         let since = std::time::Instant::now();
-        let mut enqueued = BTreeSet::new();
         let mut receive_prepared = false;
         let mut demand = None;
         if command.request.method == "group.read"
@@ -198,21 +197,26 @@ impl AccountRuntime {
                 let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(receive_prepared));
                 return Ok(());
             }
+            if let Some(error) = self.demanded_foreign(&roots, since) {
+                return Err(error);
+            }
             // A refresh only makes held entries ready; dispatch must replay them.
             receive_prepared = false;
             if demand.is_none() {
                 demand = Some(super::head_demand::HeadDemand::arm(&self.command_waiting));
             }
-            // Leave once the fetch budget ends. Waiting here for a fetch that has
-            // not queued its Apply holds the only reader of `connection_work`.
+            // Leave once the fetch budget ends. This select keeps reading both queues.
+            // A root stays demanded after a fetch that began before `since`: that
+            // observation cannot authorize this command, and enqueue is idempotent
+            // while a pass is already in flight.
             if Instant::now() >= network_deadline {
                 return self.refuse_or_apply_queued(command, since).await;
             }
             let Some(account) = self.state.accounts.get_mut(&self.id) else {
                 return Ok(());
             };
-            for root in roots {
-                if enqueued.insert(root.clone()) && !account.head_refresh.enqueue(root) {
+            for root in &roots {
+                if !account.head_refresh.enqueue(root.clone()) {
                     return Err(pending(account));
                 }
             }
@@ -226,6 +230,9 @@ impl AccountRuntime {
                 work = self.connection_work.recv() => {
                     let Some(work) = work else { return Err(SdkError::NetworkingPending); };
                     self.admit_during_head_demand(work).await?;
+                    if let Some(error) = self.demanded_foreign(&roots, since) {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -242,11 +249,23 @@ impl AccountRuntime {
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(());
         };
-        if stale_roots_since(account, &command.request, Some(since))?.is_empty() {
+        let roots = stale_roots_since(account, &command.request, Some(since))?;
+        if let Some(error) = account.head_refresh.take_demanded_foreign(&roots, since) {
+            return Err(error);
+        }
+        if roots.is_empty() {
             let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(false));
             return Ok(());
         }
         Err(pending(account))
+    }
+
+    fn demanded_foreign(
+        &mut self,
+        roots: &BTreeSet<String>,
+        since: std::time::Instant,
+    ) -> Option<SdkError> {
+        self.state.accounts.get_mut(&self.id)?.head_refresh.take_demanded_foreign(roots, since)
     }
 
     /// An explicit send whose root is not this account, an accepted contact, or a

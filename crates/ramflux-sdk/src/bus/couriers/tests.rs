@@ -61,44 +61,67 @@ async fn receipt_prekey_fetch_not_starved_by_bulk() -> Case {
 #[tokio::test]
 async fn group_and_call_control_bypass_saturated_task_limiter() -> Case {
     let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
-    super::federation::TEST_LIMITER.scope(limiter.clone(), watchdog(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let capacity = limiter;
-        let _permits = capacity.acquire_many(4).await?;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        let server = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().await?;
-                let mut request = Vec::new();
-                let mut buffer = [0; 4096];
-                loop {
-                    let count = stream.read(&mut buffer).await?;
-                    if count == 0 { return Err(std::io::Error::other("incomplete request")); }
-                    request.extend_from_slice(&buffer[..count]);
-                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
-                        let length = headers.lines().find_map(|line| line.strip_prefix("content-length:")).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
-                        if request.len() >= end + 4 + length { break; }
+    super::federation::TEST_LIMITER
+        .scope(
+            limiter.clone(),
+            watchdog(async move {
+                let capacity = limiter;
+                let _permits = capacity.acquire_many(4).await?;
+                let (handle, mut io) = fixture().await?;
+                let server = tokio::spawn(async move {
+                    for _ in 0..2 {
+                        let Some(GatewayClientFrame::Submit { submit }) = io.output.recv().await
+                        else {
+                            return Err("test: expected gateway Submit");
+                        };
+                        assert_eq!(
+                            submit.target_node.as_deref(),
+                            Some("b"),
+                            "federated target lost"
+                        );
+                        let mut accepted = entry("bypass", 1).map_err(|_| "test: entry")?;
+                        accepted.envelope = submit.envelope;
+                        send(&io, &GatewayServerFrame::Deliver { entry: accepted })
+                            .map_err(|_| "test: reply")?;
                     }
-                }
-                let body = r#"{"accepted":true,"source_node_id":"a","target_node_id":"b","delivery":{"outcome":"accepted","target_delivery_id":"target","inbox_seq":1,"cursor":null}}"#;
-                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await?;
-            }
-            Ok::<_, std::io::Error>(())
-        });
-        let (handle, _io) = fixture().await?;
-        let context = handle.test_context();
-        let route = crate::LocalBusFederationRoute {
-            federation_url: format!("http://{address}"), source_node_id: "a".into(), target_node_id: "b".into(),
-            required_capability: "group".into(), admin_token: None, recipient_prekey_url: None,
-        };
-        let envelope = entry("bypass", 1)?.envelope;
-        assert!(matches!(crate::bus::couriers::federation::submit_until(&context, envelope.clone(), Some(route.clone()), context.call_deadline(), false).await, Err(crate::SdkError::TaskForwardWorkerCapacity)));
-        crate::bus::couriers::federation::submit(&context, envelope.clone(), Some(route.clone())).await?;
-        crate::bus::couriers::federation::submit_until(&context, envelope, Some(route), context.call_deadline(), true).await?;
-        server.await??;
-        handle.stop().await;
-        Ok(())
-    })).await
+                    Ok::<_, &'static str>(())
+                });
+                let context = handle.test_context();
+                let route = crate::LocalBusFederationRoute {
+                    source_node_id: "a".into(),
+                    target_node_id: "b".into(),
+                    required_capability: "group".into(),
+                };
+                let envelope = entry("bypass", 1)?.envelope;
+                assert!(matches!(
+                    crate::bus::couriers::federation::submit_until(
+                        &context,
+                        envelope.clone(),
+                        Some(route.clone()),
+                        context.call_deadline(),
+                        false
+                    )
+                    .await,
+                    Err(crate::SdkError::TaskForwardWorkerCapacity)
+                ));
+                crate::bus::couriers::federation::submit(
+                    &context,
+                    envelope.clone(),
+                    Some(route.clone()),
+                )
+                .await?;
+                crate::bus::couriers::federation::submit_until(
+                    &context,
+                    envelope,
+                    Some(route),
+                    context.call_deadline(),
+                    true,
+                )
+                .await?;
+                server.await??;
+                handle.stop().await;
+                Ok(())
+            }),
+        )
+        .await
 }

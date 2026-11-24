@@ -220,8 +220,10 @@ impl TestNode {
         account_id: &str,
         device_id: &str,
         vault: Arc<dyn PrimaryVault>,
+        db: &ramflux_storage::AccountDb,
     ) -> TestResult {
-        let config = self.config(root, account_id, device_id);
+        let mut config = self.config(root, account_id, device_id);
+        config.pairing_admission = Some(Arc::new(db.pairing_admission_reader()));
         let mut connection = CustodyConnection::connect_for_proof(config, vault).await?;
         let publication: Publication = connection.account().publication();
         let expected = object_hash(&publication.record)?;
@@ -668,9 +670,8 @@ pub(crate) fn transfer_fixture_two(id: &str) -> TestResult<Transfer> {
 }
 
 /// The real primary transfer P0 -> P1 (`cooperative_transfer_preserving_devices`). The transferred
-/// authority is written to all three roots with `replace_rebound_authority`, the new primary's vault
-/// holds the successor primary key, and each client re-reads its unlocked human account from disk.
-/// FIXTURE: the disk write is the store function, not the pairing refresh (`pairing/activate.rs`).
+/// authority and installed refs are committed through the pairing install owner on every root.
+/// The new primary vault holds the successor key; clients re-read their installed accounts.
 pub(crate) fn transfer_primary(t: &mut Transfer, now: u64) -> TestResult<Envelope<DeviceSet>> {
     transfer_primary_to(t, now, NEW_PRIMARY_DEVICE, [31_u8; 32])
 }
@@ -731,9 +732,12 @@ pub(crate) fn transfer_primary_to(
     for device in devices {
         let root = root_of(device)?;
         let id = device.client.account_db()?.local_account_id.clone();
-        crate::custody::store::replace_rebound_authority(&root, &id, &transferred, None, now)?;
-        refresh(&mut device.client, &root, &id, now)?;
-        adopt(&mut device.client, &transferred)?;
+        install_transferred_authority(device, &root, &id, &transferred, now)
+            .map_err(|error| format!("test: transfer install {id}: {error}"))?;
+        refresh(&mut device.client, &root, &id, now)
+            .map_err(|error| format!("test: reload transferred account {id}: {error}"))?;
+        adopt(&mut device.client, &transferred)
+            .map_err(|error| format!("test: observe transferred authority {id}: {error}"))?;
     }
     Ok(transferred)
 }
@@ -757,5 +761,74 @@ fn adopt(client: &mut RamfluxClient, transferred: &Envelope<DeviceSet>) -> TestR
         rebuilt
     };
     client.persist_observed_identity_directory_now(&manifest)?;
+    Ok(())
+}
+
+/// Fixture publication, installed by the real ordered authority/adoption owner.
+fn install_transferred_authority(
+    device: &LocalBusAccountState,
+    root: &Path,
+    id: &str,
+    transferred: &Envelope<DeviceSet>,
+    now: u64,
+) -> TestResult {
+    use crate::custody::pairing::{activate, install_store};
+    let db = device.client.account_db()?;
+    let account = load_account(root, id, now)?;
+    let recipient = transferred
+        .body
+        .devices
+        .iter()
+        .find(|entry| entry.device_id == account.local_device_id().unwrap_or(""))
+        .ok_or("test: transferred local device")?;
+    let recipient_ref = DeviceRef {
+        account_anchor: transferred.body.account_anchor.clone(),
+        device_id: recipient.device_id.clone(),
+        device_epoch: recipient.device_epoch,
+    };
+    let hash = object_hash(transferred)?;
+    let primary_vault_ref = if transferred.body.master_certificate.body.primary_device_ref
+        == recipient_ref
+    {
+        Some(crate::custody::custody_vault_reference(root, id, &transferred.body.account_anchor)?)
+    } else {
+        None
+    };
+    let install = install_store::Install {
+        schema: "ramflux.pairing.Install.v2".into(),
+        version: 2,
+        account_id: id.into(),
+        account_anchor: transferred.body.account_anchor.clone(),
+        operation_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+        recipient_ref,
+        recipient_mode: "existing".into(),
+        install_purpose: "authority_refresh".into(),
+        record_hash: Some(hash.clone()),
+        prior_record_hash: Some(object_hash(account.record())?),
+        branch_vault_ref: account.branch_vault_ref().into(),
+        data_vault_ref: ramflux_storage::FileVaultSecretSource::owner_ref(id),
+        primary_vault_ref,
+        state: "adopt_prepared".into(),
+        cleanup_ref: None,
+        cleanup_owner_ref: None,
+        full_transfer: None,
+    };
+    let authority = ramflux_protocol::custody::CustodyAuthority {
+        publication: Publication { record: transferred.clone(), compacted_ids: None },
+        custodian_publication: None,
+    };
+    install_store::write_pending(root, &install)?;
+    activate::install_exact(
+        &activate::Installation { root, db, vault: vault_of(&device.client)?.as_ref(), now },
+        &install,
+        &hash,
+        &authority,
+    )
+    .map_err(|error| {
+        let head_matches = db.pairing_head().ok().flatten().map(|head| {
+            (head.state, head.operation_id == install.operation_id, head.candidate_hash == hash)
+        });
+        format!("test: ordered install: {error}; head state/op/hash agreement={head_matches:?}")
+    })?;
     Ok(())
 }

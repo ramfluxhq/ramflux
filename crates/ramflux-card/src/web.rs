@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! Single-worker facade. Only selected JSON and public release material cross it.
-use crate::{AcceptancePolicy, CardSession, CardSpec, HostEvent, SignedPackage};
+use crate::{AcceptancePolicy, CardError, CardSession, CardSpec, HostEvent, SignedPackage};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -18,6 +18,19 @@ struct Reply<T: Serialize> {
 }
 fn error(value: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&value.to_string())
+}
+fn refusal(value: &CardError) -> JsValue {
+    let kind = match value {
+        CardError::Protocol(_) => "protocol",
+        CardError::Limit(_) => "limit",
+        CardError::Invalid(_) | CardError::Json(_) => "invalid_input",
+        _ => "runtime",
+    };
+    let protocol = match value {
+        CardError::Protocol(reject) => serde_json::to_value(reject).ok(),
+        _ => None,
+    };
+    error(serde_json::json!({"type": kind, "message": value.to_string(), "protocol": protocol}))
 }
 impl CardWorker {
     fn active(&mut self) -> Result<&mut CardSession, JsValue> {
@@ -64,14 +77,38 @@ impl CardWorker {
         }
         let (session, batch) = CardSession::open(
             CardSpec::parse(selected_json.as_bytes())
-                .map_err(error)?
+                .map_err(|error| refusal(&error))?
                 .with_presentation(self.presentation.clone())
-                .map_err(error)?,
+                .map_err(|error| refusal(&error))?,
             self.package.clone(),
         )
-        .map_err(error)?;
+        .map_err(|error| refusal(&error))?;
         self.session = Some(session);
         self.reply(batch)
+    }
+    /// Development showcase only: commit editable local input before normal admission.
+    /// This supplies no authentication, signature or SDK authority.
+    /// # Errors
+    /// Returns a typed refusal from the same bounded parser and resolver as `open`.
+    pub fn open_preview(
+        &mut self,
+        selected_json: &str,
+        model_json: &str,
+    ) -> Result<String, JsValue> {
+        crate::spec::preflight(selected_json.as_bytes(), crate::spec::MAX_INPUT)
+            .map_err(|error| refusal(&error))?;
+        crate::spec::preflight(model_json.as_bytes(), crate::spec::MAX_INPUT)
+            .map_err(|error| refusal(&error))?;
+        let mut spec: CardSpec = ramflux_protocol::parse_i_json(selected_json.as_bytes())
+            .map_err(|_| refusal(&CardError::Invalid("I-JSON envelope")))?;
+        spec.snapshot.data_model = ramflux_protocol::parse_i_json(model_json.as_bytes())
+            .map_err(|_| refusal(&CardError::Invalid("I-JSON data model")))?;
+        spec.signed_hash =
+            spec.snapshot.hash().map_err(CardError::from).map_err(|error| refusal(&error))?;
+        let committed = serde_json::to_string(&spec)
+            .map_err(CardError::from)
+            .map_err(|error| refusal(&error))?;
+        self.open(&committed)
     }
     /// Read the complete current tree after host version mismatch.
     /// # Errors

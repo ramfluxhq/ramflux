@@ -32,6 +32,7 @@ pub(crate) use resync_request::ResyncReply;
 #[cfg(test)]
 pub(crate) use resync_request::with_fixed_surface_envelope_id;
 mod author_gate;
+pub(crate) mod card_session;
 mod rpc;
 mod scope;
 mod signer;

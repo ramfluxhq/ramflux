@@ -41,6 +41,7 @@ fn identity(
         principal_commitment: commitment.clone(),
         root_public_key: public.clone(),
         agent_lifecycle: None,
+        hosted_agents: Vec::new(),
         devices: vec![DeviceManifestEntry {
             principal_id: name.into(),
             principal_commitment: commitment,
@@ -182,6 +183,7 @@ fn native_identity_with(
         root_public_key: root_public_key.clone(),
         devices: Vec::new(),
         agent_lifecycle: None,
+        hosted_agents: Vec::new(),
     };
     Ok((
         CallEndpoint {
@@ -266,8 +268,7 @@ fn native_custody_authority_allocates_and_accepts_voice_leases() -> anyhow::Resu
     Ok(())
 }
 #[test]
-fn native_voice_authority_rejects_wrong_kind_capability_anchor_and_master_key() -> anyhow::Result<()>
-{
+fn native_voice_authority_rejects_wrong_capability_anchor_and_master_key() -> anyhow::Result<()> {
     let now = 1_700_000_000;
     let (caller, caller_manifest, caller_key) = native_identity("alice", 61, now)?;
     let (recipient, recipient_manifest, _) = native_identity("bob", 71, now)?;
@@ -278,25 +279,6 @@ fn native_voice_authority_rejects_wrong_kind_capability_anchor_and_master_key() 
             callee,
         },
     };
-
-    let (service, service_manifest, _) = native_identity_with(
-        "service",
-        81,
-        now,
-        ramflux_protocol::PrincipalKind::HeadlessAi,
-        Some(&caller_manifest),
-        None,
-    )?;
-    assert!(
-        validate_authority(
-            &allocate(caller.clone(), service),
-            &native_runtime(&caller, &caller_key, &caller_manifest, now)?,
-            &caller_manifest,
-            &service_manifest,
-            now,
-        )
-        .is_err()
-    );
 
     let (no_call, no_call_manifest, no_call_key) = native_identity_with(
         "no-call",

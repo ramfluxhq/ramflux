@@ -5,6 +5,9 @@
 //! custody directory record they admitted.
 
 pub(crate) mod agent_host;
+mod owner_continuity;
+
+pub(crate) use owner_continuity::require_republish_owner;
 
 use crate::{NodeCoreError, RouterRedbStore, custody_authority::CustodyAccountState};
 use agent_host::AgentHostBinding;
@@ -115,6 +118,7 @@ impl RouterRedbStore {
         self.prune_custody_history(now)?;
         let prepared = self.prepare_notify_owner(state, now)?;
         let tx = self.begin_write().map_err(error)?;
+        owner_continuity::require_publish_owner(&tx, anchor, host.owner_anchor.as_str(), state)?;
         Self::insert_agent_host_in_tx(&tx, anchor, host)?;
         Self::record_agent_publish_in_tx(&tx, request_id, row)?;
         self.record_custody_account_in_tx(

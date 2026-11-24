@@ -79,14 +79,11 @@ impl Calls {
             // Leave the writer a bounded reply margin before the caller's absolute fence.
             let exchange_deadline =
                 deadline.checked_sub(Duration::from_secs(1)).unwrap_or(deadline);
-            let result = tokio::time::timeout_at(exchange_deadline, prepared.exchange())
-                .await
-                .map_err(|_| {
-                    SdkError::UsernameDirectoryRefused(
-                        ramflux_protocol::username_directory::DirectoryCode::DirectoryUnavailable,
-                    )
-                })
-                .and_then(std::convert::identity);
+            let result =
+                tokio::time::timeout_at(exchange_deadline, prepared.exchange(exchange_deadline))
+                    .await
+                    .map_err(|_| SdkError::NetworkingPending)
+                    .and_then(std::convert::identity);
             Completion { prepared, result, caller }
         }));
     }
@@ -184,7 +181,12 @@ impl AccountRuntime {
                         &result.response_body,
                     )?;
                 }
-                Ok(ActorResponse { body: result.response_body, events: Vec::new(), nodes: None })
+                Ok(ActorResponse {
+                    body: result.response_body,
+                    events: Vec::new(),
+                    nodes: None,
+                    owner_copy: None,
+                })
             });
             self.complete_command(&command, result, reply).await
         } else {

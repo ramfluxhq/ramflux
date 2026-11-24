@@ -7,7 +7,8 @@ use super::{entry, fixture, send, watchdog};
 use crate::bus::connection_manager::subscriptions::SessionEvent;
 use crate::gateway::frame_dispatch::FrameKind;
 use crate::{
-    GatewayClientFrame, GatewayPushProvider, GatewayPushRouteRegistration, GatewayServerFrame,
+    GatewayClientFrame, GatewayPushProvider, GatewayPushRouteCapability,
+    GatewayPushRouteEnvironment, GatewayPushRouteRegistration, GatewayServerFrame,
 };
 use std::time::{Duration, Instant as WallClock};
 use tokio::time::Instant;
@@ -27,6 +28,9 @@ async fn session_host_applies_interleaved_push_routes_before_notifying_the_subsc
                             GatewayPushRouteRegistration {
                                 provider: GatewayPushProvider::Apns,
                                 token: "fixture".into(),
+                                route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+                                environment: GatewayPushRouteEnvironment::Production,
+                                capability: GatewayPushRouteCapability::Alert,
                                 endpoint: None,
                                 webpush_p256dh: None,
                                 webpush_auth: None,

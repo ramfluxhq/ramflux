@@ -24,6 +24,8 @@ use ramflux_protocol::large_attachment::{
     ScopedAttachmentGrant,
 };
 
+mod status;
+
 const ADDR_ENV: &str = "RAMFLUX_RELAY_ATTACHMENT_ADDR";
 const SEED_FILE_ENV: &str = "RAMFLUX_RELAY_ATTACHMENT_AUTHORITY_SEED_FILE";
 const SOURCE_ENV: &str = "RAMFLUX_RELAY_ATTACHMENT_SOURCE";
@@ -70,6 +72,7 @@ pub(crate) fn start(
         return Ok(());
     };
     let service = Arc::new(AttachmentService::open(&config.node_id, store, state_dir)?);
+    status::start_cleanup(Arc::clone(&service))?;
     let server =
         ramflux_transport::MeshTlsServer::bind(&addr, &crate::config::mesh_tls_config(config))?;
     server.set_nonblocking(true)?;
@@ -176,7 +179,7 @@ impl AttachmentService {
             Err(_) => 1,
         };
         let registry = store
-            .attachment_ledger(AttachmentPolicy::default())
+            .attachment_ledger(status::policy()?)
             .map_err(|error| anyhow::anyhow!("attachment ledger: {error}"))?
             .scoped_grants(AttachmentAuthority {
                 source: source.clone(),
@@ -205,6 +208,21 @@ impl AttachmentService {
         let registry = self.registry.with_deadline(Some(Instant::now() + REQUEST_BUDGET));
         match call {
             AttachmentCall::Authority => self.authority(),
+            AttachmentCall::AccountStatus => status::account(&registry, requester),
+            AttachmentCall::UploadStatus {
+                upload_id,
+                object_id,
+                manifest_hash,
+                payload_generation,
+                index,
+            } => status::checkpoint(
+                &registry,
+                &self.backend,
+                requester,
+                [upload_id, object_id, manifest_hash],
+                (payload_generation, index),
+                now,
+            ),
             AttachmentCall::Owner { operation, body, proof, signature } => owner(
                 &registry,
                 &self.backend,

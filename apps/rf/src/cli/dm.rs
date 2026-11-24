@@ -103,18 +103,6 @@ pub(crate) struct DmSend {
     pub(crate) target: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) body: String,
-    #[arg(long)]
-    pub(crate) federation_url: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) source_node: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) target_node: Option<String>,
-    #[arg(long)]
-    pub(crate) federation_admin_token: Option<String>,
-    #[arg(long)]
-    pub(crate) recipient_prekey_url: Option<String>,
-    #[arg(long, default_value = "opaque_delivery")]
-    pub(crate) federation_capability: String,
     #[arg(long, default_value_t = 300)]
     pub(crate) ttl: u32,
 }

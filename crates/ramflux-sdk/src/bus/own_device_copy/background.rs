@@ -268,7 +268,14 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
             work.next_at = now.saturating_add((1_i64 << work.attempts.min(6)).min(60));
         }
         account.client.account_db()?.persist_actor_state(&key, &work)?;
-        if !sealed(&work) && work.local_manifest && !account.client.own_sent_has_siblings()? {
+        // An explicit audience is one named sibling. An empty scan is the directory lagging
+        // that sibling, not proof that the copy has nowhere to go. The attempt cap above
+        // still ends the row.
+        if !sealed(&work)
+            && work.local_manifest
+            && work.audience.is_none()
+            && !account.client.own_sent_has_siblings()?
+        {
             finish(account, &key, &work, "not_needed")?;
             continue;
         }
@@ -351,12 +358,11 @@ fn draft(
         result => result?,
     };
     let Some(mut draft) = prepared else {
-        // A cached manifest can predate a sibling's registration. The root's authority still names
-        // an authorized sibling, so the copy is not unneeded: retry against a fetched manifest.
-        if plan.cached_manifest && account.client.own_sent_has_siblings()? {
-            return Err(SdkError::InboundPending(
-                "own-device cached manifest lists no sibling; refetch".into(),
-            ));
+        // A cached manifest can predate a sibling, and a native manifest omits a sync
+        // sibling until that sibling publishes a prekey. Finishing not_needed is terminal.
+        // An audience stays on the same retry. The attempt cap stops a sibling that never publishes.
+        if plan.work.audience.is_some() || account.client.own_sent_has_siblings()? {
+            return Ok(None);
         }
         finish(account, &plan.key, &plan.work, "not_needed")?;
         return Ok(None);

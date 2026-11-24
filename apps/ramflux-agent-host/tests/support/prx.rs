@@ -118,7 +118,13 @@ pub fn step(method: hyper::Method, path: &'static str, status: StatusCode, body:
 }
 
 pub fn accepted(id: &str) -> Value {
-    json!({"status":"accepted","job_id":id,"poll_url":format!("/api/jobs/{id}"),"cancel_url":format!("/api/jobs/{id}/cancel")})
+    json!({
+        "status": "accepted",
+        "job_id": id,
+        "run_id": format!("run-{id}"),
+        "poll_url": format!("/api/jobs/{id}"),
+        "cancel_url": format!("/api/jobs/{id}/cancel")
+    })
 }
 
 pub fn approval_view(decision: &str, expiry: &str) -> Value {
@@ -131,11 +137,11 @@ pub fn approval_steps(expiry: &str) -> Vec<Step> {
             hyper::Method::POST,
             "/api/sessions",
             StatusCode::CREATED,
-            json!({"session_id":"session-1"}),
+            json!({"session_id":"conversation"}),
         ),
         step(
             hyper::Method::POST,
-            "/api/sessions/session-1/message?mode=async",
+            "/api/sessions/conversation/message?mode=async",
             StatusCode::ACCEPTED,
             accepted("job-1"),
         ),
@@ -147,7 +153,7 @@ pub fn approval_steps(expiry: &str) -> Vec<Step> {
         ),
         step(
             hyper::Method::GET,
-            "/api/sessions/session-1/approvals/decision-1",
+            "/api/sessions/conversation/approvals/decision-1",
             StatusCode::OK,
             approval_view("decision-1", expiry),
         ),

@@ -6,7 +6,6 @@ mod session_push;
 
 use crate::identity_authority::handle_signed_device_set;
 use std::io::Write;
-use std::time::Instant;
 
 use crate::lifecycle::{
     handle_mvp7_abuse_report, handle_mvp7_abuse_report_get, handle_mvp7_federated_tombstone,
@@ -453,11 +452,11 @@ impl MeshPeerArgument for &str {
 }
 
 impl MeshResponse {
-    fn json(status: &'static str, body: Vec<u8>) -> Self {
+    pub(crate) fn json(status: &'static str, body: Vec<u8>) -> Self {
         Self { status, content_type: "application/json", body, keep_alive: true }
     }
 
-    fn text(status: &'static str, body: &str) -> Self {
+    pub(crate) fn text(status: &'static str, body: &str) -> Self {
         Self {
             status,
             content_type: "text/plain; charset=utf-8",
@@ -757,26 +756,45 @@ pub(crate) async fn handle_mesh_quic_request_raw(
         path: request.path.clone(),
         body,
     };
-    let response = if request.path == ramflux_protocol::custody::CUSTODY_RPC_PATH
-        || request.path == "/mvp0/ack-bound-batch"
-        || request.path == "/mvp0/ack-bound"
-        || request.path == "/mvp0/nack-bound"
-        || request.path == "/s1/session"
-        || request.path == ramflux_node_core::MIGRATION_PEER_PATH
-    {
-        let router = router.clone();
-        let peer = peer.clone();
-        tokio::task::spawn_blocking(move || handle_mesh_request_value(mesh_request, &router, &peer))
-            .await??
-    } else {
-        handle_mesh_request_value(mesh_request, router, peer)?
-    };
+    let response = handle_mesh_blocking(mesh_request, router, peer).await?;
     Ok(ramflux_transport::GatewayQuicResponse {
         status: mesh_response_status_code(response.status),
         body: serde_json::from_slice(&response.body).unwrap_or_else(
             |_| serde_json::json!({ "error": String::from_utf8_lossy(&response.body) }),
         ),
     })
+}
+
+async fn handle_mesh_blocking(
+    request: ramflux_transport::MeshHttpRequest,
+    router: &crate::router_runtime::RouterHandle,
+    peer: &ramflux_node_core::MeshPeerIdentity,
+) -> anyhow::Result<MeshResponse> {
+    // Every remaining route uses the synchronous mesh adapter. Forwarding and
+    // publication may drive a runtime, so none may run on the async QUIC worker.
+    // Bound jobs before spawning; cancellation must not release a running job's slot.
+    static ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(64);
+    static FORWARD_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+    let forward_permit =
+        if request.method == "POST" && request.path == "/internal/cross-node/submit" {
+            let Ok(permit) = FORWARD_ADMISSION.try_acquire() else {
+                return Ok(MeshResponse::text("503 Service Unavailable", "router forward busy"));
+            };
+            Some(permit)
+        } else {
+            None
+        };
+    let Ok(permit) = ADMISSION.try_acquire() else {
+        return Ok(MeshResponse::text("503 Service Unavailable", "router mesh busy"));
+    };
+    let router = router.clone();
+    let peer = peer.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _forward_permit = forward_permit;
+        handle_mesh_request_value(request, &router, &peer)
+    })
+    .await?
 }
 
 fn handle_mesh_retention_value(
@@ -859,6 +877,9 @@ fn handle_mesh_fast_path_value(
             }))?,
         )
         .into()),
+        ("POST", "/internal/cross-node/submit") => {
+            crate::cross_node_submit::respond(body, router, peer_service_id).map(Some)
+        }
         ("POST", "/mvp0/envelope") => {
             let response = handle_mvp0_envelope_mesh_from(
                 body,
@@ -1082,55 +1103,13 @@ pub(crate) fn envelope_origin_for_peer(
         _ => anyhow::bail!("mesh peer cannot submit envelopes"),
     }
 }
-pub(crate) fn handle_mvp0_envelope_mesh_from(
-    body: &[u8],
-    router: &crate::router_runtime::RouterHandle,
-    origin: ramflux_node_core::RouterEnvelopeOrigin,
-) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
-    let started = Instant::now();
-    let envelope = ramflux_protocol::decode_signed_envelope_ijson(body)?;
-    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
-        return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
-    }
-    router.submit_envelope_mesh_from(envelope, started, origin)
-}
+pub(crate) use crate::ingress_decode::handle_mvp0_envelope_async_from;
 #[cfg(feature = "itest-http")]
-pub(crate) fn handle_mvp0_envelope_from(
-    body: &[u8],
-    router: &crate::router_runtime::RouterHandle,
-    origin: ramflux_node_core::RouterEnvelopeOrigin,
-) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
-    let total_started = Instant::now();
-    let decode_started = Instant::now();
-    let envelope = ramflux_protocol::decode_signed_envelope_ijson(body)?;
-    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
-        return Ok(crate::durable_mode::rejected_security(&envelope));
-    }
-    ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
-    router.submit_envelope_from(envelope, total_started, origin)
-}
-
-pub(crate) async fn handle_mvp0_envelope_async_from(
-    body: &[u8],
-    router: &crate::router_runtime::RouterHandle,
-    origin: ramflux_node_core::RouterEnvelopeOrigin,
-) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
-    let total_started = Instant::now();
-    let decode_started = Instant::now();
-    let envelope = ramflux_protocol::decode_signed_envelope_ijson(body)?;
-    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
-        return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
-    }
-    ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
-    router.submit_envelope_mesh_async_from(envelope, total_started, origin).await
-}
+pub(crate) use crate::ingress_decode::handle_mvp0_envelope_from;
+pub(crate) use crate::ingress_decode::handle_mvp0_envelope_mesh_from;
 
 fn mesh_response_status_code(status: &str) -> u16 {
     status.split_ascii_whitespace().next().and_then(|code| code.parse::<u16>().ok()).unwrap_or(500)
-}
-
-fn elapsed_us(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 pub(crate) fn i_json_rejection(error: &anyhow::Error) -> Option<serde_json::Value> {

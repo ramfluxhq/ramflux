@@ -49,6 +49,7 @@ mod deleted_messages;
 pub mod device_directory;
 mod device_metadata;
 mod event_counter;
+mod files;
 pub mod friend;
 pub(crate) mod full_transfer;
 mod group_device_address;
@@ -127,6 +128,12 @@ pub struct AccountDb {
 }
 
 impl AccountDb {
+    /// Copies the key that opened this database.
+    #[must_use]
+    pub fn copy_current_key(&self) -> AccountDbKey {
+        self.current_key.clone()
+    }
+
     pub fn open(
         index: &AccountIndex,
         local_account_id: &str,

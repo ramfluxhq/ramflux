@@ -24,9 +24,14 @@ enum Request {
     Prepared(Result<Lookup, SdkError>),
 }
 
+struct Query {
+    root: String,
+    origin: crate::client::foreign_manifest::SenderManifestOrigin,
+}
+
 enum Lookup {
-    Sender(Option<String>),
-    Contact(String),
+    Sender(Option<Query>),
+    Contact(Query),
 }
 
 pub(crate) async fn prepare(
@@ -68,13 +73,13 @@ pub(crate) async fn prepare(
         Request::Prepared(request) => {
             let result = match request {
                 Err(error) => Err(error),
-                Ok(Lookup::Contact(root)) => match fetch_inbound_manifest(&config, &root).await {
+                Ok(Lookup::Contact(query)) => match fetch_sender_manifest(&config, query).await {
                     Ok(manifest) => native::contact(writer, &config, &entry.entry, manifest).await,
                     Err(error) => Err(error),
                 },
-                Ok(Lookup::Sender(root)) => {
-                    let manifest = match root {
-                        Some(root) => fetch_inbound_manifest(&config, &root).await.map(Some),
+                Ok(Lookup::Sender(query)) => {
+                    let manifest = match query {
+                        Some(query) => fetch_sender_manifest(&config, query).await.map(Some),
                         None => Ok(None),
                     };
                     match manifest {
@@ -119,17 +124,36 @@ fn request(
             return Ok(None);
         }
         if account.client.contact_bootstrap_required(entry)? {
-            return Ok(Some(
-                account.client.contact_candidate_manifest_request(entry).map(Lookup::Contact),
-            ));
+            let root = account.client.contact_candidate_manifest_request(entry)?;
+            let origin = account.client.sender_manifest_origin(&entry.envelope, &root)?;
+            return Ok(Some(Ok(Lookup::Contact(Query { root, origin }))));
         }
-        Ok(Some(account.client.inbound_device_manifest_request(entry).map(Lookup::Sender)))
+        let sender = match account.client.inbound_device_manifest_request(entry)? {
+            Some(root) => {
+                let origin = account.client.sender_manifest_origin(&entry.envelope, &root)?;
+                Some(Query { root, origin })
+            }
+            None => None,
+        };
+        Ok(Some(Ok(Lookup::Sender(sender))))
     })();
     match request {
         Ok(None) => Request::Original,
         Ok(Some(request)) => Request::Prepared(request),
         Err(error) => Request::Prepared(Err(error)),
     }
+}
+
+async fn fetch_sender_manifest(
+    config: &GatewaySessionConfig,
+    query: Query,
+) -> Result<crate::SdkDeviceManifestResponse, SdkError> {
+    crate::client::foreign_manifest::fetch_sender_manifest(config, query.origin, &query.root)
+        .await
+        .map_err(|source| SdkError::DirectoryAuthorityUnavailable {
+            root: query.root,
+            source: Box::new(source),
+        })
 }
 
 async fn fetch_inbound_manifest(

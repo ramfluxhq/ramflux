@@ -41,12 +41,34 @@ pub enum GatewayPushProvider {
 pub struct GatewayPushRouteRegistration {
     pub provider: GatewayPushProvider,
     pub token: String,
+    /// Canonical unpadded base64url of 16 bytes, chosen by this account's device.
+    pub route_tag: String,
+    pub environment: GatewayPushRouteEnvironment,
+    pub capability: GatewayPushRouteCapability,
     #[serde(default)]
     pub endpoint: Option<String>,
     #[serde(default)]
     pub webpush_p256dh: Option<String>,
     #[serde(default)]
     pub webpush_auth: Option<String>,
+}
+
+/// APNs host the node will use. FCM and Web Push are production only.
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayPushRouteEnvironment {
+    Sandbox,
+    Production,
+}
+
+/// How this registration wants its wakes delivered.
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayPushRouteCapability {
+    /// Alert transport. Messages, and calls when the device did not register `VoIP`.
+    Alert,
+    /// APNs `PushKit`. Calls only.
+    Voip,
 }
 
 impl std::fmt::Debug for GatewayPushRouteRegistration {
@@ -738,6 +760,9 @@ mod tests {
         GatewayPushRouteRegistration {
             provider: GatewayPushProvider::WebPush,
             token: token.into(),
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: GatewayPushRouteEnvironment::Production,
+            capability: GatewayPushRouteCapability::Alert,
             endpoint: Some("https://push.example/sub".into()),
             webpush_p256dh: Some("p256dh".into()),
             webpush_auth: Some("auth".into()),
@@ -929,6 +954,9 @@ mod tests {
         GatewayPushRouteRegistration {
             provider: GatewayPushProvider::Apns,
             token: token.into(),
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: GatewayPushRouteEnvironment::Production,
+            capability: GatewayPushRouteCapability::Alert,
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
@@ -939,6 +967,9 @@ mod tests {
         GatewayPushRouteRegistration {
             provider: GatewayPushProvider::ApnsVoip,
             token: token.into(),
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: GatewayPushRouteEnvironment::Production,
+            capability: GatewayPushRouteCapability::Voip,
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
@@ -960,6 +991,9 @@ mod tests {
         let body = GatewayPushRouteRegistration {
             provider: GatewayPushProvider::WebPush,
             token: "t".into(),
+            route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            environment: GatewayPushRouteEnvironment::Production,
+            capability: GatewayPushRouteCapability::Alert,
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
@@ -967,6 +1001,8 @@ mod tests {
         let value = serde_json::to_value(&body).expect("json");
         assert_eq!(value["provider"], "webpush");
         assert!(value["endpoint"].is_null());
-        assert!(!format!("{body:?}").contains("\"t\""));
+        let rendered = format!("{body:?}");
+        assert!(!rendered.contains("\"t\""));
+        assert!(!rendered.contains("AAAAAAAAAAAAAAAAAAAAAA"));
     }
 }

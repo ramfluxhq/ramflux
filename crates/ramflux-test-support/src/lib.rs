@@ -26,6 +26,12 @@ impl TestPath {
     #[track_caller]
     pub fn new() -> io::Result<Self> {
         let directory = Arc::new(tempfile::Builder::new().prefix("rf-test-").tempdir()?);
+        // Private whatever the process umask is: product code refuses group/other-accessible roots.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+        }
         let canonical = directory.path().canonicalize()?;
         record_owner(&canonical, std::panic::Location::caller())?;
         // Native tools such as OpenSSL do not consistently accept Windows verbatim paths.

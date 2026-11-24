@@ -34,6 +34,7 @@ fn route_for(
     token: &str,
     now: u64,
 ) -> DevicePushRoute {
+    let capability = DevicePushRoute::capability_for(&provider);
     DevicePushRoute {
         device_delivery_id: device.to_owned(),
         provider,
@@ -45,6 +46,9 @@ fn route_for(
         registered_at: now,
         expires_at: now.saturating_add(86_400),
         route_generation: 1,
+        route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+        environment: crate::PushRouteEnvironment::Production,
+        capability,
     }
 }
 

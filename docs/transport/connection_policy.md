@@ -3,9 +3,7 @@
 
 Native clients use the same pinned gateway CA and TLS 1.3 custody exporter
 on QUIC and TCP+TLS. The gateway needs no change for these carriers or an
-HTTP CONNECT tunnel. WebSocket is not implemented: main has no native
-WebSocket ingress, and controller decision NET-POLICY-01 r1 assigns that
-carrier to the separate NET-WS-CARRIER-01 module.
+HTTP CONNECT tunnel. WebSocket is not implemented: there is no native WebSocket ingress.
 
 `GatewaySessionConfig::with_connection_race(ConnectionRace::Raced)` opts into
 QUIC at 0 ms and TCP+TLS at 300 ms. The first completed handshake wins;
@@ -34,7 +32,7 @@ host thread. They coalesce to the latest generation via a watch channel.
 The resident connection manager retires its current session on a new report,
 cancels session children and any active exchange, and redials using its
 existing admission/resume and durable receive checkpoints. Immediate retirement
-fits main's single-owner session model and does not rely on QUIC migration or
+fits the single-owner session model and does not rely on QUIC migration or
 probe a socket whose interface has changed. While `Lost`, it sends nothing and
 waits for `Available` or `Changed`; stop remains interruptible. Direct users of
 GatewaySessionEngine own that engine and must react to monitor reports themselves.
@@ -54,5 +52,5 @@ connection, and Debug/errors redact them. Response headers are bounded to
 
 Client constraints declare no compiled-in central service, required vendor
 push, or required app store. The source/manifest guard checks those constraints.
-Mobile callback wiring and cross-target CI belong to their client/controller
-owners; loopback tests do not establish behavior on a phone or a deployed node.
+Each client integrates its platform callbacks and verifies its supported targets;
+loopback tests do not establish behavior on a phone or a deployed node.

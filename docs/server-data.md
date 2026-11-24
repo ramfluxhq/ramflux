@@ -165,9 +165,13 @@ The wire contract: send a `push_route_register` gateway session frame with `requ
 `signed_request` and `body`. Sign `POST /notify/v1/push-route` with the current
 device branch key, canonical body hash, a fresh request id/nonce and expiry,
 `device_proof_hash: "already_authed"`, and `ext.session_id` equal to the live
-session id. Body fields are `provider` (`apns`, `apns_voip`, `fcm`, `webpush`), `token`, and
-optional `endpoint`, `webpush_p256dh`, `webpush_auth`. Unknown fields are refused:
-the caller cannot supply an owner, target delivery id, credentials or expiry.
+session id. Body fields are `provider` (`apns`, `apns_voip`, `fcm`, `webpush`), `token`,
+`route_tag` (canonical unpadded base64url of 16 bytes, chosen by that account's device),
+`environment` (`sandbox` or `production`), `capability` (`alert` or `voip`), and
+optional `endpoint`, `webpush_p256dh`, `webpush_auth`. `apns_voip` requires `voip`;
+`apns`, `fcm`, and `webpush` require `alert`. FCM and Web Push accept only `production`.
+Unknown fields are refused: the caller cannot supply an owner, target delivery id,
+credentials or expiry. A delivery id already bound to another owner is `rejected_owner`.
 Success returns `push_route_registered` with server-assigned `expires_at` and the
 signed `request_id`. A refused registration returns `push_route_refused` with the
 same `request_id`; the session stays open. A `push_route_deregister` frame (body
@@ -185,7 +189,9 @@ root-signed manifest cannot reactivate a device against the current router head.
 
 Operators provide `RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE`, a JSON array of the
 existing tagged `ProviderCredential` records with node-owned secret references.
-The first configured credential matching the requested provider is selected.
+The first configured credential matching the requested provider and environment is
+selected. An APNs credential matches `sandbox` only when its `sandbox` flag is set,
+and `production` otherwise. FCM and Web Push credentials match `production` only.
 APNs and FCM endpoints are derived from that server configuration; clients cannot
 choose them. APNs tokens are even-length hexadecimal strings of 64 to 400 characters.
 An empty `RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE` means "not configured". WebPush requires HTTPS and an exact origin in the comma-separated
@@ -193,12 +199,20 @@ An empty `RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE` means "not configured". WebP
 be provisioned by the operator before accepting subscriptions. Provider secret
 references are stored in redb; provider secrets remain in the referenced files or operator-controlled environment.
 
-Providers receive the device token and a closed payload. The iOS alert title is
-`Ramflux` and the body is `You have a new Ramflux update.` The payload carries no
-wake id, envelope id, sender, delivery class, or encrypted hint, and it sets no
-sound, badge, `mutable-content`, or `content-available`. Background delivery is
-unsupported: there is no background push builder. FCM is data-only. Web Push
-encrypts a short body and is not used for calls.
+Providers receive the device token and a closed payload. An APNs alert sets
+`mutable-content` to 1 and `sound` to `default`. Its alert dictionary is a
+localisation key (`RF_PUSH_MESSAGE` for a message, `RF_PUSH_CALL` when a call
+uses the alert route) and an empty `loc-args` array. There is no literal title,
+body, sender, or message text. A custom `rf` object carries version 1, class
+`m` or `call`, the registered `route_tag`, and the wake id. APNs VoIP carries that
+same `rf` object and an empty `aps`. That wake id is
+the content-free hint. The source envelope id is not copied. Sibling fields
+still carry `wake_id`, `class`, and, for a message, `collapse_key`. The payload
+sets no badge and no `content-available`. Background delivery is unsupported:
+there is no background push builder. FCM is a data message with the same facts.
+`rf` is a JSON string, because FCM data values are strings, and there is no
+notification text. Android priority is `HIGH`. Web Push encrypts a short body,
+keeps urgency `normal`, and is not used for calls.
 
 A message collapse value is HMAC-SHA-256 of the target delivery id under the
 notify route secret, domain `ramflux.notification.device_collapse.v1`. Calls omit
@@ -206,11 +220,15 @@ collapse on every provider. One device has one message collapse slot, so message
 subclasses, token rotations, and provider routes share it. An operator who holds
 the route secret can recompute that value. Knowing only a delivery id does not.
 
-Only `call_wake` is high priority, and only after a current signed call intent.
+Messages and calls both use APNs priority 10 and FCM `HIGH`. APNs
+`apns-expiration` is the signed absolute deadline. FCM `ttl` is the whole
+seconds remaining until that deadline. A call is still minted only after a
+current signed call intent.
 An iOS device may register both an alert route (`apns`) and a `PushKit` route
-(`apns_voip`). A call uses the `PushKit` route when
-`RAMFLUX_NOTIFY_APNS_VOIP_ENABLED` is exactly `1` and that route's credential is
-current; otherwise it uses the alert route. One call never sends both. `PushKit`
+(`apns_voip`, capability `voip`). A call uses the `PushKit` route when
+`RAMFLUX_NOTIFY_APNS_VOIP_ENABLED` is exactly `1`, the stored capability is `voip`,
+and that route's credential is current; otherwise it uses the alert route. The
+operator flag remains a send switch: a registration does not turn it on. One call never sends both. `PushKit`
 pushes set APNs expiration to `0`. The server sends nothing, and retries nothing,
 once the signed deadline has passed. That is not a promise the provider delivers
 before the deadline. Messages never select a `PushKit` route.

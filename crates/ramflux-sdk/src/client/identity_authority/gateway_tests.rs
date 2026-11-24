@@ -32,8 +32,11 @@ async fn r8_malicious_server_bundle_substitution_fails_before_key_admission_or_s
     );
     server.await??;
     assert!(peer.client.account_db()?.client_record("device", "alice")?.is_none());
-    // The genuine signed set is independently admitted; substituted ready keys are not.
-    assert!(peer.client.observed_device_set(&expected)?.is_some());
+    // Reject the forged manifest atomically, before any authority or ready-key admission.
+    assert!(
+        peer.client.observed_device_set(&expected)?.is_none(),
+        "forged manifest admitted authority"
+    );
     assert_eq!(
         peer.client.account_db()?.pair_peer_devices(&peer.client.local_device_identity("bob")?)?,
         Vec::<String>::new()

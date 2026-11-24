@@ -27,12 +27,21 @@ pub(super) enum OperationKind {
     SubscriptionClose,
 }
 
+/// Suspend published the terminal result. A later bus response must not replace it.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum ResultSlot {
+    #[default]
+    Open,
+    Frozen,
+}
+
 #[derive(Default)]
 pub(super) struct OperationState {
     pub admitted: bool,
     pub kind: OperationKind,
     pub cancelled: bool,
     pub detached: bool,
+    pub slot: ResultSlot,
     pub result: Option<Zeroizing<Vec<u8>>>,
 }
 
@@ -58,7 +67,18 @@ pub(super) struct Shared {
     pub operations: Mutex<BTreeMap<u64, Arc<Operation>>>,
     pub events: Mutex<Events>,
     pub closed: std::sync::atomic::AtomicBool,
+    pub suspended: std::sync::atomic::AtomicBool,
     pub subscription: Mutex<Option<u64>>,
+    pub host_key: Mutex<Option<HostKeyFn>>,
+    pub credentials: super::credential::Bridge,
+}
+
+/// In-process provider-key callback. `user` is an opaque pointer supplied by the host.
+#[derive(Clone, Copy)]
+pub(super) struct HostKeyFn {
+    pub call:
+        extern "C" fn(*const u8, usize, *mut u8, usize, *mut usize, *mut std::ffi::c_void) -> i32,
+    pub user: usize,
 }
 
 impl Shared {
@@ -71,19 +91,24 @@ impl Shared {
         );
         crate::bus::inprocess::erase_value(&mut value);
         let Ok(mut operations) = self.operations.lock() else { return };
+        self.credentials.forget(id);
         let Some(operation) = operations.get(&id) else { return };
         let Ok(mut subscription) = self.subscription.lock() else { return };
         let detached = if let Ok(mut state) = operation.state.lock() {
-            if (state.kind == OperationKind::SubscriptionClose && success)
-                || (state.kind == OperationKind::Subscription
-                    && !success
-                    && *subscription == Some(id))
-            {
-                *subscription = None;
-                self.deactivate_generation();
+            if state.slot == ResultSlot::Frozen {
+                state.detached
+            } else {
+                if (state.kind == OperationKind::SubscriptionClose && success)
+                    || (state.kind == OperationKind::Subscription
+                        && !success
+                        && *subscription == Some(id))
+                {
+                    *subscription = None;
+                    self.deactivate_generation();
+                }
+                state.result = Some(encoded);
+                state.detached
             }
-            state.result = Some(encoded);
-            state.detached
         } else {
             false
         };
@@ -143,8 +168,27 @@ impl Shared {
         events.queue.push_back(Event { generation, bytes });
     }
 
+    pub fn cancel_for_suspend(&self) {
+        self.suspended.store(true, std::sync::atomic::Ordering::Release);
+        let Ok(operations) = self.operations.lock() else { return };
+        if let Ok(mut subscription) = self.subscription.lock() {
+            *subscription = None;
+        }
+        self.deactivate_generation();
+        for operation in operations.values() {
+            let Ok(mut state) = operation.state.lock() else { continue };
+            if state.result.is_some() {
+                continue;
+            }
+            let effects = if state.admitted { "unknown" } else { "none" };
+            state.slot = ResultSlot::Frozen;
+            state.result = Some(suspended_bytes(effects));
+        }
+    }
+
     pub fn close(&self) {
         self.closed.store(true, std::sync::atomic::Ordering::Release);
+        self.credentials.clear_username();
         let ids = self
             .operations
             .lock()
@@ -162,4 +206,14 @@ impl Shared {
             }
         }
     }
+}
+
+pub(super) fn suspended_bytes(effects: &str) -> Zeroizing<Vec<u8>> {
+    let mut value = failure(RamfluxV2Status::Suspended, effects);
+    let encoded = Zeroizing::new(
+        serde_json::to_vec(&value)
+            .unwrap_or_else(|_| br#"{"code":30,"effects":"unknown"}"#.to_vec()),
+    );
+    crate::bus::inprocess::erase_value(&mut value);
+    encoded
 }

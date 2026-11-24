@@ -149,12 +149,16 @@ impl RamfluxClient {
         })
     }
     pub(crate) fn group_invitations(&self) -> Result<serde_json::Value, SdkError> {
+        // The list runs on the query-only reader pool. Expired rows stay until
+        // `hold_group_invitation` retains them on the writer.
         let now = now_unix_timestamp();
         let db = self.account_db()?;
-        db.retain_expiring_actor_states(PREFIX, now, 128)?;
         let mut rows = Vec::new();
         for invitation in db.list_actor_states::<Invitation>(PREFIX)? {
-            if invitation.declined || self.group_parties_blocked(&invitation.snapshot)? {
+            if invitation.declined
+                || invitation.expires_at <= now
+                || self.group_parties_blocked(&invitation.snapshot)?
+            {
                 continue;
             }
             rows.push(serde_json::json!({"group_id":invitation.snapshot.group_id,"name":invitation.snapshot.state.name,"creator":invitation.snapshot.creator.identity.root_commitment,"inviter":invitation.inviter,"expires_at":invitation.expires_at}));

@@ -10,29 +10,32 @@ mod message_input;
 mod participant;
 mod provisioning;
 mod prx;
+mod prx_approval;
+mod prx_sync;
 #[cfg(test)]
 #[path = "../tests/support/prx.rs"]
 mod prx_test_support;
 mod runner;
 mod runner_approval;
-mod runner_deferred;
 mod runner_output;
 mod runner_policy;
+mod runner_poll;
 mod runner_refusal;
+mod runner_retry;
+mod runner_run_approval;
 mod runner_surface;
 mod surface_plan;
 pub use bus::{AgentBus, RfdBus};
 pub use checkpoint::{Checkpoint, CheckpointStore, GroupRefusal, OutputRefusal};
-pub use config::{
-    Choice, Config, EngineConfig, PrxAuthorization, PrxConfig, PrxSessionScope, Rule, SurfaceRule,
-};
+pub use config::{Choice, Config, EngineConfig, PrxConfig, PrxSessionScope, Rule, SurfaceRule};
 pub use engine::{
     ActionInput, ConversationInput, EngineApproval, EngineEvent, EngineFailure, EngineInput,
     EngineProvider, Intent, RuleEngine,
 };
 pub use provisioning::{CredentialVault, import_provisioning_bundle, unlock_provisioned_account};
 pub use prx::PrxEngine;
-pub use runner::AgentHost;
+pub use prx_sync::SyncTask;
+pub use runner::{AgentHost, subscribe_owner};
 
 pub type Result<T> = std::result::Result<T, Error>;
 /// Errors intentionally omit rfd bodies, message text, paths and credentials.
@@ -70,6 +73,9 @@ pub enum Error {
     EngineTimeout,
     #[error("engine rejected or returned an invalid response")]
     EngineRejected,
+    /// PRX asked the host to wait. The job or owner decision is still outstanding.
+    #[error("engine rate limit; retry after {retry_after_ms} ms")]
+    RateLimited { retry_after_ms: u64 },
 }
 
 impl Error {

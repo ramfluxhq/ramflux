@@ -3,9 +3,13 @@
 
 //! Provider request bodies for the two-class wake contract.
 //!
+//! An alert carries `mutable-content`, a localisation key, and empty `loc-args`.
+//! It has no literal title, body, sender, or message text. `rf.w` is the wake id;
+//! the source envelope id is not copied. `rf.t` is the route tag from registration.
 //! Background push is unsupported: this module has no background builder.
 //! Custom `ramflux-*` headers are not produced. A call omits collapse fields.
-//! `VoIP` `apns-expiration` is `0`; the signed deadline still refuses the send.
+//! `VoIP` keeps an empty `aps` and `apns-expiration` `0`. Message and call alerts
+//! use APNs priority 10. FCM data messages use `HIGH` and carry no notification text.
 
 use ramflux_protocol::{NotificationDeliveryClass, WakeClass};
 use serde::Serialize;
@@ -15,8 +19,10 @@ pub const PROVIDER_JSON_CEILING: usize = 4096;
 /// Encrypted Web Push bodies must be strictly shorter than this.
 pub const WEB_ENCRYPTED_BODY_LIMIT: usize = 4096;
 
-const GENERIC_TITLE: &str = "Ramflux";
-const GENERIC_BODY: &str = "You have a new Ramflux update.";
+const MESSAGE_LOC_KEY: &str = "RF_PUSH_MESSAGE";
+const CALL_LOC_KEY: &str = "RF_PUSH_CALL";
+const ALERT_SOUND: &str = "default";
+const LOC_ARGS_NONE: &[&str] = &[];
 const WAKE_ID_BYTES: usize = 16;
 const COLLAPSE_BYTES: usize = 24;
 
@@ -54,6 +60,8 @@ pub enum ProviderBuildError {
     InvalidWakeId,
     /// The collapse key is not canonical unpadded base64url of 24 bytes.
     InvalidCollapseKey,
+    /// The route tag is not canonical unpadded base64url of 16 bytes.
+    InvalidRouteTag,
     /// The provider token is empty.
     EmptyToken,
 }
@@ -68,6 +76,8 @@ pub struct ProviderBuildInput<'a> {
     pub collapse_key: Option<&'a str>,
     /// Provider device token. It is placed only in the FCM transport field.
     pub token: &'a str,
+    /// Canonical unpadded base64url of 16 bytes. Echoed as `rf.t`.
+    pub route_tag: &'a str,
     /// APNs topic. Ignored for FCM and Web Push.
     pub topic: &'a str,
     /// Persisted absolute expiry, Unix seconds.
@@ -137,6 +147,9 @@ pub fn build_provider_parts(
     if input.token.is_empty() {
         return Err(ProviderBuildError::EmptyToken);
     }
+    if !ramflux_node_core::push_route_tag_valid(input.route_tag) {
+        return Err(ProviderBuildError::InvalidRouteTag);
+    }
     validate_wake_id(input.wake_id)?;
     let collapse = collapse_for_class(input.class, input.collapse_key)?;
     let remaining = input.expires_at - input.now;
@@ -144,7 +157,8 @@ pub fn build_provider_parts(
     let (body, headers) = match input.mode {
         ProviderWireMode::ApnsAlert => {
             validate_alert_topic(input.topic)?;
-            let body = apns_alert_body(input.wake_id, class_name, collapse)?;
+            let body =
+                apns_alert_body(input.class, input.wake_id, class_name, collapse, input.route_tag)?;
             let headers = apns_headers(input, false, collapse);
             (body, headers)
         }
@@ -153,7 +167,7 @@ pub fn build_provider_parts(
                 return Err(ProviderBuildError::VoipRequiresCall);
             }
             validate_voip_topic(input.topic)?;
-            let body = apns_voip_body(input.wake_id, class_name)?;
+            let body = apns_voip_body(input.wake_id, class_name, input.route_tag)?;
             let headers = apns_headers(input, true, None);
             (body, headers)
         }
@@ -253,16 +267,12 @@ fn apns_headers(
     voip: bool,
     collapse: Option<&str>,
 ) -> Vec<(String, String)> {
-    let priority = match input.class {
-        WakeClass::CallWake => "10",
-        WakeClass::Message => "5",
-    };
     let expiration = if voip { "0".to_owned() } else { input.expires_at.to_string() };
     let push_type = if voip { "voip" } else { "alert" };
     let mut headers = vec![
         ("apns-push-type".to_owned(), push_type.to_owned()),
         ("apns-topic".to_owned(), input.topic.to_owned()),
-        ("apns-priority".to_owned(), priority.to_owned()),
+        ("apns-priority".to_owned(), "10".to_owned()),
         ("apns-expiration".to_owned(), expiration),
     ];
     if let Some(key) = collapse {
@@ -272,22 +282,61 @@ fn apns_headers(
 }
 
 fn apns_alert_body(
+    class: WakeClass,
     wake_id: &str,
     class_name: &'static str,
     collapse: Option<&str>,
+    route_tag: &str,
 ) -> Result<Vec<u8>, ProviderBuildError> {
     serde_json::to_vec(&ApnsAlertBody {
-        aps: ApnsAlertAps { alert: ApnsAlertText { title: GENERIC_TITLE, body: GENERIC_BODY } },
+        aps: ApnsAlertAps {
+            alert: ApnsLocAlert { loc_key: alert_loc_key(class), loc_args: LOC_ARGS_NONE },
+            mutable_content: 1,
+            sound: ALERT_SOUND,
+        },
         wake_id,
         class: class_name,
         collapse_key: collapse,
+        rf: rf_meta(class, wake_id, route_tag),
     })
     .map_err(|_source| ProviderBuildError::PayloadTooLarge)
 }
 
-fn apns_voip_body(wake_id: &str, class_name: &'static str) -> Result<Vec<u8>, ProviderBuildError> {
-    serde_json::to_vec(&ApnsVoipBody { aps: ApnsEmpty {}, wake_id, class: class_name })
+fn alert_loc_key(class: WakeClass) -> &'static str {
+    match class {
+        WakeClass::Message => MESSAGE_LOC_KEY,
+        WakeClass::CallWake => CALL_LOC_KEY,
+    }
+}
+
+fn rf_code(class: WakeClass) -> &'static str {
+    match class {
+        WakeClass::Message => "m",
+        WakeClass::CallWake => "call",
+    }
+}
+
+fn rf_meta<'a>(class: WakeClass, wake_id: &'a str, route_tag: &'a str) -> RfMeta<'a> {
+    RfMeta { v: 1, c: rf_code(class), t: route_tag, w: wake_id }
+}
+
+fn rf_json(class: WakeClass, wake_id: &str, route_tag: &str) -> Result<String, ProviderBuildError> {
+    serde_json::to_string(&rf_meta(class, wake_id, route_tag))
         .map_err(|_source| ProviderBuildError::PayloadTooLarge)
+}
+
+fn apns_voip_body(
+    wake_id: &str,
+    class_name: &'static str,
+    route_tag: &str,
+) -> Result<Vec<u8>, ProviderBuildError> {
+    serde_json::to_vec(&ApnsVoipBody {
+        aps: ApnsEmpty {},
+        wake_id,
+        class: class_name,
+        rf: rf_meta(WakeClass::CallWake, wake_id, route_tag),
+    })
+    .map_err(|_source| ProviderBuildError::PayloadTooLarge)
 }
 
 fn fcm_body(
@@ -296,30 +345,45 @@ fn fcm_body(
     collapse: Option<&str>,
     remaining: u64,
 ) -> Result<Vec<u8>, ProviderBuildError> {
-    let priority = match input.class {
-        WakeClass::CallWake => "HIGH",
-        WakeClass::Message => "NORMAL",
-    };
     let ttl = format!("{remaining}s");
+    let rf = rf_json(input.class, input.wake_id, input.route_tag)?;
     serde_json::to_vec(&FcmEnvelope {
         message: FcmMessage {
             token: input.token,
-            data: FcmData { wake_id: input.wake_id, class: class_name, collapse_key: collapse },
-            android: FcmAndroid { priority, ttl, collapse_key: collapse },
+            data: FcmData {
+                wake_id: input.wake_id,
+                class: class_name,
+                collapse_key: collapse,
+                rf: &rf,
+            },
+            android: FcmAndroid { priority: "HIGH", ttl, collapse_key: collapse },
         },
     })
     .map_err(|_source| ProviderBuildError::PayloadTooLarge)
 }
 
 #[derive(Serialize)]
-struct ApnsAlertText {
-    title: &'static str,
-    body: &'static str,
+struct ApnsLocAlert {
+    #[serde(rename = "loc-key")]
+    loc_key: &'static str,
+    #[serde(rename = "loc-args")]
+    loc_args: &'static [&'static str],
 }
 
 #[derive(Serialize)]
 struct ApnsAlertAps {
-    alert: ApnsAlertText,
+    alert: ApnsLocAlert,
+    #[serde(rename = "mutable-content")]
+    mutable_content: u8,
+    sound: &'static str,
+}
+
+#[derive(Serialize)]
+struct RfMeta<'a> {
+    v: u8,
+    c: &'static str,
+    t: &'a str,
+    w: &'a str,
 }
 
 #[derive(Serialize)]
@@ -329,6 +393,7 @@ struct ApnsAlertBody<'a> {
     class: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     collapse_key: Option<&'a str>,
+    rf: RfMeta<'a>,
 }
 
 #[derive(Serialize)]
@@ -339,6 +404,7 @@ struct ApnsVoipBody<'a> {
     aps: ApnsEmpty,
     wake_id: &'a str,
     class: &'static str,
+    rf: RfMeta<'a>,
 }
 
 #[derive(Serialize)]
@@ -354,6 +420,8 @@ struct FcmData<'a> {
     class: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     collapse_key: Option<&'a str>,
+    /// JSON object. FCM data values are strings.
+    rf: &'a str,
 }
 
 #[derive(Serialize)]
@@ -393,8 +461,16 @@ mod tests {
         ramflux_protocol::encode_base64url([7_u8; 24])
     }
 
+    const ROUTE_TAG: &str = "AAAAAAAAAAAAAAAAAAAAAA";
+
     fn json_of(parts: &super::ProviderRequestParts) -> Result<Value, ProviderBuildError> {
         serde_json::from_slice(&parts.body).map_err(|_source| ProviderBuildError::PayloadTooLarge)
+    }
+
+    fn fcm_rf(parsed: &Value) -> Result<Value, ProviderBuildError> {
+        let text =
+            parsed["message"]["data"]["rf"].as_str().ok_or(ProviderBuildError::PayloadTooLarge)?;
+        serde_json::from_str(text).map_err(|_source| ProviderBuildError::PayloadTooLarge)
     }
 
     #[test]
@@ -406,19 +482,27 @@ mod tests {
             wake_id: &id,
             collapse_key: Some(&key),
             token: "tok",
+            route_tag: ROUTE_TAG,
             topic: "app.bundle",
             expires_at: 2_000,
             now: 1_000,
             mode: ProviderWireMode::ApnsAlert,
         })?;
         let parsed = json_of(&alert)?;
-        assert_eq!(parsed["aps"]["alert"]["title"], "Ramflux");
-        assert_eq!(parsed["aps"]["alert"]["body"], "You have a new Ramflux update.");
-        assert!(parsed["aps"].get("mutable-content").is_none());
+        assert_eq!(parsed["aps"]["alert"]["loc-key"], "RF_PUSH_MESSAGE");
+        assert_eq!(parsed["aps"]["alert"]["loc-args"], serde_json::json!([]));
+        assert!(parsed["aps"]["alert"].get("title").is_none());
+        assert!(parsed["aps"]["alert"].get("body").is_none());
+        assert_eq!(parsed["aps"]["mutable-content"], 1);
+        assert_eq!(parsed["aps"]["sound"], "default");
         assert!(parsed["aps"].get("content-available").is_none());
+        assert_eq!(parsed["rf"]["v"], 1);
+        assert_eq!(parsed["rf"]["c"], "m");
+        assert_eq!(parsed["rf"]["t"], ROUTE_TAG);
+        assert_eq!(parsed["rf"]["w"], id);
         assert_eq!(parsed["class"], "message");
         assert_eq!(parsed["collapse_key"], key);
-        assert!(alert.headers.iter().any(|(name, value)| name == "apns-priority" && value == "5"));
+        assert!(alert.headers.iter().any(|(name, value)| name == "apns-priority" && value == "10"));
         assert!(
             alert.headers.iter().any(|(name, value)| name == "apns-expiration" && value == "2000")
         );
@@ -432,6 +516,7 @@ mod tests {
             wake_id: &id,
             collapse_key: Some(&key),
             token: "tok",
+            route_tag: ROUTE_TAG,
             topic: "",
             expires_at: 1_000 + 86_400,
             now: 1_000,
@@ -440,8 +525,13 @@ mod tests {
         let parsed = json_of(&fcm)?;
         assert!(parsed["message"].get("notification").is_none());
         assert_eq!(parsed["message"]["data"]["class"], "message");
-        assert_eq!(parsed["message"]["android"]["priority"], "NORMAL");
+        assert_eq!(parsed["message"]["android"]["priority"], "HIGH");
         assert_eq!(parsed["message"]["android"]["ttl"], "86400s");
+        assert_eq!(parsed["message"]["android"]["collapse_key"], key);
+        let rf = fcm_rf(&parsed)?;
+        assert_eq!(rf["c"], "m");
+        assert_eq!(rf["t"], ROUTE_TAG);
+        assert_eq!(rf["w"], id);
         assert_eq!(fcm.headers.len(), 0);
 
         let web = build_provider_parts(&ProviderBuildInput {
@@ -449,6 +539,7 @@ mod tests {
             wake_id: &id,
             collapse_key: Some(&key),
             token: "tok",
+            route_tag: ROUTE_TAG,
             topic: "",
             expires_at: 1_100,
             now: 1_000,
@@ -469,12 +560,20 @@ mod tests {
             wake_id: &id,
             collapse_key: None,
             token: "voip-or-alert",
+            route_tag: ROUTE_TAG,
             topic: "app.bundle",
             expires_at: 1_030,
             now: 1_020,
             mode: ProviderWireMode::ApnsAlert,
         })?;
         let parsed = json_of(&alert)?;
+        assert_eq!(parsed["aps"]["alert"]["loc-key"], "RF_PUSH_CALL");
+        assert_eq!(parsed["aps"]["alert"]["loc-args"], serde_json::json!([]));
+        assert!(parsed["aps"]["alert"].get("title").is_none());
+        assert!(parsed["aps"]["alert"].get("body").is_none());
+        assert_eq!(parsed["aps"]["mutable-content"], 1);
+        assert_eq!(parsed["rf"]["c"], "call");
+        assert_eq!(parsed["rf"]["w"], id);
         assert_eq!(parsed["class"], "call_wake");
         assert!(parsed.get("collapse_key").is_none());
         assert!(alert.headers.iter().all(|(name, _)| name != "apns-collapse-id"));
@@ -488,6 +587,7 @@ mod tests {
             wake_id: &id,
             collapse_key: None,
             token: "pushkit",
+            route_tag: ROUTE_TAG,
             topic: "app.bundle.voip",
             expires_at: 1_030,
             now: 1_000,
@@ -495,6 +595,7 @@ mod tests {
         })?;
         let parsed = json_of(&voip)?;
         assert_eq!(parsed["aps"], serde_json::json!({}));
+        assert_eq!(parsed["rf"]["t"], ROUTE_TAG);
         assert!(parsed.get("collapse_key").is_none());
         assert!(voip.headers.iter().any(|(name, value)| name == "apns-expiration" && value == "0"));
         assert!(
@@ -511,6 +612,7 @@ mod tests {
             wake_id: &id,
             collapse_key: None,
             token: "tok",
+            route_tag: ROUTE_TAG,
             topic: "",
             expires_at: 1_030,
             now: 1_020,
@@ -519,6 +621,8 @@ mod tests {
         let parsed = json_of(&fcm)?;
         assert!(parsed["message"]["data"].get("collapse_key").is_none());
         assert!(parsed["message"]["android"].get("collapse_key").is_none());
+        let rf = fcm_rf(&parsed)?;
+        assert_eq!(rf["c"], "call");
         assert_eq!(parsed["message"]["android"]["priority"], "HIGH");
         assert_eq!(parsed["message"]["android"]["ttl"], "10s");
         assert!(parsed["message"].get("notification").is_none());
@@ -534,6 +638,7 @@ mod tests {
             wake_id: &id,
             collapse_key: None,
             token: "tok",
+            route_tag: ROUTE_TAG,
             topic: "app.bundle",
             expires_at: 1_030,
             now: 1_030,
@@ -546,6 +651,7 @@ mod tests {
                 wake_id: &id,
                 collapse_key: None,
                 token: "tok",
+                route_tag: ROUTE_TAG,
                 topic: "",
                 expires_at: 2_000,
                 now: 1_000,
@@ -560,6 +666,7 @@ mod tests {
                 wake_id: &id,
                 collapse_key: Some(&key),
                 token: "tok",
+                route_tag: ROUTE_TAG,
                 topic: "app.bundle.voip",
                 expires_at: 2_000,
                 now: 1_000,
@@ -584,6 +691,7 @@ mod tests {
                 wake_id: &id,
                 collapse_key: None,
                 token: &huge,
+                route_tag: ROUTE_TAG,
                 topic: "",
                 expires_at: 2_000,
                 now: 1_000,

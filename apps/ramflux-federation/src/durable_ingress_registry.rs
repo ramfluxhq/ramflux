@@ -13,6 +13,20 @@ enum Class {
 
 const DURABLE_INGRESS: &[(&str, Class)] = &[
     (
+        "inbound_trust.rs:precheck",
+        Class::NonIngress("pure signed request policy check; no delivery or durable effects"),
+    ),
+    (
+        "inbound_trust.rs:authenticate",
+        Class::NonIngress(
+            "signed node authentication; durable delivery guarded in flow before this call",
+        ),
+    ),
+    (
+        "source_home.rs:apply",
+        Class::NonIngress("stamps verified source metadata in memory; no delivery or persistence"),
+    ),
+    (
         "durable_mode.rs:refused_forward",
         Class::NonIngress("typed refusal construction; no envelope persist"),
     ),
@@ -49,7 +63,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
         DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Ingress).count();
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
-    assert_eq!((ingress_count, non_ingress_count), (4, 5));
+    assert_eq!((ingress_count, non_ingress_count), (4, 8));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");
@@ -75,7 +89,12 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
                 serde_json::Value::String("unknown-mode".into()),
                 serde_json::Value::Null,
             ] {
-                let request = marked_forward(ordinal, mode.clone())?;
+                let mut request = marked_forward(ordinal, mode.clone())?;
+                if *entry == "flow.rs:handle_s8_forward_envelope" {
+                    // Use a deterministic local-route refusal after the mode guard. An
+                    // unpinned remote route now starts discovery, which is not this fixture.
+                    request.target_node_id = dummy_discovery().node_id;
+                }
                 let control = unmarked_forward(&request)?;
                 exercise_federation_control(entry, &store, &control)?;
                 let before = store_snapshot(&path)?;
@@ -233,8 +252,7 @@ fn assert_refused_forward(
     assert_eq!(response.delivery.outcome, "rejected_security:delivery_mode_refused", "{entry}");
 }
 
-const CONTROL_FORWARD: &str =
-    "itest HTTP operation failed: federation delivery paused for node-b.example";
+const CONTROL_FORWARD: &str = "itest HTTP operation failed: federation forward target node-a.example is local node node-a.example";
 const CONTROL_RECEIVE: &str = "itest HTTP operation failed: federation inbound target node-b.example is not local node node-a.example";
 
 fn assert_control_forward(

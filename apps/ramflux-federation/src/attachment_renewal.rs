@@ -264,7 +264,10 @@ impl Forwarder for AdmittedPeer<'_> {
         deadline: Instant,
     ) -> Result<Vec<u8>, RenewalRefusal> {
         let state = self.state.snapshot().map_err(transport)?;
-        let endpoint = state.route(node).ok_or(RenewalRefusal::SourceUnknown)?.endpoint.clone();
+        let route = state.route(node).ok_or(RenewalRefusal::SourceUnknown)?;
+        let endpoint =
+            crate::peer_pin::checked_forward_endpoint_until(node, &route.endpoint, deadline)
+                .map_err(transport)?;
         let ca = state.pinned_peer_ca_cert_pem(node).ok_or(RenewalRefusal::SourceUnknown)?;
         let tls = ramflux_transport::BoundedHttpTls::new(self.tls, FEDERATION_SERVICE, Some(&[ca]))
             .map_err(transport)?;
