@@ -30,7 +30,7 @@ impl Epoch {
     pub(crate) fn expired(&self) -> bool {
         self.deadline.as_ref().is_some_and(|deadline| deadline.remaining().is_zero())
     }
-    /// Returns (state, reason, remaining_ms). `reason` is `None` while armed:
+    /// Returns (`state`, `reason`, `remaining_ms`). `reason` is `None` while armed:
     /// the configure reason only describes the last state transition.
     pub(crate) fn snapshot(&self) -> (&'static str, Option<&'static str>, u64) {
         if self.locked {
