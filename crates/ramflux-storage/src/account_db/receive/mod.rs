@@ -300,11 +300,40 @@ impl AccountDb {
         &self,
         expected: ReceiveExpectation<'_>,
         authority: &ReceiveTransaction<'_>,
+        message_erasure_increments: i64,
     ) -> Result<(), StorageError> {
         authority.require_writer()?;
-        if self.privacy_erasure_generation()? != expected.erasure_generation {
+        // BEGIN IMMEDIATE excludes outside writers after admission. Only the exact
+        // message-scrub trigger's increments are accounted for; any other change
+        // still invalidates the whole phase, including cover, cursor and ACK.
+        let own_increments = self
+            .message_erasure_increments
+            .get()
+            .checked_sub(message_erasure_increments)
+            .ok_or(StorageError::ObjectErased)?;
+        let produced_generation = expected
+            .erasure_generation
+            .checked_add(own_increments)
+            .ok_or(StorageError::ObjectErased)?;
+        if self.privacy_erasure_generation()? != produced_generation {
             return Err(StorageError::ObjectErased);
         }
+        Ok(())
+    }
+
+    /// Records only the generation change made by the synchronous message-scrub update.
+    pub(super) fn record_message_erasure(&self, before: i64) -> Result<(), StorageError> {
+        let increment = self
+            .privacy_erasure_generation()?
+            .checked_sub(before)
+            .filter(|increment| *increment >= 0)
+            .ok_or(StorageError::ObjectErased)?;
+        let total = self
+            .message_erasure_increments
+            .get()
+            .checked_add(increment)
+            .ok_or(StorageError::ObjectErased)?;
+        self.message_erasure_increments.set(total);
         Ok(())
     }
 
@@ -321,8 +350,9 @@ impl AccountDb {
         let account = self.local_account_id.clone();
         self.write_transaction(|| {
             let authority = self.admit_receive(expected, current_generation)?;
+            let scrub_baseline = self.message_erasure_increments.get();
             let value = write(&authority)?;
-            self.recheck_receive(expected, &authority)?;
+            self.recheck_receive(expected, &authority, scrub_baseline)?;
             Ok(value)
         })
         .map_err(|error| busy_writer(account, error))
@@ -342,8 +372,9 @@ impl AccountDb {
     ) -> Result<page::ReceiveReconcileResult, StorageError> {
         self.read_snapshot(|| {
             let authority = self.admit_receive(expected, current_generation)?;
+            let scrub_baseline = self.message_erasure_increments.get();
             let plan = authority.reconcile(page)?;
-            self.recheck_receive(expected, &authority)?;
+            self.recheck_receive(expected, &authority, scrub_baseline)?;
             Ok(plan)
         })
     }
