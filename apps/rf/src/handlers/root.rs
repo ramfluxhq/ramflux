@@ -64,7 +64,9 @@ fn root_vault(
         }
         config
     };
-    Ok(ramflux_sdk::shared_root_vault(&config))
+    let vault = ramflux_sdk::shared_root_vault(&config);
+    vault.preflight()?;
+    Ok(vault)
 }
 
 fn map_shared<T>(result: Result<T, ramflux_sdk::SdkError>) -> Result<T, RfError> {
