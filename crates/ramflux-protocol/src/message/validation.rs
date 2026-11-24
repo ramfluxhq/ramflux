@@ -270,6 +270,7 @@ pub fn validate_message(message: &Message) -> Result<(), ValidationError> {
         }
     }
     for media in &message.media {
+        super::media_metadata::validate_dimensions(media.width, media.height)?;
         if media
             .inline_thumbnail
             .as_ref()

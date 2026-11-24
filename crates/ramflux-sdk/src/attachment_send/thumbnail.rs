@@ -19,11 +19,6 @@ pub(super) struct Input {
     encoded_image_base64: String,
 }
 
-pub(crate) struct Finished {
-    pub digest: [u8; 32],
-    pub thumbnail: Option<Thumbnail>,
-}
-
 impl Input {
     pub(super) fn decode(self) -> Result<Thumbnail, Refusal> {
         // Bound allocation before decoding; unpadded base64url needs ceil(4*n/3) bytes.

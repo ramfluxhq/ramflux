@@ -16,6 +16,7 @@ pub mod client_class;
 pub mod exact_content;
 pub mod history_chain;
 pub mod identity;
+pub mod media_metadata;
 pub mod original_header;
 pub mod private_revision;
 pub use client_class::{

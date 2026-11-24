@@ -101,8 +101,14 @@ fn finish(
         &body.prepare_id,
         body.generation,
         body.plaintext_length,
-        super::thumbnail::Finished {
+        super::metadata::Finished {
             digest,
+            metadata: super::metadata::Metadata {
+                width: body.width,
+                height: body.height,
+                duration_ms: body.duration_ms,
+                animated: body.animated,
+            },
             thumbnail: body.thumbnail.map(super::thumbnail::Input::decode).transpose()?,
         },
         unix_now()?,
@@ -415,6 +421,11 @@ struct FinishBody {
     plaintext_length: u64,
     plaintext_digest: String,
     thumbnail: Option<super::thumbnail::Input>,
+    width: Option<u32>,
+    height: Option<u32>,
+    #[serde(default, deserialize_with = "super::metadata::duration::deserialize")]
+    duration_ms: Option<u64>,
+    animated: Option<bool>,
 }
 
 #[derive(Deserialize)]

@@ -50,7 +50,7 @@ fn kind_registry_is_exhaustive_and_reserved() -> TestResult {
         let name = cells.next().ok_or("missing layer field")?;
         let tag: u32 = cells.next().ok_or("missing layer tag")?.parse()?;
         let layer: u32 = cells.next().ok_or("missing layer number")?.parse()?;
-        assert!((1..=4).contains(&layer));
+        assert!((1..=COMPILED_LAYER).contains(&layer));
         assert!(frozen.insert((message, tag)), "duplicate field introduction");
         let field = pool
             .all_messages()

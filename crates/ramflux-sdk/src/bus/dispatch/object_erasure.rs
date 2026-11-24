@@ -365,6 +365,10 @@ mod tests {
         let reference = large::MediaRef {
             object_id: object_id.into(),
             manifest_digest: manifest.hash().expect("manifest hash"),
+            width: None,
+            height: None,
+            duration_ms: None,
+            animated: None,
             mime_type: "image/jpeg".into(),
             size: manifest.plaintext_length,
             key_slots: slots,

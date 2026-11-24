@@ -39,6 +39,10 @@ fn media_ref(object_id: &str) -> Result<g::MediaRef, SdkError> {
     let reference = large::MediaRef {
         object_id: object_id.into(),
         manifest_digest: digest,
+        width: None,
+        height: None,
+        duration_ms: None,
+        animated: None,
         mime_type: "image/png".into(),
         size: manifest.plaintext_length,
         key_slots: manifest.key_slots.clone(),

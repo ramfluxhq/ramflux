@@ -76,6 +76,10 @@ MediaRef	key_slots	5	1
 MediaRef	file_name	6	1
 MediaRef	inline_thumbnail	7	2
 MediaRef	large_manifest	8	4
+MediaRef	width	9	5
+MediaRef	height	10	5
+MediaRef	duration_ms	11	5
+MediaRef	animated	12	5
 Message	text	1	1
 Message	entities	2	2
 Message	reply_to	3	1

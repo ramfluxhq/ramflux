@@ -336,7 +336,7 @@ fn disk_full_leaves_the_log_unchanged_and_a_retry_succeeds_once_space_returns() 
             &begun.prepare_id,
             1,
             16,
-            super::thumbnail::Finished { digest, thumbnail: None },
+            super::metadata::Finished { digest, thumbnail: None, metadata: Default::default() },
             NOW,
         )
         .unwrap_err();
@@ -352,7 +352,7 @@ fn disk_full_leaves_the_log_unchanged_and_a_retry_succeeds_once_space_returns() 
             &begun.prepare_id,
             1,
             16,
-            super::thumbnail::Finished { digest, thumbnail: None },
+            super::metadata::Finished { digest, thumbnail: None, metadata: Default::default() },
             NOW,
         )
         .unwrap();
