@@ -137,11 +137,11 @@ pub fn approval_steps(expiry: &str) -> Vec<Step> {
             hyper::Method::POST,
             "/api/sessions",
             StatusCode::CREATED,
-            json!({"session_id":"session-1"}),
+            json!({"session_id":"conversation"}),
         ),
         step(
             hyper::Method::POST,
-            "/api/sessions/session-1/message?mode=async",
+            "/api/sessions/conversation/message?mode=async",
             StatusCode::ACCEPTED,
             accepted("job-1"),
         ),
@@ -153,7 +153,7 @@ pub fn approval_steps(expiry: &str) -> Vec<Step> {
         ),
         step(
             hyper::Method::GET,
-            "/api/sessions/session-1/approvals/decision-1",
+            "/api/sessions/conversation/approvals/decision-1",
             StatusCode::OK,
             approval_view("decision-1", expiry),
         ),

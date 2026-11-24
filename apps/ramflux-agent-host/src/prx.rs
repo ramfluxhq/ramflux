@@ -3,10 +3,10 @@
 
 //! Bounded HTTP adapter for detached PRX jobs.
 //! A configured agent name opens a caller-keyed session and posts a targeted turn.
-//! Without one, the host keeps the console session and posts only `message`.
+//! Without one, the turn targets PRX Main. Sessions always use stable caller keys.
 use crate::{
     EngineApproval, EngineEvent, EngineFailure, EngineInput, EngineProvider, Error, Intent,
-    PrxAuthorization, PrxConfig, PrxSessionScope, Result,
+    PrxConfig, PrxSessionScope, Result,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
@@ -120,23 +120,17 @@ pub struct PrxEngine {
     client: reqwest::Client,
     base_url: Url,
     token: String,
-    max_conversations: usize,
+    max_pending_turns: usize,
     state: PrxState,
     last_unavailable_log: Option<Instant>,
     /// Earliest time the bus tick may spend another `GET /api/jobs` request.
     next_job_poll: Option<Instant>,
-    authorization: PrxAuthorization,
     turn_timeout_ms: u64,
     approval_timeout_ms: u64,
-    mismatch_logged: bool,
     typed: Option<ramflux_prx_client::PrxClient>,
     token_file: PathBuf,
     request_timeout_s: u64,
-    limit_turns: Option<u32>,
-    limit_cost: Option<u64>,
     prx_agent: Option<String>,
-    prx_provider: Option<String>,
-    prx_model: Option<String>,
 }
 
 impl PrxEngine {
@@ -144,8 +138,9 @@ impl PrxEngine {
     ///
     /// # Errors
     /// Rejects invalid endpoints, permissions, bearer files, or unsupported scope settings.
-    pub fn new(config: &PrxConfig, max_conversations: usize) -> Result<Self> {
-        if config.session_scope != PrxSessionScope::PerConversation
+    pub fn new(config: &PrxConfig, max_pending_turns: usize) -> Result<Self> {
+        if !(1..=1024).contains(&max_pending_turns)
+            || config.session_scope != PrxSessionScope::PerConversation
             || config.max_in_flight_per_conversation != 1
             || !(1..=3600).contains(&config.turn_timeout_s)
             || !(1..=3600).contains(&config.approval_timeout_s)
@@ -170,30 +165,22 @@ impl PrxEngine {
             .timeout(std::time::Duration::from_secs(config.request_timeout_s))
             .build()
             .map_err(|_| Error::Config)?;
-        let wants_typed = config.erase_session_on_delete
-            || config.max_concurrent_turns.is_some()
-            || config.max_cost_per_day_cents.is_some();
+        let wants_typed = config.erase_session_on_delete;
         let typed = if wants_typed { Some(typed_client(config)?) } else { None };
         Ok(Self {
             client,
             base_url,
             token,
-            max_conversations,
+            max_pending_turns,
             state: PrxState::default(),
             last_unavailable_log: None,
             next_job_poll: None,
-            authorization: config.authorization,
             turn_timeout_ms: config.turn_timeout_s.saturating_mul(1000),
             approval_timeout_ms: config.approval_timeout_s.saturating_mul(1000),
-            mismatch_logged: false,
             typed,
             token_file: config.token_file.clone(),
             request_timeout_s: config.request_timeout_s,
-            limit_turns: config.max_concurrent_turns,
-            limit_cost: config.max_cost_per_day_cents,
             prx_agent: config.agent_name.clone(),
-            prx_provider: config.provider.clone(),
-            prx_model: config.model.clone(),
         })
     }
 
@@ -266,43 +253,18 @@ impl PrxEngine {
         &mut self,
         conversation_id: &str,
     ) -> std::result::Result<String, HttpFailure> {
-        if self.state.sessions.len() >= self.max_conversations
-            && !self.state.sessions.contains_key(conversation_id)
+        if self.state.sessions.len() >= self.max_pending_turns {
+            let idle = self.state.sessions.keys().find(|id| !self.is_busy(id)).cloned();
+            let Some(idle) = idle else {
+                return Err(HttpFailure::Admission(EngineFailure::Busy));
+            };
+            self.state.sessions.remove(&idle);
+        }
+        if self
+            .prx_agent
+            .as_deref()
+            .is_some_and(|name| ramflux_prx_client::AgentName::parse(name).is_err())
         {
-            return Err(HttpFailure::Rejected);
-        }
-        if self.prx_agent.is_some() {
-            self.create_keyed_session(conversation_id).await
-        } else {
-            self.create_console_session(conversation_id).await
-        }
-    }
-
-    async fn create_console_session(
-        &mut self,
-        conversation_id: &str,
-    ) -> std::result::Result<String, HttpFailure> {
-        let response = self.request(Method::POST, "api/sessions", Some(json!({}))).await?;
-        if response.status != StatusCode::CREATED {
-            return Err(HttpFailure::Rejected);
-        }
-        let session = response.body["session_id"]
-            .as_str()
-            .filter(|value| value.len() <= 256 && valid_segment(value))
-            .ok_or(HttpFailure::Invalid)?
-            .to_owned();
-        self.state.sessions.insert(conversation_id.to_owned(), session.clone());
-        Ok(session)
-    }
-
-    async fn create_keyed_session(
-        &mut self,
-        conversation_id: &str,
-    ) -> std::result::Result<String, HttpFailure> {
-        let Some(agent) = self.prx_agent.as_deref() else {
-            return Err(HttpFailure::Rejected);
-        };
-        if ramflux_prx_client::AgentName::parse(agent).is_err() {
             return Err(HttpFailure::Rejected);
         }
         let key = caller_session_key(conversation_id);
@@ -398,20 +360,6 @@ impl PrxEngine {
                     .to_owned();
                 // Retain the decision even if inspection fails so removal can revoke it.
                 self.state.pending.insert(conversation_id.to_owned(), decision_id.clone());
-                if self.authorization == PrxAuthorization::Full {
-                    self.revoke_pending(conversation_id).await;
-                    if !self.mismatch_logged {
-                        eprintln!(
-                            "agent host PRX authorization mismatch; unexpected approval declined"
-                        );
-                        self.mismatch_logged = true;
-                    }
-                    return Ok(Some(failure(
-                        conversation_id,
-                        &job.message_id,
-                        EngineFailure::AuthorizationMismatch,
-                    )));
-                }
                 match self.approval_view(conversation_id, &decision_id, now_ms).await {
                     Ok(approval) => Ok(Some(EngineEvent::ApprovalRequired {
                         conversation_id: conversation_id.to_owned(),
@@ -451,10 +399,6 @@ impl PrxEngine {
     ) -> std::result::Result<(), HttpFailure> {
         if !valid_segment(decision_id) {
             return Err(HttpFailure::Invalid);
-        }
-        if approved && self.authorization == PrxAuthorization::Full {
-            self.revoke_pending(conversation_id).await;
-            return Err(HttpFailure::Rejected);
         }
         if self.state.jobs.contains_key(conversation_id) {
             return Err(HttpFailure::Rejected);
@@ -646,7 +590,10 @@ impl EngineProvider for PrxEngine {
         input: EngineInput<'a>,
         now_ms: u64,
     ) -> Result<Vec<EngineEvent>> {
-        if self.is_busy(input.conversation.conversation_id) {
+        if self.is_busy(input.conversation.conversation_id)
+            || self.active_conversations().iter().filter(|id| self.is_busy(id)).count()
+                >= self.max_pending_turns
+        {
             return Ok(vec![failure(
                 input.conversation.conversation_id,
                 input.conversation.message_id,
@@ -775,10 +722,6 @@ impl EngineProvider for PrxEngine {
         }
     }
 
-    async fn publish_limits(&mut self) -> Result<()> {
-        self.publish_configured().await
-    }
-
     async fn erase_history<'a>(&'a mut self, conversation_id: &'a str) -> Result<()> {
         self.erase_mapped(conversation_id).await
     }
@@ -811,10 +754,10 @@ impl EngineProvider for PrxEngine {
                     approval.deadline_ms.min(now_ms.saturating_add(self.approval_timeout_ms));
             }
         }
-        if self.state.sessions.len() > self.max_conversations
-            || self.state.jobs.len() > self.max_conversations
-            || self.state.completed.len() > self.max_conversations
-            || self.state.pending.len() > self.max_conversations
+        if self.state.sessions.len() > self.max_pending_turns
+            || self.state.jobs.len() > self.max_pending_turns
+            || self.state.completed.len() > self.max_pending_turns
+            || self.state.pending.len() > self.max_pending_turns
             || self.state.history_erased.len() > MAX_ERASE_RECEIPTS
             || self.state.history_erased.iter().any(|(id, rows)| {
                 !valid_id(id) || rows.len() > 64 || rows.iter().any(|row| !stored_history_ok(row))

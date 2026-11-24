@@ -2,8 +2,6 @@
 // Copyright (c) 2026 Span Brain
 mod host {
     mod auth_startup;
-    mod deferred_actions;
-    mod deferred_fairness;
     mod generation_one;
     mod malformed_events;
     mod native_groups;

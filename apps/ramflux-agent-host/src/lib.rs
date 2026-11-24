@@ -17,9 +17,9 @@ mod prx_sync;
 mod prx_test_support;
 mod runner;
 mod runner_approval;
-mod runner_deferred;
 mod runner_output;
 mod runner_policy;
+mod runner_poll;
 mod runner_refusal;
 mod runner_retry;
 mod runner_run_approval;
@@ -27,9 +27,7 @@ mod runner_surface;
 mod surface_plan;
 pub use bus::{AgentBus, RfdBus};
 pub use checkpoint::{Checkpoint, CheckpointStore, GroupRefusal, OutputRefusal};
-pub use config::{
-    Choice, Config, EngineConfig, PrxAuthorization, PrxConfig, PrxSessionScope, Rule, SurfaceRule,
-};
+pub use config::{Choice, Config, EngineConfig, PrxConfig, PrxSessionScope, Rule, SurfaceRule};
 pub use engine::{
     ActionInput, ConversationInput, EngineApproval, EngineEvent, EngineFailure, EngineInput,
     EngineProvider, Intent, RuleEngine,

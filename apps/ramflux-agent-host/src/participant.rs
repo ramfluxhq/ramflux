@@ -121,7 +121,6 @@ pub(crate) async fn conversation(
     bus: &mut impl AgentBus,
     state: &Checkpoint,
     id: &str,
-    _max: usize,
 ) -> Result<Option<Value>> {
     let Some(row) =
         directory_find(bus, "conversation.directory", "conversations", |r| r["id"] == id).await?
