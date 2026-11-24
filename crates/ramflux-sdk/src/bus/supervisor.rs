@@ -24,6 +24,10 @@ enum RestoreState {
 
 pub(super) struct Supervisor {
     pub(super) config: LocalBusConfig,
+    pub(crate) app_fences: Arc<super::app_lock_fence::Fences>,
+    pub(super) controls: RefCell<BTreeMap<u64, super::outbound::LocalBusOutbound>>,
+    pub(super) control_accounts: RefCell<BTreeMap<u64, BTreeSet<String>>>,
+    app_control: tokio::sync::Mutex<()>,
     pub(super) root_lease: RefCell<Option<Arc<super::data_root_lock::DataRootLock>>>,
     owner: RefCell<std::rc::Weak<Supervisor>>,
     pub(super) index: AccountIndex,
@@ -41,6 +45,7 @@ pub(super) struct Supervisor {
     event_receiver: RefCell<Option<mpsc::Receiver<EventBatch>>>,
     event_task: RefCell<Option<tokio::task::JoinHandle<()>>>,
     streams: RefCell<BTreeMap<u64, tokio::task::JoinHandle<()>>>,
+    pub(super) stream_accounts: RefCell<BTreeMap<u64, Option<String>>>,
     attended: RefCell<BTreeMap<u64, String>>,
     stop_requested: watch::Sender<bool>,
     stop_response: watch::Sender<bool>,
@@ -66,6 +71,10 @@ impl Supervisor {
         let (stop_response, _) = watch::channel(false);
         let (events, event_receiver) = mpsc::channel::<EventBatch>(64);
         let index = AccountIndex::open(&config.data_root)?;
+        let app_fences = super::app_lock_fence::Fences::for_root(&config.data_root)?;
+        for id in index.known_account_ids()? {
+            app_fences.initialize(&id, &index.app_lock_policy(&id)?)?;
+        }
         let node_actor = AccountActor::start(
             String::new(),
             config.clone(),
@@ -82,6 +91,10 @@ impl Supervisor {
             backup_expiry: RefCell::new(None),
             agent_repairs: RefCell::new(None),
             config,
+            app_fences,
+            controls: RefCell::new(BTreeMap::new()),
+            control_accounts: RefCell::new(BTreeMap::new()),
+            app_control: tokio::sync::Mutex::new(()),
             index,
             stop_requested,
             stop_response,
@@ -98,6 +111,7 @@ impl Supervisor {
             restore_states: RefCell::new(BTreeMap::new()),
             subscribers: Rc::new(RefCell::new(BTreeMap::new())),
             streams: RefCell::new(BTreeMap::new()),
+            stream_accounts: RefCell::new(BTreeMap::new()),
             attended: RefCell::new(BTreeMap::new()),
         });
         *supervisor.owner.borrow_mut() = Rc::downgrade(&supervisor);
@@ -232,6 +246,9 @@ impl Supervisor {
                 );
                 continue;
             };
+            if self.index.app_lock_policy(&manifest.local_account_id)?.enabled {
+                continue;
+            }
             if self
                 .index
                 .account(&manifest.local_account_id)
@@ -299,9 +316,46 @@ impl Supervisor {
 
     pub(super) async fn request(
         &self,
+        request: LocalBusFrame,
+        connection: &LocalBusConnectionState,
+    ) -> Result<ActorResponse, SdkError> {
+        let access = if super::app_lock_fence::control(&request.method) {
+            None
+        } else {
+            Some(self.app_fences.for_method(&request.method, request.account_id.as_deref())?)
+        };
+        if let Some(access) = &access {
+            access.check()?;
+        }
+        let attachment = (!super::app_lock_fence::redacted_view(&request.method))
+            .then(|| request.account_id.clone())
+            .flatten();
+        let mut result = Box::pin(self.request_inner(request, connection)).await;
+        if let Some(access) = access
+            && access.check().is_err()
+        {
+            if let Ok(response) = &mut result {
+                super::secrets::wipe(&mut response.body);
+                for event in &mut response.events {
+                    super::secrets::wipe(&mut event.body);
+                }
+            }
+            return Err(super::app_lock_fence::locked());
+        }
+        if result.is_ok()
+            && let Some(account) = attachment
+        {
+            self.attach_app_control(connection.connection_id, &account);
+        }
+        result
+    }
+    async fn request_inner(
+        &self,
         mut request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
+        self.ensure_request_allowed(&request)?;
+        self.admit_app_access(&request)?;
         if crate::search::capability::is_method(&request.method) {
             match crate::search::capability::guard(&request.method) {
                 Ok(Some(body)) => {
@@ -326,7 +380,15 @@ impl Supervisor {
         if request.method == "account.unlock"
             && let Some(call) = &credential_call
         {
+            let _app_control = self.app_control_guard(&request.method).await;
             return self.private_unlock(&request, call, connection.credential_prompts).await;
+        }
+        // Authentication and lock effects must run again; a receipt from a previous
+        // unlocked epoch cannot authorize a new unlock or acknowledge a later lock.
+        if matches!(request.method.as_str(), "account.unlock" | "account.lock" | "account.sign_out")
+            && self.index.app_lock_policy(request_account_id(&request)?)?.enabled
+        {
+            return Box::pin(self.route(request, connection)).await;
         }
         if !super::lifecycle::handles(&request.method) {
             return Box::pin(self.route(request, connection)).await;
@@ -478,6 +540,7 @@ impl Supervisor {
         self.set_active(id).await?;
         self.set_unlocked(id, true).await?;
         self.advance_after_unlock(id).await;
+        self.app_unlocked(id)?;
         Ok(reply(serde_json::to_value(result)?))
     }
 
@@ -547,6 +610,11 @@ impl Supervisor {
     ) -> Result<ActorResponse, SdkError> {
         self.start_event_router();
         self.ensure_request_allowed(&request)?;
+        // Serialize effects in their execution owner, never lifecycle receipt waiters.
+        // Retries must reach conflict detection and shutdown must close admission promptly.
+        let _app_control = self.app_control_guard(&request.method).await;
+        self.ensure_request_allowed(&request)?;
+        self.admit_app_access(&request)?;
         if let Some(body) = super::custody_setup::guard_account(&self.config.data_root, &request)? {
             return Ok(reply(body));
         }
@@ -593,6 +661,9 @@ impl Supervisor {
             }
             "account.app_lock.configure" => {
                 return self.configure_app_lock(&request, connection).await;
+            }
+            "account.app_lock.lock" => {
+                return self.lock_app_access(&request, connection).await;
             }
             "account.app_lock.state" => {
                 return self.app_lock_state(&request, connection).await;
@@ -654,6 +725,11 @@ impl Supervisor {
             return Err(self.account_unavailable(&id));
         };
         let locking = matches!(request.method.as_str(), "account.lock" | "account.sign_out");
+        if locking && self.index.app_lock_policy(&id)?.enabled {
+            self.app_fences.transition(&id, true, true, "manual")?;
+            self.close_app_subscriptions(&id);
+            self.backup_jobs.app_lock_account(&id).await?;
+        }
         let unlocking = request.method == "account.unlock";
         let mut request = command(request, connection);
         request.attended = self.attended.borrow().values().any(|account| account == &id);
@@ -687,6 +763,7 @@ impl Supervisor {
         }
         if unlocking && response.is_ok() {
             self.advance_after_unlock(&id).await;
+            self.app_unlocked(&id)?;
         }
         if locking && response.is_ok() {
             actor.stop().await?;
@@ -695,6 +772,9 @@ impl Supervisor {
             self.accounts.borrow_mut().remove(&id);
             self.subscribers.borrow_mut().retain(|_, subscriber| subscriber.account_id != id);
             self.attended.borrow_mut().retain(|_, account| account != &id);
+            if self.index.app_lock_policy(&id)?.enabled {
+                self.finish_hard_app_lock(&id).await?;
+            }
         }
         response
     }
@@ -893,8 +973,10 @@ impl Supervisor {
             }
             super::account_local::attach_from_state(row);
         }
-        let details = known.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
-        let accounts = super::account_local::picker(&details);
+        let mut details = known.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
+        self.redact_app_accounts(&mut details, true)?;
+        let mut accounts = super::account_local::picker(&details);
+        self.redact_app_accounts(&mut accounts, false)?;
         Ok(reply(serde_json::json!({
             "accounts": accounts,
             "account_details": details,
@@ -1222,6 +1304,15 @@ impl Supervisor {
         }
     }
 
+    #[cfg(feature = "c-abi")]
+    pub(super) fn close_account_subscription(&self, id: u64) {
+        self.search_disconnect(id);
+        self.daemon_attended.borrow_mut().remove(&id);
+        self.clear_stream(id);
+        self.stream_accounts.borrow_mut().remove(&id);
+        self.subscribers.borrow_mut().remove(&id);
+        self.attended.borrow_mut().remove(&id);
+    }
     pub(super) fn subscribe(&self, connection: &LocalBusConnectionState, account_id: String) {
         if let Some(id) = &connection.attended_account_id {
             self.attended.borrow_mut().insert(connection.connection_id, id.clone());
@@ -1237,7 +1328,10 @@ impl Supervisor {
     }
 
     pub(super) fn disconnect(&self, id: u64) {
+        self.controls.borrow_mut().remove(&id);
+        self.control_accounts.borrow_mut().remove(&id);
         self.search_disconnect(id);
+        self.stream_accounts.borrow_mut().remove(&id);
         if let Some(task) = self.streams.borrow_mut().remove(&id) {
             task.abort();
         }
@@ -1272,8 +1366,13 @@ impl Supervisor {
         if let Some(mut receiver) = self.event_receiver.borrow_mut().take() {
             let subscribers = Rc::clone(&self.subscribers);
             *self.event_task.borrow_mut() = Some(tokio::task::spawn_local(async move {
-                while let Some(batch) = receiver.recv().await {
-                    super::events::broadcast(&mut subscribers.borrow_mut(), &batch.events);
+                while let Some(mut batch) = receiver.recv().await {
+                    if batch.access.as_ref().is_none_or(|access| access.check().is_ok()) {
+                        super::events::broadcast(&mut subscribers.borrow_mut(), &batch.events);
+                    }
+                    for event in &mut batch.events {
+                        super::secrets::wipe(&mut event.body);
+                    }
                     let _ = batch.accepted.send(());
                 }
             }));

@@ -8,8 +8,155 @@ use super::Supervisor;
 use crate::bus::io::request_account_id;
 use crate::prelude::*;
 use ramflux_storage::{AppLockPolicy, StorageError, WrappedAccountDbKey};
+use std::sync::Arc;
 
 impl Supervisor {
+    pub(super) async fn app_control_guard(
+        &self,
+        method: &str,
+    ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        if matches!(
+            method,
+            "account.app_lock.configure"
+                | "account.app_lock.lock"
+                | "account.unlock"
+                | "account.lock"
+                | "account.sign_out"
+        ) {
+            Some(self.app_control.lock().await)
+        } else {
+            None
+        }
+    }
+    pub(super) async fn finish_hard_app_lock(&self, id: &str) -> Result<(), SdkError> {
+        let _drained = Arc::clone(&self.app_fences.delivery).write_owned().await;
+        let request = LocalBusFrame::request(
+            "",
+            Some(id.into()),
+            "account",
+            "account.lock",
+            serde_json::json!({}),
+        );
+        self.emit_app_lock_change(&request, id)
+    }
+
+    pub(in crate::bus) fn admit_app_access(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
+        if super::super::app_lock_fence::control(&request.method) {
+            return Ok(());
+        }
+        self.app_fences.for_method(&request.method, request.account_id.as_deref())?.check()
+    }
+    pub(super) fn app_unlocked(&self, id: &str) -> Result<(), SdkError> {
+        let policy = self.index.app_lock_policy(id)?;
+        if policy.enabled {
+            self.app_fences.transition(id, true, false, "authenticated")?;
+            let request = LocalBusFrame::request(
+                "",
+                Some(id.into()),
+                "account",
+                "account.unlock",
+                serde_json::json!({}),
+            );
+            self.emit_app_lock_change(&request, id)?;
+        }
+        Ok(())
+    }
+    fn app_lock_body(
+        &self,
+        policy: &AppLockPolicy,
+        id: &str,
+    ) -> Result<serde_json::Value, SdkError> {
+        let open = self.accounts.borrow().get(id).is_some_and(super::AccountActor::is_open);
+        let epoch = self.app_fences.epoch(id)?;
+        let mut body = state_body(policy, open && !epoch.locked);
+        let fields = body.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?;
+        fields.insert("generation".into(), epoch.generation.into());
+        if !epoch.reason.is_empty() {
+            fields.insert("reason".into(), epoch.reason.into());
+        }
+        Ok(body)
+    }
+    pub(super) fn emit_app_lock_change(
+        &self,
+        request: &LocalBusFrame,
+        id: &str,
+    ) -> Result<(), SdkError> {
+        let epoch = self.app_fences.epoch(id)?;
+        let frame = local_bus_event(
+            request,
+            id,
+            "account",
+            "account.app_lock.changed",
+            serde_json::json!({
+                "state": if epoch.locked { "locked" } else { "unlocked" },
+                "reason": epoch.reason, "generation": epoch.generation, "remaining_ms": 0,
+            }),
+        );
+        self.controls.borrow_mut().retain(|connection, outbound| {
+            if self
+                .control_accounts
+                .borrow()
+                .get(connection)
+                .is_some_and(|accounts| accounts.contains(id))
+            {
+                outbound.try_send(frame.clone()).is_ok()
+            } else {
+                true
+            }
+        });
+        Ok(())
+    }
+    pub(super) async fn lock_app_access(
+        &self,
+        request: &LocalBusFrame,
+        connection: &LocalBusConnectionState,
+    ) -> Result<super::ActorResponse, SdkError> {
+        let id = request_account_id(request)?.to_owned();
+        refuse_attended(connection, &id)?;
+        let policy = self.index.app_lock_policy(&id)?;
+        if !policy.enabled {
+            return Err(SdkError::LocalBusRefused {
+                code: "app_lock_disabled".into(),
+                message: "app lock is disabled".into(),
+                body: Box::new(serde_json::json!({"reason_code":"app_lock_disabled"})),
+            });
+        }
+        self.attach_app_control(connection.connection_id, &id);
+        self.app_fences.transition(&id, true, true, "manual")?;
+        self.close_app_subscriptions(&id);
+        self.backup_jobs.app_lock_account(&id).await?;
+        self.lock_account_session(&id).await?;
+        // Every transport write admitted before the epoch change must finish before acknowledgement.
+        let _drained = Arc::clone(&self.app_fences.delivery).write_owned().await;
+        self.emit_app_lock_change(request, &id)?;
+        Ok(super::reply(self.app_lock_body(&policy, &id)?))
+    }
+    pub(super) fn close_app_subscriptions(&self, id: &str) {
+        let ids = self
+            .subscribers
+            .borrow()
+            .iter()
+            .filter_map(|(key, subscriber)| (subscriber.account_id == id).then_some(*key))
+            .collect::<Vec<_>>();
+        for key in ids {
+            self.clear_stream(key);
+        }
+        // Journal streams do not all have an ephemeral subscriber. Their producer epoch fences
+        // delivery even if a tail has already enqueued a page; abort the account-bound tails.
+        let ids = self
+            .stream_accounts
+            .borrow()
+            .iter()
+            .filter_map(|(key, account)| {
+                account.as_deref().is_none_or(|account| account == id).then_some(*key)
+            })
+            .collect::<Vec<_>>();
+        for key in ids {
+            self.clear_stream(key);
+        }
+        self.subscribers.borrow_mut().retain(|_, subscriber| subscriber.account_id != id);
+    }
+
     /// Clears leftover silent wraps before any account can open. A failure is logged;
     /// the open path still refuses an account whose stored policy is on.
     pub(super) fn reconcile_app_lock_wraps(&self) {
@@ -24,17 +171,44 @@ impl Supervisor {
         connection: &LocalBusConnectionState,
     ) -> Result<super::ActorResponse, SdkError> {
         let account_id = self.authorize_app_lock_change(request, connection)?;
+        self.attach_app_control(connection.connection_id, &account_id);
         let enabled = required_bool(&request.body)?;
         let timeout_ms = required_timeout(&request.body)?;
         let policy = if enabled {
-            self.write_app_lock(account_id, true, timeout_ms, None).await?
+            self.write_app_lock(account_id.clone(), true, timeout_ms, None).await?
         } else {
             let actor =
                 self.accounts.borrow().get(&account_id).cloned().ok_or_else(unauthorized)?;
             let wrap = actor.silent_device_wrap().await?;
-            self.write_app_lock(account_id, false, timeout_ms, Some(wrap)).await?
+            self.write_app_lock(account_id.clone(), false, timeout_ms, Some(wrap)).await?
         };
-        Ok(super::reply(state_body(&policy, true)))
+        self.app_fences.transition(&account_id, policy.enabled, false, "configured")?;
+        self.emit_app_lock_change(request, &account_id)?;
+        Ok(super::reply(self.app_lock_body(&policy, &account_id)?))
+    }
+    pub(in crate::bus) fn attach_app_control(&self, connection: u64, id: &str) {
+        if !self.accounts.borrow().contains_key(id) && self.index.account(id).is_err() {
+            return;
+        }
+        self.control_accounts.borrow_mut().entry(connection).or_default().insert(id.into());
+    }
+
+    pub(super) fn redact_app_accounts(
+        &self,
+        rows: &mut [serde_json::Value],
+        detailed: bool,
+    ) -> Result<(), SdkError> {
+        for row in rows {
+            let id = super::super::account_local::row_id(row).to_owned();
+            if self.app_fences.epoch(&id)?.locked {
+                *row = if detailed {
+                    serde_json::json!({"id":id,"state":"locked","locked":true})
+                } else {
+                    serde_json::json!({"id":id,"locked":true})
+                };
+            }
+        }
+        Ok(())
     }
 
     pub(super) async fn app_lock_state(
@@ -49,10 +223,8 @@ impl Supervisor {
         let policy = lifecycle::spawn_blocking(move || read_policy(&index, &id))
             .await
             .map_err(|error| SdkError::LocalBus(format!("index reader failed: {error}")))??;
-        let open =
-            self.accounts.borrow().get(&account_id).is_some_and(super::AccountActor::is_open);
         Ok(super::reply(match policy {
-            PolicyRead::Ready(policy) => state_body(&policy, open),
+            PolicyRead::Ready(policy) => self.app_lock_body(&policy, &account_id)?,
             PolicyRead::Unreadable => unavailable_body(),
         }))
     }

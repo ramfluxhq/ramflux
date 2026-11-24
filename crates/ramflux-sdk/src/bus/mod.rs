@@ -12,6 +12,7 @@ mod agent_advance;
 mod agent_directory;
 mod agent_methods;
 mod agent_retire;
+pub(crate) mod app_lock_fence;
 pub(crate) mod attachment_plane;
 mod attachment_scheduler;
 pub(crate) mod backup_jobs;

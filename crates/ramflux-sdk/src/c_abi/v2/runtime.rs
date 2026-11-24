@@ -188,6 +188,10 @@ impl Client {
                 return Err(error.into());
             }
         };
+        let fences = crate::bus::app_lock_fence::Fences::for_root(&data_root)?;
+        let observer: Arc<dyn crate::bus::app_lock_fence::Observer> = shared.clone();
+        fences.observe(Arc::downgrade(&observer))?;
+        let _ = shared.app_fences.set(fences);
         Ok(Arc::new(Self {
             diagnostics,
             lifecycle_gate: Mutex::new(()),
@@ -527,7 +531,13 @@ fn handle_public(shared: &Shared, bytes: &[u8]) -> Result<bool, SdkError> {
         let generation = generation
             .ok_or_else(|| SdkError::LocalBus("event missing subscription generation".into()))?;
         super::native_error::frame(&mut frame);
-        shared.push_event(serde_json::to_vec(&frame)?, generation);
+        if frame.get("method").and_then(serde_json::Value::as_str)
+            == Some("account.app_lock.changed")
+        {
+            shared.push_control(serde_json::to_vec(&frame)?);
+        } else {
+            shared.push_event(serde_json::to_vec(&frame)?, generation);
+        }
     }
     crate::bus::inprocess::erase_value(&mut frame);
     Ok(stop_requested)

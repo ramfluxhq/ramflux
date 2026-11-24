@@ -77,6 +77,15 @@ async fn handle_app_lock(
     command: AccountAppLockCommand,
 ) -> Result<(), RfError> {
     match command.action {
+        AccountAppLockAction::Lock(selector) => print_json(
+            &bus.request(
+                Some(selector.account),
+                "account",
+                "account.app_lock.lock",
+                serde_json::json!({}),
+            )
+            .await?,
+        ),
         AccountAppLockAction::State(selector) => print_json(
             &bus.request(
                 Some(selector.account),

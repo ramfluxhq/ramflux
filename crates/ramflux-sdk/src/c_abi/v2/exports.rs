@@ -469,6 +469,12 @@ pub extern "C" fn ramflux_v2_execute(
         let deadline_ms = Some(request.deadline_ms);
         let attended_method = request.method.clone();
         let attended_account = request.account_id.clone();
+        let access = super::app_lock::capture_access(
+            &client.shared,
+            &request.method,
+            request.account_id.as_deref(),
+        )
+        .map_err(|_| internal())?;
         let mut frame = LocalBusFrame::request(
             id.to_string(),
             request.account_id.take(),
@@ -482,6 +488,7 @@ pub extern "C" fn ramflux_v2_execute(
         let bytes =
             zeroize::Zeroizing::new(bytes.map_err(|error| super::super::map_sdk_error(&error))?);
         let operation = Arc::new(Operation::default());
+        operation.state.lock().map_err(|_| internal())?.access = access;
         operation.state.lock().map_err(|_| internal())?.kind = if subscription {
             OperationKind::Subscription
         } else if frame_method_close {
@@ -542,13 +549,20 @@ pub extern "C" fn ramflux_v2_operation_poll(
         super::super::clear_out_ptr(out)?;
         let client = client(handle)?;
         let operation = operation(&client, id)?;
-        let state = operation.state.lock().map_err(|_| internal())?;
-        if let Some(bytes) = &state.result {
-            super::buffer::write_buffer(out, bytes.to_vec())?;
+        let mut deliver = || {
+            let state = operation.state.lock().map_err(|_| internal())?;
+            if let Some(bytes) = &state.result {
+                super::buffer::write_buffer(out, bytes.to_vec())?;
+            } else {
+                pending = true;
+            }
+            Ok(())
+        };
+        if let Some(fences) = client.shared.app_fences.get() {
+            fences.serialize(deliver).map_err(|_| internal())?
         } else {
-            pending = true;
+            deliver()
         }
-        Ok(())
     });
     if code == 0 && pending { RamfluxV2Status::Pending as i32 } else { code }
 }
@@ -664,34 +678,46 @@ pub extern "C" fn ramflux_v2_event_poll(handle: u64, out: *mut *mut RamfluxBuffe
     let code = call(|| {
         super::super::clear_out_ptr(out)?;
         let client = client(handle)?;
-        let mut events = client.shared.events.lock().map_err(|_| internal())?;
-        while events.queue.front().is_some_and(|event| {
-            !events.active || event.generation == 0 || event.generation != events.generation
-        }) {
-            if let Some(event) = events.queue.pop_front() {
-                events.bytes = events.bytes.saturating_sub(event.bytes.len());
+        let mut deliver = || {
+            if let Some(bytes) = client.shared.controls.lock().map_err(|_| internal())?.pop_front()
+            {
+                super::buffer::write_buffer(out, bytes.to_vec())?;
+                return Ok(());
             }
-        }
-        if events.resync && events.active && events.generation != 0 {
-            super::buffer::write_json_buffer(
-                out,
-                &json!({
-                    "bus_protocol":"ramflux.local_bus.v1","frame_id":"c_abi_resync",
-                    "kind":"event","request_id":"","sdk_api":"bus","method":"stream.lagged",
-                    "account_id":events.account_id,"body":{"resync_required":true},
-                    "subscription_generation":events.generation.to_string(),
-                }),
-            )?;
-            status = RamfluxV2Status::ResyncRequired as i32;
-        } else if let Some(event) = events.queue.pop_front() {
-            events.bytes = events.bytes.saturating_sub(event.bytes.len());
-            super::buffer::write_buffer(out, event.bytes.to_vec())?;
-        } else if client.shared.closed.load(std::sync::atomic::Ordering::Acquire) {
-            status = RamfluxV2Status::Closed as i32;
+            let mut events = client.shared.events.lock().map_err(|_| internal())?;
+            while events.queue.front().is_some_and(|event| {
+                !events.active || event.generation == 0 || event.generation != events.generation
+            }) {
+                if let Some(event) = events.queue.pop_front() {
+                    events.bytes = events.bytes.saturating_sub(event.bytes.len());
+                }
+            }
+            if events.resync && events.active && events.generation != 0 {
+                super::buffer::write_json_buffer(
+                    out,
+                    &json!({
+                        "bus_protocol":"ramflux.local_bus.v1","frame_id":"c_abi_resync",
+                        "kind":"event","request_id":"","sdk_api":"bus","method":"stream.lagged",
+                        "account_id":events.account_id,"body":{"resync_required":true},
+                        "subscription_generation":events.generation.to_string(),
+                    }),
+                )?;
+                status = RamfluxV2Status::ResyncRequired as i32;
+            } else if let Some(event) = events.queue.pop_front() {
+                events.bytes = events.bytes.saturating_sub(event.bytes.len());
+                super::buffer::write_buffer(out, event.bytes.to_vec())?;
+            } else if client.shared.closed.load(std::sync::atomic::Ordering::Acquire) {
+                status = RamfluxV2Status::Closed as i32;
+            } else {
+                status = RamfluxV2Status::Pending as i32;
+            }
+            Ok(())
+        };
+        if let Some(fences) = client.shared.app_fences.get() {
+            fences.serialize(deliver).map_err(|_| internal())?
         } else {
-            status = RamfluxV2Status::Pending as i32;
+            deliver()
         }
-        Ok(())
     });
     if code == 0 { status } else { code }
 }
@@ -757,12 +783,7 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "peer_upgrade_required"
         | "manifest_unavailable"
         | "unsupported_platform" => E::UnsupportedVersion as i32,
-        "AuthFailed"
-        | "AccountLocked"
-        | "Unauthenticated"
-        | "TransportSecurity"
-        | "CustodyConfirmationFailed"
-        | "credential_unavailable" => E::AuthFailed as i32,
+        name if super::native_error::auth_failure(name) => E::AuthFailed as i32,
         "CapabilityRejected" => E::CapabilityRejected as i32,
         "ReplayRejected" | "ReplayMismatch" => E::ReplayRejected as i32,
         "McpGrantRejected" => E::McpGrantRejected as i32,

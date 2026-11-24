@@ -318,7 +318,7 @@ fn occupy_until_one_spare(runtime: &AccountRuntime) -> TestResult {
         let (accepted, _done) = tokio::sync::oneshot::channel();
         runtime
             .events
-            .try_send(EventBatch { events: Vec::new(), accepted })
+            .try_send(EventBatch { events: Vec::new(), access: None, accepted })
             .map_err(|_| "test: router hold slot")?;
     }
     assert!(runtime.events.capacity() <= 1, "test: router has no spare slot");

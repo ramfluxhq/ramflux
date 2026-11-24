@@ -306,7 +306,11 @@ impl RamfluxClient {
                 Err(StorageError::GroupPermissionDenied.into())
             }
         } else {
-            Err(StorageError::GroupPermissionDenied.into())
+            // A control entry (for example a member's delivery beacon) can reach this device
+            // before the creator's snapshot does. That is a retryable ordering gap, not a
+            // permission refusal: a storage error would pin the receive cursor and block the
+            // snapshot queued behind this entry, so the group would never appear.
+            Err(SdkError::InboundPending("group state not yet received".into()))
         }
     }
 }

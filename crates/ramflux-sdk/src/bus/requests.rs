@@ -31,6 +31,14 @@ pub(super) async fn respond(
     context: LocalBusConnectionState,
 ) -> (String, Result<(), SdkError>) {
     let request = OwnedRequest(request);
+    let access = if super::app_lock_fence::control(&request.method) {
+        None
+    } else {
+        supervisor
+            .app_fences
+            .token(super::app_lock_fence::scope(&request.method, request.account_id.as_deref()))
+            .ok()
+    };
     let mut stop_response = (request.method == "daemon.stop").then(|| StopResponse {
         supervisor: Rc::clone(&supervisor),
         connection: context.connection_id,
@@ -63,7 +71,9 @@ pub(super) async fn respond(
         if let Some(guard) = stop_response.as_mut() {
             guard.armed = false;
         }
-        supervisor.broadcast(&events);
+        if access.as_ref().is_none_or(|access| access.check().is_ok()) {
+            supervisor.broadcast(&events);
+        }
     }
     (request.request_id.clone(), sent)
 }
