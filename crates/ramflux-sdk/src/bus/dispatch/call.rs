@@ -67,14 +67,8 @@ pub(crate) async fn dispatch(
     }
     Ok(local_bus_ok(serde_json::to_value(row)?))
 }
-fn require_call_agent_operable(account: &LocalBusAccountState) -> Result<(), SdkError> {
-    let Some(born) = account.client.born_v3_account.as_ref() else {
-        return Ok(());
-    };
-    crate::custody::agent_creation::require_agent_operable(
-        account.client.account_index()?.root(),
-        born.local_account_id(),
-    )
+async fn require_call_agent_operable(account: &LocalBusAccountState) -> Result<(), SdkError> {
+    crate::bus::couriers::primary::call_agent_fence(account).await
 }
 
 async fn invite(
@@ -82,7 +76,7 @@ async fn invite(
     request: &LocalBusFrame,
     now: i64,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    require_call_agent_operable(account)?;
+    require_call_agent_operable(account).await?;
     if account.client.voice_calls.values().any(|c| c.row.state != "ended") {
         return Err(invalid("account busy"));
     }
