@@ -146,6 +146,7 @@ methods! {
         "account.unlock",
     ];
     LocalMutation(Always) => Supervisor: [
+        "account.app_lock.configure",
         "account.backup.export",
         "account.backup.import",
         "account.export_agent_credentials",
@@ -200,6 +201,7 @@ methods! {
         "task.list",
     ];
     LocalRead(Always) => Supervisor: [
+        "account.app_lock.state",
         "account.list",
         "daemon.status",
         "node.list",

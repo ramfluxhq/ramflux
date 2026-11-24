@@ -65,6 +65,10 @@ pub(super) enum PrivateCommand {
         home_node_id: Option<String>,
         reply: oneshot::Sender<Result<crate::LocalBusCreatedAccount, SdkError>>,
     },
+    /// Wrap the open account key. The caller stores it with the policy change.
+    SilentDeviceWrap {
+        reply: oneshot::Sender<Result<ramflux_storage::WrappedAccountDbKey, SdkError>>,
+    },
     Capture(oneshot::Sender<Result<super::backup_jobs::CapturedAccount, SdkError>>),
     /// An agent creation command; boxed so the agent payloads do not grow this enum.
     Agent(Box<AgentPrivate>),
@@ -312,6 +316,14 @@ impl AccountActor {
     ) -> Result<crate::LocalBusCreatedAccount, SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::NativeUnlock { secret, home_node_id, reply })?;
+        response.await.map_err(|_| stopped())?
+    }
+
+    pub(super) async fn silent_device_wrap(
+        &self,
+    ) -> Result<ramflux_storage::WrappedAccountDbKey, SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::SilentDeviceWrap { reply })?;
         response.await.map_err(|_| stopped())?
     }
 
