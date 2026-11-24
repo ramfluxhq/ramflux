@@ -143,8 +143,16 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Option<Decoded>, SdkError> {
             ) {
                 return Ok(None);
             }
+            let mut packet = from_generated(value)?;
+            packet.received_group_epoch = Some(
+                inner
+                    .identity
+                    .as_ref()
+                    .and_then(|identity| identity.group_epoch)
+                    .ok_or_else(|| invalid("group control epoch missing"))?,
+            );
             return Ok(Some(Decoded {
-                packet: from_generated(value)?,
+                packet,
                 supported: scanned.outcome == g::validation::ScanOutcome::Supported,
             }));
         }

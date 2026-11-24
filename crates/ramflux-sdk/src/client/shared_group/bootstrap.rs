@@ -293,6 +293,14 @@ impl RamfluxClient {
                 return Ok(changed);
             }
             let local = self.owned_device_identity()?;
+            if changed
+                && state.view().effective_role(local.root_commitment(), local.device_id()).is_some()
+            {
+                let epoch = self
+                    .group_roster_epoch(local.root_commitment())?
+                    .ok_or_else(|| invalid("group local device-set epoch missing"))?;
+                self.stage_group_device_beacon(&state.view().group_id, local_target, epoch)?;
+            }
             if let Some(bytes) = &prepared.distribution
                 && state.view().effective_role(local.root_commitment(), local.device_id()).is_some()
             {

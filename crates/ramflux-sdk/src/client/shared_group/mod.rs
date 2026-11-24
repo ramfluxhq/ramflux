@@ -25,6 +25,7 @@ pub(crate) use devices::select as select_layer_devices;
 mod federation;
 mod invitations;
 pub(crate) mod maintenance;
+pub(crate) mod member_delivery;
 mod message_ids;
 mod own_consent;
 mod requests;
@@ -359,6 +360,15 @@ impl RamfluxClient {
         let mut value = serde_json::to_value(display)?;
         value["conversation_id"] = json!(state.conversation_id);
         value["member_roster"] = json!(state.members);
+        let outcomes = self.group_member_delivery_outcomes(&verified)?;
+        if let Some(roster) = value["member_roster"].as_array_mut() {
+            for (member, outcome) in roster.iter_mut().zip(&outcomes) {
+                member["state"] = outcome["state"].clone();
+                member["reason"] = outcome["reason"].clone();
+                member["status_text"] = outcome["status_text"].clone();
+            }
+        }
+        value["member_outcomes"] = json!(outcomes);
         value["excluded_devices"] = json!(state.excluded);
         value["name"] = json!(state.name);
         value["name_epoch"] = json!(state.name_epoch);

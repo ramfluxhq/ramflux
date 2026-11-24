@@ -86,15 +86,13 @@ pub(super) async fn dispatch(
     let primary = native_group_primary(account).await?;
     account.client.account_db()?.write_transaction(|| -> Result<(), SdkError> {
         if let Some(change) = change {
-            if let Some(primary) = primary.as_ref() {
+            if !reinvite_pending(&account.client, previous.as_ref(), &change)? {
                 account.client.shared_group_change_with_primary(
                     group,
                     &target,
                     change,
-                    Some(primary),
-                )?
-            } else {
-                account.client.shared_group_change(group, &target, change)?
+                    primary.as_deref(),
+                )?;
             }
         } else {
             let conversation = body["conversation_id"].as_str().unwrap_or(group);
@@ -106,11 +104,11 @@ pub(super) async fn dispatch(
                     name,
                     &target,
                     Some(primary),
-                )?
+                )?;
             } else {
-                account.client.shared_group_create(group, conversation, name, &target)?
+                account.client.shared_group_create(group, conversation, name, &target)?;
             }
-        };
+        }
         if let Some(route) = &route {
             account.client.persist_group_member_route(group, route)?;
             account.client.persist_shared_group_federation_route(
@@ -130,6 +128,36 @@ pub(super) async fn dispatch(
         account.client.shared_group_metadata(group)?.ok_or(StorageError::GroupPermissionDenied)?;
     result["accepted"] = json!(true);
     Ok(Some(result))
+}
+
+fn reinvite_pending(
+    client: &RamfluxClient,
+    previous: Option<&ramflux_crypto::VerifiedGroupState>,
+    change: &GroupStateChange,
+) -> Result<bool, SdkError> {
+    let (Some(state), GroupStateChange::Add { member, role }) = (previous, change) else {
+        return Ok(false);
+    };
+    if !state.view().members.iter().any(|old| old.identity == *member && old.role == *role) {
+        return Ok(false);
+    }
+    let own = client.owned_device_identity()?;
+    if !state
+        .view()
+        .effective_role(own.root_commitment(), own.device_id())
+        .is_some_and(|role| matches!(role.as_str(), "owner" | "admin"))
+    {
+        return Err(StorageError::GroupPermissionDenied.into());
+    }
+    let pending = client.group_member_delivery_outcomes(state)?.iter().any(|row| {
+        row["root_commitment"] == member.root_commitment
+            && row["device_id"] == member.device_id
+            && row["state"] == "pending"
+    });
+    if pending {
+        outbox::reinvite(client, state, member)?;
+    }
+    Ok(pending)
 }
 
 fn leave_change(
