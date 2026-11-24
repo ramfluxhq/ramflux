@@ -5,7 +5,9 @@
 //!
 //! The actor records the command and returns to its loop. A later install
 //! signal or the command deadline makes the command ready; the actor then
-//! runs it again. The wait itself never holds the serial slot.
+//! runs it again. The wait itself never holds the serial slot. A parked
+//! command is not put back on the bounded mailbox, so it does not consume
+//! one of those slots or count as a waiting command.
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;

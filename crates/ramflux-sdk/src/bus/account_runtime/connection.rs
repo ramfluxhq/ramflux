@@ -16,6 +16,13 @@ use crate::prelude::{
 };
 use tokio::time::{Instant, timeout_at};
 
+enum WorkRace {
+    Stop,
+    Preempt,
+    Done(Result<(), SdkError>),
+    Command(Box<AccountCommand>),
+}
+
 impl AccountRuntime {
     pub(super) fn start_connection(&mut self) -> Result<(), SdkError> {
         if let Some(account) = self.state.accounts.get_mut(&self.id) {
@@ -69,6 +76,64 @@ impl AccountRuntime {
             }
         }
     }
+
+    /// Claim a command that arrives during connection work. The work stays queued when it
+    /// has not started. A started page is dropped the same way shutdown and preempt drop it;
+    /// the worker retries on the closed reply.
+    pub(super) async fn drive_connection_work(
+        &mut self,
+        work: AccountWork,
+        checkpoints: &mut u8,
+    ) -> Result<bool, SdkError> {
+        let (_, standin) = tokio::sync::mpsc::channel(1);
+        let mut mailbox = std::mem::replace(&mut self.receiver, standin);
+        let mut pending = Some(work);
+        let mut shutdown = self.shutdown.clone();
+        let mut preempt = self.preempt.clone();
+        let outcome = {
+            let work_fut = async {
+                let Some(work) = pending.take() else { std::future::pending().await };
+                Box::pin(self.finish_connection_work(work)).await
+            };
+            tokio::pin!(work_fut);
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => WorkRace::Stop,
+                command = mailbox.recv() => match command {
+                    Some(command) => WorkRace::Command(Box::new(command)),
+                    None => WorkRace::Stop,
+                },
+                _ = preempt.changed() => WorkRace::Preempt,
+                result = &mut work_fut => WorkRace::Done(result),
+            }
+        };
+        self.receiver = mailbox;
+        let started = pending.is_none();
+        let command_won = matches!(outcome, WorkRace::Command(_));
+        if command_won && let Some(work) = pending.take() {
+            self.deferred.push_front(work);
+        }
+        if started && command_won {
+            tracing::debug!(
+                phase = "actor_hold",
+                event = "yield_connection",
+                "connection work yielded to a queued command"
+            );
+        }
+        match outcome {
+            WorkRace::Stop => Ok(true),
+            WorkRace::Preempt => Ok(false),
+            WorkRace::Done(result) => {
+                result?;
+                Ok(false)
+            }
+            WorkRace::Command(command) => {
+                *checkpoints = 0;
+                self.claim_and_apply(*command).await
+            }
+        }
+    }
+
     pub(super) async fn stop_connection(&mut self) {
         self.clear_transient_host();
         self.transient = super::transient::TransientHost::default();

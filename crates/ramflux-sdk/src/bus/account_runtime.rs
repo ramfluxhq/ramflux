@@ -348,19 +348,28 @@ impl AccountRuntime {
     }
 
     fn queued_command(&mut self, checkpoints: &mut u8) -> Option<AccountCommand> {
+        // A mailbox command is claimed before a parked publication wait. The
+        // parked command is not in this mailbox, and it must not delay one that is.
+        let waiting = self.command_waiting.load(Ordering::Acquire) > 0;
+        if waiting && let Some(command) = self.try_mailbox() {
+            return Some(command);
+        }
         if let Some(command) = publication_park::take_ready() {
             let _ = publication_park::take_skip_note();
             return Some(command);
         }
         // A waiting command skips the eight-checkpoint gate. Its residence
         // budget is five seconds; a page can wait.
-        let waiting = self.command_waiting.load(Ordering::Acquire) > 0;
         if !waiting {
             if *checkpoints < 8 {
                 return None;
             }
             *checkpoints = 0;
         }
+        self.try_mailbox()
+    }
+
+    fn try_mailbox(&mut self) -> Option<AccountCommand> {
         let command = self
             .lifecycle
             .try_recv()
@@ -474,6 +483,58 @@ impl AccountRuntime {
         Ok((transient, username))
     }
 
+    async fn claim_and_apply(&mut self, command: AccountCommand) -> Result<bool, SdkError> {
+        publication_park::set_final(false);
+        self.note_command_taken();
+        self.apply(command).await
+    }
+
+    /// Background prepare must not hold the mailbox closed for the residence budget.
+    /// A released actor keeps the real mailbox: a closed stand-in looks like shutdown.
+    async fn prepare_until_command(
+        &mut self,
+    ) -> Result<Option<(Option<tokio::time::Instant>, Option<tokio::time::Instant>)>, SdkError>
+    {
+        loop {
+            if background::files_released() {
+                return self.background_or_prepare().await;
+            }
+            match Box::pin(self.race_background_prepare()).await? {
+                PrepareRace::Stop => return Ok(None),
+                PrepareRace::Ready(deadlines) => return Ok(Some(deadlines)),
+                PrepareRace::Command(command) => {
+                    if Box::pin(self.claim_and_apply(*command)).await? {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn race_background_prepare(&mut self) -> Result<PrepareRace, SdkError> {
+        let (_, standin) = mpsc::channel(1);
+        let mut mailbox = std::mem::replace(&mut self.receiver, standin);
+        let mut shutdown = self.shutdown.clone();
+        let outcome = tokio::select! {
+            biased;
+            _ = shutdown.changed() => BackgroundRace::Stop,
+            command = mailbox.recv() => match command {
+                Some(command) => BackgroundRace::Command(Box::new(command)),
+                None => BackgroundRace::Stop,
+            },
+            prepared = Box::pin(self.background_or_prepare()) => BackgroundRace::Prepared(prepared),
+        };
+        self.receiver = mailbox;
+        match outcome {
+            BackgroundRace::Stop => Ok(PrepareRace::Stop),
+            BackgroundRace::Command(command) => Ok(PrepareRace::Command(command)),
+            BackgroundRace::Prepared(result) => match result? {
+                Some(deadlines) => Ok(PrepareRace::Ready(deadlines)),
+                None => Ok(PrepareRace::Stop),
+            },
+        }
+    }
+
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         if !self.initialize_actor(ready).await? {
             return Ok(());
@@ -481,7 +542,7 @@ impl AccountRuntime {
         let (_writer_budget, mut schedule, mut next) = self.serve_setup();
         let mut checkpoints = 0_u8;
         loop {
-            let prepared = self.background_or_prepare().await?;
+            let prepared = Box::pin(self.prepare_until_command()).await?;
             let Some((transient_deadline, username_deadline)) = prepared else { break };
             if let Some(command) = self.queued_command(&mut checkpoints) {
                 if Box::pin(self.apply(command)).await? {
@@ -489,15 +550,14 @@ impl AccountRuntime {
                 }
                 continue;
             }
-            if self
-                .poll_turn(
-                    &mut schedule,
-                    &mut next,
-                    &mut checkpoints,
-                    transient_deadline,
-                    username_deadline,
-                )
-                .await?
+            if Box::pin(self.poll_turn(
+                &mut schedule,
+                &mut next,
+                &mut checkpoints,
+                transient_deadline,
+                username_deadline,
+            ))
+            .await?
             {
                 break;
             }
@@ -519,12 +579,18 @@ impl AccountRuntime {
             biased;
             _ = self.shutdown.changed() => return Ok(true),
             command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
+            command = self.receiver.recv() => command,
+            () = publication_park::until_ready(), if publication_park::pending() => {
+                match publication_park::take_ready() {
+                    Some(command) => Some(command),
+                    None => return Ok(false),
+                }
+            },
             checkpoint=self.transfers.receive.recv()=>{*checkpoints += 1;if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}return Ok(false);},
             work = recv(&mut self.deferred, &mut self.head_rx, &mut self.connection_work) => {
                 *checkpoints += 1;
                 if let Some(work)=work {
-                    let mut shutdown=self.shutdown.clone();let mut preempt=self.preempt.clone();
-                    tokio::select! {biased;_=shutdown.changed()=>return Ok(true),_=preempt.changed()=>{},result=self.finish_connection_work(work)=>result?}
+                    return Box::pin(self.drive_connection_work(work, checkpoints)).await;
                 }
                 return Ok(false);
             },
@@ -552,13 +618,6 @@ impl AccountRuntime {
                 if let Some(completion) = completion
                     && self.finish_pairing_begin(completion).await? { return Ok(true); }
                 return Ok(false);
-            },
-            command = self.receiver.recv() => command,
-            () = publication_park::until_ready(), if publication_park::pending() => {
-                match publication_park::take_ready() {
-                    Some(command) => Some(command),
-                    None => return Ok(false),
-                }
             },
             () = wait_pairing_signal(pairing) => {
                 Box::pin(self.service_pairing_data()).await;
@@ -706,6 +765,20 @@ enum MaintenancePoll {
     Stop,
     Again,
     Command(Box<AccountCommand>),
+}
+
+type PrepareDeadlines = (Option<tokio::time::Instant>, Option<tokio::time::Instant>);
+
+enum PrepareRace {
+    Stop,
+    Ready(PrepareDeadlines),
+    Command(Box<AccountCommand>),
+}
+
+enum BackgroundRace {
+    Stop,
+    Command(Box<AccountCommand>),
+    Prepared(Result<Option<PrepareDeadlines>, SdkError>),
 }
 
 async fn flush_if_open(account: &AccountRuntime, request: &LocalBusFrame) -> Result<(), SdkError> {
