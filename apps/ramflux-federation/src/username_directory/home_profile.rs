@@ -3,7 +3,8 @@
 
 //! Exact profile reads through a fresh centre decision and the real terminal home's transport.
 use super::{
-    Result, directory, error, home::HomeService, refuse, rpc, source::Sources, tcp, tls, wire,
+    Result, directory, error, home::HomeService, refuse, rpc, source::Sources, tcp, tls, warn_drop,
+    wire,
 };
 use ramflux_crypto::username_directory as crypto;
 use ramflux_protocol::{home_migration::ResolveResult, username_directory as w};
@@ -254,10 +255,12 @@ pub(super) fn listen(home: Arc<HomeService>) -> Result<()> {
                     let spawned = std::thread::Builder::new()
                         .name("username-home-profile".into())
                         .spawn(move || {
+                            let mut stage = "tls/request";
                             let result = (|| -> Result<()> {
                                 let mut incoming = owner.client.secret.with_bytes(|seed| {
                                     tcp::accept(socket, tls, &owner.client.discovery.node_id, seed)
                                 })?;
+                                stage = "request";
                                 if incoming.path != PROFILE_PATH || incoming.body.len() > 8192 {
                                     return refuse("username profile request bound");
                                 }
@@ -267,6 +270,7 @@ pub(super) fn listen(home: Arc<HomeService>) -> Result<()> {
                                     .acquire(&request.resolve.body.principal_commitment)?;
                                 let channel = ramflux_protocol::encode_base64url(incoming.exporter);
                                 let mut call = owner.publication(request, &channel)?;
+                                stage = "response";
                                 loop {
                                     if Instant::now() >= incoming.deadline {
                                         return refuse("username profile deadline");
@@ -288,6 +292,7 @@ pub(super) fn listen(home: Arc<HomeService>) -> Result<()> {
                             })();
                             if let Err(error) = result {
                                 tracing::debug!(%error, "username home profile connection closed");
+                                warn_drop("home_profile", address, stage, &error);
                             }
                         });
                     match spawned {
@@ -295,7 +300,14 @@ pub(super) fn listen(home: Arc<HomeService>) -> Result<()> {
                         Err(error) => tracing::warn!(%error, "username profile worker unavailable"),
                     }
                 }
-                Ok(_) => {}
+                Ok((_socket, address)) => {
+                    warn_drop(
+                        "home_profile",
+                        address,
+                        "accept",
+                        &"connection refused by admission limits",
+                    );
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(error) => {
                     tracing::error!(%error, "username home listener stopped");
