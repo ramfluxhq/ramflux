@@ -212,6 +212,9 @@ type WriterBudget = ();
 
 impl AccountRuntime {
     async fn close_actor(&mut self) -> Result<(), SdkError> {
+        if let Some(state) = self.state.accounts.get(&self.id) {
+            state.client.stop_in_process_media(ramflux_media::authorization::GateReason::Terminal);
+        }
         self.username.stop().await;
         self.pairing.stop().await;
         self.ledger = None;
@@ -506,6 +509,9 @@ impl AccountRuntime {
     async fn prepare_receive_turn(
         &mut self,
     ) -> Result<(Option<tokio::time::Instant>, Option<tokio::time::Instant>), SdkError> {
+        if let Some(account) = self.state.accounts.get(&self.id) {
+            super::media::reconcile(account);
+        }
         self.refresh_transient_host().await;
         self.publish_transient_updates();
         let transient = self.transient_deadline();

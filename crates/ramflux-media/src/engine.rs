@@ -29,17 +29,22 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::authorization::{Authorization, GateReason, GateSnapshot};
 use crate::codec::{Decoder, FRAME_MS, FRAME_SAMPLES, Frame};
 use crate::jitter::{JitterBuffer, JitterStats, Playout};
 use crate::pipeline::{Inbound, Outbound, PipelineError, Rebinder};
 use crate::relay::MAX_DATAGRAM;
 use crate::session::MediaSession;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Where captured audio comes from.
 pub trait Capture: Send + 'static {
     /// The next 20 ms frame, waiting at most `timeout`; `None` when none
     /// arrived in time.
     fn next_frame(&mut self, timeout: Duration) -> Option<Frame>;
+
+    /// Discard queued capture after a generation change, on the sender worker.
+    fn discard_pending(&mut self) {}
 }
 
 /// Where received audio goes.
@@ -96,6 +101,8 @@ pub enum Quality {
 pub struct EngineStats {
     /// Packets sent.
     pub sent: u64,
+    /// Packets authenticated by the existing replay-protected receiver.
+    pub authenticated: u64,
     /// Packets that failed to open (forged, altered, replayed, foreign).
     pub rejected: u64,
     /// Datagrams from another address than the endpoint (dropped unread).
@@ -130,6 +137,8 @@ struct Shared {
 
 /// A running call engine. Dropping it stops it.
 pub struct Engine {
+    authorization: Arc<Authorization>,
+    jitter: Arc<Mutex<JitterBuffer>>,
     stop: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
@@ -160,9 +169,30 @@ impl Engine {
     /// The endpoint does not resolve, the socket does not open, or the
     /// session's suite or keys are refused.
     pub fn start(
+        session: MediaSession,
+        capture: Box<dyn Capture>,
+        playback: Box<dyn Playback>,
+    ) -> Result<Self, EngineError> {
+        Self::start_inner(session, capture, playback, None)
+    }
+
+    /// Start under the SDK fence, initially with audio inactive.
+    /// # Errors
+    /// Returns the same startup errors as [`Self::start`].
+    pub fn start_authorized(
+        session: MediaSession,
+        capture: Box<dyn Capture>,
+        playback: Box<dyn Playback>,
+        lease: Duration,
+    ) -> Result<Self, EngineError> {
+        Self::start_inner(session, capture, playback, Some(lease))
+    }
+
+    fn start_inner(
         mut session: MediaSession,
         capture: Box<dyn Capture>,
         playback: Box<dyn Playback>,
+        lease: Option<Duration>,
     ) -> Result<Self, EngineError> {
         let endpoint = session
             .endpoint()
@@ -174,6 +204,7 @@ impl Engine {
             if endpoint.is_ipv4() { ([0, 0, 0, 0], 0).into() } else { ([0_u16; 8], 0).into() };
         let socket = UdpSocket::bind(bind)?;
         socket.set_read_timeout(Some(Duration::from_millis(50)))?;
+        socket.set_write_timeout(Some(Duration::from_millis(50)))?;
         let local = socket.local_addr()?;
         let ssrc = random_u32()?;
         let initial = random_u32()?;
@@ -183,6 +214,7 @@ impl Engine {
         drop(session);
         let decoder = Decoder::new().map_err(PipelineError::from)?;
 
+        let authorization = Arc::new(Authorization::new(lease));
         let stop = Arc::new(AtomicBool::new(false));
         let muted = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(Mutex::new(Shared::default()));
@@ -195,6 +227,7 @@ impl Engine {
             endpoint,
             outbound,
             capture,
+            authorization: authorization.clone(),
             stop: stop.clone(),
             muted: muted.clone(),
             shared: shared.clone(),
@@ -205,18 +238,63 @@ impl Engine {
             inbound,
             rebinder,
             jitter: jitter.clone(),
+            authorization: authorization.clone(),
             stop: stop.clone(),
             shared: shared.clone(),
             started,
         };
-        let player =
-            PlayoutLoop { decoder, playback, jitter, stop: stop.clone(), shared: shared.clone() };
-        let threads = vec![
-            spawn("ramflux-call-send", move || sender.run())?,
-            spawn("ramflux-call-receive", move || receiver.run())?,
-            spawn("ramflux-call-playout", move || player.run())?,
-        ];
-        Ok(Self { stop, muted, shared, threads, local })
+        let player = PlayoutLoop {
+            decoder,
+            playback,
+            jitter: jitter.clone(),
+            authorization: authorization.clone(),
+            stop: stop.clone(),
+            shared: shared.clone(),
+        };
+        let mut engine =
+            Self { authorization, jitter, stop, muted, shared, threads: Vec::new(), local };
+        engine.threads.push(spawn("ramflux-call-send", move || sender.run())?);
+        engine.threads.push(spawn("ramflux-call-receive", move || receiver.run())?);
+        engine.threads.push(spawn("ramflux-call-playout", move || player.run())?);
+        Ok(engine)
+    }
+
+    /// Install SDK authority and remaining lease. Never activates host audio.
+    pub fn authorize(&self, reason: Option<GateReason>, lease: Duration, renewed: bool) {
+        let previous = self.authorization.snapshot().generation;
+        self.authorization.update(reason, lease, renewed);
+        if self.authorization.snapshot().generation != previous {
+            self.flush_playout();
+        }
+    }
+
+    /// Set host audio readiness after the SDK grant. Closing fences worker output.
+    #[must_use]
+    pub fn audio_active(&self, active: bool) -> bool {
+        let accepted = self.authorization.activate(active);
+        if !active {
+            self.flush_playout();
+        }
+        accepted
+    }
+
+    /// Current credential-free gate.
+    #[must_use]
+    pub fn gate(&self) -> GateSnapshot {
+        self.authorization.snapshot()
+    }
+
+    fn flush_playout(&self) {
+        *self.jitter.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            JitterBuffer::new();
+    }
+
+    /// Close admission and fence all in-flight output before returning its retired generation.
+    #[must_use]
+    pub fn fence(&self, reason: GateReason) -> GateSnapshot {
+        self.authorization.retire(reason);
+        self.flush_playout();
+        self.authorization.snapshot()
     }
 
     /// The local socket address (tests, diagnostics).
@@ -257,7 +335,15 @@ impl Engine {
         self.halt();
     }
 
+    /// Stop, join every worker and return the final counters.
+    #[must_use]
+    pub fn stop_with_stats(mut self) -> EngineStats {
+        self.halt();
+        self.stats()
+    }
+
     fn halt(&mut self) {
+        self.authorization.retire(GateReason::Terminal);
         self.stop.store(true, Ordering::SeqCst);
         for thread in self.threads.drain(..) {
             let _ = thread.join();
@@ -301,6 +387,7 @@ struct SendLoop {
     endpoint: SocketAddr,
     outbound: Outbound,
     capture: Box<dyn Capture>,
+    authorization: Arc<Authorization>,
     stop: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
@@ -310,12 +397,39 @@ impl SendLoop {
     fn run(mut self) {
         let mut last_sent = Instant::now();
         let mut silent_frames = 0_u32;
-        if let Some(keepalive) = self.outbound.keepalive() {
-            // Bind this side's address at the relay before any audio.
-            let _ = self.socket.send_to(&keepalive, self.endpoint);
-        }
+        let mut generation = 0;
         while !self.stop.load(Ordering::SeqCst) {
-            let Some(mut frame) = self.capture.next_frame(Duration::from_millis(100)) else {
+            let current = {
+                let mut gate = self.authorization.lock();
+                if gate.retired {
+                    break;
+                }
+                if !gate.admitted() {
+                    drop(gate);
+                    self.capture.discard_pending();
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                gate.generation
+            };
+            if generation != current {
+                self.capture.discard_pending();
+                generation = current;
+                let mut gate = self.authorization.lock();
+                if gate.admitted()
+                    && gate.generation == current
+                    && let Some(keepalive) = self.outbound.keepalive()
+                {
+                    let _ = self.socket.send_to(&keepalive, self.endpoint);
+                    last_sent = Instant::now();
+                }
+            }
+            let captured = self.capture.next_frame(Duration::from_millis(100)).map(Zeroizing::new);
+            let mut gate = self.authorization.lock();
+            if !gate.admitted() || gate.generation != current {
+                continue;
+            }
+            let Some(frame) = captured else {
                 if last_sent.elapsed() >= KEEPALIVE
                     && let Some(keepalive) = self.outbound.keepalive()
                 {
@@ -324,19 +438,18 @@ impl SendLoop {
                 }
                 continue;
             };
+            let mut frame = frame;
             if self.muted.load(Ordering::SeqCst) {
-                frame = [0; FRAME_SAMPLES];
+                frame.zeroize();
                 silent_frames = 0;
             } else if frame.iter().all(|s| *s == 0) {
                 silent_frames = silent_frames.saturating_add(1);
             } else {
                 silent_frames = 0;
             }
-            let sent = self
-                .outbound
-                .packet(&frame)
-                .ok()
-                .map(|datagram| self.socket.send_to(&datagram, self.endpoint).is_ok());
+            let sent = self.outbound.packet(&frame).ok().and_then(|datagram| {
+                gate.admitted().then(|| self.socket.send_to(&datagram, self.endpoint).is_ok())
+            });
             last_sent = Instant::now();
             let mut shared = lock(&self.shared);
             match sent {
@@ -354,6 +467,7 @@ struct ReceiveLoop {
     inbound: Inbound,
     rebinder: Rebinder,
     jitter: Arc<Mutex<JitterBuffer>>,
+    authorization: Arc<Authorization>,
     stop: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
     started: Instant,
@@ -364,25 +478,35 @@ impl ReceiveLoop {
         let mut buffer = vec![0_u8; MAX_DATAGRAM];
         let mut peer_ssrc = None;
         while !self.stop.load(Ordering::SeqCst) {
+            if self.authorization.snapshot().retired {
+                break;
+            }
             let Ok((len, from)) = self.socket.recv_from(&mut buffer) else { continue };
             if from != self.endpoint {
                 lock(&self.shared).stats.foreign += 1;
                 continue;
             }
-            if len == 0 {
+            let Some(datagram) = buffer.get(..len).filter(|bytes| !bytes.is_empty()) else {
+                continue;
+            };
+            let mut gate = self.authorization.lock();
+            if !gate.admitted() {
+                if gate.retired {
+                    break;
+                }
                 continue;
             }
-            if Rebinder::is_challenge(&buffer[..len]) {
+            if Rebinder::is_challenge(datagram) {
                 // From the relay only (checked above): answer from this
                 // socket, the address the relay saw change.
-                if let Some(answer) = self.rebinder.answer(&buffer[..len])
+                if let Some(answer) = self.rebinder.answer(datagram)
                     && self.socket.send_to(&answer, self.endpoint).is_ok()
                 {
                     lock(&self.shared).stats.rebinds_answered += 1;
                 }
                 continue;
             }
-            match self.inbound.open(&buffer[..len]) {
+            match self.inbound.open(datagram) {
                 Ok(received) => {
                     let arrival = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(0);
                     let mut jitter =
@@ -396,7 +520,9 @@ impl ReceiveLoop {
                         received.opus,
                         arrival,
                     );
-                    lock(&self.shared).last_packet = Some(Instant::now());
+                    let mut shared = lock(&self.shared);
+                    shared.last_packet = Some(Instant::now());
+                    shared.stats.authenticated += 1;
                 }
                 Err(_) => lock(&self.shared).stats.rejected += 1,
             }
@@ -408,6 +534,7 @@ struct PlayoutLoop {
     decoder: Decoder,
     playback: Box<dyn Playback>,
     jitter: Arc<Mutex<JitterBuffer>>,
+    authorization: Arc<Authorization>,
     stop: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
 }
@@ -416,6 +543,7 @@ impl PlayoutLoop {
     fn run(mut self) {
         let frame_time = Duration::from_millis(FRAME_MS);
         let mut deadline = Instant::now() + frame_time;
+        let mut generation = 0;
         while !self.stop.load(Ordering::SeqCst) {
             let now = Instant::now();
             if deadline > now {
@@ -425,6 +553,20 @@ impl PlayoutLoop {
                 deadline = now;
             }
             deadline += frame_time;
+            let mut gate = self.authorization.lock();
+            if !gate.admitted() {
+                if gate.retired {
+                    break;
+                }
+                *self.jitter.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    JitterBuffer::new();
+                continue;
+            }
+            if generation != gate.generation {
+                let Ok(decoder) = Decoder::new() else { break };
+                self.decoder = decoder;
+                generation = gate.generation;
+            }
             let (playout, jitter_stats) = {
                 let mut jitter =
                     self.jitter.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -434,14 +576,26 @@ impl PlayoutLoop {
                 Playout::Wait => ([0; FRAME_SAMPLES], None),
                 Playout::Packet(packet) => match self.decoder.decode(&packet) {
                     Ok(frame) => (frame, Some(Outcome::Played)),
-                    Err(_) => (self.conceal(), Some(Outcome::Concealed)),
+                    Err(_) => (
+                        self.decoder.conceal().unwrap_or([0; FRAME_SAMPLES]),
+                        Some(Outcome::Concealed),
+                    ),
                 },
                 Playout::Lost { next: Some(next) } => match self.decoder.recover(&next) {
                     Ok(frame) => (frame, Some(Outcome::Recovered)),
-                    Err(_) => (self.conceal(), Some(Outcome::Concealed)),
+                    Err(_) => (
+                        self.decoder.conceal().unwrap_or([0; FRAME_SAMPLES]),
+                        Some(Outcome::Concealed),
+                    ),
                 },
-                Playout::Lost { next: None } => (self.conceal(), Some(Outcome::Concealed)),
+                Playout::Lost { next: None } => {
+                    (self.decoder.conceal().unwrap_or([0; FRAME_SAMPLES]), Some(Outcome::Concealed))
+                }
             };
+            let frame = Zeroizing::new(frame);
+            if !gate.admitted() {
+                continue;
+            }
             self.playback.play(&frame);
             let mut shared = lock(&self.shared);
             shared.stats.jitter = jitter_stats;
@@ -460,10 +614,6 @@ impl PlayoutLoop {
                     u32::try_from(lost * 1000 / shared.window.len()).unwrap_or(1000);
             }
         }
-    }
-
-    fn conceal(&mut self) -> Frame {
-        self.decoder.conceal().unwrap_or([0; FRAME_SAMPLES])
     }
 }
 

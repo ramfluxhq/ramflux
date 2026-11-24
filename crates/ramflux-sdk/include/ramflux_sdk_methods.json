@@ -50,6 +50,15 @@
       "bridge_allowed": true,
       "capability": "account",
       "key_export": false,
+      "name": "account.app_lock.lock",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
       "name": "account.app_lock.state",
       "secret_input": false,
       "secret_output": false,
@@ -731,7 +740,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": true,
+      "bridge_allowed": false,
       "capability": "call",
       "key_export": false,
       "name": "call.media.session",

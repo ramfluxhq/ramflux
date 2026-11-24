@@ -34,6 +34,7 @@ policies! {
     "a2i.list" => ("a2i", false, true, false, false),
     "a2i.list_pending" => ("a2i", false, true, false, false),
     "account.app_lock.configure" => ("account", false, false, false, false),
+    "account.app_lock.lock" => ("account", false, false, false, false),
     "account.app_lock.state" => ("account", false, false, false, false),
     "account.backup.cancel" => ("account", true, false, false, false),
     "account.backup.create" => ("account", true, false, false, false),
@@ -281,6 +282,8 @@ policies! {
 // Search and daemon shutdown stay unavailable. Username methods and the
 // profile alias are executable. The master phrase is not a bus field.
 pub(super) const DENIED_METHODS: &[&str] = &[
+    // Generic media-key export is refused before admission, regardless of export permission.
+    "call.media.session",
     "daemon.stop",
     "search.cancel",
     "search.cursor.close",

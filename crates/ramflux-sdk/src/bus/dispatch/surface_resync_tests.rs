@@ -173,15 +173,30 @@ impl Group {
                 if !beacon.delivered.is_subset(&expected) {
                     return Err("native group setup served an unexpected destination".into());
                 }
-                if beacon.delivered == expected && db.actor_state_usage("group-state/send/")?.0 == 0 {
+                if beacon.delivered == expected && Self::send_intents_idle(db)? {
                     break;
                 }
             }
             drop(couriers);
+            // No fixture peer sends the confirmation that would end the sender's bounded retry of
+            // the unconfirmed grant (#590); resync is measured without that unrelated resend.
+            source.client.account_db()?.remove_actor_state(&format!(
+                "group-state/send/{}",
+                ramflux_protocol::encode_base64url("group")
+            ))?;
             Self::require_setup_quiescent(source).await
         })
         .await
         .map_err(|_| "native group setup did not serve every destination before resync")?
+    }
+
+    /// Every group-state send intent is parked until a future retry. An unconfirmed grant keeps
+    /// its intent after delivery (#590), so an empty namespace no longer marks setup complete.
+    fn send_intents_idle(db: &ramflux_storage::AccountDb) -> Result<bool, SdkError> {
+        let now = now_unix_timestamp();
+        Ok(db.list_actor_states::<Value>("group-state/send/")?.iter().all(|intent| {
+            intent["round_active"] == false && intent["next_at"].as_i64().is_some_and(|at| at > now)
+        }))
     }
 
     async fn require_setup_quiescent(source: &mut LocalBusAccountState) -> TestResult {

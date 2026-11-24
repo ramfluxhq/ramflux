@@ -519,6 +519,7 @@ pub(super) fn adopt_installed(
     let index = account.client.account_index()?;
     index.set_account_unlocked(account_id, true)?;
     index.set_active_account(account_id)?;
+    account.client.bind_process_media_ownership(state.config.media_ownership())?;
     state.accounts.insert(account_id.into(), account);
     state.active_account_id = Some(account_id.into());
     Ok(true)
