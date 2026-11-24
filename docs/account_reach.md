@@ -8,7 +8,8 @@ read the home-committed policy.
 `account.reach.get {}` returns `{mode, revision, policy}` from the authenticated
 home. `account.reach.set {mode, expected_revision, operation_id}` commits the next
 revision. Modes are `contacts_only` and `open`. A stale revision returns
-`reach_revision_conflict` with the current policy and revision. Operation IDs are
+`reach_revision_conflict` with the current mode, revision and policy in the error
+`details` object. Its stable generated numeric category is `InvalidArgument`. Operation IDs are
 nonempty opaque strings of at most 256 bytes. Reusing an operation with different
 policy bytes refuses; a completed retry never reopens an account subsequently
 closed by a newer revision. Offline changes retain their exact signed intent.

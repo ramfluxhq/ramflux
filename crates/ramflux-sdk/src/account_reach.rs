@@ -151,10 +151,22 @@ pub(crate) fn apply(
     )?;
     let body = serde_json::json!({"mode":policy.body.mode,"revision":policy.body.revision,"policy":policy});
     if view.conflict {
+        let error = crate::bindings::AdapterError {
+            details: crate::bindings::ErrorDetails::ReachRevisionConflict {
+                reason: "reach_revision_conflict".into(),
+                mode: policy.body.mode,
+                revision: policy.body.revision,
+                policy: Box::new(policy.clone()),
+            },
+            ..crate::bindings::AdapterError::new(
+                crate::bindings::GeneratedErrorCode::InvalidArgument,
+                "Reach revision changed",
+            )
+        };
         return Err(SdkError::LocalBusRefused {
             code: "reach_revision_conflict".into(),
             message: "Reach revision changed".into(),
-            body: Box::new(body),
+            body: Box::new(serde_json::to_value(error)?),
         });
     }
     Ok(body)
