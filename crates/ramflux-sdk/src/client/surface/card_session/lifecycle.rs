@@ -24,12 +24,13 @@ pub(super) fn update(
     match keep(client, account, parsed.session)? {
         Kept::Stopped(value) => Ok(value),
         Kept::Ready { stored, state, fallback } => {
-            refresh(account, parsed.session, &stored, &state, &fallback)
+            refresh(client, account, parsed.session, &stored, &state, &fallback)
         }
     }
 }
 
 fn refresh(
+    client: &RamfluxClient,
     account: &str,
     session: u64,
     stored: &StoredSurface,
@@ -39,6 +40,7 @@ fn refresh(
     let (locale, dark) =
         store::with_session(account, session, |held| Ok((held.locale().to_owned(), held.dark())))?;
     let spec = spec_build::authorized(stored, state, &locale, dark)?;
+    let spec = super::host_view::stamp(client, spec, state)?;
     store::with_session(account, session, |held| {
         let batch = held.session().update(spec).map_err(card_err)?;
         let conflict = held.session().draft_conflict();
@@ -51,6 +53,7 @@ fn refresh(
             host_request: None,
             submit: None,
             draft_conflict: conflict,
+            action_outcome: None,
         }))
     })
 }
@@ -93,6 +96,7 @@ fn change(
             host_request: None,
             submit: None,
             draft_conflict: false,
+            action_outcome: None,
         }))
     })
 }
@@ -153,6 +157,7 @@ fn pause(
             host_request: None,
             submit: None,
             draft_conflict: false,
+            action_outcome: None,
         }))
     })
 }
@@ -175,6 +180,7 @@ pub(super) fn dispose(
                 host_request: None,
                 submit: None,
                 draft_conflict: false,
+                action_outcome: None,
             }))
         }
     }

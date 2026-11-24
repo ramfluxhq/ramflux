@@ -20,6 +20,9 @@ pub enum SlotRequest {
         request_ref: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         task_binding: Option<ramflux_protocol::a2ui::TaskBinding>,
+        /// Verified row only. Absent when the SDK has no matching approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        facts: Option<crate::ApprovalFacts>,
     },
     Modal {
         trigger_key: String,

@@ -18,6 +18,8 @@ mod event;
 #[cfg(feature = "card-runtime")]
 mod guard;
 #[cfg(feature = "card-runtime")]
+mod host_view;
+#[cfg(feature = "card-runtime")]
 mod lifecycle;
 #[cfg(feature = "card-runtime")]
 mod open;
