@@ -56,10 +56,19 @@ impl AccountRuntime {
             let _ = admission.claim();
             admission
         });
-        let deadline = admission.admitted_at + self.timeouts.network_wait;
+        let attachment_enable = command.request.method == "attachment.enable";
+        let deadline = if attachment_enable {
+            admission.command_deadline
+        } else {
+            admission.admitted_at + self.timeouts.network_wait
+        };
         // Subscribe before checking readiness or enqueueing a head request.
         let changed = connection.snapshot_watch();
-        if connection.snapshot().state != NetworkingState::Live {
+        let live = connection.snapshot().state == NetworkingState::Live;
+        if attachment_enable {
+            admission.set_readiness_pending(!live);
+        }
+        if !live {
             #[cfg(test)]
             if let Some(gate) = &self.state.config.test_network_command_gate {
                 gate.waiting.notify_one();

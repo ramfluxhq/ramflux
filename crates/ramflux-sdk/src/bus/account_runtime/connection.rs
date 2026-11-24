@@ -164,7 +164,18 @@ impl AccountRuntime {
         if let Some(gate) = &self.state.config.test_network_command_gate {
             gate.waiting.notify_one();
         }
-        let ready = handle.require_live_since(admitted_at, self.timeouts.network_wait);
+        let deadline = command
+            .admission
+            .as_ref()
+            .map_or(admitted_at + self.timeouts.command, |admission| admission.command_deadline);
+        let network_wait = self.timeouts.network_wait;
+        let ready = async {
+            if command.request.method == "attachment.enable" {
+                handle.require_live_until(deadline).await
+            } else {
+                handle.require_live_since(admitted_at, network_wait).await
+            }
+        };
         tokio::pin!(ready);
         loop {
             // A live session proceeds. A command already queued beats another page:
