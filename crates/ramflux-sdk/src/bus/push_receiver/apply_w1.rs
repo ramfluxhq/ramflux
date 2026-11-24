@@ -115,7 +115,20 @@ pub(crate) async fn apply_page(
             )?;
             return Ok((None, backpressure));
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            // A classified per-entry refusal must not pin the cursor. The caller
+            // (`receive.rs` apply) aborts the whole pass on `Err`, so Deliver frames
+            // after this inbox sequence never project.
+            if let Err(error) = admit_mapped(account, &turn, handle_generation, &prepared, error) {
+                tracing::warn!(
+                    %error,
+                    inbox_seq = prepared.entry.inbox_seq,
+                    "receive entry blocked the pass"
+                );
+                return Err(error);
+            }
+            return Ok((None, backpressure));
+        }
     };
     apply_loaded(
         account,
@@ -172,7 +185,18 @@ async fn apply_loaded(
                 crate::bus::account_runtime::writer_slice::stash_apply(page);
                 return Err(error);
             }
-            Err(error) => return Err(error),
+            Err(error) if crate::client::recipient_home::pinned_receive_code(&error).is_some() => {
+                admit_mapped(account, &page.turn, handle_generation, &page.prepared, error)?;
+                break;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    inbox_seq = page.prepared.entry.inbox_seq,
+                    "receive entry blocked the pass"
+                );
+                return Err(error);
+            }
             Ok(reply) => {
                 stash_pair_reply(reply);
                 break;
@@ -796,6 +820,15 @@ fn failure_of(
     error: &SdkError,
     entry: &GatewayInboxEntry,
 ) -> Result<Option<(ReceiveFailureKind, &'static str)>, SdkError> {
+    if let Some(code) = crate::client::recipient_home::pinned_receive_code(error) {
+        tracing::warn!(
+            reason_code = code,
+            inbox_seq = entry.inbox_seq,
+            %error,
+            "pinned home blocked this entry; the receive pass continues"
+        );
+        return Ok(Some((ReceiveFailureKind::Retryable, code)));
+    }
     if identity_absence(error) || local_refusal(error) {
         return Ok(None);
     }
