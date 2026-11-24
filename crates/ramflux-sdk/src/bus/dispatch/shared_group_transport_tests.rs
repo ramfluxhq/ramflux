@@ -83,10 +83,11 @@ async fn shared_group_routed_fanout_resumes_one_round_and_one_failed_device_does
     let id = format!("group-state/send/{}", ramflux_protocol::encode_base64url("group"));
     source.client.account_db()?.persist_actor_state(&id, &second)?;
     assert_eq!(crate::bus::shared_group_sync::flush(&mut source).await?, 1);
-    assert_eq!(
-        source.client.account_db()?.list_actor_states::<Value>("group-state/send/")?.len(),
-        0
-    );
+    // Gateway acceptance does not settle a membership grant (#590): the sender keeps one idle
+    // retry owner until the invited device confirms, which no peer here does.
+    let retained = source.client.account_db()?.list_actor_states::<Value>("group-state/send/")?;
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0]["round_active"], false);
     let entries = captured.lock().map_err(|_| "capture lock")?.clone();
     assert_eq!(entries.len(), 6);
     let (logical, encrypted) = prepared_group_frame(&source.client, &config)?;
@@ -410,10 +411,11 @@ async fn background_group_delivery_preserves_partial_round_and_recipient_crypto(
     );
     let envelopes = captured.lock().map_err(|_| "capture")?.clone();
     assert_eq!(envelopes.len(), 5);
-    assert_eq!(
-        source.client.account_db()?.list_actor_states::<Value>("group-state/send/")?.len(),
-        0
-    );
+    // Gateway acceptance does not settle a membership grant (#590): the sender keeps one idle
+    // retry owner until the invited device confirms, which no peer here does.
+    let retained = source.client.account_db()?.list_actor_states::<Value>("group-state/send/")?;
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0]["round_active"], false);
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );

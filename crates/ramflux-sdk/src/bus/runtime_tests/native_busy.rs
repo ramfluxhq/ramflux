@@ -395,7 +395,14 @@ async fn network_command_answers_networking_pending_within_bound() -> Case {
             );
             assert_eq!(wire.retry_after_ms, connection.snapshot().retry_after_ms);
             let wall = std::time::Instant::now();
-            let second = fixture.actor.request(submit_command(&fixture)?).await;
+            // Since #580 a later command parks for its own network budget, measured from its own
+            // admission, instead of inheriting the expired budget of the held attempt.
+            let actor = fixture.actor.clone();
+            let command = submit_command(&fixture)?;
+            let second = tokio::task::spawn_local(async move { actor.request(command).await });
+            wait_for_gate(&fixture).await?;
+            tokio::time::advance(Duration::from_secs(5)).await;
+            let second = second.await?;
             assert!(matches!(second, Err(SdkError::NetworkingPendingContext { .. })));
             assert!(wall.elapsed() < super::HANG);
             assert!(fixture.connector.held.load(Ordering::Acquire));

@@ -16,8 +16,15 @@ pub async fn serve_local_bus_until(
     config: LocalBusConfig,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), SdkError> {
-    std::fs::create_dir_all(&config.data_root)?;
-    set_owner_only_dir_permissions(&config.data_root)?;
+    // Windows must create the root itself with the owner-only descriptor: a plain
+    // `create_dir_all` leaves the Administrators group as owner on an elevated token.
+    #[cfg(windows)]
+    crate::platform::fs::ensure_data_root(&config.data_root)?;
+    #[cfg(not(windows))]
+    {
+        std::fs::create_dir_all(&config.data_root)?;
+        set_owner_only_dir_permissions(&config.data_root)?;
+    }
     let diagnostic_config = crate::diag::DiagnosticConfig {
         process: "daemon".into(),
         #[cfg(feature = "diag-realrun")]
