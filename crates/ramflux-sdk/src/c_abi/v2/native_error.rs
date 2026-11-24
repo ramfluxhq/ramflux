@@ -38,6 +38,17 @@ fn token(value: &Value) -> Option<String> {
 }
 fn details(value: &Value, code: &Code) -> Details {
     let value = value.get("details").unwrap_or(&Value::Null);
+    if (matches!(code, Code::Number(1))
+        || matches!(code, Code::Name(name) if name == "reach_revision_conflict"))
+        && let Ok(error) = serde_json::from_value::<crate::bindings::AdapterError>(
+            serde_json::json!({
+                "code":1,"name":"invalid_argument","message":"Reach revision changed","details":value,
+            }),
+        )
+        && matches!(&error.details, ErrorDetails::ReachRevisionConflict { .. })
+    {
+        return Details::Generated(error.details);
+    }
     let name = match code {
         Code::Name(name) => name.as_str(),
         Code::Number(6) => "resync_required",
