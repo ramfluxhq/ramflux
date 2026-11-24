@@ -59,6 +59,7 @@ impl AccountRuntime {
             identity,
             erasure_generation,
             actor: None,
+            media: crate::attachment_send::recovery::Capture::new(account, &self.id)?,
         })
     }
 
@@ -201,6 +202,8 @@ impl AccountRuntime {
         Ok(())
     }
     pub(super) async fn apply(&mut self, command: AccountCommand) -> Result<bool, SdkError> {
+        #[cfg(test)]
+        let direct_component = command.admission.is_none() && command.private.is_none();
         let method = command.request.method.clone();
         let started = tokio::time::Instant::now();
         tracing::debug!(
@@ -221,6 +224,16 @@ impl AccountRuntime {
             "account command phase"
         );
         super::command_park::set_final(false);
+        // Direct component calls have no actor loop to drive their deferred reply.
+        // Keep the same one-row completion step and yield between durable rows.
+        // Admitted mailbox commands retain the production nonblocking return.
+        #[cfg(test)]
+        if direct_component && stop.is_ok() {
+            while !self.publications.is_empty() {
+                self.advance_publications()?;
+                tokio::task::yield_now().await;
+            }
+        }
         stop
     }
 

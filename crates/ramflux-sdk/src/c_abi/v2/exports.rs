@@ -978,3 +978,26 @@ pub extern "C" fn ramflux_v2_set_host_credential_provider(
         Ok(())
     })
 }
+
+/// Return the build-pinned diagnostic support public key catalog, without opening an account.
+/// An unprovisioned build returns available=false. Free output with `ramflux_v2_buffer_free`.
+#[unsafe(no_mangle)]
+#[must_use]
+pub extern "C" fn ramflux_v2_diag_support_key(out: *mut *mut RamfluxBuffer) -> i32 {
+    call(|| {
+        super::super::clear_out_ptr(out)?;
+        let bytes = include_bytes!("../../../diag/support-public-keys.v1.json");
+        let catalog = ramflux_protocol::diag_support::Catalog::decode(bytes);
+        match catalog {
+            Ok(catalog) if catalog.active_epoch.is_some() => {
+                super::buffer::write_json_buffer(out, &catalog)
+            }
+            _ => super::buffer::write_json_buffer(
+                out,
+                &serde_json::json!({
+                    "available": false, "reason": "support_key_unavailable"
+                }),
+            ),
+        }
+    })
+}

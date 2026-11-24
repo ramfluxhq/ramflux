@@ -20,6 +20,10 @@ pub async fn serve_local_bus_until(
     set_owner_only_dir_permissions(&config.data_root)?;
     let diagnostic_config = crate::diag::DiagnosticConfig {
         process: "daemon".into(),
+        #[cfg(feature = "diag-realrun")]
+        level: "debug".into(),
+        #[cfg(feature = "diag-realrun")]
+        build_class: "realrun".into(),
         ..crate::diag::DiagnosticConfig::default()
     };
     let diagnostics = crate::diag::start(&config.data_root, diagnostic_config)?;

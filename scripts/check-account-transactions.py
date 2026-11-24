@@ -46,6 +46,7 @@ ALLOW = {
     ('account_db/mac_subkeys.rs', 'initialize_archive'): 'atomic authority provenance for private restore staging; live accounts use initialize_managed',
     ('account_db/mac_subkeys.rs', 'initialize_with_fault'): 'private restore staging migration; live accounts use initialize_managed',
     ('account_db/backup_database.rs', 'enqueue_restore_events'): 'private restore staging database',
+    ('account_db/backup_media.rs', 'put_backup_media_state'): 'private backup archive/restore staging database (BackupDatabase), not the live managed account connection',
     ('account_db/backup_merge.rs', 'begin_message_merge'): 'private restore staging database',
     ('account_db/backup_merge.rs', 'merge_backup_pipeline'): 'private restore staging database',
     ('account_db/backup_merge.rs', 'finish_merge'): 'private restore staging database',

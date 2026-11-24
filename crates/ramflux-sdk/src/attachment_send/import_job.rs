@@ -53,6 +53,12 @@ pub(crate) struct Opened {
     manifest: MediaManifest,
 }
 
+impl Opened {
+    pub(super) fn recovery_key(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        zeroize::Zeroizing::new(*self.key)
+    }
+}
+
 /// Decodes the canonical reference. This runs the codec's binding rules: entries equal the
 /// manifest's, the manifest digest and size match, entries are unique, and no manifest-level
 /// capability is present.
@@ -228,7 +234,11 @@ fn finish_checks(written: u64, plain: [u8; 32], manifest: &MediaManifest) -> Res
     Ok(())
 }
 
-fn fetch_segment(plane: &dyn Plane, opened: &Opened, index: u32) -> Result<Vec<u8>, Refusal> {
+pub(super) fn fetch_segment(
+    plane: &dyn Plane,
+    opened: &Opened,
+    index: u32,
+) -> Result<Vec<u8>, Refusal> {
     let total = opened
         .layout
         .segment_plaintext_length(u64::from(index))

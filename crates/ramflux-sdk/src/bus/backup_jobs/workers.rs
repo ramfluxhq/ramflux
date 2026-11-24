@@ -230,7 +230,7 @@ impl BackupJobs {
             .unwrap_or(std::path::Path::new("."));
         check_space(destination, estimate.saturating_add(20 * 1024 * 1024))?;
         let database = directory.join("account.db");
-        let snapshot = captured
+        let mut snapshot = captured
             .reader
             .write_backup_snapshot_cancellable(&database, Arc::clone(&cancel))
             .map_err(|error| {
@@ -241,10 +241,18 @@ impl BackupJobs {
                 }
             })?;
 
-        self.change(|registry| registry.writing(&job.job_id, snapshot.counts.clone(), now()))
-            .map_err(|_| failure(BackupFailureCode::Interrupted))?;
         let db = BackupDatabase::open(&database, &snapshot.key)
             .map_err(|error| storage_error(&error))?;
+        crate::attachment_send::recovery::write(
+            &captured.reader,
+            captured.media.as_ref(),
+            &db,
+            &cancel,
+        )
+        .map_err(|error| sdk_error(&error))?;
+        snapshot.counts = db.counts().map_err(|error| storage_error(&error))?;
+        self.change(|registry| registry.writing(&job.job_id, snapshot.counts.clone(), now()))
+            .map_err(|_| failure(BackupFailureCode::Interrupted))?;
         db.clear_missing_manifest().map_err(|error| storage_error(&error))?;
         if db.missing_attachment_count().map_err(|error| storage_error(&error))? > 0 {
             if !allow_missing_attachments {

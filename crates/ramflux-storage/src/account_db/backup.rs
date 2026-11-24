@@ -304,9 +304,11 @@ pub(super) fn read_counts(db: &rusqlite::Connection) -> rusqlite::Result<BackupC
         tasks: count(
             "SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'task/view/%'",
         )?,
-        attachments: count("SELECT count(*) FROM object_index WHERE backup_excluded=0")?,
+        attachments: count(
+            "SELECT (SELECT count(*) FROM object_index WHERE backup_excluded=0)+(SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'attachment/recovery/%/metadata')",
+        )?,
         attachment_bytes: count(
-            "SELECT coalesce(sum(length(ciphertext)),0) FROM object_index WHERE backup_excluded=0",
+            "SELECT (SELECT coalesce(sum(length(ciphertext)),0) FROM object_index WHERE backup_excluded=0)+(SELECT coalesce(sum(json_extract(CAST(state_json AS TEXT),'$.ciphertext_bytes')),0) FROM runtime_actor_state WHERE state_kind LIKE 'attachment/recovery/%/metadata')",
         )?,
     })
 }

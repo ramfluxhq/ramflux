@@ -89,3 +89,4 @@ crates/ramflux-protocol/src/username_directory/codec.rs | decode | 1 | E | exclu
 crates/ramflux-protocol/src/username_directory/codec.rs | decode | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/wake_v2.rs | parse_signed_call_intent_v1 | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/wake_v2.rs | parse_signed_wake_v2 | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/diag_support.rs | decode | 1 | E | excluded=public support key catalog contains no protocol Envelope/Ack/Nack

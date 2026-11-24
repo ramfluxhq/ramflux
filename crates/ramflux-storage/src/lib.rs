@@ -10,6 +10,7 @@ pub use account_db::backup_database::{
     BackupAttachmentVerification, BackupDatabase, BackupInputObservation, BackupOpenMode,
 };
 pub use account_db::backup_edit_register::PARKED_EDIT_REVIEW;
+pub use account_db::backup_media::{BackupMedia, BackupMediaSegment};
 pub use account_db::backup_merge::{BackupItemRefusal, BackupMergeReport};
 pub use account_db::local_search;
 pub use account_db::restore_floor::{FloorPolicy, admit_floor};

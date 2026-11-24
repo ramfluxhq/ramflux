@@ -19,6 +19,7 @@ pub(crate) fn project(
     if let Some(projected) = project_account_job(db, entry)? {
         return Ok(projected);
     }
+    // Receipt effects already publish typed updates in their authenticated receive transaction.
     if let Some(conversation) = field(keys, "conversation_id") {
         if let Some(message) = field(keys, "message_id") {
             if entry.table_name == "direct_message_projection" {
@@ -39,10 +40,7 @@ pub(crate) fn project(
                     "message.updated"
                 };
                 events.push((topic.to_owned(),json!({"message":row,"conversation":super::super::read_model::row(client,"conversation",conversation)?}),None));
-            } else if matches!(
-                entry.table_name.as_str(),
-                "message_tombstone_projection" | "receipt_projection"
-            ) {
+            } else if entry.table_name == "message_tombstone_projection" {
                 events.push((
                     "message.updated".to_owned(),
                     json!({"message_id":message,"conversation_id":conversation}),
