@@ -115,6 +115,10 @@ pub(crate) async fn apply_page(
             )?;
             return Ok((None, backpressure));
         }
+        Err(SdkError::PairRecoveryRequired) => {
+            settle_pair_recovery(account, &turn, handle_generation, &prepared)?;
+            return Ok((None, backpressure));
+        }
         Err(error) => {
             // A classified per-entry refusal must not pin the cursor. The caller
             // (`receive.rs` apply) aborts the whole pass on `Err`, so Deliver frames
@@ -177,8 +181,7 @@ async fn apply_loaded(
         {
             Err(SdkError::LegacyBindingChanged) => note_binding_changed(&mut page.attempts)?,
             Err(SdkError::PairRecoveryRequired) => {
-                recover_own_copy(account, &page.turn, handle_generation(), &page.prepared.entry)?;
-                stash_pair_reply(None);
+                settle_pair_recovery(account, &page.turn, handle_generation, &page.prepared)?;
                 break;
             }
             Err(error @ SdkError::WriterPause) => {
@@ -1239,6 +1242,34 @@ fn admitted_work_entry(
 enum StageOpen {
     Continue(Opened),
     Retain(Box<GatewayInboxEntry>),
+}
+
+/// A pair that cannot open this entry never pins the cursor. A sender the pair-reset policy
+/// allows (contact, own device, pending reset) gets the durable reset and the entry is covered.
+/// Any other sender (a removed or unknown contact) gets a typed, recorded refusal: no key churn
+/// is started for it, the entry is covered terminally and the next entries apply.
+fn settle_pair_recovery(
+    account: &LocalBusAccountState,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
+    prepared: &ReceiveEntry,
+) -> Result<(), SdkError> {
+    if account.client.pair_recovery_permitted(&prepared.entry)? {
+        recover_own_copy(account, turn, handle_generation(), &prepared.entry)?;
+    } else {
+        let key = account.client.inbox_admission_key(&prepared.entry)?;
+        admit_failure(
+            account,
+            turn,
+            handle_generation,
+            &prepared.entry,
+            prepared.entry.inbox_seq,
+            &key,
+            (ReceiveFailureKind::Deterministic, "pair_recovery_unavailable"),
+        )?;
+    }
+    stash_pair_reply(None);
+    Ok(())
 }
 
 fn recover_own_copy(
