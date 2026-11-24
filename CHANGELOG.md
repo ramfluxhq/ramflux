@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Optional app lock fences account requests, queued native results, subscriptions, media readers and exports; lock state changes remain available on a content-free control stream.
+
 - Group invitations expose per-member unconfirmed delivery until an authenticated member beacon confirms joining; re-adding a contact and re-inviting can recover the existing membership grant without disclosing contact removal.
 - Native Linux x86_64/aarch64 CLI and TUI release bundles with checksums, an Arch `ramflux-cli` source package, and Arch/Omarchy installation instructions.
 - Describe connection policy, gateway reset, dependency patches, username directory, custody, task limits and agent provisioning without internal process records; correct the client repository list in licensing guidance.

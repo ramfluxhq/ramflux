@@ -25,33 +25,97 @@ enum Channel {
 pub(crate) struct LocalBusOutbound {
     channel: Channel,
     scope: Option<Scope>,
+    fences: Option<std::sync::Arc<super::app_lock_fence::Fences>>,
+    access: Option<super::app_lock_fence::Token>,
+    generations: bool,
+    control: tokio::sync::watch::Sender<Option<Message>>,
 }
 
+#[derive(Clone)]
 pub(crate) struct Message {
     pub frame: LocalBusFrame,
     pub generation: Option<u64>,
+    pub access: Option<super::app_lock_fence::Token>,
 }
 
+impl Message {
+    fn take_frame(mut self) -> LocalBusFrame {
+        std::mem::replace(
+            &mut self.frame,
+            LocalBusFrame::request("", None, "", "", serde_json::Value::Null),
+        )
+    }
+}
+impl Drop for Message {
+    fn drop(&mut self) {
+        super::secrets::wipe(&mut self.frame.body);
+    }
+}
 pub(crate) enum Receiver {
-    Plain(mpsc::Receiver<LocalBusFrame>),
-    Tagged(mpsc::Receiver<Message>),
+    Tagged(mpsc::Receiver<Message>, tokio::sync::watch::Receiver<Option<Message>>),
 }
 
 impl From<mpsc::Sender<LocalBusFrame>> for LocalBusOutbound {
     fn from(sender: mpsc::Sender<LocalBusFrame>) -> Self {
-        Self { channel: Channel::Plain(sender), scope: None }
+        Self {
+            channel: Channel::Plain(sender),
+            scope: None,
+            fences: None,
+            access: None,
+            generations: false,
+            control: tokio::sync::watch::channel(None).0,
+        }
     }
 }
 
 impl LocalBusOutbound {
-    pub fn channel(capacity: usize, tagged: bool) -> (Self, Receiver) {
-        if tagged {
-            let (sender, receiver) = mpsc::channel(capacity);
-            (Self { channel: Channel::Tagged(sender), scope: None }, Receiver::Tagged(receiver))
+    pub fn with_fences(mut self, fences: std::sync::Arc<super::app_lock_fence::Fences>) -> Self {
+        self.fences = Some(fences);
+        self
+    }
+    pub fn for_request(mut self, request: &LocalBusFrame) -> Result<Self, SdkError> {
+        self.access = if super::app_lock_fence::control(&request.method) {
+            None
         } else {
-            let (sender, receiver) = mpsc::channel(capacity);
-            (sender.into(), Receiver::Plain(receiver))
+            self.fences
+                .as_ref()
+                .map(|fences| {
+                    fences.token(super::app_lock_fence::scope(
+                        &request.method,
+                        request.account_id.as_deref(),
+                    ))
+                })
+                .transpose()?
+        };
+        Ok(self)
+    }
+    fn access(
+        &self,
+        frame: &LocalBusFrame,
+    ) -> Result<Option<super::app_lock_fence::Token>, SdkError> {
+        if super::app_lock_fence::control(&frame.method) {
+            return Ok(None);
         }
+        if let Some(access) = &self.access {
+            return Ok(Some(access.clone()));
+        }
+        self.fences.as_ref().map(|fences| fences.token(frame.account_id.as_deref())).transpose()
+    }
+
+    pub fn channel(capacity: usize, tagged: bool) -> (Self, Receiver) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        let (control, changes) = tokio::sync::watch::channel(None);
+        (
+            Self {
+                channel: Channel::Tagged(sender),
+                scope: None,
+                fences: None,
+                access: None,
+                generations: tagged,
+                control,
+            },
+            Receiver::Tagged(receiver, changes),
+        )
     }
 
     pub fn subscribe(&self, account: Option<String>) -> Result<Self, SdkError> {
@@ -64,16 +128,35 @@ impl LocalBusOutbound {
         let generation = previous
             .checked_add(1)
             .ok_or_else(|| SdkError::LocalBus("subscription generation exhausted".into()))?;
-        Ok(Self { channel: self.channel.clone(), scope: Some(Scope { account, generation }) })
+        let access =
+            self.fences.as_ref().map(|fences| fences.token(account.as_deref())).transpose()?;
+        Ok(Self {
+            channel: self.channel.clone(),
+            scope: Some(Scope { account, generation }),
+            fences: self.fences.clone(),
+            access,
+            generations: self.generations,
+            control: self.control.clone(),
+        })
     }
 
     pub fn for_account(&self, account: Option<&str>) -> Self {
         let scope =
             self.scope.as_ref().filter(|scope| scope.account.as_deref() == account).cloned();
-        Self { channel: self.channel.clone(), scope }
+        Self {
+            channel: self.channel.clone(),
+            scope,
+            fences: self.fences.clone(),
+            access: self.access.clone(),
+            generations: self.generations,
+            control: self.control.clone(),
+        }
     }
 
     fn generation(&self, frame: &LocalBusFrame) -> Option<u64> {
+        if !self.generations {
+            return None;
+        }
         let subscription_reply =
             matches!(frame.method.as_str(), "subscription.open" | "bus.subscribe");
         if frame.kind == LocalBusFrameKind::Event || subscription_reply {
@@ -92,14 +175,22 @@ impl LocalBusOutbound {
         &self,
         frame: LocalBusFrame,
     ) -> Result<(), Box<mpsc::error::SendError<LocalBusFrame>>> {
+        if frame.method == "account.app_lock.changed" {
+            let generation = self.generation(&frame);
+            self.control.send_replace(Some(Message { frame, generation, access: None }));
+            return Ok(());
+        }
         match &self.channel {
             Channel::Plain(sender) => sender.send(frame).await.map_err(Box::new),
             Channel::Tagged(sender) => {
                 let generation = self.generation(&frame);
+                let Ok(access) = self.access(&frame) else {
+                    return Err(Box::new(mpsc::error::SendError(frame)));
+                };
                 sender
-                    .send(Message { frame, generation })
+                    .send(Message { frame, generation, access })
                     .await
-                    .map_err(|error| Box::new(mpsc::error::SendError(error.0.frame)))
+                    .map_err(|error| Box::new(mpsc::error::SendError(error.0.take_frame())))
             }
         }
     }
@@ -108,18 +199,26 @@ impl LocalBusOutbound {
         &self,
         frame: LocalBusFrame,
     ) -> Result<(), Box<mpsc::error::TrySendError<LocalBusFrame>>> {
+        if frame.method == "account.app_lock.changed" {
+            let generation = self.generation(&frame);
+            self.control.send_replace(Some(Message { frame, generation, access: None }));
+            return Ok(());
+        }
         match &self.channel {
             Channel::Plain(sender) => sender.try_send(frame).map_err(Box::new),
             Channel::Tagged(sender) => {
                 let generation = self.generation(&frame);
+                let Ok(access) = self.access(&frame) else {
+                    return Err(Box::new(mpsc::error::TrySendError::Closed(frame)));
+                };
                 sender
-                    .try_send(Message { frame, generation })
+                    .try_send(Message { frame, generation, access })
                     .map_err(|error| match error {
                         mpsc::error::TrySendError::Full(message) => {
-                            mpsc::error::TrySendError::Full(message.frame)
+                            mpsc::error::TrySendError::Full(message.take_frame())
                         }
                         mpsc::error::TrySendError::Closed(message) => {
-                            mpsc::error::TrySendError::Closed(message.frame)
+                            mpsc::error::TrySendError::Closed(message.take_frame())
                         }
                     })
                     .map_err(Box::new)
@@ -152,10 +251,16 @@ impl LocalBusOutbound {
 impl Receiver {
     pub async fn recv(&mut self) -> Option<Message> {
         match self {
-            Self::Plain(receiver) => {
-                receiver.recv().await.map(|frame| Message { frame, generation: None })
+            Self::Tagged(receiver, changes) => {
+                tokio::select! {
+                    biased;
+                    notification = changes.changed() => {
+                        if notification.is_err() { return receiver.recv().await; }
+                        changes.borrow_and_update().clone()
+                    }
+                    frame = receiver.recv() => frame,
+                }
             }
-            Self::Tagged(receiver) => receiver.recv().await,
         }
     }
 }

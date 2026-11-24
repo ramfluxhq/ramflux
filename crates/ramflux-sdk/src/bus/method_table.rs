@@ -148,6 +148,7 @@ methods! {
     ];
     LocalMutation(Always) => Supervisor: [
         "account.app_lock.configure",
+        "account.app_lock.lock",
         "account.backup.export",
         "account.backup.import",
         "account.export_agent_credentials",

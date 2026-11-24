@@ -135,13 +135,15 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     let generations = stream.subscription_generations();
     let (reader, writer) = stream.into_halves();
     let (outbound, receiver) = super::outbound::LocalBusOutbound::channel(64, generations);
+    let outbound = outbound.with_fences(Arc::clone(&supervisor.app_fences));
+    supervisor.controls.borrow_mut().insert(id, outbound.clone());
     let credential_input =
         super::credentials::connection(supervisor.config.data_root.clone(), id, outbound.clone());
     let reader_credentials = credential_input.channel();
     let host_credentials = Arc::clone(&reader_credentials);
     let RequestReader { task: reader_task, mut frames, mut disconnected } =
         spawn_request_reader(reader, reader_credentials, id);
-    let (secrets, secret_receiver) = mpsc::channel::<zeroize::Zeroizing<Vec<u8>>>(1);
+    let (secrets, secret_receiver) = mpsc::channel::<SecretResponse>(1);
     let writer_task = tokio::task::spawn_local(write_responses(
         writer,
         receiver,
@@ -220,6 +222,11 @@ enum Admit {
     Done(Result<(), SdkError>),
 }
 
+struct SecretResponse {
+    bytes: zeroize::Zeroizing<Vec<u8>>,
+    access: Option<super::app_lock_fence::Token>,
+    refusal: LocalBusFrame,
+}
 struct AdmitState<'a> {
     supervisor: &'a Rc<Supervisor>,
     host_credentials:
@@ -227,7 +234,7 @@ struct AdmitState<'a> {
     ceremony: &'a mut Option<crate::custody::CreationCeremony>,
     recovery: &'a mut Option<crate::custody::RecoveryCeremony>,
     disconnected: &'a mut watch::Receiver<bool>,
-    secrets: &'a mpsc::Sender<zeroize::Zeroizing<Vec<u8>>>,
+    secrets: &'a mpsc::Sender<SecretResponse>,
     outbound: &'a super::outbound::LocalBusOutbound,
     inflight: &'a mut BTreeSet<String>,
     connection: &'a mut LocalBusConnectionState,
@@ -274,6 +281,17 @@ async fn admit_frame(
         }
         Some(Err(error)) => return Ok(Admit::Done(Err(error))),
     };
+    let source = incoming.frame()?;
+    let access =
+        if super::app_lock_fence::control(&source.method) {
+            None
+        } else {
+            Some(state.supervisor.app_fences.token(super::app_lock_fence::scope(
+                &source.method,
+                source.account_id.as_deref(),
+            ))?)
+        };
+    let refusal = super::io::local_bus_error(source, &super::app_lock_fence::locked());
     if let Some(bytes) = local_method(
         &mut incoming,
         state.supervisor,
@@ -284,10 +302,13 @@ async fn admit_frame(
     )
     .await?
     {
-        tokio::time::timeout(Duration::from_secs(10), state.secrets.send(bytes))
-            .await
-            .map_err(|_| closed())?
-            .map_err(|_| closed())?;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            state.secrets.send(SecretResponse { bytes, access, refusal }),
+        )
+        .await
+        .map_err(|_| closed())?
+        .map_err(|_| closed())?;
         return Ok(Admit::Stay);
     }
     let mut request = incoming.take()?;
@@ -320,7 +341,8 @@ async fn admit_frame(
     }
     let mut context = state.connection.clone();
     context.pending_events.clear();
-    context.outbound = context.outbound.for_account(request.account_id.as_deref());
+    context.outbound =
+        context.outbound.for_account(request.account_id.as_deref()).for_request(&request)?;
     state.requests.spawn_local(super::requests::respond(
         request,
         Rc::clone(state.supervisor),
@@ -337,6 +359,10 @@ async fn local_method(
     recovery: &mut Option<crate::custody::RecoveryCeremony>,
     disconnected: &mut watch::Receiver<bool>,
 ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, SdkError> {
+    if let Err(error) = supervisor.admit_app_access(incoming.frame()?) {
+        let response = super::io::local_bus_error(incoming.frame()?, &error);
+        return Ok(Some(zeroize::Zeroizing::new(super::io::encode_local_bus_frame(&response)?)));
+    }
     let method = incoming.frame()?.method.clone();
     if method == "agent.host.manage" {
         return Ok(Some(super::host_manage::respond(incoming, Arc::clone(channel)).await?));
@@ -427,7 +453,7 @@ pub(super) async fn configure_subscription(
 ) -> Result<(), SdkError> {
     #[cfg(feature = "c-abi")]
     if request.method == "subscription.close" {
-        supervisor.disconnect(connection.connection_id);
+        supervisor.close_account_subscription(connection.connection_id);
         connection.topics.clear();
         connection.attended_account_id = None;
         connection
@@ -437,6 +463,11 @@ pub(super) async fn configure_subscription(
             .map_err(|_| closed())?;
         return Ok(());
     }
+    supervisor.admit_app_access(request)?;
+    supervisor
+        .stream_accounts
+        .borrow_mut()
+        .insert(connection.connection_id, request.account_id.clone());
     connection.outbound = connection.outbound.subscribe(request.account_id.clone())?;
     if request.body.get("attended_frontend").and_then(serde_json::Value::as_bool).unwrap_or(false) {
         connection.attended_account_id.clone_from(&request.account_id);
@@ -543,7 +574,7 @@ impl Drop for WriterStopped {
 async fn write_responses<W: AsyncWrite + Unpin>(
     mut writer: W,
     mut receiver: super::outbound::Receiver,
-    mut secret_receiver: mpsc::Receiver<zeroize::Zeroizing<Vec<u8>>>,
+    mut secret_receiver: mpsc::Receiver<SecretResponse>,
     supervisor: Rc<Supervisor>,
     id: u64,
 ) -> Result<(), SdkError> {
@@ -551,8 +582,12 @@ async fn write_responses<W: AsyncWrite + Unpin>(
     loop {
         let frame = tokio::select! {
             bytes = secret_receiver.recv() => {
-                let Some(bytes) = bytes else { break; };
-                tokio::time::timeout(Duration::from_secs(10),super::io::write_encoded_local_bus_frame(&mut writer,&bytes)).await.map_err(|_|closed())??;
+                let Some(mut response) = bytes else { break; };
+                let _delivery = Arc::clone(&supervisor.app_fences.delivery).read_owned().await;
+                if response.access.as_ref().is_some_and(|access| access.check().is_err()) {
+                    response.bytes = zeroize::Zeroizing::new(super::io::encode_local_bus_frame(&response.refusal)?);
+                }
+                tokio::time::timeout(Duration::from_secs(10),super::io::write_encoded_local_bus_frame(&mut writer,&response.bytes)).await.map_err(|_|closed())??;
                 continue;
             }
             frame = receiver.recv() => frame,
@@ -560,6 +595,17 @@ async fn write_responses<W: AsyncWrite + Unpin>(
         let Some(mut frame) = frame else {
             break;
         };
+        let _delivery = Arc::clone(&supervisor.app_fences.delivery).read_owned().await;
+        if let Some(access) = &frame.access
+            && access.check().is_err()
+        {
+            super::secrets::wipe(&mut frame.frame.body);
+            if frame.frame.kind == LocalBusFrameKind::Event {
+                continue;
+            }
+            frame.frame =
+                super::io::local_bus_error(&frame.frame, &super::app_lock_fence::locked());
+        }
         if frame.frame.method == "search.query" && frame.frame.ok == Some(true) {
             let encoded = (|| -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
                 let completion = supervisor.resolve_search_completion(&frame.frame, id)?;
@@ -598,7 +644,9 @@ async fn write_responses<W: AsyncWrite + Unpin>(
             .map_err(|_| closed())??;
             continue;
         }
-        super::outbound::write(&mut writer, &frame).await?;
+        tokio::time::timeout(Duration::from_secs(10), super::outbound::write(&mut writer, &frame))
+            .await
+            .map_err(|_| closed())??;
         if frame.frame.method == "daemon.stop" {
             supervisor.finish_stop_response(id, &frame.frame.request_id);
         }

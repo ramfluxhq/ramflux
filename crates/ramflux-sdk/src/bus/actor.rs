@@ -128,6 +128,7 @@ enum ActorExit {
 
 #[derive(Clone)]
 pub(super) struct AccountActor {
+    account_id: String,
     timeouts: super::runtime_limits::RuntimeTimeouts,
     sender: mpsc::Sender<AccountCommand>,
     lifecycle: mpsc::Sender<AccountCommand>,
@@ -171,6 +172,9 @@ fn is_lifecycle_private(command: &PrivateCommand) -> bool {
 }
 
 impl AccountActor {
+    pub(super) fn account_id(&self) -> &str {
+        &self.account_id
+    }
     #[cfg(test)]
     pub(super) fn connection_for_test(
         &self,
@@ -240,7 +244,7 @@ impl AccountActor {
         let command_waiting = Arc::new(AtomicUsize::new(0));
         let bootstrap = super::account_runtime::Bootstrap {
             timeouts: timeouts.clone(),
-            account_id,
+            account_id: account_id.clone(),
             config,
             nodes,
             index,
@@ -255,6 +259,7 @@ impl AccountActor {
             ready,
         };
         let actor = Self {
+            account_id,
             timeouts,
             sender,
             lifecycle,

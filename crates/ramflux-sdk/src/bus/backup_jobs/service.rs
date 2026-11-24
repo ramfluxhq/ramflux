@@ -40,6 +40,7 @@ pub(crate) struct BackupJobs {
     pub(super) index: ramflux_storage::AccountIndex,
     pub(super) generations: super::generation_lock::GenerationLocks,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    pub(super) exports: Arc<Mutex<Vec<super::app_lock::Export>>>,
     next_cleanup: Arc<Mutex<std::time::Instant>>,
     pub(super) diagnostics: super::attachments::Diagnostics,
     #[cfg(test)]
@@ -80,6 +81,7 @@ impl BackupJobs {
             index,
             generations,
             tasks: Arc::default(),
+            exports: Arc::default(),
             next_cleanup: Arc::new(Mutex::new(std::time::Instant::now())),
             diagnostics: Arc::default(),
             #[cfg(test)]
@@ -180,9 +182,18 @@ impl BackupJobs {
         allow_missing_attachments: bool,
     ) -> Result<BackupJob, SdkError> {
         let row = self.start(BackupJobKind::Backup, path)?;
+        let (finished, done) = tokio::sync::watch::channel(false);
+        self.exports.lock().map_err(|_| refused("interrupted"))?.push(super::app_lock::Export {
+            account: actor.account_id().to_owned(),
+            job: row.job_id.clone(),
+            cancel: self.cancellation(&row.job_id)?,
+            done,
+        });
+        let finished = super::app_lock::ExportDone(finished);
         let job = row.clone();
         let service = self.clone();
         self.task(tokio::task::spawn_local(async move {
+            let _finished = finished;
             let id = job.job_id.clone();
             match service.fetch_before_capture(&actor, &job).await {
                 Ok(captured) => {

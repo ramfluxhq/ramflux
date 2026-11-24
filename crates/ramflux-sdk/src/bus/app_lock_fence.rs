@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Account access epochs shared by routing, transport delivery and native result polls.
+use crate::SdkError;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex, Weak},
+};
+use tokio::sync::RwLock;
+
+static ROOTS: LazyLock<Mutex<BTreeMap<PathBuf, Weak<Fences>>>> = LazyLock::new(Mutex::default);
+
+pub(crate) trait Observer: Send + Sync {
+    fn locked(&self, account: &str);
+}
+#[derive(Clone, Default)]
+pub(crate) struct Epoch {
+    pub generation: u64,
+    pub locked: bool,
+    pub reason: &'static str,
+}
+#[derive(Default)]
+struct State {
+    accounts: BTreeMap<String, Epoch>,
+    observers: Vec<Weak<dyn Observer>>,
+}
+#[derive(Default)]
+pub(crate) struct Fences {
+    state: Mutex<State>,
+    pub delivery: Arc<RwLock<()>>,
+}
+#[derive(Clone)]
+pub(crate) struct Token {
+    owner: Arc<Fences>,
+    account: Option<String>,
+    epochs: BTreeMap<String, u64>,
+}
+impl Token {
+    pub(crate) fn affects(&self, account: &str) -> bool {
+        self.account.as_deref().is_none_or(|id| id == account)
+    }
+    pub(crate) fn check(&self) -> Result<(), SdkError> {
+        self.with_current(|| ())
+    }
+    pub(crate) fn with_current<T>(&self, deliver: impl FnOnce() -> T) -> Result<T, SdkError> {
+        let state = self.owner.state.lock().map_err(|_| locked())?;
+        for (id, epoch) in &state.accounts {
+            if self.affects(id)
+                && (epoch.locked || self.epochs.get(id).copied().unwrap_or(0) != epoch.generation)
+            {
+                return Err(locked());
+            }
+        }
+        Ok(deliver())
+    }
+}
+impl Fences {
+    pub(crate) fn for_root(root: &Path) -> Result<Arc<Self>, SdkError> {
+        let root = std::fs::canonicalize(root)?;
+        let mut roots = ROOTS.lock().map_err(|_| locked())?;
+        roots.retain(|_, owner| owner.strong_count() != 0);
+        if let Some(owner) = roots.get(&root).and_then(Weak::upgrade) {
+            return Ok(owner);
+        }
+        let owner = Arc::new(Self::default());
+        roots.insert(root, Arc::downgrade(&owner));
+        Ok(owner)
+    }
+    #[cfg(feature = "c-abi")]
+    pub(crate) fn serialize<T>(&self, deliver: impl FnOnce() -> T) -> Result<T, SdkError> {
+        let _state = self.state.lock().map_err(|_| locked())?;
+        Ok(deliver())
+    }
+    #[cfg(feature = "c-abi")]
+    pub(crate) fn observe(&self, observer: Weak<dyn Observer>) -> Result<(), SdkError> {
+        self.state.lock().map_err(|_| locked())?.observers.push(observer);
+        Ok(())
+    }
+    pub(crate) fn token(self: &Arc<Self>, account: Option<&str>) -> Result<Token, SdkError> {
+        let state = self.state.lock().map_err(|_| locked())?;
+        Ok(Token {
+            owner: Arc::clone(self),
+            account: account.map(str::to_owned),
+            epochs: state
+                .accounts
+                .iter()
+                .filter(|(id, _)| account.is_none_or(|account| account == id.as_str()))
+                .map(|(id, epoch)| (id.clone(), epoch.generation))
+                .collect(),
+        })
+    }
+    pub(crate) fn epoch(&self, account: &str) -> Result<Epoch, SdkError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| locked())?
+            .accounts
+            .get(account)
+            .cloned()
+            .unwrap_or_default())
+    }
+    pub(crate) fn initialize(
+        &self,
+        account: &str,
+        policy: &ramflux_storage::AppLockPolicy,
+    ) -> Result<(), SdkError> {
+        let mut state = self.state.lock().map_err(|_| locked())?;
+        let generation = match state.accounts.get(account) {
+            Some(previous) => previous.generation.checked_add(1).ok_or_else(locked)?,
+            None => policy.generation,
+        };
+        state.accounts.insert(
+            account.into(),
+            Epoch {
+                generation,
+                locked: policy.enabled,
+                reason: if policy.enabled { "cold_start" } else { "authenticated" },
+            },
+        );
+        if policy.enabled {
+            for observer in state.observers.iter().filter_map(Weak::upgrade) {
+                observer.locked(account);
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn transition(
+        &self,
+        account: &str,
+        enabled: bool,
+        is_locked: bool,
+        reason: &'static str,
+    ) -> Result<Epoch, SdkError> {
+        let mut state = self.state.lock().map_err(|_| locked())?;
+        let epoch = state.accounts.entry(account.into()).or_default();
+        epoch.generation = epoch.generation.checked_add(1).ok_or_else(locked)?;
+        epoch.locked = is_locked && enabled;
+        epoch.reason = reason;
+        let result = epoch.clone();
+        if is_locked {
+            state.observers.retain(|observer| {
+                if let Some(observer) = observer.upgrade() {
+                    observer.locked(account);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        Ok(result)
+    }
+}
+/// Global views do not become account-scoped when a caller adds an unused account identifier.
+pub(crate) fn scope<'a>(method: &str, account: Option<&'a str>) -> Option<&'a str> {
+    if matches!(
+        method,
+        "account.list"
+            | "account.backup.jobs"
+            | "account.backup.cancel"
+            | "account.restore.verify"
+            | "account.restore.install"
+    ) {
+        None
+    } else {
+        account
+    }
+}
+pub(crate) fn control(method: &str) -> bool {
+    matches!(
+        method,
+        "account.app_lock.configure"
+            | "account.app_lock.state"
+            | "account.app_lock.lock"
+            | "account.app_lock.unlock"
+            | "account.unlock"
+            | "account.lock"
+            | "account.sign_out"
+            | "device.credential.request"
+            | "daemon.status"
+            | "daemon.stop"
+            | "subscription.close"
+            | "account.app_lock.changed"
+    )
+}
+pub(crate) fn locked() -> SdkError {
+    SdkError::LocalBusRefused {
+        code: "app_locked".into(),
+        message: "account app lock is closed".into(),
+        body: Box::new(serde_json::json!({"reason_code":"app_locked"})),
+    }
+}
