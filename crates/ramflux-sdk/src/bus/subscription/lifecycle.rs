@@ -37,6 +37,7 @@ impl StreamReaders {
                 continue;
             }
             if result.is_err()
+                && readers.retired_for_suspend()
                 && self.actor.reader_pool().is_ok_and(|current| !readers.same_pool(&current))
             {
                 // This read raced a completed suspend rollback. Retry the same cursor on

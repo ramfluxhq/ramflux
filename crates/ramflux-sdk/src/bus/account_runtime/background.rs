@@ -68,6 +68,11 @@ impl AccountRuntime {
         self.transfers.stop().await;
         self.username.stop().await;
         self.pairing.stop().await;
+        if let Ok(readers) = self.readers.lock()
+            && let Some(pool) = readers.as_ref()
+        {
+            pool.mark_suspend();
+        }
         self.close_readers().await;
         self.ledger = None;
         let released = self.drop_open_files();
