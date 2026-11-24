@@ -479,7 +479,7 @@ fn note_control_result(
     }
     #[cfg(feature = "test-support")]
     {
-        next.last_control_error = outcome.error.clone();
+        next.last_control_error.clone_from(&outcome.error);
     }
     if outcome.success && outcome.sent {
         next.pending.clear();
