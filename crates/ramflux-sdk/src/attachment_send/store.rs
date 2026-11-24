@@ -233,6 +233,9 @@ impl Store {
         if matches!(row.phase, Phase::Accepted | Phase::Reserved) {
             self.verify_snapshot(&mut row)?;
         }
+        if row.phase == Phase::Admitted {
+            self.remove_admitted_plaintext(&row)?;
+        }
         self.save(&row)?;
         Ok(row)
     }
@@ -359,7 +362,8 @@ impl Store {
     }
 
     /// Marks granted prepares admitted after the one message is submitted, and binds each row
-    /// to the actual message id. A repeat with the same id is a no-op.
+    /// to the actual message id, then durably removes the plaintext staging copy. A repeat
+    /// with the same id completes any interrupted cleanup without touching sealed sources.
     /// # Errors
     /// Returns `seal_failed` when a row cannot be rewritten, `duplicate_operation` when a row
     /// already belongs to another message.
@@ -376,6 +380,7 @@ impl Store {
                 row.message_id = Some(message_id.to_owned());
                 row.phase = Phase::Admitted;
                 self.save(&row)?;
+                self.remove_admitted_plaintext(&row)?;
             }
         }
         Ok(())
