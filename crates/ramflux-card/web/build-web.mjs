@@ -30,10 +30,12 @@ await mkdir(output,{recursive:true});
 const result=await build({entryPoints:[resolve(root,"worker.ts"),resolve(root,"adapter.ts"),resolve(root,"preview.ts")],outdir:output,
   write:false,minify:true,bundle:true,format:"esm",platform:"browser",target:"es2022",alias:{env:resolve(root,"env.ts")},plugins:[{name:"gallery-data",setup(build){build.onResolve({filter:/^gallery-data$/},()=>({path:"gallery-data",namespace:"gallery"}));build.onLoad({filter:/.*/,namespace:"gallery"},()=>({contents:JSON.stringify(gallery),loader:"json"}))}},{name:"generated-wasm",setup(build){build.onResolve({filter:/^\.\/pkg\.js$/},()=>({path:resolve(root,"pkg/ramflux_card.js")}))}}]});
 for(const file of result.outputFiles){if(checking){if(!Buffer.from(await readFile(file.path)).equals(Buffer.from(file.contents)))throw Error("web bundle drift: "+file.path)}else await writeFile(file.path,file.contents)}
-if(!checking)await cp(resolve(root,"pkg"),resolve(output,"pkg"),{recursive:true});
+if(!checking){await cp(resolve(root,"pkg"),resolve(output,"pkg"),{recursive:true});await cp(resolve(root,"fonts"),resolve(output,"fonts"),{recursive:true})}
 const assets={
  "index.html":await readFile(resolve(root,"gallery.html")),
  "gallery.css":await readFile(resolve(root,"gallery.css")),
+ "card.css":await readFile(resolve(root,"card/card.css")),
+ "reference-image.svg":await readFile(resolve(root,"reference-image.svg")),
  "stories.json":Buffer.from(JSON.stringify({schema:gallery.schema,stories:gallery.stories.map(({input,...story})=>({...story,input}))},null,2)+"\n")
 };
 for(const [name,contents]of Object.entries(assets)){

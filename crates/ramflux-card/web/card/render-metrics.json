@@ -1,0 +1,1295 @@
+{
+  "foundations": {
+    "type_styles": {
+      "caption": {
+        "size": 11,
+        "line": 16,
+        "weight": 400
+      },
+      "meta": {
+        "size": 12,
+        "line": 17,
+        "weight": 400
+      },
+      "secondary": {
+        "size": 13,
+        "line": 19,
+        "weight": 400
+      },
+      "secondary.strong": {
+        "size": 13,
+        "line": 19,
+        "weight": 600
+      },
+      "button": {
+        "size": 14,
+        "line": 20,
+        "weight": 500
+      },
+      "body": {
+        "size": 15,
+        "line": 22,
+        "weight": 400
+      },
+      "body.compact": {
+        "size": 17,
+        "line": 25,
+        "weight": 400
+      },
+      "subheading": {
+        "size": 17,
+        "line": 25,
+        "weight": 600
+      },
+      "title": {
+        "size": 20,
+        "line": 29,
+        "weight": 600
+      },
+      "page": {
+        "size": 24,
+        "line": 35,
+        "weight": 600
+      },
+      "faces": {
+        "latin": "font_latin",
+        "cjk": "font",
+        "mono": "font_mono",
+        "other_scripts": "platform UI face"
+      },
+      "line_ratio": 1.448
+    },
+    "spacing_step": 4,
+    "spacing_scale": [
+      4,
+      8,
+      12,
+      16,
+      20,
+      24
+    ],
+    "radii": {
+      "card": "radius_card",
+      "inset": "radius_md",
+      "button": "radius_button",
+      "input": "radius_input",
+      "chip": "radius_chip",
+      "tip_bar": "radius_sm",
+      "dialog": "radius_dialog",
+      "sheet": "radius_sheet",
+      "menu": "radius_menu"
+    },
+    "border_width": 1,
+    "elevation": {
+      "card": "none",
+      "overlay": {
+        "fill": "overlay",
+        "border": "overlay_border",
+        "shadow": {
+          "offset_y": 8,
+          "blur": 24,
+          "color": "shadow"
+        }
+      }
+    },
+    "focus": {
+      "field": {
+        "width": 2,
+        "color": "focus"
+      },
+      "other": {
+        "width": 2,
+        "offset": 2,
+        "color": "focus",
+        "when": "keyboard focus only"
+      }
+    },
+    "motion": {
+      "easing": {
+        "standard": "cubic-bezier(0.2,0,0,1)",
+        "exit": "cubic-bezier(0.4,0,1,1)"
+      },
+      "hover_ms": 120,
+      "press_in_ms": 80,
+      "press_out_ms": 120,
+      "card_entrance": {
+        "ms": 200,
+        "from": {
+          "opacity": 0,
+          "translateY": 4
+        }
+      },
+      "content_update_ms": 160,
+      "height_change_ms": 200,
+      "expand_ms": 200,
+      "collapse_ms": 160,
+      "tab_change_ms": 150,
+      "busy_fade": {
+        "ms": 120,
+        "opacity": 0.6
+      },
+      "dialog_open_ms": 200,
+      "dialog_close_ms": 150,
+      "dialog_scale_from": 0.98,
+      "sheet_open_ms": 280,
+      "sheet_close_ms": 200,
+      "shimmer_loop_ms": 1200,
+      "spinner_turn_ms": 900,
+      "reduced_motion": "no transforms; opacity fades 80 ms; shimmer static"
+    },
+    "density": {
+      "compact": {
+        "button_h": 44,
+        "field_h": 48,
+        "toggle": 24,
+        "segmented_h": 36,
+        "option_row_h": 44,
+        "min_target": 44,
+        "card_padding": 12
+      },
+      "regular": {
+        "button_h": 32,
+        "field_h": 40,
+        "toggle": 18,
+        "segmented_h": 32,
+        "option_row_h": 32,
+        "min_target": 32,
+        "inline_icon_target": 24,
+        "card_padding": 16
+      },
+      "wide": {
+        "card_padding": 20,
+        "title_style": "title"
+      }
+    },
+    "width_classes": {
+      "compact": {
+        "max_exclusive": 400
+      },
+      "regular": {
+        "max_exclusive": 600
+      },
+      "wide": {},
+      "card_max": 640,
+      "gallery_viewports": {
+        "phone": 360,
+        "dock": 480,
+        "wide": 960
+      }
+    },
+    "tokens_to_add": {
+      "control_height": 32,
+      "control_height_touch": 44,
+      "field_height": 40,
+      "field_height_touch": 48,
+      "toggle_size": 18,
+      "toggle_size_touch": 24,
+      "space_step": 4,
+      "card_padding": 16,
+      "card_padding_compact": 12,
+      "card_padding_wide": 20,
+      "card_max": 640,
+      "focus_width": 2,
+      "motion_fast_ms": 120,
+      "motion_base_ms": 200,
+      "motion_slow_ms": 280
+    }
+  },
+  "card_frame": {
+    "parts": {
+      "frame": {
+        "fill": "surface_white",
+        "border": "line",
+        "border_width": 1,
+        "radius": "radius_card",
+        "padding": {
+          "compact": 12,
+          "regular": 16,
+          "wide": 20
+        },
+        "max_width": 640,
+        "stack_gap": 8,
+        "placement": "replaces the bubble; incoming column; no tail"
+      },
+      "header": {
+        "height": 24,
+        "gap_after": 12
+      },
+      "avatar": {
+        "size": 24,
+        "fill": "agent_av",
+        "ink": "on_agent_av",
+        "radius_agent": "radius_sm",
+        "radius_person": "radius_full",
+        "person_fill": "avatar_person",
+        "initial": {
+          "style": "meta"
+        },
+        "gap_after": 8
+      },
+      "author": {
+        "style": "secondary",
+        "color": "secondary"
+      },
+      "ai_marker": {
+        "text": "localised \"Agent\" after a middle dot",
+        "style": "secondary",
+        "color": "secondary"
+      },
+      "owner_suffix": {
+        "text": "\". <owner>\" for another person's agent",
+        "style": "secondary",
+        "color": "secondary"
+      },
+      "status_chip": {
+        "height": 25,
+        "padding": [
+          4,
+          8
+        ],
+        "radius": "radius_chip",
+        "text": {
+          "style": "meta"
+        },
+        "tones": {
+          "neutral": [
+            "surface",
+            "text"
+          ],
+          "success": [
+            "success_bg",
+            "success"
+          ],
+          "warning": [
+            "warning_bg",
+            "warning"
+          ],
+          "danger": [
+            "danger_bg",
+            "danger"
+          ]
+        },
+        "gap_after": 12
+      },
+      "info_button": {
+        "target": 24,
+        "icon": 16,
+        "color": "secondary"
+      },
+      "title": {
+        "compact": {
+          "style": "subheading",
+          "color": "text"
+        },
+        "regular": {
+          "style": "subheading",
+          "color": "text"
+        },
+        "wide": {
+          "style": "title",
+          "color": "text"
+        }
+      },
+      "state_line": {
+        "style": "secondary",
+        "color": "secondary"
+      },
+      "block_gap": 12,
+      "action_row": {
+        "gap": 8,
+        "align": {
+          "regular": "end",
+          "compact": "equal-width split"
+        }
+      },
+      "footer_line": {
+        "style": "secondary",
+        "color": "secondary"
+      },
+      "inset": {
+        "fill": "surface",
+        "radius": "radius_md",
+        "padding": {
+          "regular": 12,
+          "wide": 16
+        },
+        "title": {
+          "style": "secondary.strong",
+          "color": "text"
+        },
+        "body": {
+          "style": "secondary",
+          "color": "secondary"
+        },
+        "title_body_gap": 4
+      }
+    },
+    "states": {
+      "streaming": {
+        "chip": "Generating",
+        "actions": "disabled"
+      },
+      "submitting": {
+        "opacity": 0.6,
+        "inert": true,
+        "button_label": "Submitting...",
+        "spinner": 14,
+        "button_fill": "surface",
+        "button_label_color": "control"
+      },
+      "consumed": {
+        "chip": "Waiting for confirmation",
+        "values": "read-only"
+      },
+      "closed": {
+        "chip": "Closed",
+        "fields": "read-only, same look",
+        "actions": "disabled"
+      },
+      "expired": {
+        "chip": "Expired"
+      },
+      "superseded": {
+        "chip": "Updated",
+        "title": "Content updated",
+        "actions": "disabled"
+      },
+      "out_of_sync": {
+        "resync_button": "default enabled",
+        "submit": "disabled"
+      },
+      "unknown_kind": {
+        "body": "fallbackText in secondary"
+      },
+      "limit": {
+        "actions": "disabled"
+      },
+      "error": {
+        "tip_bar": {
+          "tone": "danger",
+          "min_h": 34,
+          "padding": [
+            6,
+            12
+          ],
+          "icon": 16,
+          "radius": "radius_sm",
+          "text": {
+            "style": "secondary",
+            "color": "text"
+          }
+        },
+        "retry": "default button"
+      }
+    }
+  },
+  "kinds": {
+    "Text": {
+      "variants": {
+        "body": {
+          "text": {
+            "style": "body",
+            "color": "text"
+          }
+        },
+        "caption": {
+          "text": {
+            "style": "secondary",
+            "color": "secondary"
+          }
+        }
+      },
+      "markdown": {
+        "list_indent": 16,
+        "bullet_width": 8,
+        "paragraph_gap": 8,
+        "inline_code": {
+          "face": "font_mono",
+          "size": 13,
+          "fill": "surface",
+          "radius": 4,
+          "padding": [
+            0,
+            4
+          ]
+        }
+      },
+      "states": {
+        "empty": "renders nothing"
+      }
+    },
+    "Icon": {
+      "size": 20,
+      "size_in_button": 16,
+      "stroke": 1.5,
+      "color": "inherits context text colour",
+      "svgPath_viewbox": 24,
+      "mirror_in_rtl": [
+        "arrowBack",
+        "arrowForward",
+        "send",
+        "skipNext",
+        "skipPrevious",
+        "fastForward",
+        "rewind"
+      ]
+    },
+    "Row": {
+      "gap": 8,
+      "compact_overflow": "wrap"
+    },
+    "Column": {
+      "gap": 12
+    },
+    "List": {
+      "variants": {
+        "vertical": {
+          "rule": "line_soft",
+          "item_padding_y": 12,
+          "collapse_after": 5,
+          "show_all": "borderless \"Show all (N)\""
+        },
+        "horizontal": {
+          "item_width": {
+            "regular": 200,
+            "compact": "75%"
+          },
+          "gap": 8,
+          "edge_fade": 24,
+          "nav_buttons": 32,
+          "snap": "start"
+        }
+      },
+      "states": {
+        "empty": {
+          "text": "Nothing to show",
+          "height": 48,
+          "style": "secondary",
+          "color": "secondary"
+        }
+      }
+    },
+    "Card": {
+      "nested": {
+        "fill": "surface",
+        "radius": "radius_md",
+        "padding": 12,
+        "first_text": {
+          "style": "secondary.strong",
+          "color": "text"
+        },
+        "other_text": {
+          "style": "secondary",
+          "color": "secondary"
+        }
+      },
+      "root": "is the card frame"
+    },
+    "Tabs": {
+      "variants": {
+        "segmented": {
+          "max_tabs": 4,
+          "height": {
+            "regular": 32,
+            "compact": 36
+          },
+          "track": "surface",
+          "track_padding": 2,
+          "selected": "surface_white",
+          "selected_radius": "radius_xs",
+          "label": {
+            "style": "button",
+            "color": "text"
+          },
+          "unselected_label": "secondary"
+        },
+        "underline": {
+          "height": 32,
+          "indicator": {
+            "height": 2,
+            "color": "primary"
+          },
+          "label": {
+            "style": "button",
+            "color": "text"
+          },
+          "unselected_label": "secondary",
+          "edge_fade": 24
+        }
+      },
+      "panel_gap": 12,
+      "keyboard": "arrows select, Home/End"
+    },
+    "Modal": {
+      "variants": {
+        "dialog": {
+          "width": 480,
+          "max_width": 640,
+          "max_height": "80%",
+          "fill": "overlay",
+          "border": "overlay_border",
+          "radius": "radius_dialog",
+          "padding": 24,
+          "header": {
+            "style": "subheading",
+            "color": "text"
+          },
+          "close_button": 32,
+          "scrim": "scrim"
+        },
+        "sheet": {
+          "radius_top": "radius_sheet",
+          "handle": {
+            "w": 36,
+            "h": 4,
+            "color": "line_strong",
+            "top": 8
+          },
+          "padding": 16,
+          "max_height": "90%",
+          "scrim": "scrim"
+        }
+      },
+      "dismiss": [
+        "close button",
+        "Escape",
+        "scrim click",
+        "swipe down (phone)",
+        "system back"
+      ],
+      "focus": "first focusable on open; Tab cycles inside; returns to trigger"
+    },
+    "Divider": {
+      "variants": {
+        "horizontal": {
+          "thickness": 1,
+          "color": "line",
+          "margin_y": 4
+        },
+        "vertical": {
+          "thickness": 1,
+          "color": "line"
+        }
+      }
+    },
+    "Button": {
+      "common": {
+        "height": {
+          "regular": 32,
+          "compact": 44
+        },
+        "padding_x": 12,
+        "min_width": 64,
+        "radius": "radius_button",
+        "label": {
+          "style": "button"
+        },
+        "icon": 16,
+        "icon_gap": 6,
+        "max_lines": 2
+      },
+      "variants": {
+        "primary": {
+          "fill": "primary",
+          "label": "on_primary",
+          "hover": "accent",
+          "edge": "none"
+        },
+        "default": {
+          "fill": "surface_white",
+          "label": "text",
+          "hover": "selected",
+          "edge": "text"
+        },
+        "borderless": {
+          "fill": "transparent",
+          "label": "text",
+          "hover": "surface",
+          "edge": "none"
+        }
+      },
+      "states": {
+        "pressed": "hover fill, 80 ms",
+        "disabled": {
+          "fill": "surface",
+          "label": "control",
+          "edge": "surface"
+        },
+        "busy": {
+          "label": "Submitting...",
+          "spinner": 14
+        },
+        "consumed": "disabled look, label kept"
+      }
+    },
+    "TextField": {
+      "shell": {
+        "label": {
+          "style": "secondary.strong",
+          "color": "text",
+          "weight": 500,
+          "gap_after": 6
+        },
+        "field": {
+          "height": {
+            "regular": 40,
+            "compact": 48
+          },
+          "fill": "input",
+          "border": "input_border",
+          "radius": "radius_input",
+          "padding_x": 12,
+          "value": {
+            "style": "body",
+            "color": "text"
+          },
+          "placeholder": "control"
+        },
+        "error_message": {
+          "style": "meta",
+          "color": "danger",
+          "gap_before": 4
+        },
+        "required_marker": {
+          "text": " *",
+          "color": "text"
+        },
+        "states": {
+          "hover": {
+            "border": "line_strong"
+          },
+          "focus": {
+            "border_width": 2,
+            "border": "focus"
+          },
+          "error": {
+            "border": "danger",
+            "fill": "danger_bg"
+          },
+          "disabled": {
+            "fill": "surface",
+            "value": "control"
+          },
+          "read_only": {
+            "look": "default, no caret, no hover"
+          }
+        }
+      },
+      "variants": {
+        "shortText": {
+          "lines": 1
+        },
+        "longText": {
+          "min_lines": 3,
+          "max_lines_before_scroll": 8,
+          "min_height": 88
+        },
+        "number": {
+          "align": "end",
+          "keyboard": "numeric"
+        },
+        "obscured": {
+          "render": "refused by runtime; fallback only"
+        }
+      }
+    },
+    "CheckBox": {
+      "box": {
+        "size": {
+          "regular": 18,
+          "compact": 24
+        },
+        "radius": "radius_xs",
+        "check": 12
+      },
+      "states": {
+        "on": {
+          "fill": "primary",
+          "check": "on_primary"
+        },
+        "off": {
+          "fill": "input",
+          "edge": "control"
+        },
+        "disabled_off": {
+          "fill": "surface",
+          "edge": "line_strong"
+        },
+        "disabled_on": {
+          "fill": "control",
+          "edge": "line_strong"
+        },
+        "error": {
+          "edge": "danger"
+        }
+      },
+      "label": {
+        "style": "body",
+        "color": "text"
+      },
+      "label_gap": 12,
+      "row_h": {
+        "regular": 32,
+        "compact": 44
+      }
+    },
+    "ChoicePicker": {
+      "group_label": {
+        "style": "secondary.strong",
+        "color": "text"
+      },
+      "variants": {
+        "mutuallyExclusive": {
+          "radio": {
+            "size": {
+              "regular": 18,
+              "compact": 24
+            },
+            "off_fill": "input",
+            "off_edge": "control",
+            "on_ring": "primary",
+            "on_ring_width": 1.5,
+            "dot": 8
+          }
+        },
+        "multipleSelection": {
+          "control": "CheckBox rows"
+        }
+      },
+      "displayStyle": {
+        "checkbox": {
+          "row_h": {
+            "regular": 32,
+            "compact": 44
+          },
+          "row_gap": 4,
+          "menu_after_options": 6,
+          "menu_item_h": "menu_item_height"
+        },
+        "chips": {
+          "height": {
+            "regular": 32,
+            "compact": 40
+          },
+          "padding_x": 12,
+          "radius": "radius_chip",
+          "gap": 8,
+          "off": {
+            "fill": "surface_white",
+            "edge": "line_strong",
+            "label": "text"
+          },
+          "on": {
+            "fill": "primary",
+            "label": "on_primary",
+            "check_icon": 14
+          }
+        }
+      },
+      "filterable": {
+        "search_h": {
+          "regular": 34,
+          "compact": 40
+        },
+        "icon": 16,
+        "empty": "No matches"
+      }
+    },
+    "Slider": {
+      "track": {
+        "height": 4,
+        "radius": "radius_full",
+        "color": "line_strong",
+        "active": "primary"
+      },
+      "thumb": {
+        "size": {
+          "regular": 16,
+          "compact": 24
+        },
+        "fill": "primary",
+        "ring": "surface_white",
+        "ring_width": 2
+      },
+      "target": {
+        "regular": 32,
+        "compact": 44
+      },
+      "label": {
+        "style": "secondary.strong",
+        "color": "text"
+      },
+      "value": {
+        "style": "meta",
+        "color": "secondary"
+      },
+      "ticks": {
+        "w": 2,
+        "h": 6,
+        "color": "line_strong",
+        "max_steps_with_ticks": 20
+      },
+      "states": {
+        "hover": {
+          "thumb_ring": "selected"
+        },
+        "disabled": {
+          "track": "line",
+          "thumb": "control"
+        }
+      }
+    },
+    "DateTimeInput": {
+      "shell": "TextField shell",
+      "trailing_icon": {
+        "size": 16,
+        "color": "secondary"
+      },
+      "picker": {
+        "ios": "system date/time picker in a sheet",
+        "android": "Material date and time pickers",
+        "desktop_web": {
+          "fill": "overlay",
+          "radius": "radius_menu",
+          "padding": 12,
+          "width": 280,
+          "day_cell": 32,
+          "today_ring": "text",
+          "selected": [
+            "primary",
+            "on_primary"
+          ],
+          "out_of_range": "control",
+          "nav_buttons": 32,
+          "time_stepper_h": 32
+        }
+      },
+      "neither_enabled": "read-only text"
+    },
+    "Image": {
+      "variants": {
+        "icon": {
+          "box": [
+            24,
+            24
+          ],
+          "radius": "radius_xs"
+        },
+        "avatar": {
+          "box": [
+            40,
+            40
+          ],
+          "radius": "radius_full"
+        },
+        "smallFeature": {
+          "box": [
+            96,
+            96
+          ],
+          "radius": "radius_md"
+        },
+        "mediumFeature": {
+          "width": "100%",
+          "aspect": "16:9",
+          "max_height": 280,
+          "radius": "radius_md"
+        },
+        "largeFeature": {
+          "width": "100%",
+          "aspect": "4:3",
+          "max_height": 420,
+          "radius": "radius_md"
+        },
+        "header": {
+          "bleed": "to card edges, top",
+          "aspect": "2:1",
+          "max_height": 240,
+          "radius_top": "radius_card"
+        }
+      },
+      "states": {
+        "loading": {
+          "fill": "surface",
+          "icon": 24,
+          "icon_color": "control",
+          "shimmer_after_ms": 300
+        },
+        "failed": {
+          "fill": "surface",
+          "text": "Image unavailable",
+          "style": "meta",
+          "color": "secondary"
+        }
+      },
+      "tap": "full view in dialog or sheet"
+    },
+    "Approval": {
+      "host_owned": true,
+      "geometry": {
+        "regular_width": 560,
+        "regular_height_pending": 214,
+        "padding": {
+          "compact": 12,
+          "regular": 16,
+          "wide": 20
+        },
+        "inset_height_two_lines": 66,
+        "button": {
+          "w": 52,
+          "h": 32,
+          "gap": 8
+        },
+        "compact_buttons": {
+          "h": 44,
+          "layout": "equal split",
+          "gap": 8
+        }
+      },
+      "parts": {
+        "chip_pending": "Waiting for you",
+        "summary_title": {
+          "style": "subheading",
+          "color": "text"
+        },
+        "scope_inset": {
+          "title": {
+            "style": "secondary.strong",
+            "color": "text"
+          },
+          "rows": {
+            "style": "secondary",
+            "color": "secondary"
+          }
+        },
+        "risk_chip": {
+          "low": "neutral",
+          "medium": "warning",
+          "high": "danger",
+          "icon": 12
+        },
+        "expiry": {
+          "style": "meta",
+          "color": "secondary",
+          "warning_below_s": 60,
+          "warning_color": "warning",
+          "format_switch_min": 10
+        },
+        "explanation": {
+          "style": "secondary",
+          "color": "secondary",
+          "collapsed_lines": 2
+        },
+        "details_disclosure": {
+          "button": "borderless \"Show details\"",
+          "key": {
+            "style": "secondary.strong",
+            "color": "text"
+          },
+          "value": {
+            "face": "font_mono",
+            "size": 13,
+            "color": "text"
+          },
+          "collapse_after_rows": 8
+        },
+        "deny": "Button default",
+        "allow": "Button primary, last",
+        "task_binding_line": {
+          "style": "secondary",
+          "color": "secondary"
+        }
+      },
+      "resolved": {
+        "approved": {
+          "chip": "Allowed",
+          "footer": "<who> allowed . <time>"
+        },
+        "denied": {
+          "chip": "Denied",
+          "footer": "<who> denied . <time> . <agent> did not run this step"
+        },
+        "expired": {
+          "chip": "Expired",
+          "footer": "Expired at <time> . no decision was made"
+        },
+        "superseded": {
+          "chip": "Replaced",
+          "footer": "Replaced by a newer request . <time>",
+          "link": "Go to the new request"
+        },
+        "withdrawn": {
+          "chip": "Withdrawn",
+          "footer": "<agent> withdrew the request . <time>"
+        }
+      },
+      "rules": "Allow opens host security sheet; single tap Confirm; never from lock screen or notification"
+    },
+    "Task": {
+      "status": {
+        "pending": {
+          "chip": "Waiting to start",
+          "tone": "neutral",
+          "glyph": "empty circle",
+          "glyph_color": "control"
+        },
+        "delivered": {
+          "chip": "Delivered",
+          "tone": "neutral",
+          "glyph": "dot circle",
+          "glyph_color": "secondary"
+        },
+        "running": {
+          "chip": "Running",
+          "tone": "neutral",
+          "glyph": "spinner",
+          "glyph_color": "text"
+        },
+        "completed": {
+          "chip": "Completed",
+          "tone": "success",
+          "glyph": "check circle",
+          "glyph_color": "success"
+        },
+        "refused": {
+          "chip": "Refused",
+          "tone": "danger",
+          "glyph": "x circle",
+          "glyph_color": "danger"
+        },
+        "cancelled": {
+          "chip": "Cancelled",
+          "tone": "neutral",
+          "glyph": "slash circle",
+          "glyph_color": "control"
+        }
+      },
+      "parts": {
+        "title": {
+          "style": "subheading",
+          "color": "text",
+          "format": "<owner> . <title>"
+        },
+        "requester_line": {
+          "style": "secondary",
+          "color": "secondary"
+        },
+        "progress": {
+          "height": 4,
+          "radius": "radius_full",
+          "track": "surface",
+          "fill": "primary",
+          "value": {
+            "style": "meta",
+            "color": "text"
+          },
+          "indeterminate": "30% segment, 1200 ms sweep"
+        },
+        "steps": {
+          "glyph": 14,
+          "gap": 8,
+          "row_h": {
+            "regular": 28,
+            "compact": 40
+          },
+          "text": {
+            "style": "secondary",
+            "color": "secondary"
+          },
+          "running_text": {
+            "color": "text",
+            "weight": 600
+          },
+          "inline_max": 3
+        },
+        "skeleton": {
+          "lines": [
+            "100%",
+            "70%",
+            "40%"
+          ],
+          "line_h": 12,
+          "fill": "surface"
+        },
+        "actions": {
+          "running": [
+            "Cancel default",
+            "Details default"
+          ],
+          "terminal": [
+            "Details default"
+          ]
+        },
+        "detail_dialog": {
+          "width": 680,
+          "title": {
+            "style": "page",
+            "color": "text"
+          },
+          "row_rule": "line"
+        }
+      }
+    },
+    "Chart": {
+      "variants": {
+        "line": {
+          "stroke": 2,
+          "last_point_dot": 6,
+          "series2_dash": [
+            4,
+            3
+          ],
+          "series2_marker": "square 6"
+        },
+        "bar": {
+          "bar_width": 11,
+          "pair_gap": 2,
+          "group_pitch_8_at_480": 52,
+          "top_radius": 2
+        }
+      },
+      "parts": {
+        "title": {
+          "regular": {
+            "style": "body",
+            "color": "text",
+            "weight": 600
+          },
+          "compact": {
+            "style": "subheading",
+            "color": "text"
+          }
+        },
+        "subtitle": {
+          "style": "secondary",
+          "color": "secondary"
+        },
+        "toggle_button": 32,
+        "toggle_icon": 16,
+        "legend": {
+          "dot": 8,
+          "dot_gap": 7,
+          "series_gap": 16,
+          "label": {
+            "style": "meta",
+            "color": "secondary"
+          },
+          "value": {
+            "style": "meta",
+            "color": "text",
+            "weight": 600
+          }
+        },
+        "plot": {
+          "height": {
+            "compact": 120,
+            "regular": 140,
+            "wide": 160
+          },
+          "gridlines": 4,
+          "grid": "line",
+          "y_labels": {
+            "style": "caption",
+            "color": "secondary"
+          },
+          "x_labels": {
+            "style": "caption",
+            "color": "secondary"
+          },
+          "x_label_max": 4,
+          "label_gap": 8
+        },
+        "series": [
+          "chart_1",
+          "chart_2"
+        ],
+        "zero_line": "line_strong",
+        "tooltip": {
+          "fill": "tooltip",
+          "text": "on_tooltip",
+          "style": "meta",
+          "radius": 4,
+          "padding": [
+            4,
+            8
+          ],
+          "guide": "line_strong"
+        },
+        "table_alternative": {
+          "row_h": 28,
+          "rule": "line_soft",
+          "header": {
+            "style": "meta",
+            "color": "secondary"
+          },
+          "numbers": "end-aligned",
+          "footer": {
+            "style": "caption",
+            "color": "secondary"
+          },
+          "visible_rows": 5
+        }
+      },
+      "states": {
+        "loading": {
+          "spinner": 20,
+          "text": "Loading data..."
+        },
+        "empty": {
+          "icon": 20,
+          "text": "No data for this period"
+        },
+        "failed": {
+          "icon": "warning",
+          "text": "Could not load data",
+          "retry": "Button default"
+        }
+      },
+      "expand": {
+        "plot_height": 280
+      }
+    },
+    "Table": {
+      "header": {
+        "row_h": 28,
+        "style": "meta",
+        "color": "secondary",
+        "weight": 600,
+        "rule": "line"
+      },
+      "row": {
+        "h": {
+          "regular": 28,
+          "compact": 36
+        },
+        "text": {
+          "style": "meta",
+          "color": "text"
+        },
+        "rule": "line_soft",
+        "zebra": false,
+        "cell_padding_x": 8
+      },
+      "align": {
+        "integer": "end, tabular figures",
+        "boolean": "centre check 14 / em dash control",
+        "string": "start, wrap"
+      },
+      "overflow": {
+        "visible_rows": 8,
+        "footer": {
+          "style": "caption",
+          "color": "secondary"
+        },
+        "expand": "dialog or sheet"
+      },
+      "states": {
+        "empty": {
+          "text": "No rows",
+          "height": 48
+        }
+      },
+      "copy": "Copy as text (TSV) in expanded view"
+    }
+  }
+}
