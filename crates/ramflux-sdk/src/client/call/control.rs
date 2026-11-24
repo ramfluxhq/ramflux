@@ -485,8 +485,19 @@ impl RamfluxClient {
         }
         // An already committed delivery can be retried after an ACK failure. Its cache refresh
         // must neither apply the signed sequence twice nor recreate lost media keys after restart.
-        if self.voice_calls.get(&c.call_id).is_some_and(|old| old.has_seen(&c.sender, c.seq)) {
-            return Ok(true);
+        if let Some(old) = self.voice_calls.get(&c.call_id) {
+            // An ignored late control is not a restart. The ended owner may
+            // still have a hangup to deliver and a relay allocation to release.
+            if old.row.state == "ended" {
+                tracing::debug!(
+                    pending_controls = old.pending.len(),
+                    "late peer control retained terminal call"
+                );
+                return Ok(true);
+            }
+            if old.has_seen(&c.sender, c.seq) {
+                return Ok(true);
+            }
         }
         self.retire_call_without_keys(&c.call_id)?;
         self.voice_calls.remove(&c.call_id);
