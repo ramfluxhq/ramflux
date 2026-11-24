@@ -314,7 +314,19 @@ URL-safe base64, and each chunk is at most 512 KiB. Finish with
 `attachment.prepare.finish`
 `{prepare_id, generation, plaintext_length, plaintext_digest}`.
 `plaintext_digest` is the lowercase hex BLAKE3 of the plaintext bytes with no
-domain separator. Then `conversation.send` the `{prepare_id}` values.
+domain separator. Finish optionally accepts
+`thumbnail: {mime_type, width, height, encoded_image_base64}`: JPEG or WebP,
+1–320 pixels in each dimension, 1–16384 encoded bytes, unpadded URL-safe base64.
+The SDK checks the image container and its actual dimensions against these fields;
+clients remain responsible for safe pixel decoding. Invalid thumbnails return
+`layout_invalid` before any relay reservation. An accepted finish is immutable:
+retry with the same digest, length and thumbnail; changed metadata returns
+`duplicate_operation`. Omit `thumbnail` for no preview. The exact thumbnail
+persists across reopen and appears as `inline_thumbnail` in `message.read`,
+inside the encrypted message, before any `attachment.import.*` body fetch.
+Thumbnail bytes count toward the encoded message size before upload; a valid
+thumbnail can still produce `manifest_too_large` for an oversized message.
+Then `conversation.send` the `{prepare_id}` values.
 
 Import the peer's bytes with `attachment.import.begin`
 `{message_id, index, operation_id}`, poll `attachment.import.status`

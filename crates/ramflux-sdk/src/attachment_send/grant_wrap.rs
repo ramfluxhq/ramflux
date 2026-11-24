@@ -320,7 +320,7 @@ fn media_ref(input: &WrapInput<'_>, slots: Vec<MediaKeySlot>) -> Result<MediaRef
     let reference = MediaRef {
         mime_type: input.row.mime.clone(),
         file_name: Some(input.row.file_name.clone()),
-        inline_thumbnail: None,
+        inline_thumbnail: input.row.thumbnail.as_ref().map(super::thumbnail::to_canonical),
         object_id: ramflux_protocol::encode_base64url(
             input.row.object_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
         ),

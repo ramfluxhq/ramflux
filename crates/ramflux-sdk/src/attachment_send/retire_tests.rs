@@ -155,7 +155,15 @@ impl Fixture {
         self.store.chunk(&row.prepare_id, row.generation, 0, BODY, self.now).unwrap();
         let digest = *blake3::hash(BODY).as_bytes();
         let len = u64::try_from(BODY.len()).unwrap();
-        self.store.finish(&row.prepare_id, row.generation, len, digest, self.now).unwrap()
+        self.store
+            .finish(
+                &row.prepare_id,
+                row.generation,
+                len,
+                super::thumbnail::Finished { digest, thumbnail: None },
+                self.now,
+            )
+            .unwrap()
     }
 
     fn send(&self, operation: &str, peers: &[&Peer]) -> (Row, MediaRef) {

@@ -110,10 +110,12 @@ impl Store {
         prepare_id: &str,
         generation: u64,
         length: u64,
-        digest: [u8; 32],
+        finished: super::thumbnail::Finished,
         now: u64,
     ) -> Result<Row, Refusal> {
         let mut row = self.owned(prepare_id, generation, now)?;
+        let super::thumbnail::Finished { digest, thumbnail } = finished;
+        super::thumbnail::validate(thumbnail.as_ref())?;
         if length > MAX_PLAINTEXT {
             return Err(Refusal::new(CODE_FILE_TOO_LARGE));
         }
@@ -121,7 +123,14 @@ impl Store {
             && row.plaintext_length == Some(length)
             && row.plaintext_digest == Some(digest)
         {
-            return Ok(row);
+            return if row.thumbnail == thumbnail {
+                Ok(row)
+            } else {
+                Err(Refusal::new(CODE_DUPLICATE))
+            };
+        }
+        if row.phase != Phase::Accepting {
+            return Err(Refusal::new(CODE_DUPLICATE));
         }
         if row.accepted_through != length {
             self.fence(&mut row)?;
@@ -143,6 +152,7 @@ impl Store {
         row.charged = row.charged.saturating_add(need);
         row.plaintext_length = Some(length);
         row.plaintext_digest = Some(digest);
+        row.thumbnail = thumbnail;
         row.phase = Phase::Accepted;
         if let Err(error) = self.save(&row).and_then(|()| self.remember(&row)) {
             budget::release_disk(need);

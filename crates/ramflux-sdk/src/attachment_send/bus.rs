@@ -101,7 +101,10 @@ fn finish(
         &body.prepare_id,
         body.generation,
         body.plaintext_length,
-        digest,
+        super::thumbnail::Finished {
+            digest,
+            thumbnail: body.thumbnail.map(super::thumbnail::Input::decode).transpose()?,
+        },
         unix_now()?,
     )?;
     Ok(local_bus_ok(progress(&row)))
@@ -411,6 +414,7 @@ struct FinishBody {
     generation: u64,
     plaintext_length: u64,
     plaintext_digest: String,
+    thumbnail: Option<super::thumbnail::Input>,
 }
 
 #[derive(Deserialize)]

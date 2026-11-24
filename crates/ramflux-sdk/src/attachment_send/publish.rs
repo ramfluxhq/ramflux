@@ -87,6 +87,7 @@ fn check_roster(input: &PublishInput<'_>, rows: &[Row]) -> Result<(), Refusal> {
             mime: &row.mime,
             name: &row.file_name,
             plaintext_length: row.plaintext_length.unwrap_or(0),
+            thumbnail: row.thumbnail.as_ref(),
         })
         .collect();
     preflight::measure(
@@ -154,6 +155,7 @@ fn bound_one(input: &PublishInput<'_>, row: &Row) -> Result<(), Refusal> {
             mime: &row.mime,
             name: &row.file_name,
             plaintext_length: row.plaintext_length.unwrap_or(0),
+            thumbnail: row.thumbnail.as_ref(),
         }],
         input.targets,
         input.caption,
