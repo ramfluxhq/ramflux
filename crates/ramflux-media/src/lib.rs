@@ -29,6 +29,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod authorization;
 pub mod codec;
 pub mod engine;
 pub mod jitter;

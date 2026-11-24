@@ -740,7 +740,7 @@
       "show_once": false
     },
     {
-      "bridge_allowed": true,
+      "bridge_allowed": false,
       "capability": "call",
       "key_export": false,
       "name": "call.media.session",

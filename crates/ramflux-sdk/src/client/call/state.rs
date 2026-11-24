@@ -41,6 +41,7 @@ pub(crate) struct LiveCall {
     pub retry_attempts: u32,
     pub release_until: u64,
     pub media_taken: bool,
+    pub(crate) allocation_credentials: Option<[u8; 32]>,
     pub pending: Vec<CallControl>,
     media_loss: Option<(VoiceCallFailureReason, u64)>,
     offer_keys: BTreeMap<CallEndpoint, Zeroizing<[u8; 32]>>,
@@ -234,6 +235,7 @@ impl LiveCall {
             retry_attempts: 0,
             release_until: 0,
             media_taken: false,
+            allocation_credentials: None,
             pending: Vec::new(),
             media_loss: None,
             offer_keys: BTreeMap::new(),
@@ -781,7 +783,11 @@ impl LiveCall {
         reason: VoiceCallFailureReason,
         now: i64,
     ) -> Result<(), SdkError> {
+        // A peer's generic Failed control carries no cause. Preserve an already
+        // observed local relay refusal when that control wins the expiry race.
+        let local_reason = self.media_loss.map(|(reason, _)| reason);
         self.finish("failed", now)?;
+        self.row.failure_reason = local_reason;
         self.row.peer_reason = Some(reason);
         Ok(())
     }

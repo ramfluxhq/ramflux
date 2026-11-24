@@ -259,6 +259,9 @@ fn reject_reply(
 fn reject_private(private: PrivateCommand) {
     let error = super::super::background::client_suspended();
     match private {
+        PrivateCommand::Media { reply, .. } => {
+            let _ = reply.send(Err(super::super::background::client_suspended()));
+        }
         PrivateCommand::SearchRebuild { reply, .. } => {
             let _ = reply.send(Err(error));
         }

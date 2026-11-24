@@ -231,7 +231,11 @@ impl AccountRuntime {
         if matches!(&work, AccountWork::Courier(_)) {
             tokio::spawn(async {}).await.map_err(|_| SdkError::NetworkingPending)?;
         }
-        let publish_networking = self.apply_connection_work_inner(work).await?;
+        let result = self.apply_connection_work_inner(work).await;
+        if let Some(account) = self.state.accounts.get(&self.id) {
+            super::super::media::reconcile(account);
+        }
+        let publish_networking = result?;
         // A courier that refused with `FreshHeadRequired` waits for a wake; a head that became
         // current in this step (refresh, receive, another courier) is that wake.
         if let Some(account) = self.state.accounts.get(&self.id)
@@ -803,6 +807,7 @@ impl AccountRuntime {
         for call in account.client.voice_calls.values_mut() {
             call.bind_gateway_generation(metadata.session.call_session_generation.as_deref())?;
         }
+        super::super::media::reconcile(account);
         let verified = metadata.mode.push_incarnation().map(str::to_owned);
         account.gateway_config = metadata.config;
         account.target_delivery_id.clone_from(&account.gateway_config.target_delivery_id);

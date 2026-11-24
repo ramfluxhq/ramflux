@@ -147,6 +147,31 @@ the endpoint bandwidth budget. Challenge replies are bounded to 55 bytes, once p
 five-second outstanding challenge. Ordinary media needs no per-packet HMAC.
 Changing only the socket preserves the existing SFrame counters and replay window.
 
+## In-process SDK engine ownership
+
+A trusted host constructs `LocalBusConfig::in_process` before opening accounts and
+retains `media_control()`. This typed Rust control routes `open`, `status`,
+`audio_active` and `close` to the existing account writer. `open` compares the
+current call sequence and moves the private session into one SDK-owned engine;
+its capture and playback adapters receive PCM only. It returns a credential-free
+receipt and engine status, initially with audio inactive. Generic
+`call.media.session` export remains denied in this mode.
+
+One process-wide reservation covers pending calls and engine drain across all
+accounts. A second take is refused, including after close or failed startup;
+starting another engine requires a fresh call. Host audio readiness cannot grant
+SDK authority. Gateway holds, stale session resolution and temporary authority
+refresh gaps fence media and deactivate audio while retaining the same SFrame
+sender and replay-protected receiver. An authenticated new grant and fresh host
+readiness are required to resume. NAT rebinding retains those crypto objects too.
+
+Workers enforce the lease with a monotonic deadline even when the account writer
+is delayed. Repeated status reconciliation cannot extend that deadline; an actual
+lease renewal can. Terminal calls, definitive authority loss, lock and shutdown
+fence output, join workers and discard the session. Restart retains public call
+history with the existing restart reason and cannot recover consumed media keys.
+These typed controls add no C ABI execute methods or direct PCM exports.
+
 ## Node configuration and acceptance
 
 Configure all relay endpoints together: `RAMFLUX_RELAY_VOICE_UDP_ADDR`,
@@ -161,10 +186,11 @@ Limits are two concurrent allocations per root-qualified account, 4096 globally,
 bandwidth window. Expiry/release remove credentials and quota charges. Private and
 special-use forwarding targets remain refused by default; QA explicitly opts in.
 
-QA uses `RAMFLUX_ITEST_VOICE=1` and `docker-compose.itest.voice.yml`, named stacks,
-two daemons, CLI signaling, bidirectional synthetic Opus/RTP/SFrame, replay refusal,
-failed stolen-token rebinding and successful HMAC NAT rebinding. The realnet fixture
-requires `RAMFLUX_ITEST_REALNET=1 RAMFLUX_OBJECT_V3=1 RAMFLUX_CROSS_GATEWAY=1` too.
+Development verification uses two real SDK peers and the real relay on QA,
+driven through account-owned signalling and typed engine controls. A scratch
+network proxy can retain encrypted packets and move relay-facing UDP addresses
+to observe replay refusal and authenticated NAT rebinding. Platform speech,
+audio-device and operating-system integration require separate client verification.
 
 A saturated gateway writer returns the retryable session NACK
 `gateway_writer_busy: retryable`, never a voice authority refusal. Both SDK call
