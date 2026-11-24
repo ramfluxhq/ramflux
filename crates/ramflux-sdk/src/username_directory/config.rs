@@ -24,13 +24,21 @@ pub fn configured_center() -> Result<NativeDirectoryPin, SdkError> {
         public_key: required("PUBLIC_KEY")?,
         generation,
     };
+    validate_center(&pin)?;
+    Ok(pin)
+}
+
+/// Validate an explicit host-provisioned directory authority.
+/// # Errors
+/// Refuses malformed origins, trust generations and weak signing keys.
+pub fn validate_center(pin: &NativeDirectoryPin) -> Result<(), SdkError> {
     pin.validate().map_err(|_| Code::DirectoryUnavailable)?;
     let key = ramflux_crypto::verifying_key_from_base64url(&pin.public_key)
         .map_err(|_| Code::SignatureInvalid)?;
     if key.is_weak() {
         return Err(Code::SignatureInvalid.into());
     }
-    Ok(pin)
+    Ok(())
 }
 
 /// Local presentation normalization only; remote decoders always require exact wire spelling.

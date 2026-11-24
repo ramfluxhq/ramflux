@@ -61,7 +61,9 @@ pub(super) fn prepare(
     }
     let id = request_account_id(request)?;
     let account = local_bus_account(state, id)?;
-    let pin = directory::configured_center()?;
+    let pin =
+        state.config.username_directory.clone().ok_or(w::DirectoryCode::DirectoryUnavailable)?;
+    directory::validate_center(&pin)?;
     let gateway = account.sealing_config()?;
     let root = account.principal_commitment.clone();
     let (action, purpose) = match request.method.as_str() {

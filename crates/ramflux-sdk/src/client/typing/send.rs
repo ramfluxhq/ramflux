@@ -67,6 +67,17 @@ impl RamfluxClient {
     /// Refuses group/unbound scopes and bounded transient-memory exhaustion.
     pub fn set_typing_focus(&self, conversation: Option<&str>) -> Result<Option<String>, SdkError> {
         if let Some(conversation) = conversation {
+            let row = self.account_db()?.client_record("conversation", conversation)?;
+            if row.as_ref().is_some_and(|row| {
+                row.get("kind").and_then(serde_json::Value::as_str) == Some("group")
+                    || row.get("group_id").is_some_and(|id| !id.is_null())
+            }) {
+                return Err(SdkError::LocalBusRefused {
+                    code: "unsupported_for_group".into(),
+                    message: "group typing is unsupported".into(),
+                    body: Box::new(serde_json::json!({"reason_code":"unsupported_for_group"})),
+                });
+            }
             self.typing_peer_root(conversation)?;
         }
         self.typing_sender.borrow_mut().focus(conversation)

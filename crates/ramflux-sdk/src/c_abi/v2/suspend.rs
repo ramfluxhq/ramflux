@@ -23,7 +23,11 @@ pub extern "C" fn ramflux_v2_client_suspend(handle: u64) -> i32 {
         let client = client(handle)?;
         refuse_closed(&client)?;
         client.shared.cancel_for_suspend();
-        drive(&client, false)
+        let result = drive(&client, false);
+        if let Some(diag) = &client.diagnostics {
+            diag.flush();
+        }
+        result
     }))
 }
 

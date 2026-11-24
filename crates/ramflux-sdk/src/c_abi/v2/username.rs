@@ -8,8 +8,7 @@ use super::runtime::Client;
 use super::{RamfluxV2Status, credential::UsernameParent};
 use crate::SdkError;
 use crate::username_directory::{
-    SignedUsernameChange, UsernameChange, UsernameDraft, authorize_username_draft,
-    configured_center,
+    SignedUsernameChange, UsernameChange, UsernameDraft, authorize_username_draft, validate_center,
 };
 use ramflux_protocol::username_directory::{DirectoryCode, NativeDirectoryPin};
 use serde::Deserialize;
@@ -62,7 +61,7 @@ pub(super) fn authorize(
     if request.account_id != account_id || request.request_id != request_id {
         return Err(invalid("username request"));
     }
-    let center = match checked(&parent, &request, &client.data_root) {
+    let center = match checked(&parent, &request, client) {
         Ok(center) => center,
         Err(error) => return refuse(&ceremony, &error),
     };
@@ -126,17 +125,18 @@ fn sign(
 fn checked(
     parent: &UsernameParent,
     request: &PublicRequest,
-    root: &std::path::Path,
+    client: &Client,
 ) -> Result<NativeDirectoryPin, SdkError> {
     profile_alias(parent, request)?;
     if request.draft.change.normalized()? != request.expected_change.normalized()? {
         return Err(DirectoryCode::Replay.into());
     }
-    let center = configured_center()?;
+    let center = client.username_directory.clone().ok_or(DirectoryCode::DirectoryUnavailable)?;
+    validate_center(&center)?;
     if request.draft.center != center {
         return Err(DirectoryCode::Replay.into());
     }
-    account_matches(root, &parent.account_id, &request.draft)?;
+    account_matches(&client.data_root, &parent.account_id, &request.draft)?;
     draft_window(&request.draft)?;
     Ok(center)
 }
@@ -309,6 +309,8 @@ fn cancel(ceremony: &Ceremony<'_>) -> Result<bool, super::super::CAbiError> {
         &serde_json::json!({
             "code": RamfluxV2Status::Cancelled as i32,
             "name": "Cancelled",
+            "reason": "cancelled",
+            "reason_code": "cancelled",
         }),
     )?;
     Ok(true)
@@ -336,7 +338,8 @@ fn write_error(
     code: super::super::RamfluxErrorCode,
     directory: Option<&str>,
 ) -> Result<(), super::super::CAbiError> {
-    let mut value = serde_json::json!({"code": code as i32, "name": code.name()});
+    let reason = directory.unwrap_or(code.name());
+    let mut value = serde_json::json!({"code": code as i32, "name": code.name(), "reason":reason,"reason_code":reason});
     if let Some(token) = directory {
         value["directory"] = serde_json::json!(token);
     }
