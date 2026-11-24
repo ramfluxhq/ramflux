@@ -56,6 +56,7 @@ impl AccountRuntime {
             identity,
             erasure_generation,
             actor: None,
+            media: crate::attachment_send::recovery::Capture::new(account, &self.id)?,
         })
     }
 

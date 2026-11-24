@@ -26,6 +26,7 @@ pub(super) struct CapturedAccount {
     pub identity: format::Identity,
     pub erasure_generation: i64,
     pub actor: Option<super::actor::AccountActor>,
+    pub media: Option<crate::attachment_send::recovery::Capture>,
 }
 
 #[cfg(test)]
