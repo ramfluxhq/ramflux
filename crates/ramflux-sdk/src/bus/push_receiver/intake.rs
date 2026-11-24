@@ -50,6 +50,8 @@ async fn run_session(
     work: &mpsc::Sender<AccountWork>,
     stop: &mut watch::Receiver<bool>,
 ) {
+    let generation = handle.generation();
+    let mut changed = handle.snapshot_watch();
     let mut events = handle.subscribe([FrameKind::Deliver, FrameKind::Resync]);
     let mut pending = BTreeMap::new();
     loop {
@@ -70,8 +72,58 @@ async fn run_session(
                     tracing::debug!(%error, "deliver intake deferred");
                 }
             }
+            result = changed.changed() => {
+                if result.is_err() || handle.generation() != generation
+                    || handle.snapshot().state != NetworkingState::Live
+                {
+                    return;
+                }
+                // A completed catch-up can close the hole before buffered live rows.
+                // Its readiness notification must drain those rows without another push.
+                if let Err(error) = Box::pin(drain_ready(handle, work, &mut pending)).await {
+                    tracing::debug!(%error, "contiguous deliver intake deferred");
+                }
+            }
         }
     }
+}
+
+async fn drain_ready(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    pending: &mut BTreeMap<u64, GatewayInboxEntry>,
+) -> Result<(), SdkError> {
+    // Intake cannot add rows while this drain is running; each page removes at least one.
+    for _ in 0..pending.len() {
+        let Some(seq) = handle.reorder().peek_contiguous().first().copied() else {
+            return Ok(());
+        };
+        if !pending.contains_key(&seq) {
+            return Ok(());
+        }
+        // The pending map contains only rows with a successful durable W0 witness.
+        // Refresh the fence on the actor; catch-up may have advanced it since staging.
+        let generation = handle.generation();
+        let turn = crate::bus::couriers::writer::Writer::new(work.clone(), generation)
+            .apply(move |account| {
+                crate::bus::sync_driver::source::w0::actor_turn(account, generation)
+            })
+            .await?;
+        let Some(turn) = turn else {
+            return Ok(());
+        };
+        handle
+            .reorder()
+            .advance_cursor(handle.receive_now_ms(), turn.cursor)
+            .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
+        pending.retain(|seq, _| *seq > turn.cursor);
+        let Some(seq) = handle.reorder().peek_contiguous().first().copied() else {
+            return Ok(());
+        };
+        handle.reorder().note_local_work();
+        apply_ready(handle, work, pending, turn, seq).await?;
+    }
+    Ok(())
 }
 
 async fn handle_event(
