@@ -99,7 +99,9 @@ methods are rejected. Operations currently cover:
 | Voice | `call.invite/answer/reject/hangup/list/media.session` |
 | Agents and permissions | `bot.list/install/revoke/trust.add`, `mcp.*`, `grant.*`, `task.*` |
 | Devices/backup/settings | `device.list/pair.*/activate/authorize/revoke/refresh/sync.*`, `account.backup.*`, `account.config.get/set` |
-| Attachments/cards | `object.*`, `surface.list/get/send/action/request_resync/resync`, `a2ui.render/action`, `a2i.*` |
+| Objects | `object.*` |
+| Large attachments | `attachment.enable`, `attachment.prepare.begin/chunk/finish/renew/status/cancel`, `attachment.import.begin/read/status/finish/cancel` |
+| Cards | `surface.list/get/send/action/request_resync/resync`, `a2ui.render/action`, `a2i.*` |
 
 This inventory exposes existing business capabilities. It does not assert that
 missing core APIs exist: local full-text search, dedicated Agent CRUD/configure,
@@ -248,15 +250,19 @@ authority. Business models and policy stay in the shared crate.
 ## Conversation send
 
 Use `conversation.send` through `ramflux_v2_execute`, with an account id, a durable
-`operation_id`, and body `{conversation_id,text,media?}`. Text is UTF-8 and uses the
-generated Message byte limit; an empty text requires media. Each media reference
-contains the ATTACH-LARGE-01 r4 `large_manifest`. Retired attachment inputs return
-typed Content refusal before route or network work. Routing fields are refused.
-The SDK derives the sender from its authenticated device, the peer commitment from
-the existing conversation, and recipient devices from the verified manifest. Group
-conversations use the ordinary group sender. Sealing, friend-link checks, TTL,
-own-device copies and gateway submission use the existing SDK delivery paths.
-DM and group media use the same generated Message contract.
+`operation_id`, and body `{conversation_id,text,prepares?,media?,group_id?}`.
+Text is UTF-8 and uses the generated Message byte limit. Prepared files use
+`prepares`: an array of `{prepare_id}` from `attachment.prepare.finish`. An empty
+`prepares` list falls through to prebuilt `media`. Each media reference contains
+the ATTACH-LARGE-01 r4 `large_manifest`. A non-empty `attachments` field is
+retired and returns Content
+(`retired conversation attachment input; use media with r4 large_manifest`)
+before route or network work. Mixing non-empty `prepares` with non-empty `media`
+returns `layout_invalid`. Routing fields are refused.
+The SDK derives the sender from its authenticated device. A group send passes
+`group_id`. Sealing, friend-link checks, TTL, own-device copies and gateway
+submission use the existing SDK delivery paths. DM and group media use the same
+generated Message contract.
 
 The call returns the usual asynchronous operation handle. Its completion body has
 `message_id`, `conversation_id`, `delivery_state` (`submitted` or `failed`), and
@@ -271,6 +277,36 @@ Before a verified route is available the operation can return the usual SDK erro
 `message.submit` is disabled in v2 by default (PermissionDenied=12 before admission).
 Trusted diagnostic hosts can open with `allow_raw_messages:true`; its generated
 capability is `raw_message`. Native product clients use `conversation.send`.
+
+## Large attachments
+
+Large files stay disabled until an explicit enable. Account activation does not
+enable them. Call `attachment.enable` once per account with `{from_node:true}`
+after the home node is live. The SDK reads the home relay authority through the
+live gateway and pins it. A later different pin is `duplicate_operation`. Until
+that pin exists, `attachment.prepare.begin` returns `large_attachments` (C ABI
+numeric code InvalidArgument = 1). A peer that imports a remote file must enable
+the same way: remote import reads the pinned authority.
+
+`attachment.prepare.begin` takes
+`{operation_id, kind, file_name, mime, path?}`. A direct message sets `kind` to
+`dm` and `peer` to the conversation id. A group sets `kind` to `group` and
+`group_id`.
+The response includes `prepare_id`, `generation`, `state` (`accepting` when new)
+and `max_chunk`. Stream plaintext with `attachment.prepare.chunk`
+`{prepare_id, generation, offset, data_base64}`. `data_base64` is unpadded
+URL-safe base64, and each chunk is at most 512 KiB. Finish with
+`attachment.prepare.finish`
+`{prepare_id, generation, plaintext_length, plaintext_digest}`.
+`plaintext_digest` is the lowercase hex BLAKE3 of the plaintext bytes with no
+domain separator. Then `conversation.send` the `{prepare_id}` values.
+
+Import the peer's bytes with `attachment.import.begin`
+`{message_id, index, operation_id}`, poll `attachment.import.status`
+`{import_id}` until the view is ready, read with `attachment.import.read`
+`{import_id, generation, offset, max_bytes}` (`1 <= max_bytes <= 524288`; the
+response `bytes` field is the same base64url, plus `eof` and `offset`), and
+finish with `attachment.import.finish` `{import_id}`.
 
 ## Host custody provider (Android M4 and iOS)
 
