@@ -186,6 +186,9 @@ impl AccountRuntime {
             let Some(command) = command else {
                 return Ok(true);
             };
+            // Every enqueue increments command_waiting, including lifecycle commands.
+            // The parked loop owns dequeue just as the normal serve loop does.
+            self.note_command_taken();
             if self.command_while_released(command) {
                 return Ok(false);
             }
