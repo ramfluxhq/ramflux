@@ -129,7 +129,7 @@ impl AccountRuntime {
                 super::super::read_model::capture(account, &command.request, &response.body)?;
             }
         }
-        self.complete_command(&command, result, reply)
+        Ok(self.complete_command(&command, result, reply))
     }
 }
 

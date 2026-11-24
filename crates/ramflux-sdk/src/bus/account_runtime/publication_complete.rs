@@ -79,7 +79,7 @@ impl AccountRuntime {
             Ok(true)
         })();
         match progressed {
-            Ok(false) => return Ok(()),
+            Ok(false) => Ok(()),
             Ok(true) => self.finish_publication(None),
             Err(error) => self.finish_publication(Some(error)),
         }

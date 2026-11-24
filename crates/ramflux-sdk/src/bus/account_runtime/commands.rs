@@ -326,7 +326,7 @@ impl AccountRuntime {
                 Ok(false)
             }
             Dispatch::Park { .. } => Ok(false),
-            Dispatch::Done(result) => self.complete_command(&command, result, reply),
+            Dispatch::Done(result) => Ok(self.complete_command(&command, result, reply)),
         }
     }
 
@@ -389,13 +389,13 @@ impl AccountRuntime {
         command: &AccountCommand,
         result: Result<super::super::actor::ActorResponse, SdkError>,
         reply: tokio::sync::oneshot::Sender<Result<super::super::actor::ActorResponse, SdkError>>,
-    ) -> Result<bool, SdkError> {
+    ) -> bool {
         if super::super::generated_typing::is_transient(
             &command.request.method,
             &command.request.body,
         ) {
             let _ = reply.send(result);
-            return Ok(false);
+            return false;
         }
         let result = match self.initialize_readers() {
             Ok(()) => result,
@@ -416,8 +416,8 @@ impl AccountRuntime {
         } else {
             let _ = reply.send(result);
         }
-        Ok(matches!(command.request.method.as_str(), "account.lock" | "account.sign_out")
-            && self.state.accounts.is_empty())
+        matches!(command.request.method.as_str(), "account.lock" | "account.sign_out")
+            && self.state.accounts.is_empty()
     }
 }
 
