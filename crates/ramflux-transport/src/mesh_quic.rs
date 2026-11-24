@@ -165,6 +165,21 @@ enum MeshQuicClientRequestPayload {
     Postcard(MeshQuicPostcardRequest),
 }
 
+impl MeshQuicClientRequestPayload {
+    fn permits_response_retry(&self) -> bool {
+        let (method, path) = match self {
+            Self::Json(request) => (request.method.as_str(), request.path.as_str()),
+            Self::Postcard(request) => (request.method.as_str(), request.path.as_str()),
+            Self::RawJson(_, _) => return false,
+        };
+        // Session registrations replace the same descriptor; issued-seqs is a read whose
+        // target list is carried in POST. Other writes may carry one-use signatures/nonces.
+        method == "GET"
+            || (method == "POST"
+                && matches!(path, "/s1/session" | "/s1/session/upsert" | "/mvp0/issued-seqs"))
+    }
+}
+
 enum MeshQuicClientResponsePayload {
     RawJson(Vec<u8>),
     Json(GatewayQuicResponse),
@@ -1556,8 +1571,8 @@ fn run_mesh_quic_client_runtime(
     Ok(())
 }
 
-/// `retry_cached` permits one re-send when a cached connection fails before the request is
-/// fully written. A written request is never resent: the peer may already have accepted it.
+/// `retry_cached` permits one reconnect before a request is fully written. Only explicitly
+/// retry-safe, unsigned requests can also reconnect after a missing response.
 async fn mesh_quic_cached_request(
     pools: Arc<MeshQuicPoolRegistry>,
     breakers: Arc<MeshQuicCircuitBreakers>,
@@ -1594,6 +1609,7 @@ async fn mesh_quic_cached_request(
         connection.connection(),
         &job.request,
         reused_cached_connection && retry_cached,
+        !job.signed_envelope && job.request.permits_response_retry(),
     )
     .await
     {
@@ -1944,7 +1960,7 @@ fn log_unsent_mesh_failure(
 
 enum MeshFirst {
     Done(MeshQuicClientResponsePayload),
-    /// The cached connection failed before `finish`: the peer has no complete request.
+    /// The cached probe failed before `finish`, or the complete exchange is retry-safe.
     Resend(TransportError),
     /// The request was written, or this was not a cached probe. Resending would reuse its nonce.
     Failed(TransportError),
@@ -1954,6 +1970,7 @@ async fn first_mesh_attempt(
     connection: &quinn::Connection,
     request: &MeshQuicClientRequestPayload,
     probe: bool,
+    response_retry: bool,
 ) -> MeshFirst {
     if !probe {
         return match timed_mesh_quic_request_on_connection(
@@ -1964,6 +1981,21 @@ async fn first_mesh_attempt(
         .await
         {
             Ok(response) => MeshFirst::Done(response),
+            Err(error) => MeshFirst::Failed(error),
+        };
+    }
+    if response_retry {
+        // A stale connection can accept the write and then lose its response after a
+        // router restart. Bound the whole probe so reconnect fits the caller's deadline.
+        return match timed_mesh_quic_request_on_connection(
+            connection,
+            request,
+            MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT,
+        )
+        .await
+        {
+            Ok(response) => MeshFirst::Done(response),
+            Err(error @ TransportError::Quic(_)) => MeshFirst::Resend(error),
             Err(error) => MeshFirst::Failed(error),
         };
     }

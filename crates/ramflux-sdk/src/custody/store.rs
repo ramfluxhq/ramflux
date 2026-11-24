@@ -987,6 +987,21 @@ pub(crate) async fn load_account_after_install(
 pub(crate) fn load_data_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {
     read_account(root, id, now, false, None)
 }
+/// Select human data accounts without trying to authorize paused agents against a new primary.
+/// The decoded kind only excludes rows; every included human still receives full verification.
+pub(super) fn load_human_data_account(
+    root: &Path,
+    id: &str,
+    now: u64,
+) -> Result<Option<BornAccount>, SdkError> {
+    if read_stored(root, id)?.record.body.principal_kind != ramflux_protocol::PrincipalKind::Human {
+        return Ok(None);
+    }
+    let account = load_data_account(root, id, now)?;
+    // Recheck the verified kind in case the authority file changed between reads.
+    Ok((account.record().body.principal_kind == ramflux_protocol::PrincipalKind::Human)
+        .then_some(account))
+}
 pub(crate) fn load_account_with_cache(
     root: &Path,
     id: &str,
