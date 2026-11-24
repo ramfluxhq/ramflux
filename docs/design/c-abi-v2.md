@@ -18,6 +18,14 @@ symbols belong to that crate; sessions are renderer-thread-affine u64 tokens,
 and callback JSON is borrowed only for the synchronous callback. Card events
 produce declarative intents; SDK authority validates and signs any send.
 
+## Notification-extension host
+
+[`ramflux_v2_wake_fetch`](wake-fetch-host.md) runs one bounded authenticated inbox
+fetch for one account using shared custody and the notification-priority session
+lease. It does not open a full client or start background workers. Its typed
+outcomes are `fetched`, `busy`, `locked` and `deadline`; transport receipt does
+not imply durable application, ACK or a notification result.
+
 ## Negotiation and requests
 
 Call `ramflux_v2_negotiate(2, 0, &buffer)` before opening a client. Negotiation
@@ -32,6 +40,13 @@ its typed message binding was built against.
 the existing data-root writer lease. A second opener of that root fails. No
 pathname listener is created, and neither the CLI nor its daemon is modified.
 Opening and closing block: invoke them on a native background executor.
+
+App and extension hosts can opt into [shared-root session handoff](shared-root-session-lease.md)
+with `"session_lease": {"priority":"notification", "wait_ms":5000}` in either
+v2 open configuration. Priorities are `foreground`, `notification` and `background`;
+the wait defaults to five seconds and cannot exceed it. A pending request drains
+the old supervisor before releasing its lease. Contention returns AccountBusy (18).
+After yielding, close the old handle and open a fresh client before further work.
 
 `execute` copies this bounded request and returns an operation handle immediately:
 

@@ -43,7 +43,7 @@ impl Supervisor {
         if !self.config.background.load(Ordering::Acquire) && self.root_lease.borrow().is_some() {
             return Ok(());
         }
-        self.reacquire_root()?;
+        self.reacquire_root().await?;
         self.index.reopen_files().map_err(SdkError::from)?;
         let node = self.node_actor.clone();
         let accounts = self.accounts.borrow().values().cloned().collect::<Vec<_>>();
@@ -67,11 +67,14 @@ impl Supervisor {
         Ok(())
     }
 
-    fn reacquire_root(&self) -> Result<(), SdkError> {
+    async fn reacquire_root(&self) -> Result<(), SdkError> {
         if self.root_lease.borrow().is_some() {
             return Ok(());
         }
-        let lease = super::data_root_lock::DataRootLock::acquire(&self.config.data_root)?;
+        let lease = match self.config.session_lease {
+            Some(lease) => super::session_lease::acquire(&self.config.data_root, lease).await?,
+            None => super::data_root_lock::DataRootLock::acquire(&self.config.data_root)?,
+        };
         *self.root_lease.borrow_mut() = Some(lease);
         Ok(())
     }

@@ -1116,6 +1116,63 @@ jobs:
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
           RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label memory-vault -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
 
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: junit-v-sdk-a
+          path: target/nextest/ci/junit-*.xml
+          if-no-files-found: ignore
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
+
+  v-sdk-production-absence:
+    name: "SDK variant: migration approval production absence"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
+
+      - name: Install pinned Rust toolchain and check build prerequisites
+        run: |
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+
+      - name: Use tmpfs for /tmp
+        if: runner.environment == 'github-hosted'
+        # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
+        run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
+
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
+          shared-key: v-sdk-production-absence
+
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest@0.9.150
+
       - name: Test (production absence)
         if: ${{ !cancelled() }}
         run: |
@@ -1127,7 +1184,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: junit-v-sdk-a
+          name: junit-v-sdk-production-absence
           path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
       - name: Reject leaked test temporary files

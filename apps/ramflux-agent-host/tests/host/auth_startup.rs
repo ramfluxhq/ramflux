@@ -16,6 +16,7 @@ async fn startup_and_reconnect_authentication_races_retry_identity_before_resumi
             let listener = tokio::net::UnixListener::bind(&f.config.socket)?;
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await?;
+                let mut subscription = None;
                 // Two interrupted starts followed by a complete authenticated start.
                 for attempt in 0..3 {
                     for method in [
@@ -26,7 +27,15 @@ async fn startup_and_reconnect_authentication_races_retry_identity_before_resumi
                         "conversation.directory",
                         "group.list",
                     ] {
+                        // AP-07 keeps subscription events off the RPC connection.
+                        let socket = if method == "bus.subscribe" {
+                            let (stream, _) = listener.accept().await?;
+                            subscription.insert(stream)
+                        } else {
+                            &mut socket
+                        };
                         let len = socket.read_u32().await?;
+                        assert!(len <= 262_144, "scripted request exceeds the fixture frame bound");
                         let mut bytes = vec![0; usize::try_from(len)?];
                         socket.read_exact(&mut bytes).await?;
                         let mut frame: LocalBusFrame = serde_json::from_slice(&bytes)?;

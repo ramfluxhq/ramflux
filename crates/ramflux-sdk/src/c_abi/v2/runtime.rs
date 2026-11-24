@@ -264,7 +264,7 @@ async fn run(worker: Worker) -> Result<(), SdkError> {
     let server = tokio::task::spawn_local(crate::bus::inprocess::serve(
         config,
         server_stream,
-        server_shutdown,
+        (server_shutdown, stop.clone()),
         lifecycle,
         server_ready,
         #[cfg(test)]
