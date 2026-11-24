@@ -22,6 +22,7 @@ pub(super) fn open(client: &RamfluxClient, account: &str, body: &Value) -> Resul
             let fallback =
                 state.content().map(|content| content.fallback_text.clone()).unwrap_or_default();
             let spec = spec_build::authorized(&stored, &state, locale, dark)?;
+            let spec = super::host_view::stamp(client, spec, &state)?;
             let (session, batch) =
                 CardSession::open(spec, package::bundled()?).map_err(card_err)?;
             let hash = state.hash().ok_or_else(|| super::super::invalid("card_session_refused"))?;
@@ -48,6 +49,7 @@ pub(super) fn open(client: &RamfluxClient, account: &str, body: &Value) -> Resul
                 host_request: None,
                 submit: None,
                 draft_conflict: false,
+                action_outcome: None,
             }))
         }
     }
