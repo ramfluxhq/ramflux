@@ -30,6 +30,7 @@ pub(super) struct State {
     pub events: VecDeque<(u64, BackupJob)>,
     pub head: u64,
     pub cancelling: std::collections::BTreeSet<String>,
+    pub accounts: std::collections::BTreeMap<String, String>,
     progress: std::collections::BTreeMap<String, ProgressMark>,
 }
 #[derive(Clone)]
@@ -74,6 +75,7 @@ impl BackupJobs {
                 events: VecDeque::new(),
                 head: 0,
                 cancelling: std::collections::BTreeSet::default(),
+                accounts: std::collections::BTreeMap::default(),
                 progress: std::collections::BTreeMap::default(),
             })),
             root,
@@ -152,6 +154,7 @@ impl BackupJobs {
         };
         self.fail(id, failure);
     }
+    #[cfg(test)]
     pub(crate) fn jobs(&self) -> Result<serde_json::Value, SdkError> {
         let state = self.state.lock().map_err(|_| refused("interrupted"))?;
         Ok(serde_json::json!({"jobs":state.registry.jobs()}))
@@ -182,6 +185,7 @@ impl BackupJobs {
         allow_missing_attachments: bool,
     ) -> Result<BackupJob, SdkError> {
         let row = self.start(BackupJobKind::Backup, path)?;
+        self.bind_app_account(&row.job_id, actor.account_id())?;
         let (finished, done) = tokio::sync::watch::channel(false);
         self.exports.lock().map_err(|_| refused("interrupted"))?.push(super::app_lock::Export {
             account: actor.account_id().to_owned(),

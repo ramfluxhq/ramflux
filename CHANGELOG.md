@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Account switching can list locked account identifiers without profile data; backup job lists omit app-locked accounts, and lock changes reach only attached connections.
+
 - Optional app lock fences account requests, queued native results, subscriptions, media readers and exports; lock state changes remain available on a content-free control stream.
 
 - Group invitations expose per-member unconfirmed delivery until an authenticated member beacon confirms joining; re-adding a contact and re-inviting can recover the existing membership grant without disclosing contact removal.

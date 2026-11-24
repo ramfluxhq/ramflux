@@ -44,12 +44,7 @@ impl Supervisor {
         if super::super::app_lock_fence::control(&request.method) {
             return Ok(());
         }
-        self.app_fences
-            .token(super::super::app_lock_fence::scope(
-                &request.method,
-                request.account_id.as_deref(),
-            ))?
-            .check()
+        self.app_fences.for_method(&request.method, request.account_id.as_deref())?.check()
     }
     pub(super) fn app_unlocked(&self, id: &str) -> Result<(), SdkError> {
         let policy = self.index.app_lock_policy(id)?;
@@ -97,7 +92,18 @@ impl Supervisor {
                 "reason": epoch.reason, "generation": epoch.generation, "remaining_ms": 0,
             }),
         );
-        self.controls.borrow_mut().retain(|_, outbound| outbound.try_send(frame.clone()).is_ok());
+        self.controls.borrow_mut().retain(|connection, outbound| {
+            if self
+                .control_accounts
+                .borrow()
+                .get(connection)
+                .is_some_and(|accounts| accounts.contains(id))
+            {
+                outbound.try_send(frame.clone()).is_ok()
+            } else {
+                true
+            }
+        });
         Ok(())
     }
     pub(super) async fn lock_app_access(
@@ -115,6 +121,7 @@ impl Supervisor {
                 body: Box::new(serde_json::json!({"reason_code":"app_lock_disabled"})),
             });
         }
+        self.attach_app_control(connection.connection_id, &id);
         self.app_fences.transition(&id, true, true, "manual")?;
         self.close_app_subscriptions(&id);
         self.backup_jobs.app_lock_account(&id).await?;
@@ -164,6 +171,7 @@ impl Supervisor {
         connection: &LocalBusConnectionState,
     ) -> Result<super::ActorResponse, SdkError> {
         let account_id = self.authorize_app_lock_change(request, connection)?;
+        self.attach_app_control(connection.connection_id, &account_id);
         let enabled = required_bool(&request.body)?;
         let timeout_ms = required_timeout(&request.body)?;
         let policy = if enabled {
@@ -177,6 +185,30 @@ impl Supervisor {
         self.app_fences.transition(&account_id, policy.enabled, false, "configured")?;
         self.emit_app_lock_change(request, &account_id)?;
         Ok(super::reply(self.app_lock_body(&policy, &account_id)?))
+    }
+    pub(in crate::bus) fn attach_app_control(&self, connection: u64, id: &str) {
+        if !self.accounts.borrow().contains_key(id) && self.index.account(id).is_err() {
+            return;
+        }
+        self.control_accounts.borrow_mut().entry(connection).or_default().insert(id.into());
+    }
+
+    pub(super) fn redact_app_accounts(
+        &self,
+        rows: &mut [serde_json::Value],
+        detailed: bool,
+    ) -> Result<(), SdkError> {
+        for row in rows {
+            let id = super::super::account_local::row_id(row).to_owned();
+            if self.app_fences.epoch(&id)?.locked {
+                *row = if detailed {
+                    serde_json::json!({"id":id,"state":"locked","locked":true})
+                } else {
+                    serde_json::json!({"id":id,"locked":true})
+                };
+            }
+        }
+        Ok(())
     }
 
     pub(super) async fn app_lock_state(

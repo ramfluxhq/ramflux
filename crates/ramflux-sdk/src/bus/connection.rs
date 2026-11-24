@@ -282,15 +282,11 @@ async fn admit_frame(
         Some(Err(error)) => return Ok(Admit::Done(Err(error))),
     };
     let source = incoming.frame()?;
-    let access =
-        if super::app_lock_fence::control(&source.method) {
-            None
-        } else {
-            Some(state.supervisor.app_fences.token(super::app_lock_fence::scope(
-                &source.method,
-                source.account_id.as_deref(),
-            ))?)
-        };
+    let access = if super::app_lock_fence::control(&source.method) {
+        None
+    } else {
+        Some(state.supervisor.app_fences.for_method(&source.method, source.account_id.as_deref())?)
+    };
     let refusal = super::io::local_bus_error(source, &super::app_lock_fence::locked());
     if let Some(bytes) = local_method(
         &mut incoming,
@@ -464,6 +460,9 @@ pub(super) async fn configure_subscription(
         return Ok(());
     }
     supervisor.admit_app_access(request)?;
+    if let Some(id) = &request.account_id {
+        supervisor.attach_app_control(connection.connection_id, id);
+    }
     supervisor
         .stream_accounts
         .borrow_mut()

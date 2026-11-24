@@ -26,6 +26,7 @@ pub(super) struct Supervisor {
     pub(super) config: LocalBusConfig,
     pub(crate) app_fences: Arc<super::app_lock_fence::Fences>,
     pub(super) controls: RefCell<BTreeMap<u64, super::outbound::LocalBusOutbound>>,
+    pub(super) control_accounts: RefCell<BTreeMap<u64, BTreeSet<String>>>,
     app_control: tokio::sync::Mutex<()>,
     pub(super) root_lease: RefCell<Option<Arc<super::data_root_lock::DataRootLock>>>,
     owner: RefCell<std::rc::Weak<Supervisor>>,
@@ -92,6 +93,7 @@ impl Supervisor {
             config,
             app_fences,
             controls: RefCell::new(BTreeMap::new()),
+            control_accounts: RefCell::new(BTreeMap::new()),
             app_control: tokio::sync::Mutex::new(()),
             index,
             stop_requested,
@@ -320,14 +322,14 @@ impl Supervisor {
         let access = if super::app_lock_fence::control(&request.method) {
             None
         } else {
-            Some(self.app_fences.token(super::app_lock_fence::scope(
-                &request.method,
-                request.account_id.as_deref(),
-            ))?)
+            Some(self.app_fences.for_method(&request.method, request.account_id.as_deref())?)
         };
         if let Some(access) = &access {
             access.check()?;
         }
+        let attachment = (!super::app_lock_fence::redacted_view(&request.method))
+            .then(|| request.account_id.clone())
+            .flatten();
         let mut result = Box::pin(self.request_inner(request, connection)).await;
         if let Some(access) = access
             && access.check().is_err()
@@ -339,6 +341,11 @@ impl Supervisor {
                 }
             }
             return Err(super::app_lock_fence::locked());
+        }
+        if result.is_ok()
+            && let Some(account) = attachment
+        {
+            self.attach_app_control(connection.connection_id, &account);
         }
         result
     }
@@ -961,8 +968,10 @@ impl Supervisor {
             }
             super::account_local::attach_from_state(row);
         }
-        let details = known.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
-        let accounts = super::account_local::picker(&details);
+        let mut details = known.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
+        self.redact_app_accounts(&mut details, true)?;
+        let mut accounts = super::account_local::picker(&details);
+        self.redact_app_accounts(&mut accounts, false)?;
         Ok(reply(serde_json::json!({
             "accounts": accounts,
             "account_details": details,
@@ -1290,6 +1299,7 @@ impl Supervisor {
         }
     }
 
+    #[cfg(feature = "c-abi")]
     pub(super) fn close_account_subscription(&self, id: u64) {
         self.search_disconnect(id);
         self.daemon_attended.borrow_mut().remove(&id);
@@ -1314,6 +1324,7 @@ impl Supervisor {
 
     pub(super) fn disconnect(&self, id: u64) {
         self.controls.borrow_mut().remove(&id);
+        self.control_accounts.borrow_mut().remove(&id);
         self.search_disconnect(id);
         self.stream_accounts.borrow_mut().remove(&id);
         if let Some(task) = self.streams.borrow_mut().remove(&id) {

@@ -36,6 +36,7 @@ pub(crate) struct Token {
     owner: Arc<Fences>,
     account: Option<String>,
     epochs: BTreeMap<String, u64>,
+    redacted_view: bool,
 }
 impl Token {
     pub(crate) fn affects(&self, account: &str) -> bool {
@@ -48,7 +49,8 @@ impl Token {
         let state = self.owner.state.lock().map_err(|_| locked())?;
         for (id, epoch) in &state.accounts {
             if self.affects(id)
-                && (epoch.locked || self.epochs.get(id).copied().unwrap_or(0) != epoch.generation)
+                && ((!self.redacted_view && epoch.locked)
+                    || self.epochs.get(id).copied().unwrap_or(0) != epoch.generation)
             {
                 return Err(locked());
             }
@@ -83,6 +85,7 @@ impl Fences {
         Ok(Token {
             owner: Arc::clone(self),
             account: account.map(str::to_owned),
+            redacted_view: false,
             epochs: state
                 .accounts
                 .iter()
@@ -90,6 +93,18 @@ impl Fences {
                 .map(|(id, epoch)| (id.clone(), epoch.generation))
                 .collect(),
         })
+    }
+    pub(crate) fn for_method(
+        self: &Arc<Self>,
+        method: &str,
+        account: Option<&str>,
+    ) -> Result<Token, SdkError> {
+        let mut token = self.token(scope(method, account))?;
+        token.redacted_view = redacted_view(method);
+        Ok(token)
+    }
+    pub(crate) fn any_locked(&self) -> Result<bool, SdkError> {
+        Ok(self.state.lock().map_err(|_| locked())?.accounts.values().any(|epoch| epoch.locked))
     }
     pub(crate) fn epoch(&self, account: &str) -> Result<Epoch, SdkError> {
         Ok(self
@@ -151,6 +166,9 @@ impl Fences {
         }
         Ok(result)
     }
+}
+pub(crate) fn redacted_view(method: &str) -> bool {
+    matches!(method, "account.list" | "account.backup.jobs")
 }
 /// Global views do not become account-scoped when a caller adds an unused account identifier.
 pub(crate) fn scope<'a>(method: &str, account: Option<&'a str>) -> Option<&'a str> {

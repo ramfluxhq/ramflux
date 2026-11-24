@@ -79,12 +79,7 @@ impl LocalBusOutbound {
         } else {
             self.fences
                 .as_ref()
-                .map(|fences| {
-                    fences.token(super::app_lock_fence::scope(
-                        &request.method,
-                        request.account_id.as_deref(),
-                    ))
-                })
+                .map(|fences| fences.for_method(&request.method, request.account_id.as_deref()))
                 .transpose()?
         };
         Ok(self)

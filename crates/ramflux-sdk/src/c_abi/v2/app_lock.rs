@@ -52,9 +52,5 @@ pub(super) fn capture_access(
     if crate::bus::app_lock_fence::control(method) {
         return Ok(None);
     }
-    shared
-        .app_fences
-        .get()
-        .map(|fences| fences.token(crate::bus::app_lock_fence::scope(method, account)))
-        .transpose()
+    shared.app_fences.get().map(|fences| fences.for_method(method, account)).transpose()
 }
