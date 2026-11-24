@@ -76,7 +76,9 @@ impl<'a> Visitor<'a> {
             }
         } else if matches!(
             field.name(),
-            "reason"
+            "phase"
+                | "event"
+                | "reason"
                 | "reason_code"
                 | "error_code"
                 | "name"

@@ -242,6 +242,20 @@ before import. The commands use the attended daemon job workflow above; they no
 longer call the old manifest/key-only backup endpoints. A completed new-install
 restore still requires explicit recovery before networking is authorized.
 
+On a fresh root, confirm the intended home node through `node.add`,
+`node.confirm` and `node.set_default` (or an independently trusted built-in
+profile). Archive contents never establish a trusted node pin. After install,
+`account.unlock` opens the restored local data; it does not authorize the new
+device. Call `account.recover.begin` with the installed `account_id`, then
+`account.recover.confirm` with the recovery `phrase`, the installed local
+`passphrase` and the explicitly confirmed `confirmed_anchor`. Recovery revokes
+the other devices. These ceremonies carry no operation ID and must stay on the
+same client connection. Once recovery and node admission complete, ordinary
+network operations such as `attachment.enable {"from_node":true}` can proceed.
+Before those steps, `networking_pending` is expected; `account.status` exposes
+`networking_reason` and `local_device_authorized` to distinguish missing node
+selection from a device that still requires recovery.
+
 Writer-lock and index-read I/O failures during restore checks or installation use
 `unreadable`. Failure to unwrap or verify the local wrapped DB key (including a
 stale local passphrase) and a failed `PRAGMA integrity_check` also use `unreadable`.
