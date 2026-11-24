@@ -34,7 +34,27 @@ impl Supervisor {
         let released = parked.and_then(|()| self.index.release_files().map_err(SdkError::from));
         // Stop has dropped every QUIC client. Return only after those UDP sockets close.
         ramflux_transport::drain_abandoned_quic().await;
-        released?;
+        if let Err(error) = released {
+            // Release can fail after earlier actors (or SQLite itself) have closed files.
+            // Keep admission fenced until every owner has been reopened.
+            let rollback = self.resume_for_background().await;
+            return Err(SdkError::LocalBusRefused {
+                code: "SuspendFailed".into(),
+                message: "suspend failed; call resume to recover".into(),
+                body: Box::new(serde_json::json!({
+                    "reason": if rollback.is_ok() {
+                        "suspend_release_failed"
+                    } else {
+                        "suspend_rollback_failed"
+                    },
+                    "release_stage": if matches!(error, SdkError::Storage(_)) {
+                        "storage"
+                    } else {
+                        "actor"
+                    }
+                })),
+            });
+        }
         self.root_lease.borrow_mut().take();
         Ok(())
     }
@@ -47,10 +67,15 @@ impl Supervisor {
         self.index.reopen_files().map_err(SdkError::from)?;
         let node = self.node_actor.clone();
         let accounts = self.accounts.borrow().values().cloned().collect::<Vec<_>>();
-        node.reopen_files().await?;
+        // Try every actor: one refusal must not strand the remaining parked owners.
+        let mut reopened = node.reopen_files().await;
         for actor in &accounts {
-            actor.reopen_files().await?;
+            let result = actor.reopen_files().await;
+            if reopened.is_ok() {
+                reopened = result;
+            }
         }
+        reopened?;
         self.config.background.store(false, Ordering::Release);
         Ok(())
     }

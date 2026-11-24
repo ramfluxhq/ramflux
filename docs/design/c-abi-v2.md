@@ -768,3 +768,18 @@ reason, effect and variant. Immediate synchronous admission calls still return
 an integer according to their existing C signature; the diagnostic sink records
 the named admission refusal. A group `message.focus` returns the typed
 `unsupported_for_group` refusal; group typing is outside the beta scope.
+
+
+### Suspend failure recovery
+
+`ramflux_v2_client_suspend` rolls back a failed release by reopening parked files
+before returning `StorageFailed` (8). The existing event subscription stays active
+when rollback succeeds; pending operations may already have completed as Suspended.
+The diagnostic writer records `client.suspend.failed`, name `SuspendFailed`, and
+reason `suspend_release_failed`. If reopening also fails, admission stays fenced
+and the reason is `suspend_rollback_failed`; no new work is admitted into partially
+reopened owners. Call `ramflux_v2_client_resume` after any failed suspend (including
+a timeout), check its result, and reopen the event subscription from the last cursor.
+Resume needs no unlock prompt. The worker publishes the completed lifecycle state
+even if the synchronous caller times out. Normal successful suspend still cancels
+the subscription, releases files and stops networking; resume reopens them.

@@ -15,6 +15,9 @@ use std::time::Duration;
 /// Unlocked account state, including the database key, stays in memory.
 /// Pending operations complete as `RAMFLUX_V2_STATUS_SUSPENDED` (30).
 /// A second call while already suspended returns 0.
+/// A release failure rolls back parked files and returns `StorageFailed` (8).
+/// Diagnostics contain `SuspendFailed` and `suspend_release_failed` or `suspend_rollback_failed`.
+/// Call resume after any failure, then reopen the event subscription from its cursor.
 /// Call off the UI thread. A killed process is a cold start and must unlock again.
 #[unsafe(no_mangle)]
 #[must_use]
@@ -22,8 +25,34 @@ pub extern "C" fn ramflux_v2_client_suspend(handle: u64) -> i32 {
     finish(call(|| {
         let client = client(handle)?;
         refuse_closed(&client)?;
+        let _lifecycle = client
+            .lifecycle_gate
+            .try_lock()
+            .map_err(|_| CAbiError::new(RamfluxErrorCode::AccountBusy, "lifecycle_in_progress"))?;
+        let was_suspended = client.shared.suspended.load(Ordering::Acquire);
         client.shared.cancel_for_suspend();
         let result = drive(&client, false);
+        if let Err(error) = &result {
+            // Submission failure never reached the lifecycle owner.
+            if error.code == RamfluxErrorCode::TransportUnavailable {
+                client.shared.suspended.store(was_suspended, Ordering::Release);
+            }
+            if let Some(diag) = &client.diagnostics {
+                diag.record(
+                    "E",
+                    "sdk.lifecycle",
+                    "client.suspend.failed",
+                    serde_json::json!({"suspended": client.shared.suspended.load(Ordering::Acquire)}),
+                    Some(serde_json::json!({
+                        "code": error.status.unwrap_or(error.code as i32),
+                        "name": "SuspendFailed",
+                        "reason": error.message,
+                        "effect": "unknown",
+                        "variant": "SuspendFailed"
+                    })),
+                );
+            }
+        }
         if let Some(diag) = &client.diagnostics {
             diag.flush();
         }
@@ -41,6 +70,10 @@ pub extern "C" fn ramflux_v2_client_resume(handle: u64) -> i32 {
     finish(call(|| {
         let client = client(handle)?;
         refuse_closed(&client)?;
+        let _lifecycle = client
+            .lifecycle_gate
+            .try_lock()
+            .map_err(|_| CAbiError::new(RamfluxErrorCode::AccountBusy, "lifecycle_in_progress"))?;
         drive(&client, true)?;
         client.shared.suspended.store(false, Ordering::Release);
         Ok(())
@@ -65,9 +98,29 @@ fn refuse_closed(client: &Client) -> Result<(), CAbiError> {
 fn drive(client: &Arc<Client>, resume: bool) -> Result<(), CAbiError> {
     match client.drive_lifecycle(resume, Duration::from_secs(10)) {
         Ok(()) => Ok(()),
-        Err(DriveError::TimedOut) => {
-            Err(CAbiError::new(RamfluxErrorCode::Timeout, "lifecycle timed out"))
+        Err(DriveError::Unavailable) => {
+            Err(CAbiError::new(RamfluxErrorCode::TransportUnavailable, "lifecycle_unavailable"))
         }
-        Err(DriveError::Failed(error)) => Err(super::super::map_sdk_error(&error)),
+        Err(DriveError::TimedOut) => {
+            Err(CAbiError::new(RamfluxErrorCode::Timeout, "lifecycle_timed_out"))
+        }
+        Err(DriveError::Failed(crate::SdkError::LocalBusRefused { code, body, .. }))
+            if code == "SuspendFailed" =>
+        {
+            let reason = body.get("reason").and_then(serde_json::Value::as_str);
+            Err(CAbiError::new(
+                RamfluxErrorCode::StorageFailed,
+                if reason == Some("suspend_rollback_failed") {
+                    "suspend_rollback_failed"
+                } else {
+                    "suspend_release_failed"
+                },
+            ))
+        }
+        Err(DriveError::Failed(error)) => {
+            let mut mapped = super::super::map_sdk_error(&error);
+            mapped.message = "lifecycle_failed".into();
+            Err(mapped)
+        }
     }
 }
