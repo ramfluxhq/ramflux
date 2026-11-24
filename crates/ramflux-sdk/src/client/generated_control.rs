@@ -147,10 +147,10 @@ fn validate_group_state(state: &g::GroupStateControl) -> Result<(), SdkError> {
                 request.request.as_ref().map(|leaf| leaf.canonical.as_slice()),
                 "group request requires native change bytes",
             )?;
+            // The node route is source and target. federation_url was removed from the
+            // SDK route and the writer leaves the protobuf field empty.
             if request.federation.as_ref().is_some_and(|route| {
-                route.federation_url.is_empty()
-                    || route.source_node_id.is_empty()
-                    || route.target_node_id.is_empty()
+                route.source_node_id.is_empty() || route.target_node_id.is_empty()
             }) {
                 return Err(refused("group request federation route is incomplete"));
             }
