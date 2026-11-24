@@ -168,3 +168,6 @@ pub mod username_directory;
 
 mod call_submission;
 pub use call_submission::{CallSubmitCarrier, CallSubmitCarrierRef};
+
+/// Public diagnostic support-key catalog; contains no private key material.
+pub mod diag_support;
