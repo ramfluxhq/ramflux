@@ -593,6 +593,9 @@ fn apply_one_resolution(
         };
         return next.finish(reason, now);
     }
+    // New calls are created after the connection is installed. Bind only the
+    // authenticated, current operation's generation before releasing media.
+    next.bind_gateway_generation(Some(&resolved.context.session_generation))?;
     let allowed = resolved.permits_media();
     next.apply_media_for(
         bound.peer.clone(),
