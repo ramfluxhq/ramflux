@@ -78,6 +78,8 @@ pub(super) async fn publish(
     networking_expiry: Option<(i64, &LocalBusFrame)>,
     sender: &mpsc::Sender<EventBatch>,
 ) -> Result<(), SdkError> {
+    // Callers race this future against shutdown. The body does not wait on the router.
+    std::future::ready(()).await;
     client.expire_surface_pending()?;
     let db = client.account_db()?;
     loop {
@@ -86,6 +88,7 @@ pub(super) async fn publish(
             return Ok(());
         };
         let last_sequence = last.sequence;
+        let page_started = tokio::time::Instant::now();
         let mut events = Vec::with_capacity(entries.len());
         for entry in entries {
             if entry.table_name == "direct_message_projection"
@@ -114,9 +117,16 @@ pub(super) async fn publish(
             frame.frame_id = format!("outbox_{}", entry.sequence);
             events.push(frame);
         }
-        let (accepted, done) = oneshot::channel();
-        sender.send(EventBatch { events, accepted }).await.map_err(|_| closed())?;
-        done.await.map_err(|_| closed())?;
+        let durable_ms = elapsed_ms(page_started);
+        let deferred = handoff(sender, events)?;
+        tracing::debug!(
+            phase = "outbox_publish",
+            method = %request.method,
+            durable_ms,
+            handoff_ms = elapsed_ms(page_started).saturating_sub(durable_ms),
+            deferred,
+            "account command phase"
+        );
         db.mark_outbox_published(last_sequence)?;
         if matches!(request.method.as_str(), "contact.verify" | "grant.approve" | "grant.deny")
             && let Some(subject) = request
@@ -140,6 +150,33 @@ pub(super) async fn publish(
 
 fn closed() -> SdkError {
     SdkError::LocalBus("subscription router stopped before outbox acceptance".to_owned())
+}
+
+/// Queues a durable outbox page for the subscription router without waiting for it.
+fn handoff(
+    sender: &mpsc::Sender<EventBatch>,
+    events: Vec<LocalBusFrame>,
+) -> Result<bool, SdkError> {
+    let (accepted, done) = oneshot::channel();
+    match sender.try_send(EventBatch { events, accepted }) {
+        Ok(()) => {
+            drop(done);
+            Ok(false)
+        }
+        Err(mpsc::error::TrySendError::Full(batch)) => {
+            drop(done);
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                let _ = sender.send(batch).await;
+            });
+            Ok(true)
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(closed()),
+    }
+}
+
+fn elapsed_ms(started: tokio::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

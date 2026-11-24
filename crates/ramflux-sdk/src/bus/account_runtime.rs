@@ -32,6 +32,7 @@ pub(super) mod fetches;
 mod head_demand;
 pub(crate) mod head_refresh;
 pub(crate) mod lifecycle_fence;
+mod publication_park;
 mod readers;
 pub(crate) mod session_thread;
 pub(super) mod uploads;
@@ -347,6 +348,10 @@ impl AccountRuntime {
     }
 
     fn queued_command(&mut self, checkpoints: &mut u8) -> Option<AccountCommand> {
+        if let Some(command) = publication_park::take_ready() {
+            let _ = publication_park::take_skip_note();
+            return Some(command);
+        }
         // A waiting command skips the eight-checkpoint gate. Its residence
         // budget is five seconds; a page can wait.
         let waiting = self.command_waiting.load(Ordering::Acquire) > 0;
@@ -365,6 +370,7 @@ impl AccountRuntime {
             .or_else(|_| self.receiver.try_recv())
             .ok();
         if command.is_some() {
+            publication_park::set_final(false);
             self.note_command_taken();
         }
         command
@@ -483,89 +489,141 @@ impl AccountRuntime {
                 }
                 continue;
             }
-            self.reap_transfer_jobs();
-            let pairing =
-                crate::custody::pairing::work_signal(&self.state.config.data_root, &self.id);
-            let command = tokio::select! {
-                biased;
-                _ = self.shutdown.changed() => break,
-                command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
-                checkpoint=self.transfers.receive.recv()=>{checkpoints += 1;if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}continue;},
-                work = recv(&mut self.deferred, &mut self.head_rx, &mut self.connection_work) => {
-                    checkpoints += 1;
-                    if let Some(work)=work {
-                        let mut shutdown=self.shutdown.clone();let mut preempt=self.preempt.clone();
-                        tokio::select! {biased;_=shutdown.changed()=>break,_=preempt.changed()=>{},result=self.finish_connection_work(work)=>result?}
-                    }
-                    continue;
-                },
-                frame = self.transient.next(&self.state, &self.id) => {
-                    self.apply_transient_frame(frame);
-                    continue;
-                },
-                () = async {
-                    match transient_deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline).await,
-                        None => std::future::pending().await,
-                    }
-                } => { self.publish_transient_updates(); continue; },
-                completion = self.username.receive() => {
-                    if let Some(completion) = completion && Box::pin(self.finish_username(completion)).await? { break; }
-                    continue;
-                },
-                () = async {
-                    match username_deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline).await,
-                        None => std::future::pending().await,
-                    }
-                } => { self.start_username_delivery(); continue; },
-                completion = self.pairing.receive() => {
-                    if let Some(completion) = completion
-                        && self.finish_pairing_begin(completion).await? { break; }
-                    continue;
-                },
-                command = self.receiver.recv() => command,
-                () = wait_pairing_signal(pairing) => {
-                    Box::pin(self.service_pairing_data()).await;
-                    continue;
-                },
-                outcome = async {
-                    match self.courier.as_mut() {
-                        Some(courier) => courier.recv().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    self.service_courier_outcome(outcome).await?;
-                    continue;
-                },
-                () = tokio::time::sleep_until(next), if !self.state.accounts.is_empty() => {
-                    self.maintain_expired_object_holds();
-                    match Box::pin(self.maintain_until_command()).await {
-                        Maintenance::Stopped => break,
-                        Maintenance::Interrupted => continue,
-                        Maintenance::Command(command) => Some(*command),
-                        Maintenance::Username(completion) => {
-                            if Box::pin(self.finish_username(*completion)).await? { break; }
-                            continue;
-                        }
-                        Maintenance::Completed(active) => {
-                            schedule.completed(active);
-                            next = tokio::time::Instant::now() + schedule.interval;
-                            continue;
-                        }
-                    }
-                },
-            };
-            checkpoints = 0;
-            let Some(command) = command else {
-                break;
-            };
-            self.note_command_taken();
-            if Box::pin(self.apply(command)).await? {
+            if self
+                .poll_turn(
+                    &mut schedule,
+                    &mut next,
+                    &mut checkpoints,
+                    transient_deadline,
+                    username_deadline,
+                )
+                .await?
+            {
                 break;
             }
         }
         Ok(())
+    }
+
+    async fn poll_turn(
+        &mut self,
+        schedule: &mut super::sync_driver::Schedule,
+        next: &mut tokio::time::Instant,
+        checkpoints: &mut u8,
+        transient_deadline: Option<tokio::time::Instant>,
+        username_deadline: Option<tokio::time::Instant>,
+    ) -> Result<bool, SdkError> {
+        self.reap_transfer_jobs();
+        let pairing = crate::custody::pairing::work_signal(&self.state.config.data_root, &self.id);
+        let command = tokio::select! {
+            biased;
+            _ = self.shutdown.changed() => return Ok(true),
+            command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
+            checkpoint=self.transfers.receive.recv()=>{*checkpoints += 1;if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}return Ok(false);},
+            work = recv(&mut self.deferred, &mut self.head_rx, &mut self.connection_work) => {
+                *checkpoints += 1;
+                if let Some(work)=work {
+                    let mut shutdown=self.shutdown.clone();let mut preempt=self.preempt.clone();
+                    tokio::select! {biased;_=shutdown.changed()=>return Ok(true),_=preempt.changed()=>{},result=self.finish_connection_work(work)=>result?}
+                }
+                return Ok(false);
+            },
+            frame = self.transient.next(&self.state, &self.id) => {
+                self.apply_transient_frame(frame);
+                return Ok(false);
+            },
+            () = async {
+                match transient_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => { self.publish_transient_updates(); return Ok(false); },
+            completion = self.username.receive() => {
+                if let Some(completion) = completion && Box::pin(self.finish_username(completion)).await? { return Ok(true); }
+                return Ok(false);
+            },
+            () = async {
+                match username_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => { self.start_username_delivery(); return Ok(false); },
+            completion = self.pairing.receive() => {
+                if let Some(completion) = completion
+                    && self.finish_pairing_begin(completion).await? { return Ok(true); }
+                return Ok(false);
+            },
+            command = self.receiver.recv() => command,
+            () = publication_park::until_ready(), if publication_park::pending() => {
+                match publication_park::take_ready() {
+                    Some(command) => Some(command),
+                    None => return Ok(false),
+                }
+            },
+            () = wait_pairing_signal(pairing) => {
+                Box::pin(self.service_pairing_data()).await;
+                return Ok(false);
+            },
+            outcome = async {
+                match self.courier.as_mut() {
+                    Some(courier) => courier.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                self.service_courier_outcome(outcome).await?;
+                return Ok(false);
+            },
+            () = tokio::time::sleep_until(*next), if !self.state.accounts.is_empty() => {
+                self.maintain_expired_object_holds();
+                match self.maintenance_turn(schedule, next).await? {
+                    MaintenancePoll::Stop => return Ok(true),
+                    MaintenancePoll::Again => return Ok(false),
+                    MaintenancePoll::Command(command) => Some(*command),
+                }
+            },
+        };
+        self.finish_polled_command(checkpoints, command).await
+    }
+
+    async fn maintenance_turn(
+        &mut self,
+        schedule: &mut super::sync_driver::Schedule,
+        next: &mut tokio::time::Instant,
+    ) -> Result<MaintenancePoll, SdkError> {
+        match Box::pin(self.maintain_until_command()).await {
+            Maintenance::Stopped => Ok(MaintenancePoll::Stop),
+            Maintenance::Interrupted => Ok(MaintenancePoll::Again),
+            Maintenance::Command(command) => Ok(MaintenancePoll::Command(command)),
+            Maintenance::Username(completion) => {
+                if Box::pin(self.finish_username(*completion)).await? {
+                    Ok(MaintenancePoll::Stop)
+                } else {
+                    Ok(MaintenancePoll::Again)
+                }
+            }
+            Maintenance::Completed(active) => {
+                schedule.completed(active);
+                *next = tokio::time::Instant::now() + schedule.interval;
+                Ok(MaintenancePoll::Again)
+            }
+        }
+    }
+
+    async fn finish_polled_command(
+        &mut self,
+        checkpoints: &mut u8,
+        command: Option<AccountCommand>,
+    ) -> Result<bool, SdkError> {
+        *checkpoints = 0;
+        let Some(command) = command else {
+            return Ok(true);
+        };
+        let resumed = publication_park::take_skip_note();
+        if !resumed {
+            publication_park::set_final(false);
+            self.note_command_taken();
+        }
+        self.apply(command).await
     }
 
     async fn sync(&mut self) -> Result<bool, SdkError> {
@@ -642,6 +700,12 @@ impl AccountRuntime {
             }
         }
     }
+}
+
+enum MaintenancePoll {
+    Stop,
+    Again,
+    Command(Box<AccountCommand>),
 }
 
 async fn flush_if_open(account: &AccountRuntime, request: &LocalBusFrame) -> Result<(), SdkError> {

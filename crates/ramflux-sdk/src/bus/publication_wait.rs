@@ -20,18 +20,29 @@ use crate::SdkError;
 const SCAN_CAP: usize = 128;
 const ACCOUNT_ID_MAX: usize = 128;
 
+pub(super) enum Dispatch {
+    Done(Result<ActorResponse, SdkError>),
+    /// The actor must park `command` until `deadline` and keep serving other commands.
+    Park {
+        deadline: Instant,
+    },
+}
+
+const IMMEDIATE_RETRIES: u8 = 2;
+
 pub(super) async fn dispatch(
     state: &mut LocalBusDaemonState,
     account_id: &str,
     command: &AccountCommand,
     command_timeout: Duration,
-) -> Result<ActorResponse, SdkError> {
+    final_attempt: bool,
+) -> Dispatch {
     let deadline = command
         .admission
         .as_ref()
         .map_or_else(|| Instant::now() + command_timeout, |admission| admission.command_deadline);
     super::command_admission::COMMAND_CONTEXT
-        .scope(deadline, dispatch_bounded(state, account_id, command, deadline))
+        .scope(deadline, dispatch_bounded(state, account_id, command, deadline, final_attempt))
         .await
 }
 
@@ -40,33 +51,48 @@ async fn dispatch_bounded(
     account_id: &str,
     command: &AccountCommand,
     deadline: Instant,
-) -> Result<ActorResponse, SdkError> {
-    if !ordinary(&command.request.method) {
-        return attempt(state, account_id, command, deadline).await;
+    final_attempt: bool,
+) -> Dispatch {
+    if !ordinary(&command.request.method) || final_attempt {
+        return Dispatch::Done(attempt(state, account_id, command, deadline).await);
     }
     let wait_deadline = earlier(deadline, Instant::now() + COMMAND_DEADLINE);
+    if Instant::now() >= wait_deadline {
+        return Dispatch::Done(attempt(state, account_id, command, deadline).await);
+    }
+    let mut immediate = 0_u8;
     loop {
-        let settled = crate::custody::pairing::activate::INSTALL_SETTLED.notified();
-        tokio::pin!(settled);
-        settled.as_mut().enable();
+        let generation = install_generation();
         match attempt(state, account_id, command, deadline).await {
-            Ok(response) => return Ok(response),
+            Ok(response) => return Dispatch::Done(Ok(response)),
             Err(error) if should_wait(&error, wait_deadline, state, account_id) => {
                 if let Err(release_error) = release_pending(state, account_id, command) {
                     tracing::warn!(
                         %release_error,
                         "publication wait left the operation receipt pending"
                     );
-                    return Err(error);
+                    return Dispatch::Done(Err(error));
                 }
-                let expired = tokio::time::timeout_at(wait_deadline, settled).await.is_err();
-                if expired || Instant::now() >= wait_deadline {
-                    return attempt(state, account_id, command, deadline).await;
+                if install_cleared(generation, state, account_id) && immediate < IMMEDIATE_RETRIES {
+                    immediate += 1;
+                    continue;
                 }
+                if install_cleared(generation, state, account_id) {
+                    return Dispatch::Done(attempt(state, account_id, command, deadline).await);
+                }
+                return Dispatch::Park { deadline: wait_deadline };
             }
-            Err(error) => return Err(error),
+            Err(error) => return Dispatch::Done(Err(error)),
         }
     }
+}
+
+fn install_generation() -> u64 {
+    crate::custody::pairing::activate::INSTALL_GENERATION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+fn install_cleared(generation: u64, state: &LocalBusDaemonState, account_id: &str) -> bool {
+    install_generation() != generation || !other_install_blocks(&state.config.data_root, account_id)
 }
 
 async fn attempt(

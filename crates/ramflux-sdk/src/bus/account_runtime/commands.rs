@@ -3,7 +3,7 @@
 
 //! Claimed commands, lifecycle preemption, and bounded ordinary dispatch.
 
-use super::super::publication_wait::dispatch;
+use super::super::publication_wait::{Dispatch, dispatch};
 use super::{AccountRuntime, stopped};
 use crate::bus::actor::AccountCommand;
 use crate::prelude::*;
@@ -180,9 +180,27 @@ impl AccountRuntime {
         Ok(())
     }
     pub(super) async fn apply(&mut self, command: AccountCommand) -> Result<bool, SdkError> {
-        super::head_refresh::RECEIVE_PREPARED
+        let method = command.request.method.clone();
+        let started = tokio::time::Instant::now();
+        tracing::debug!(
+            phase = "actor_hold",
+            event = "begin",
+            method = %method,
+            "account command phase"
+        );
+        let stop = super::head_refresh::RECEIVE_PREPARED
             .scope(std::cell::Cell::new(false), self.apply_command(command))
-            .await
+            .await;
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::debug!(
+            phase = "actor_hold",
+            event = "end",
+            method = %method,
+            elapsed_ms,
+            "account command phase"
+        );
+        super::publication_park::set_final(false);
+        stop
     }
 
     async fn park_command(&mut self, command: &mut AccountCommand) -> Result<bool, SdkError> {
@@ -203,7 +221,7 @@ impl AccountRuntime {
             return Ok(false);
         }
         self.refresh_networking_expiry().await;
-        if command.admission.as_ref().is_some_and(|admission| !admission.claim()) {
+        if !admit(&command) {
             return Ok(false);
         }
 
@@ -261,24 +279,16 @@ impl AccountRuntime {
         #[cfg(test)]
         let receive_gate_hook = self.receive_gate_hook.take();
         let command_timeout = self.timeouts.command;
-        let mut stopping = false;
-        let mut cancelled = false;
-        let mut preempted = false;
-        let result = if lifecycle {
-            super::super::mutations::execute(&mut self.state, &self.id, &command).await
-        } else {
-            tokio::select! {
-                biased;
-                _ = self.shutdown.changed() => { stopping = true; Err(stopped()) },
-                _ = self.preempt.changed() => {cancelled = true;preempted=true;Err(stopped())},
-                () = reply.closed() => { cancelled = true; Err(stopped()) },
-                result = async {
-                    #[cfg(test)]
-                    wait_receive_gate(receive_gate_hook).await;
-                    dispatch(&mut self.state, &self.id, &command, command_timeout).await
-                } => result,
-            }
-        };
+        let (dispatched, stopping, cancelled, preempted) = self
+            .ordinary_dispatch(
+                &command,
+                &mut reply,
+                lifecycle,
+                command_timeout,
+                #[cfg(test)]
+                receive_gate_hook,
+            )
+            .await;
         if let Some(account) = self.state.accounts.get_mut(&self.id) {
             super::super::control_state::trim(account);
         }
@@ -293,7 +303,58 @@ impl AccountRuntime {
             self.publish_after_cancel(&command.request).await;
             return Ok(false);
         }
-        self.complete_command(&command, result, reply).await
+        match dispatched {
+            Dispatch::Park { deadline } if !reply.is_closed() => {
+                super::publication_park::park(command, reply, deadline);
+                Ok(false)
+            }
+            Dispatch::Park { .. } => Ok(false),
+            Dispatch::Done(result) => self.complete_command(&command, result, reply).await,
+        }
+    }
+
+    async fn ordinary_dispatch(
+        &mut self,
+        command: &AccountCommand,
+        reply: &mut tokio::sync::oneshot::Sender<
+            Result<super::super::actor::ActorResponse, SdkError>,
+        >,
+        lifecycle: bool,
+        command_timeout: std::time::Duration,
+        #[cfg(test)] receive_gate_hook: Option<super::ReceiveGateHook>,
+    ) -> (Dispatch, bool, bool, bool) {
+        let mut stopping = false;
+        let mut cancelled = false;
+        let mut preempted = false;
+        let dispatched = if lifecycle {
+            Dispatch::Done(
+                super::super::mutations::execute(&mut self.state, &self.id, command).await,
+            )
+        } else {
+            let final_attempt = super::publication_park::is_final();
+            tokio::select! {
+                biased;
+                _ = self.shutdown.changed() => {
+                    stopping = true;
+                    Dispatch::Done(Err(stopped()))
+                },
+                _ = self.preempt.changed() => {
+                    cancelled = true;
+                    preempted = true;
+                    Dispatch::Done(Err(stopped()))
+                },
+                () = reply.closed() => {
+                    cancelled = true;
+                    Dispatch::Done(Err(stopped()))
+                },
+                result = async {
+                    #[cfg(test)]
+                    wait_receive_gate(receive_gate_hook).await;
+                    dispatch(&mut self.state, &self.id, command, command_timeout, final_attempt).await
+                } => result,
+            }
+        };
+        (dispatched, stopping, cancelled, preempted)
     }
 
     async fn publish_after_cancel(&self, request: &LocalBusFrame) {
@@ -396,6 +457,13 @@ impl AccountRuntime {
             _ => return Err(SdkError::LocalBus("unknown owned account command".into())),
         }
         Ok(())
+    }
+}
+
+fn admit(command: &AccountCommand) -> bool {
+    match &command.admission {
+        None => true,
+        Some(admission) => admission.claim() || admission.is_claimed(),
     }
 }
 

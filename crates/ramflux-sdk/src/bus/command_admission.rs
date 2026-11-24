@@ -41,6 +41,10 @@ impl CommandAdmission {
         }
     }
 
+    pub(super) fn is_claimed(&self) -> bool {
+        self.state.load(Ordering::Acquire) == CLAIMED
+    }
+
     pub(super) fn claim(&self) -> bool {
         if Instant::now() >= self.residence_deadline {
             let _ =
