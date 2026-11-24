@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Single protected authority actor. No positive bytes leave via the private primary daemon.
-use super::{Result, directory, error, flag, ipc, quic, refuse, source::Sources, tcp, tls, wire};
+use super::{
+    Result, directory, error, flag, ipc, quic, refuse, source::Sources, tcp, tls, warn_drop, wire,
+};
 use std::{
     io::Write,
     net::TcpListener,
@@ -188,11 +190,30 @@ impl WitnessState {
                         std::thread::Builder::new().name("username-tls-read".into()).spawn(
                             move || {
                                 let _permit = permit;
-                                if let Ok(incoming) = tcp::accept(socket, tls, &node_id, &seed) {
-                                    let _ = sender.try_send(incoming);
+                                match tcp::accept(socket, tls, &node_id, &seed) {
+                                    Ok(incoming) => {
+                                        if sender.try_send(incoming).is_err() {
+                                            warn_drop(
+                                                "witness_public",
+                                                address,
+                                                "accept",
+                                                &"hand-off channel full or closed",
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        warn_drop("witness_public", address, "tls/request", &error);
+                                    }
                                 }
                             },
                         )?,
+                    );
+                } else {
+                    warn_drop(
+                        "witness_public",
+                        address,
+                        "accept",
+                        &"connection refused by admission limits",
                     );
                 }
             }
@@ -225,6 +246,8 @@ impl WitnessState {
                 if Instant::now() < call.incoming.deadline {
                     return true;
                 }
+                let stage = if call.call_id.is_some() { "response" } else { "request" };
+                warn_drop("witness_public", call.incoming.source, stage, &"deadline exceeded");
                 if let Some(id) = &call.call_id {
                     self.authority.cancel_call(id);
                 }
@@ -239,7 +262,7 @@ impl WitnessState {
                             if let Some(id) = &call.call_id {
                                 self.authority.cancel_call(id);
                             }
-                            tracing::debug!(%error, "username response closed");
+                            warn_drop("witness_public", call.incoming.source, "response", &error);
                             false
                         }
                     }
