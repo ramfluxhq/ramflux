@@ -3,3 +3,7 @@
 crates/ramflux-prx-client/src/error.rs | decode_ok | 1 | B | strict=parse_i_json; admission=B ingress boundary: PRX daemon 2xx response bytes over loopback
 crates/ramflux-prx-client/src/error.rs | rate_limited | 1 | B | strict=parse_i_json; admission=B ingress boundary: PRX daemon 429 response body over loopback
 crates/ramflux-prx-client/src/error.rs | limit_or_rate | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-prx-client/src/automation.rs | json_value | 1 | E | excluded=PRX management automation response; not Envelope/Ack/Nack ingress
+crates/ramflux-prx-client/src/sync/frame.rs | event | 1 | E | excluded=PRX journal event DTO; no Ramflux envelope admission
+crates/ramflux-prx-client/src/sync/frame.rs | resync | 1 | E | excluded=PRX websocket resync control DTO
+crates/ramflux-prx-client/src/sync/frame.rs | welcome | 1 | E | excluded=PRX websocket welcome control DTO

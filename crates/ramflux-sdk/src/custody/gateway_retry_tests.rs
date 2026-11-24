@@ -392,6 +392,22 @@ async fn reply_frame(
             };
             write_push(stream, &reply).await
         }
+        "submit" => {
+            let submit: crate::GatewaySubmitFrame =
+                serde_json::from_value(frame.get("submit").ok_or("submit body")?.clone())?;
+            ramflux_transport::write_gateway_session_json(
+                stream,
+                &GatewayServerFrame::ForwardAck {
+                    ack: crate::gateway::GatewayForwardAck {
+                        envelope_id: submit.envelope.envelope_id,
+                        target_delivery_id: submit.envelope.target_delivery_id,
+                        inbox_seq: Some(1),
+                    },
+                },
+            )
+            .await?;
+            Ok(())
+        }
         "heartbeat" => {
             let now = number_at(frame, "now")?;
             ramflux_transport::write_gateway_session_json(
