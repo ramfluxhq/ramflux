@@ -20,22 +20,11 @@ use crate::attachment_send::{
 
 const CALL_BUDGET: Duration = Duration::from_secs(60);
 
-/// Waits before capturing enable's capability, sharing its deadline with the Authority call.
+/// Captures enable's admitted session with the command deadline for the Authority call.
 pub(crate) async fn authority(
     account: &mut super::state::LocalBusAccountState,
 ) -> Result<Vec<u8>, SdkError> {
-    let deadline = super::command_admission::current_deadline()
-        .unwrap_or_else(|| tokio::time::Instant::now() + account.timeouts.call);
-    let ready = super::command_admission::COMMAND_CONTEXT.scope(deadline, account.session_client());
-    let mut session = match tokio::time::timeout_at(deadline, ready).await {
-        Ok(result) => result?,
-        Err(_) => {
-            return Err(account
-                .connection
-                .as_ref()
-                .map_or(SdkError::GatewaySessionNotEstablished, ConnectionHandle::pending));
-        }
-    };
+    let mut session = account.live_session_client()?;
     let reply = session
         .attachment_call(AttachmentFrame {
             request_id: request_id()?,

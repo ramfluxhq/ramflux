@@ -777,12 +777,14 @@ impl ConnectionHandle {
         admitted_at: Instant,
         wait: std::time::Duration,
     ) -> Result<(), SdkError> {
+        let snapshot = self.snapshot();
+        let origin = snapshot.attempt_started.map_or(admitted_at, |start| start.min(admitted_at));
+        self.require_live_until(origin + wait).await
+    }
+    pub(crate) async fn require_live_until(&self, deadline: Instant) -> Result<(), SdkError> {
         #[cfg(test)]
         let _waiter = LiveWaiter::new(&self.shared.live_waiters);
         let mut changed = self.shared.changed.subscribe();
-        let snapshot = self.snapshot();
-        let origin = snapshot.attempt_started.map_or(admitted_at, |start| start.min(admitted_at));
-        let deadline = origin + wait;
         loop {
             if self.snapshot().state == NetworkingState::Live {
                 return Ok(());
