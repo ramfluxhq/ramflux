@@ -468,7 +468,7 @@ fn note_control_result(
     plan: Plan,
     outcome: &ControlOutcome,
 ) -> Result<(), SdkError> {
-    if !current(account, &plan)? {
+    if !current_control_result(account, &plan, outcome)? {
         return Ok(());
     }
     let now = now_unix_timestamp();
@@ -478,21 +478,20 @@ fn note_control_result(
         .iter()
         .map(crate::gateway::call_resolution::CallOperationAction::from_control)
         .collect::<std::collections::BTreeSet<_>>();
-    let mut next = plan.original;
-    if account
+    let mut next = account
         .client
         .voice_calls
-        .get(&next.row.call_id)
-        .is_some_and(|live| live.held_answer == call::state::HeldAnswer::Requested)
-    {
-        next.held_answer = call::state::HeldAnswer::Requested;
-    }
+        .get(&plan.original.row.call_id)
+        .cloned()
+        .ok_or_else(|| invalid("call completion lost its live owner"))?;
     #[cfg(feature = "test-support")]
     {
         next.last_control_error.clone_from(&outcome.error);
     }
     if outcome.success && outcome.sent {
-        next.pending.clear();
+        // Receiving Ringing or Answer may advance the caller while this submit
+        // completes. Keep that state and any controls queued after this batch.
+        next.pending.retain(|control| !plan.original.pending.contains(control));
         next.retry_attempts = 0;
         next.retry_at = 0;
         if outcome.acknowledged.is_some() {
@@ -513,6 +512,42 @@ fn note_control_result(
     }
     next.queue_requested_answer(now)?;
     install(account, next)
+}
+
+fn current_control_result(
+    account: &LocalBusAccountState,
+    plan: &Plan,
+    outcome: &ControlOutcome,
+) -> Result<bool, SdkError> {
+    if current(account, plan)? {
+        return Ok(true);
+    }
+    let Some(live) = account.client.voice_calls.get(&plan.original.row.call_id) else {
+        return Ok(false);
+    };
+    // Only a delivered caller batch can merge across received peer controls.
+    // A changed authority generation, terminal call, invitation roster, local
+    // media loss, conversation or pending batch still invalidates completion.
+    let applies = outcome.success
+        && outcome.sent
+        && plan.original.local == plan.original.caller
+        && plan.original.row.state != "ended"
+        && live.row.state != "ended"
+        && live.local_generation == plan.original.local_generation
+        && live.gateway_generation == plan.original.gateway_generation
+        && live.invited == plan.original.invited
+        && live.media_lost() == plan.original.media_lost()
+        && plan.original.pending.iter().all(|control| live.pending.contains(control))
+        && account
+            .client
+            .account_db()?
+            .client_record("conversation", &plan.original.row.conversation_id)?
+            .as_ref()
+            == Some(&plan.thread);
+    if applies {
+        tracing::debug!("call completion retained received peer controls");
+    }
+    Ok(applies)
 }
 
 struct BoundStart {

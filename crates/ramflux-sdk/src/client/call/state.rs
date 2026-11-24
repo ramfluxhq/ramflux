@@ -783,7 +783,11 @@ impl LiveCall {
         reason: VoiceCallFailureReason,
         now: i64,
     ) -> Result<(), SdkError> {
+        // A peer's generic Failed control carries no cause. Preserve an already
+        // observed local relay refusal when that control wins the expiry race.
+        let local_reason = self.media_loss.map(|(reason, _)| reason);
         self.finish("failed", now)?;
+        self.row.failure_reason = local_reason;
         self.row.peer_reason = Some(reason);
         Ok(())
     }
