@@ -452,8 +452,8 @@ int32_t ramflux_v2_set_host_credential_provider(uint64_t handle,
 /*
  Read one committed account snapshot. Does not start a supervisor or take a writer lease.
 
- Config is `{data_root, account_id}`. Provider is the shared host custody table (ABI v1).
- Missing device wrap requires ordinary unlock; no account code is checked here.
+ Config is `{data_root, account_id}`. The host supplies the shared OS custody provider.
+ A locked account requires ordinary unlock; this call never checks an account code.
  Output JSON is `{account_id, direct_message_ids, message_ids}` and uses `ramflux_v2_buffer_free`.
  A root owned by another daemon is still readable. A second `ramflux_v2_client_open` of that
  root remains `AccountBusy`.
