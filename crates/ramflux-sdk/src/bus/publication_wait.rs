@@ -25,6 +25,7 @@ pub(super) enum Dispatch {
     /// The actor must park `command` until `deadline` and keep serving other commands.
     Park {
         deadline: Instant,
+        generation: u64,
     },
 }
 
@@ -80,7 +81,7 @@ async fn dispatch_bounded(
                 if install_cleared(generation, state, account_id) {
                     return Dispatch::Done(attempt(state, account_id, command, deadline).await);
                 }
-                return Dispatch::Park { deadline: wait_deadline };
+                return Dispatch::Park { deadline: wait_deadline, generation };
             }
             Err(error) => return Dispatch::Done(Err(error)),
         }

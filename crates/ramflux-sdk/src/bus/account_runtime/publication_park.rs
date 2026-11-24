@@ -57,10 +57,12 @@ pub(super) fn park(
     mut command: AccountCommand,
     reply: oneshot::Sender<Result<ActorResponse, SdkError>>,
     deadline: Instant,
+    generation: u64,
 ) {
     command.reply = Some(reply);
     let method = command.request.method.clone();
-    let generation = crate::custody::pairing::activate::INSTALL_GENERATION.load(Ordering::Acquire);
+    // Keep the generation observed before dispatch. If an install settles
+    // between the refusal and this enqueue, the next actor turn sees it.
     tracing::debug!(
         phase = "publication_wait",
         event = "park",

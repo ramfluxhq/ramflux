@@ -321,8 +321,8 @@ impl AccountRuntime {
             return Ok(false);
         }
         match dispatched {
-            Dispatch::Park { deadline } if !reply.is_closed() => {
-                super::publication_park::park(command, reply, deadline);
+            Dispatch::Park { deadline, generation } if !reply.is_closed() => {
+                super::publication_park::park(command, reply, deadline, generation);
                 Ok(false)
             }
             Dispatch::Park { .. } => Ok(false),
