@@ -67,7 +67,7 @@ async fn deliver_to_attended_call(tagged: bool) -> TestResult {
         message.generation.is_none(),
         "test: credential request acquired a subscription generation"
     );
-    let prompt = message.frame;
+    let prompt = message.frame.clone();
     assert_eq!(
         prompt.request_id, "parent-a",
         "test: connection-owned callback or early private-frame refusal changed"

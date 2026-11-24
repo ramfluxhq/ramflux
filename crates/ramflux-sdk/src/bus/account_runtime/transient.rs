@@ -142,6 +142,11 @@ impl AccountRuntime {
         let Ok(permit) = self.events.try_reserve() else {
             return;
         };
+        let Ok(access) = crate::bus::app_lock_fence::Fences::for_root(&self.state.config.data_root)
+            .and_then(|fences| fences.token(Some(&self.id)))
+        else {
+            return;
+        };
         let Ok(updates) = account.client.drain_transient_updates(
             &self.id,
             wall_ms(),
@@ -169,6 +174,6 @@ impl AccountRuntime {
             return;
         }
         let (accepted, _done) = tokio::sync::oneshot::channel();
-        permit.send(crate::bus::events::EventBatch { events, accepted });
+        permit.send(crate::bus::events::EventBatch { events, access: Some(access), accepted });
     }
 }

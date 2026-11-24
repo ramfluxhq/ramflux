@@ -43,6 +43,7 @@ pub(super) struct OperationState {
     pub detached: bool,
     pub slot: ResultSlot,
     pub result: Option<Zeroizing<Vec<u8>>>,
+    pub access: Option<crate::bus::app_lock_fence::Token>,
 }
 
 pub(super) struct Event {
@@ -62,6 +63,8 @@ pub(super) struct Events {
 
 #[derive(Default)]
 pub(super) struct Shared {
+    pub app_fences: std::sync::OnceLock<Arc<crate::bus::app_lock_fence::Fences>>,
+    pub controls: Mutex<VecDeque<Zeroizing<Vec<u8>>>>,
     pub allow_secret_exports: std::sync::atomic::AtomicBool,
     pub allow_raw_messages: std::sync::atomic::AtomicBool,
     pub operations: Mutex<BTreeMap<u64, Arc<Operation>>>,

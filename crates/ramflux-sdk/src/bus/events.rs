@@ -34,6 +34,7 @@ fn outbox_yield_enabled() -> bool {
 
 pub(super) struct EventBatch {
     pub events: Vec<LocalBusFrame>,
+    pub access: Option<super::app_lock_fence::Token>,
     pub accepted: oneshot::Sender<()>,
 }
 
@@ -188,7 +189,9 @@ fn publish_one_page(
     let (deferred, accepted) = if events.is_empty() {
         (false, None)
     } else {
-        let (deferred, accepted) = handoff(sender, events)?;
+        let fences = super::app_lock_fence::Fences::for_root(client.account_index()?.root())?;
+        let access = fences.token(Some(account_id))?;
+        let (deferred, accepted) = handoff(sender, events, access)?;
         (deferred, Some(accepted))
     };
     tracing::debug!(
@@ -309,9 +312,10 @@ fn closed() -> SdkError {
 fn handoff(
     sender: &mpsc::Sender<EventBatch>,
     events: Vec<LocalBusFrame>,
+    access: super::app_lock_fence::Token,
 ) -> Result<(bool, oneshot::Receiver<()>), SdkError> {
     let (accepted, done) = oneshot::channel();
-    match sender.try_send(EventBatch { events, accepted }) {
+    match sender.try_send(EventBatch { events, access: Some(access), accepted }) {
         Ok(()) => Ok((false, done)),
         Err(mpsc::error::TrySendError::Full(batch)) => {
             let sender = sender.clone();

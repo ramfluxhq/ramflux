@@ -113,6 +113,7 @@ pub struct BackupAttachmentChecks {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupFailureCode {
+    AppLocked,
     AccountBusy,
     ObjectErased,
     ObjectIdentityConflict,
