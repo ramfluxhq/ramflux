@@ -7,6 +7,7 @@ use crate::prelude::*;
 
 #[derive(Clone)]
 pub struct LocalBusConfig {
+    pub(crate) session_lease: Option<super::session_lease::SessionLeaseConfig>,
     /// Shared host network reports; retain a clone to notify running account sessions.
     pub network_monitor: crate::NetworkMonitor,
     /// Auto ordering for every account owned by this daemon.
@@ -1083,6 +1084,7 @@ impl LocalBusConfig {
     #[must_use]
     pub fn new(socket_path: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
         Self {
+            session_lease: None,
             network_monitor: crate::NetworkMonitor::new(),
             connection_race: crate::ConnectionRace::default(),
             #[cfg(all(feature = "http-connect-proxy", not(windows)))]
