@@ -1,0 +1,224 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! In-process control of a running upload: the pause gate checked before each slice, and the
+//! unique byte count that `attachment.transfer.list` reports. Nothing here is persisted. The
+//! durable record is the encrypted account-DB ACK journal, from which the list derives the
+//! unique count of a pending send after a restart.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+use super::codes::{CODE_CANCELLED, CODE_NOT_READY, CODE_UPLOAD_REJECTED, Refusal};
+
+/// `(account id, prepare id)`: a prepare id is only meaningful inside its account.
+type Key = (String, String);
+
+/// How often a paused worker re-checks its flag. Bounded so a cancelled entry is noticed.
+const PAUSE_POLL: Duration = Duration::from_millis(250);
+
+/// Journal topic of transfer snapshots; subscribers receive it as a stream frame.
+pub(crate) const TRANSFER_TOPIC: &str = "attachment.transfer.changed";
+/// Progress snapshots of one transfer are at most this far apart; phase changes never wait.
+const EMIT_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Default)]
+struct Control {
+    paused: bool,
+    total_bytes: u64,
+    unique_bytes: u64,
+    /// Monotonic per transfer; seeded from the clock so it keeps rising across restarts.
+    revision: u64,
+    last_emit: Option<Instant>,
+}
+
+/// Pause intents that arrived before their worker registered (planning, sealing, the first
+/// journal load). Bounded: a pause for an admitted send is one entry per prepare.
+const MAX_PAUSE_INTENTS: usize = 256;
+
+/// One row per upload that is running in this process, plus the pauses waiting for one.
+struct Registry {
+    running: Mutex<BTreeMap<Key, Control>>,
+    intents: Mutex<BTreeSet<Key>>,
+    changed: Condvar,
+}
+
+static REGISTRY: Registry = Registry {
+    running: Mutex::new(BTreeMap::new()),
+    intents: Mutex::new(BTreeSet::new()),
+    changed: Condvar::new(),
+};
+
+/// Holds one running entry; dropping it removes the entry and wakes any paused worker.
+pub(crate) struct Live(Key);
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        if let Ok(mut running) = REGISTRY.running.lock() {
+            running.remove(&self.0);
+        }
+        REGISTRY.changed.notify_all();
+    }
+}
+
+/// A snapshot of one running upload, for `attachment.transfer.list`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Snapshot {
+    pub prepare_id: String,
+    pub paused: bool,
+    pub total_bytes: u64,
+    pub unique_bytes: u64,
+}
+
+fn lock() -> Result<std::sync::MutexGuard<'static, BTreeMap<Key, Control>>, Refusal> {
+    REGISTRY.running.lock().map_err(|_| Refusal::new(CODE_CANCELLED))
+}
+
+fn key(account: &str, prepare_id: &str) -> Key {
+    (account.to_owned(), prepare_id.to_owned())
+}
+
+/// Registers the upload of one prepare. A second upload of the same prepare in this process is
+/// refused, so two workers never race on one set of ACKs.
+/// # Errors
+/// Returns `upload_rejected` when the prepare already has a running upload here.
+pub(crate) fn enter(account: &str, prepare_id: &str, total_bytes: u64) -> Result<Live, Refusal> {
+    let mut running = lock()?;
+    let id = key(account, prepare_id);
+    if running.contains_key(&id) {
+        return Err(Refusal::new(CODE_UPLOAD_REJECTED));
+    }
+    // A pause requested before this worker existed holds from its first slice.
+    let paused = REGISTRY.intents.lock().is_ok_and(|mut intents| intents.remove(&id));
+    let revision = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis()),
+    )
+    .unwrap_or(u64::MAX);
+    running.insert(
+        id.clone(),
+        Control { paused, total_bytes, unique_bytes: 0, revision, last_emit: None },
+    );
+    Ok(Live(id))
+}
+
+/// Whether the upload is paused right now (the worker announces the pause once, then waits).
+pub(crate) fn is_paused(account: &str, prepare_id: &str) -> bool {
+    REGISTRY
+        .running
+        .lock()
+        .is_ok_and(|running| running.get(&key(account, prepare_id)).is_some_and(|c| c.paused))
+}
+
+/// Claims the right to publish one snapshot now and returns its revision. A progress snapshot
+/// (`force` false) is published at most once per interval; a phase change always is.
+pub(crate) fn claim_emit(account: &str, prepare_id: &str, force: bool) -> Option<u64> {
+    let mut running = REGISTRY.running.lock().ok()?;
+    let control = running.get_mut(&key(account, prepare_id))?;
+    let now = Instant::now();
+    let due =
+        force || control.last_emit.is_none_or(|last| now.duration_since(last) >= EMIT_INTERVAL);
+    if !due {
+        return None;
+    }
+    control.last_emit = Some(now);
+    control.revision = control.revision.saturating_add(1);
+    Some(control.revision)
+}
+
+/// Blocks while the upload is paused. Returns `cancelled` when the entry has gone away.
+/// # Errors
+/// Returns `cancelled` when the upload is no longer registered.
+pub(crate) fn gate(account: &str, prepare_id: &str) -> Result<(), Refusal> {
+    let id = key(account, prepare_id);
+    let mut running = lock()?;
+    loop {
+        match running.get(&id) {
+            None => return Err(Refusal::new(CODE_CANCELLED)),
+            Some(control) if !control.paused => return Ok(()),
+            Some(_) => {}
+        }
+        let (guard, _) = REGISTRY
+            .changed
+            .wait_timeout(running, PAUSE_POLL)
+            .map_err(|_| Refusal::new(CODE_CANCELLED))?;
+        running = guard;
+    }
+}
+
+/// Stops one prepare's upload for a cancel. The registry entry and any pending pause go away, so
+/// the worker's next `gate` returns `cancelled` and it sends no further slice.
+pub(crate) fn forget(account: &str, prepare_id: &str) {
+    let id = key(account, prepare_id);
+    if let Ok(mut running) = REGISTRY.running.lock() {
+        running.remove(&id);
+    }
+    if let Ok(mut intents) = REGISTRY.intents.lock() {
+        intents.remove(&id);
+    }
+    REGISTRY.changed.notify_all();
+}
+
+/// Sets the unique count to the bytes the journaled ACK bitmap confirms. It is recomputed from
+/// the bitmap, not accumulated, so a replayed or lost confirmation can never double-count.
+pub(crate) fn set_unique(account: &str, prepare_id: &str, bytes: u64) {
+    if let Ok(mut running) = REGISTRY.running.lock()
+        && let Some(control) = running.get_mut(&key(account, prepare_id))
+    {
+        control.unique_bytes = bytes;
+    }
+}
+
+/// Pauses or resumes an upload. The worker stops before its next slice. A pause for a prepare
+/// whose worker has not registered yet is kept as an intent and applied when it does.
+/// # Errors
+/// Returns `not_ready` when the prepare has no running upload and no pause is pending for it
+/// (a resume with nothing to resume, or too many pending pauses).
+pub(crate) fn set_paused(account: &str, prepare_id: &str, paused: bool) -> Result<(), Refusal> {
+    let id = key(account, prepare_id);
+    let mut running = lock()?;
+    if let Some(control) = running.get_mut(&id) {
+        control.paused = paused;
+        REGISTRY.changed.notify_all();
+        return Ok(());
+    }
+    let mut intents = REGISTRY.intents.lock().map_err(|_| Refusal::new(CODE_CANCELLED))?;
+    if paused && intents.len() < MAX_PAUSE_INTENTS {
+        intents.insert(id);
+        return Ok(());
+    }
+    if !paused && intents.remove(&id) {
+        return Ok(());
+    }
+    Err(Refusal::new(CODE_NOT_READY))
+}
+
+/// Every running upload of one account, ordered by prepare id.
+pub(crate) fn snapshot(account: &str) -> Vec<Snapshot> {
+    let Ok(running) = REGISTRY.running.lock() else { return Vec::new() };
+    running
+        .iter()
+        .filter(|((owner, _), _)| owner == account)
+        .map(|((_, prepare_id), control)| Snapshot {
+            prepare_id: prepare_id.clone(),
+            paused: control.paused,
+            total_bytes: control.total_bytes,
+            unique_bytes: control.unique_bytes,
+        })
+        .collect()
+}
+
+/// Running uploads first, then the durable pending sends that are not running in this process.
+/// `durable` comes from the account-DB journal, so it is the restart-safe view.
+pub(crate) fn listed(account: &str, durable: Vec<Snapshot>) -> Vec<Snapshot> {
+    let mut rows = snapshot(account);
+    for row in durable {
+        if !rows.iter().any(|running| running.prepare_id == row.prepare_id) {
+            rows.push(row);
+        }
+    }
+    rows.sort_by(|left, right| left.prepare_id.cmp(&right.prepare_id));
+    rows
+}

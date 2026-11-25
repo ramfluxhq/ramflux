@@ -246,8 +246,13 @@ fn same_root_senders(
         ramflux_crypto::X25519KeyPair::from_seed([42; 32]).public,
     );
     certificate.cert_id = ramflux_protocol::encode_base64url([43; 32]);
-    let record =
-        primary.enroll_device(account.verified(), primary.certify_branch(certificate)?, now)?;
+    let message_layer = ramflux_crypto::custody::sign_enrollment_layer(&branch, &certificate)?;
+    let record = primary.enroll_device(
+        account.verified(),
+        primary.certify_branch(certificate)?,
+        message_layer,
+        now,
+    )?;
     let manifest = |record| -> TestResult<g::NativeCustodyManifest> {
         Ok(g::NativeCustodyManifest {
             canonical: ramflux_protocol::canonical_json_bytes(&CustodyManifest {

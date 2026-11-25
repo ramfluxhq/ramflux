@@ -47,7 +47,9 @@ objects['Update_terminal'] = terminal
 objects['EnrollmentBodyMax'] = dict(schema='ramflux.identity.pairing.enrollment.v1', version=1,
     invitation_id=b(1), transcript_hash=b(2), base_record_hash=b(3), base_epoch=U,
     recipient_ref=ref(), branch_signing_key=b(4), agreement_key=b(5), requested_role='secondary',
-    capabilities=CAPS, lease_expires_at=U, display_name=name)
+    capabilities=CAPS, lease_expires_at=U, display_name=name,
+    # SECONDARY-LAYER-01: the recipient's branch-signed declaration, named for recipient_ref.
+    message_layer=dict(declaration=dict(device=ref(), max_layer=3, declaration_sequence=U, issued_at=U-300, expires_at=U), branch_signature=b(7, 64)))
 objects['PreservationBodyMax'] = dict(schema='ramflux.identity.transfer.preserve.v1', version=1,
     transfer_id=b(1), transcript_hash=b(2), old_record_hash=b(3), new_record_hash=b(4),
     destination_ref=ref(), recipient_mode='existing', policy='preserve_all_existing', expires_at=U)

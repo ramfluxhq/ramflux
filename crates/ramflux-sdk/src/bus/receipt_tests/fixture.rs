@@ -92,20 +92,25 @@ impl Spec {
     ) -> Result<crate::SdkDeviceManifestResponse, SdkError> {
         let account = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
         let identity = client.owned_device_identity()?;
+        let publication = account.publication();
+        let device_ref = ramflux_protocol::custody::DeviceRef {
+            account_anchor: identity.root_commitment().into(),
+            device_id: self.device.clone(),
+            device_epoch: 1,
+        };
+        // The projection must equal the roster's endorsed declaration (#620).
+        let message_layer =
+            crate::custody::layer_declaration::endorsed_for(&publication.record, &device_ref);
         crate::SdkDeviceManifestResponse::from_native(ramflux_protocol::custody::CustodyManifest {
-            publication: account.publication(),
+            publication,
             custodian_publication: None,
             devices: vec![ramflux_protocol::custody::CustodyManifestDevice {
-                device_ref: ramflux_protocol::custody::DeviceRef {
-                    account_anchor: identity.root_commitment().into(),
-                    device_id: self.device.clone(),
-                    device_epoch: 1,
-                },
+                device_ref,
                 target_delivery_id: identity.storage_key().into(),
                 prekey_bundle: serde_json::to_value(
                     client.load_x3dh_private_state(&identity)?.bundle,
                 )?,
-                message_layer: None,
+                message_layer,
             }],
         })
     }
@@ -256,8 +261,9 @@ impl Spec {
         certificate.agreement_identity_public_key =
             ramflux_protocol::encode_base64url(&agreement.public);
         certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+        let message_layer = ramflux_crypto::custody::sign_enrollment_layer(&branch, &certificate)?;
         native.publication.record =
-            key.enroll_device(&current, key.certify_branch(certificate)?, now)?;
+            key.enroll_device(&current, key.certify_branch(certificate)?, message_layer, now)?;
         crate::custody::accept_publication(
             &primary.root,
             &primary.principal,
@@ -282,6 +288,13 @@ impl Spec {
         native.devices.extend(
             self.manifest(&sibling)?.custody.ok_or("test: native sibling manifest")?.devices,
         );
+        // The manifest projection must equal the roster's endorsed declarations (#620).
+        for row in &mut native.devices {
+            row.message_layer = crate::custody::layer_declaration::endorsed_for(
+                &native.publication.record,
+                &row.device_ref,
+            );
+        }
         let full = crate::SdkDeviceManifestResponse::from_native(native)?;
         source.persist_observed_identity_directory_now(&full)?;
         sibling.persist_observed_identity_directory_now(&full)?;

@@ -456,7 +456,8 @@ fn channel_contexts(all: &Value) -> TestResult {
         "requested_role":"secondary",
         "capabilities":enrollment_common["capabilities"],
         "lease_expires_at":enrollment_common["lease_expires_at"],
-        "display_name":source["responder"]["display_name"]
+        "display_name":source["responder"]["display_name"],
+        "message_layer":{"declaration":{"device":source["responder"]["device_ref"],"max_layer":1,"declaration_sequence":1,"issued_at":1,"expires_at":2},"branch_signature":encode_base64url([7u8; 64])}
     }));
     let enrollment = channel(
         enrollment_common,
@@ -474,9 +475,11 @@ fn channel_contexts(all: &Value) -> TestResult {
         ),
         ("/payload/proposal/body/base_epoch", json!(1), "proposal_head"),
         (
+            // The signed declaration names recipient_ref, so its device binding (channel.rs
+            // layer_declaration) refuses the swap before the proposal context check runs.
             "/payload/proposal/body/recipient_ref/device_id",
             json!("other-device"),
-            "proposal_context",
+            "message_layer.device",
         ),
         (
             "/payload/proposal/body/branch_signing_key",
@@ -502,11 +505,10 @@ fn channel_contexts(all: &Value) -> TestResult {
     ] {
         let mut wrong = enrollment.clone();
         *wrong.pointer_mut(path).ok_or("enrollment field")? = value;
-        assert_eq!(
-            decode_value::<Channel>(&wrong)?.validate_context(&enroll_context),
-            Err(WireError::Field(error)),
-            "{path}"
-        );
+        // A decode-time refusal (the declaration binding) is as much a refusal as a context one.
+        let outcome = decode_value::<Channel>(&wrong)
+            .and_then(|channel| channel.validate_context(&enroll_context));
+        assert_eq!(outcome, Err(WireError::Field(error)), "{path}");
     }
     enroll_context.sender = "initiator";
     assert_eq!(

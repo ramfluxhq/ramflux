@@ -617,6 +617,18 @@ impl Supervisor {
         request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
+        // Transfer control runs before admission and the app-control guard, so it answers while a
+        // send holds the account actor. It needs only the unlocked account.
+        if matches!(
+            request.method.as_str(),
+            "attachment.transfer.pause" | "attachment.transfer.resume"
+        ) {
+            let id = request_account_id(&request)?.to_owned();
+            if !self.accounts.borrow().contains_key(&id) {
+                return Err(self.account_unavailable(&id));
+            }
+            return Ok(reply(crate::attachment_send::transfer_body(&request)?));
+        }
         self.start_event_router();
         self.ensure_request_allowed(&request)?;
         // Serialize effects in their execution owner, never lifecycle receipt waiters.
@@ -749,13 +761,14 @@ impl Supervisor {
         let mut request = command(request, connection);
         request.attended = self.attended.borrow().values().any(|account| account == &id);
         request.nodes = Some(self.nodes.borrow().clone());
-        let requested = if matches!(
-            request.request.method.as_str(),
-            "device.transfer.begin"
-                | "device.transfer.status"
-                | "device.pair.join"
-                | "device.transfer.join"
-        ) {
+        let requested = if super::publication_wait::carries_prepares(&request.request)
+            || matches!(
+                request.request.method.as_str(),
+                "device.transfer.begin"
+                    | "device.transfer.status"
+                    | "device.pair.join"
+                    | "device.transfer.join"
+            ) {
             // Source preparation and attended recipient input belong to the initiating
             // connection/account lifecycle, beyond the ordinary command deadline.
             super::command_admission::RETAIN_COMPLETION.scope((), actor.request(request)).await

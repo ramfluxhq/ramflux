@@ -22,6 +22,14 @@ compile_error!(
 compile_error!("production builds must not enable itest-memory-vault");
 #[cfg(all(feature = "itest-memory-vault", ramflux_release_profile))]
 compile_error!("release profiles must not enable itest-memory-vault");
+#[cfg(all(feature = "itest-short-layer-lease", not(any(test, ramflux_itest))))]
+compile_error!(
+    "itest-short-layer-lease requires cfg(test) or an explicit RAMFLUX_ITEST_BUILD=1 fixture build"
+);
+#[cfg(all(feature = "itest-short-layer-lease", ramflux_production))]
+compile_error!("production builds must not enable itest-short-layer-lease");
+#[cfg(all(feature = "itest-short-layer-lease", ramflux_release_profile))]
+compile_error!("release profiles must not enable itest-short-layer-lease");
 
 pub mod bindings;
 mod bus;

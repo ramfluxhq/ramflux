@@ -122,7 +122,7 @@ pub(crate) mod memory_vault;
 #[cfg(feature = "itest-memory-vault")]
 pub use memory_vault::MemoryPrimaryVault;
 
-mod layer_declaration;
+pub(crate) mod layer_declaration;
 pub use layer_declaration::DeclarationValidity;
 #[cfg(test)]
 pub(crate) use layer_declaration::candidate as sign_layer_declaration;

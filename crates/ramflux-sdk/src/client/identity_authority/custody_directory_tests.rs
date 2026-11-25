@@ -29,10 +29,13 @@ fn manifest_for(
         publication: Publication { record: account.record().clone(), compacted_ids: None },
         custodian_publication: None,
         devices: vec![CustodyManifestDevice {
-            device_ref: reference,
+            device_ref: reference.clone(),
             target_delivery_id: identity.storage_key().into(),
             prekey_bundle: serde_json::to_value(bundle)?,
-            message_layer: None,
+            message_layer: crate::custody::layer_declaration::endorsed_for(
+                account.record(),
+                &reference,
+            ),
         }],
     })
 }
@@ -256,17 +259,21 @@ async fn observing_agent_custodian_preserves_human_own_device_manifest() -> Test
         for client in [human, sibling] {
             let identity = client.owned_device_identity()?;
             let branch = client.device_branch.as_ref().ok_or("human branch")?;
+            let device_ref = DeviceRef {
+                account_anchor: identity.root_commitment().into(),
+                device_id: identity.device_id().into(),
+                device_epoch: branch.device_epoch,
+            };
             devices.push(CustodyManifestDevice {
-                device_ref: DeviceRef {
-                    account_anchor: identity.root_commitment().into(),
-                    device_id: identity.device_id().into(),
-                    device_epoch: branch.device_epoch,
-                },
+                message_layer: crate::custody::layer_declaration::endorsed_for(
+                    account.record(),
+                    &device_ref,
+                ),
+                device_ref,
                 target_delivery_id: identity.storage_key().into(),
                 prekey_bundle: serde_json::to_value(
                     client.load_x3dh_private_state(&identity)?.bundle,
                 )?,
-                message_layer: None,
             });
         }
         let manifest = crate::prekey::SdkDeviceManifestResponse::from_native(CustodyManifest {

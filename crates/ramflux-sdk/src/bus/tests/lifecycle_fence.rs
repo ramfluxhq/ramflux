@@ -83,6 +83,7 @@ pub(super) fn runtime_for(
     let (preempt_sender, preempt) = watch::channel(0_u64);
     std::mem::forget((commands, stop, lifecycle_sender, preempt_sender));
     super::super::AccountRuntime {
+        attachment_sends: crate::bus::account_runtime::attachment_sends::AttachmentSends::default(),
         timeouts: limits(),
         id: "sender".into(),
         state: crate::bus::state::LocalBusDaemonState {

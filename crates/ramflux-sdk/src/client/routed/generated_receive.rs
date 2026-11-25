@@ -455,6 +455,12 @@ impl RamfluxClient {
             self.apply_generated_metadata_control_once(entry, identity, bytes, || {
                 self.receive_generated_own_group_consent(&source, consent).map(|_| ())
             })?;
+        } else if let Some(g::control::Payload::OwnLayerRenewal(renewal)) = control.payload.as_ref()
+        {
+            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+            self.apply_generated_metadata_control_once(entry, identity, bytes, || {
+                self.receive_own_layer_renewal(&source, renewal)
+            })?;
         } else if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
             self.apply_generated_friend_control(entry, identity, friend, bytes)?;
         } else if let Some(g::control::Payload::GroupKeyControl(key)) = control.payload.as_ref() {

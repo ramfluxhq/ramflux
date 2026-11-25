@@ -224,6 +224,21 @@ pub(crate) fn remember_sequences(
     Ok(())
 }
 
+/// The declaration the signed roster endorses for `device`. Test fixtures that project a native
+/// manifest must carry it too: `verify_native_material` rejects any mismatch with the roster.
+#[cfg(test)]
+pub(crate) fn endorsed_for(
+    record: &ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>,
+    device: &ramflux_protocol::custody::DeviceRef,
+) -> Option<ramflux_protocol::custody::SignedLayerDeclaration> {
+    record
+        .body
+        .devices
+        .iter()
+        .find(|row| row.device_id == device.device_id && row.device_epoch == device.device_epoch)
+        .and_then(|row| row.message_layer.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

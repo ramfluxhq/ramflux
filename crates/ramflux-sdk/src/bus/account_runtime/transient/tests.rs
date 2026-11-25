@@ -26,6 +26,8 @@ fn runtime(
     let (head_completion_sender, head_rx) = mpsc::channel(1);
     (
         AccountRuntime {
+            attachment_sends:
+                crate::bus::account_runtime::attachment_sends::AttachmentSends::default(),
             timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
             state: LocalBusDaemonState {
                 account_index: None,

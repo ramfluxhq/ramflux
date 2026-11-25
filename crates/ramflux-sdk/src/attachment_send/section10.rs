@@ -141,6 +141,7 @@ fn sixty_five_targets_do_not_reserve() {
     let key = SigningKey::from_bytes(&ramflux_node_core::fixture::owner_signing_seed());
     let error = publish::publish_all(
         &PublishInput {
+            journal: &crate::attachment_send::upload::TEST_JOURNAL,
             store: &store,
             plane: &listener,
             owner: &owner,
@@ -177,6 +178,7 @@ fn repeated_target_key_is_layout_invalid_and_does_not_reserve() {
     let key = SigningKey::from_bytes(&ramflux_node_core::fixture::owner_signing_seed());
     let error = publish::publish_all(
         &PublishInput {
+            journal: &crate::attachment_send::upload::TEST_JOURNAL,
             store: &store,
             plane: &listener,
             owner: &owner,
@@ -321,6 +323,7 @@ fn cancel_after_commit_admits_nothing_and_a_bound_row_keeps_its_upload() {
     store.mark(committed.clone(), Phase::Committed).unwrap();
     store.cancel(&committed.prepare_id, committed.generation).unwrap();
     let input = PublishInput {
+        journal: &crate::attachment_send::upload::TEST_JOURNAL,
         store: &store,
         plane: &listener,
         owner: &owner,
@@ -374,6 +377,7 @@ fn one_entry_imports_only_its_grantee_and_a_copy_sends_no_get() {
     let row = accept(&store, "send", body);
     let wrapped = publish::publish_all(
         &PublishInput {
+            journal: &crate::attachment_send::upload::TEST_JOURNAL,
             store: &store,
             plane: &listener,
             owner: &owner,
@@ -494,6 +498,7 @@ pub(super) fn publish_input<'a>(
     source: &'a str,
 ) -> PublishInput<'a> {
     PublishInput {
+        journal: &crate::attachment_send::upload::TEST_JOURNAL,
         store,
         plane: listener,
         owner,

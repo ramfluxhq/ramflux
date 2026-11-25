@@ -243,8 +243,6 @@ async fn enroll_surface_sibling(
     account_id: &str,
     device: &str,
 ) -> TestResult<RamfluxClient> {
-    use ramflux_protocol::custody::CustodyAuthority;
-    use zeroize::Zeroizing;
     let mut native = source.local_own_copy_manifest()?.custody.ok_or("native manifest")?;
     let primary = vault.primary_for_public_key(
         &native.publication.record.body.master_certificate.body.self_signing_public_key,
@@ -273,7 +271,7 @@ async fn enroll_surface_sibling(
         native.publication.compacted_ids.as_deref(),
         custodian.as_ref(),
     )?;
-    let mut seeds = Zeroizing::new([0u8; 64]);
+    let mut seeds = zeroize::Zeroizing::new([0u8; 64]);
     getrandom::fill(&mut *seeds).map_err(|_| SdkError::CustodyRandomUnavailable)?;
     let signing: [u8; 32] = seeds.get(..32).ok_or("signing seed")?.try_into()?;
     let agreement: [u8; 32] = seeds.get(32..).ok_or("agreement seed")?.try_into()?;
@@ -300,13 +298,18 @@ async fn enroll_surface_sibling(
     certificate.agreement_identity_public_key =
         ramflux_protocol::encode_base64url(agreement.public);
     certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-    native.publication.record =
-        primary.enroll_device(&current, primary.certify_branch(certificate)?, now)?;
+    let message_layer = ramflux_crypto::custody::sign_enrollment_layer(&branch, &certificate)?;
+    native.publication.record = primary.enroll_device(
+        &current,
+        primary.certify_branch(certificate)?,
+        message_layer,
+        now,
+    )?;
     let source_id = source.account_db()?.local_account_id.clone();
     crate::custody::accept_publication(
         source.account_index()?.root(),
         &source_id,
-        &CustodyAuthority {
+        &ramflux_protocol::custody::CustodyAuthority {
             publication: native.publication.clone(),
             custodian_publication: native.custodian_publication.clone(),
         },
@@ -344,22 +347,27 @@ fn native_manifest(client: &RamfluxClient) -> TestResult<crate::prekey::SdkDevic
     let identity = client.owned_device_identity()?;
     let branch = client.device_branch.as_ref().ok_or("certified branch")?;
     let account = client.born_v3_account.as_ref().ok_or("native account")?;
+    let publication = account.publication();
+    let device_ref = DeviceRef {
+        account_anchor: identity.root_commitment().into(),
+        device_id: identity.device_id().into(),
+        device_epoch: branch.device_epoch,
+    };
     let manifest = crate::prekey::SdkDeviceManifestResponse::from_native(CustodyManifest {
-        publication: account.publication(),
         custodian_publication: account.custodian_publication(
             client.account_index()?.root(),
             crate::custody::network_now()?,
         )?,
         devices: vec![CustodyManifestDevice {
-            device_ref: DeviceRef {
-                account_anchor: identity.root_commitment().into(),
-                device_id: identity.device_id().into(),
-                device_epoch: branch.device_epoch,
-            },
+            message_layer: crate::custody::layer_declaration::endorsed_for(
+                &publication.record,
+                &device_ref,
+            ),
+            device_ref,
             target_delivery_id: identity.storage_key().into(),
             prekey_bundle: serde_json::to_value(client.load_x3dh_private_state(&identity)?.bundle)?,
-            message_layer: None,
         }],
+        publication,
     })?;
     client.persist_observed_identity_directory_now(&manifest)?;
     Ok(manifest)
