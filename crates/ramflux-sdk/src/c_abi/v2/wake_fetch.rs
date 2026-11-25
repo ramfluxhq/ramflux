@@ -46,7 +46,7 @@ impl Decode for Config {
 /// (always `[]`) and `receipts_sent` (always `"0"`). Fetched means the whole page is durably
 /// applied and the notification candidates were consumed exactly once in this call; show is
 /// true only for a newly applied visible incoming message that is still unread and unmuted.
-/// Busy, locked and deadline return show and unread_total null and clears empty. A deadline
+/// Busy, locked and deadline return show and `unread_total` null and clears empty. A deadline
 /// or error may follow partial durable progress; the caller must invoke again.
 /// Entries use ordinary fenced receive policy: terminal application/refusal or durable hold.
 /// Only committed terminal intents are acknowledged; uncertain ACKs remain durable for replay.

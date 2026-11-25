@@ -40,7 +40,7 @@ impl Wire {
         }
     }
 
-    fn fetched(decision: notification::Decision) -> Self {
+    fn fetched(decision: &notification::Decision) -> Self {
         Self {
             outcome: "fetched",
             show: Some(decision.show),
@@ -94,7 +94,7 @@ pub(crate) fn run(
         {
             Err(_) => Ok(Wire::unknown("deadline")),
             Ok(Err(error)) => classify(error),
-            Ok(Ok(decision)) => Ok(Wire::fetched(decision)),
+            Ok(Ok(decision)) => Ok(Wire::fetched(&decision)),
         }
     });
     // Join custody's blocking jobs before releasing ownership, including on timeout.
