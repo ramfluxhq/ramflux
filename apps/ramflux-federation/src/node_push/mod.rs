@@ -73,8 +73,7 @@ pub(crate) fn start(discovery: &FederationDiscoverySurface, seed: [u8; 32]) -> R
                 node_key,
                 key_gen,
                 push.state_file.clone(),
-                endpoint,
-                (centre, server_name),
+                (endpoint, centre, server_name),
             ) {
                 Ok(shared) => Arc::new(shared),
                 Err(error) => {

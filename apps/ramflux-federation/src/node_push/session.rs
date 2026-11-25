@@ -62,10 +62,9 @@ impl PushShared {
         node_key: String,
         key_gen: u64,
         state_path: std::path::PathBuf,
-        endpoint: quinn::Endpoint,
-        target: (SocketAddr, String),
+        link: (quinn::Endpoint, SocketAddr, String),
     ) -> Result<Self, String> {
-        let (centre, server_name) = target;
+        let (endpoint, centre, server_name) = link;
         let state = read_push_central_state(&state_path)
             .map_err(|error| format!("push state: {error}"))?
             .unwrap_or_else(|| PushCentralState {
@@ -108,10 +107,10 @@ impl PushShared {
     }
 
     fn is_stopped(&self) -> bool {
-        self.stopped_until
-            .lock()
-            .map(|until| until.is_some_and(|instant| instant > Instant::now()))
-            .unwrap_or(false)
+        match self.stopped_until.lock() {
+            Ok(until) => until.is_some_and(|instant| instant > Instant::now()),
+            Err(_) => false,
+        }
     }
 
     fn stop_for(&self, wait: Duration) {
@@ -289,7 +288,10 @@ pub(crate) async fn sync_once(shared: &PushShared) -> Duration {
                 if let Ok(mut until) = shared.stopped_until.lock() {
                     *until = None;
                 }
-                let sync_s = shared.sync_s.lock().map(|value| *value).unwrap_or(DEFAULT_SYNC_S);
+                let sync_s = match shared.sync_s.lock() {
+                    Ok(value) => *value,
+                    Err(_) => DEFAULT_SYNC_S,
+                };
                 Duration::from_secs(sync_s)
             } else {
                 refusal_wait(shared, &reply)
