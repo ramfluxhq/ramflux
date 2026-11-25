@@ -13,6 +13,20 @@ const MAX_LEASE_LIFETIME: u64 = 4 * 60 * 60;
 const BYTES_PER_SECOND: usize = 128 * 1024;
 const UNPINNED_BYTES_PER_SECOND: usize = 4 * 1024;
 const MIN_REBIND_CHALLENGE_DATAGRAM_BYTES: usize = 60;
+/// Per call and per side: the video track (RTP PT112 media, PT113 feedback) has its own budget.
+pub const VIDEO_BYTES_PER_SECOND: usize = 256 * 1024;
+pub const VIDEO_PACKETS_PER_SECOND: usize = 340;
+const VIDEO_MEDIA_PAYLOAD_TYPE: u8 = 112;
+const VIDEO_FEEDBACK_PAYLOAD_TYPE: u8 = 113;
+
+/// Relay-wide counters of the video budget (admitted and refused PT112/PT113 datagrams).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VideoQuotaCounters {
+    pub admitted_packets: u64,
+    pub admitted_bytes: u64,
+    pub refused_packets: u64,
+    pub refused_bytes: u64,
+}
 fn refused(message: &str) -> NodeCoreError {
     NodeCoreError::Unauthorized(message.into())
 }
@@ -24,6 +38,9 @@ struct Side {
     bytes: usize,
     unpinned_second: u64,
     unpinned_bytes: usize,
+    video_second: u64,
+    video_bytes: usize,
+    video_packets: usize,
     challenge: Option<rebinding::Challenge>,
 }
 struct Lease {
@@ -40,6 +57,7 @@ pub struct VoiceRelayState {
     leases: BTreeMap<(String, String), Lease>,
     tokens: BTreeMap<String, ((String, String), usize)>,
     usage: quota::Usage,
+    video: VideoQuotaCounters,
 }
 impl VoiceRelayState {
     /// Allocates or recovers an exact scope owned by the authenticated node.
@@ -252,7 +270,16 @@ impl VoiceRelayState {
             challenge_allowed: packet.len() >= MIN_REBIND_CHALLENGE_DATAGRAM_BYTES,
         };
         let authenticated_rebind = rebinding::authenticates_pending(side, admission);
-        if pinned {
+        let video = is_video_payload(payload);
+        if pinned && video {
+            if let Err(error) = charge_video(side, now, packet.len()) {
+                self.video.refused_packets += 1;
+                self.video.refused_bytes += u64::try_from(packet.len()).unwrap_or(u64::MAX);
+                return Err(error);
+            }
+            self.video.admitted_packets += 1;
+            self.video.admitted_bytes += u64::try_from(packet.len()).unwrap_or(u64::MAX);
+        } else if pinned {
             charge_window(
                 &mut side.second,
                 &mut side.bytes,
@@ -285,6 +312,12 @@ impl VoiceRelayState {
         }
         Ok(VoiceRoute::Forward { target, packet: payload })
     }
+    /// Relay-wide video quota counters (admitted and refused PT112/PT113 datagrams).
+    #[must_use]
+    pub fn video_counters(&self) -> VideoQuotaCounters {
+        self.video
+    }
+
     fn account_usage(&self, account: &CallEndpoint) -> usize {
         self.usage.count(account)
     }
@@ -315,6 +348,9 @@ fn new_side(now: u64) -> Result<Side, NodeCoreError> {
         bytes: 0,
         unpinned_second: now,
         unpinned_bytes: 0,
+        video_second: now,
+        video_bytes: 0,
+        video_packets: 0,
         challenge: None,
     })
 }
@@ -337,6 +373,33 @@ fn charge_window(
     *bytes = next;
     Ok(())
 }
+/// RTP version 2 with payload type 112 (video) or 113 (feedback).
+fn is_video_payload(payload: &[u8]) -> bool {
+    let (Some(first), Some(second)) = (payload.first(), payload.get(1)) else {
+        return false;
+    };
+    payload.len() >= 12
+        && first >> 6 == 2
+        && matches!(second & 0x7f, VIDEO_MEDIA_PAYLOAD_TYPE | VIDEO_FEEDBACK_PAYLOAD_TYPE)
+}
+
+/// One video datagram against the side's per-second packet and byte budget.
+fn charge_video(side: &mut Side, now: u64, packet_bytes: usize) -> Result<(), NodeCoreError> {
+    if now != side.video_second {
+        side.video_second = now;
+        side.video_bytes = 0;
+        side.video_packets = 0;
+    }
+    let packets = side.video_packets.saturating_add(1);
+    let bytes = side.video_bytes.saturating_add(packet_bytes);
+    if packets > VIDEO_PACKETS_PER_SECOND || bytes > VIDEO_BYTES_PER_SECOND {
+        return Err(refused("voice video quota exhausted"));
+    }
+    side.video_packets = packets;
+    side.video_bytes = bytes;
+    Ok(())
+}
+
 fn allocation(l: &Lease, endpoint: &str, side: usize) -> VoiceAllocation {
     VoiceAllocation {
         lease_id: l.id.clone(),
