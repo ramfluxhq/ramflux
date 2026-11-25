@@ -155,7 +155,7 @@ fn samples() -> Result<Vec<Control>, SdkError> {
     ])
 }
 
-/// CONTROL_OWN_LAYER_RENEWAL (18, tag 34): the registry grew by one operation in RFCORE-139.
+/// `CONTROL_OWN_LAYER_RENEWAL` (18, tag 34): the registry grew by one operation in RFCORE-139.
 fn own_layer_renewal() -> Result<Control, SdkError> {
     control_from_payload(control::Payload::OwnLayerRenewal(
         ramflux_protocol::message::OwnLayerRenewal {
