@@ -134,6 +134,13 @@ fn validate_call_action(
     match action {
         Some(g::call_action::Value::Invite(invite)) => require_key(&invite.base_key, "invite"),
         Some(g::call_action::Value::Answer(answer)) => require_key(&answer.base_key, "answer"),
+        Some(g::call_action::Value::VideoTrack(track)) => {
+            if track.base_key.is_empty() {
+                Ok(())
+            } else {
+                require_key(&track.base_key, "video track")
+            }
+        }
         Some(g::call_action::Value::Ready(ready)) => {
             let Some(consent) = ready.consent.as_ref() else {
                 return Err(refused("call ready requires voice lease consent"));

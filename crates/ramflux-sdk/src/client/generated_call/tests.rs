@@ -77,9 +77,12 @@ fn round_trip(action: call_action::Value, event_id: &[u8]) -> TestResult {
 #[test]
 fn all_thirteen_call_actions_and_native_lease_fields_round_trip() -> TestResult {
     let actions = vec![
-        call_action::Value::Invite(CallActionInvite { base_key: "k0".into() }),
+        call_action::Value::Invite(CallActionInvite { base_key: "k0".into(), video_offer: None }),
         call_action::Value::Ringing(CallActionRinging {}),
-        call_action::Value::Answer(CallActionAnswer { base_key: "k1".into() }),
+        call_action::Value::Answer(CallActionAnswer {
+            base_key: "k1".into(),
+            video_selection: None,
+        }),
         call_action::Value::Ack(CallActionAck {
             allocation: Some(VoicePeerAllocation {
                 lease_id: "lease-1".into(),
@@ -105,7 +108,10 @@ fn all_thirteen_call_actions_and_native_lease_fields_round_trip() -> TestResult 
     RamfluxClient::validate_generated_voice_lease(&lease(), "call-1")?;
     assert!(RamfluxClient::validate_generated_voice_lease(&lease(), "other").is_err());
 
-    let signed = control(call_action::Value::Invite(CallActionInvite { base_key: "k0".into() }));
+    let signed = control(call_action::Value::Invite(CallActionInvite {
+        base_key: "k0".into(),
+        video_offer: None,
+    }));
     RamfluxClient::authorize_generated_call_action_signer("alice", &signed)?;
     let mut forged = signed.clone();
     forged.signature.clear();

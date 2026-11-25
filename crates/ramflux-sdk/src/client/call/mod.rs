@@ -8,6 +8,7 @@ pub(crate) mod intent;
 mod lease;
 pub(crate) mod media_owner;
 pub(crate) mod state;
+pub(crate) mod video_signaling;
 
 pub use handoff::InProcessMediaReceipt;
 pub use media_owner::InProcessMediaStatus;

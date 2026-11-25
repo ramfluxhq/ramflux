@@ -127,7 +127,8 @@ fn caller_action(control: &CallControl) -> Option<CallIntentAction> {
         | CallAction::Ack { .. }
         | CallAction::Ready { .. }
         | CallAction::Rekey { .. }
-        | CallAction::RekeyAck { .. } => None,
+        | CallAction::RekeyAck { .. }
+        | CallAction::VideoTrack { .. } => None,
     }
 }
 
@@ -224,7 +225,8 @@ fn cancel_slot(action: &CallAction) -> Option<&'static str> {
         | CallAction::Ack { .. }
         | CallAction::Ready { .. }
         | CallAction::Rekey { .. }
-        | CallAction::RekeyAck { .. } => None,
+        | CallAction::RekeyAck { .. }
+        | CallAction::VideoTrack { .. } => None,
     }
 }
 

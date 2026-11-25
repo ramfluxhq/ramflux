@@ -112,13 +112,70 @@ fn decode_start(bytes: &[u8]) -> Result<n::SignedCallIntentV1, SdkError> {
     Ok(n::parse_signed_call_intent_v1(bytes)?)
 }
 
+fn offer(value: &n::VideoOffer) -> g::CallVideoOffer {
+    g::CallVideoOffer {
+        version: value.version,
+        codec: value.codec.clone(),
+        profile: value.profile.clone(),
+        max_rung: value.max_rung,
+        packet_format: value.packet_format,
+        receive_enabled: value.receive_enabled,
+    }
+}
+fn native_offer(value: g::CallVideoOffer) -> n::VideoOffer {
+    n::VideoOffer {
+        version: value.version,
+        codec: value.codec,
+        profile: value.profile,
+        max_rung: value.max_rung,
+        packet_format: value.packet_format,
+        receive_enabled: value.receive_enabled,
+    }
+}
+fn selection(value: &n::VideoSelection) -> g::CallVideoSelection {
+    g::CallVideoSelection {
+        version: value.version,
+        accepted: value.accepted,
+        codec: value.codec.clone(),
+        profile: value.profile.clone(),
+        max_rung: value.max_rung,
+        packet_format: value.packet_format,
+        receive_enabled: value.receive_enabled,
+    }
+}
+fn native_selection(value: g::CallVideoSelection) -> n::VideoSelection {
+    n::VideoSelection {
+        version: value.version,
+        accepted: value.accepted,
+        codec: value.codec,
+        profile: value.profile,
+        max_rung: value.max_rung,
+        packet_format: value.packet_format,
+        receive_enabled: value.receive_enabled,
+    }
+}
+
 fn action(value: &n::CallAction) -> g::call_action::Value {
     use g::call_action::Value as G;
     use n::CallAction as N;
     match value {
-        N::Invite { base_key } => G::Invite(g::CallActionInvite { base_key: base_key.clone() }),
+        N::Invite { base_key, video_offer } => G::Invite(g::CallActionInvite {
+            base_key: base_key.clone(),
+            video_offer: video_offer.as_ref().map(offer),
+        }),
         N::Ringing => G::Ringing(g::CallActionRinging {}),
-        N::Answer { base_key } => G::Answer(g::CallActionAnswer { base_key: base_key.clone() }),
+        N::Answer { base_key, video_selection } => G::Answer(g::CallActionAnswer {
+            base_key: base_key.clone(),
+            video_selection: video_selection.as_ref().map(selection),
+        }),
+        N::VideoTrack { revision, enabled, max_rung, base_key } => {
+            G::VideoTrack(g::CallActionVideoTrack {
+                revision: *revision,
+                enabled: *enabled,
+                max_rung: *max_rung,
+                base_key: base_key.clone().unwrap_or_default(),
+            })
+        }
         N::Ack { allocation } => G::Ack(g::CallActionAck {
             allocation: Some(g::VoicePeerAllocation {
                 lease_id: allocation.lease_id.clone(),
@@ -150,9 +207,20 @@ fn native_action(value: g::call_action::Value) -> Result<n::CallAction, SdkError
     use g::call_action::Value as G;
     use n::CallAction as N;
     Ok(match value {
-        G::Invite(value) => N::Invite { base_key: value.base_key },
+        G::Invite(value) => {
+            N::Invite { base_key: value.base_key, video_offer: value.video_offer.map(native_offer) }
+        }
         G::Ringing(_) => N::Ringing,
-        G::Answer(value) => N::Answer { base_key: value.base_key },
+        G::Answer(value) => N::Answer {
+            base_key: value.base_key,
+            video_selection: value.video_selection.map(native_selection),
+        },
+        G::VideoTrack(value) => N::VideoTrack {
+            revision: value.revision,
+            enabled: value.enabled,
+            max_rung: value.max_rung,
+            base_key: (!value.base_key.is_empty()).then_some(value.base_key),
+        },
         G::Ack(value) => {
             let allocation = value.allocation.ok_or_else(|| refused("voice allocation missing"))?;
             N::Ack {
