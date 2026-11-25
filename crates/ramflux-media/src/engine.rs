@@ -138,6 +138,11 @@ pub struct EngineStats {
     pub video_dropped: u64,
     /// Video feedback reports accepted (PT113).
     pub video_feedback: u64,
+    /// The target video bitrate of the rate controller, bits per second (0 without video).
+    pub video_target_bps: u32,
+    /// The highest keyframe revision the peer asked of this side's video
+    /// (increasing; the host answers it with an IDR and [`Engine::keyframe_applied`]).
+    pub keyframe_request_revision: u32,
     /// Video datagrams sent.
     pub video_sent: u64,
     /// Video access units dropped before sending (queue full, or waiting for a keyframe).
@@ -272,6 +277,7 @@ impl Engine {
             rebinder,
             jitter: jitter.clone(),
             video: video.clone(),
+            video_out: video_out.clone(),
             control: control.clone(),
             authorization: authorization.clone(),
             stop: stop.clone(),
@@ -367,8 +373,16 @@ impl Engine {
     pub fn submit_video(&self, au: &AccessUnit) -> Result<Submitted, PipelineError> {
         let out = self.video_out.as_ref().ok_or(PipelineError::VideoNotNegotiated)?;
         let outcome = if self.authorization.lock().admitted_video() {
-            lock_control(&self.control).note_outbound_revision(au.track_revision);
-            lock_sender(out).submit(au, Instant::now())?
+            let paused = {
+                let mut control = lock_control(&self.control);
+                control.note_outbound_revision(au.track_revision);
+                control.paused()
+            };
+            if paused {
+                Submitted { queued: false, dropped: 1 }
+            } else {
+                lock_sender(out).submit(au, Instant::now())?
+            }
         } else {
             Submitted { queued: false, dropped: 1 }
         };
@@ -427,8 +441,16 @@ impl Engine {
 
     /// The counters so far.
     pub fn stats(&self) -> EngineStats {
+        let (video_target_bps, keyframe_request_revision) = {
+            let control = lock_control(&self.control);
+            (control.target_bps(), control.peer_request())
+        };
         let shared = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut stats = shared.stats;
+        if self.video_out.is_some() {
+            stats.video_target_bps = video_target_bps;
+        }
+        stats.keyframe_request_revision = keyframe_request_revision;
         stats.since_last_packet_ms = shared
             .last_packet
             .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX));
@@ -602,10 +624,18 @@ impl SendLoop {
         if !gate.admitted_video() {
             return;
         }
-        let report = lock_control(&self.control).report_due(Instant::now());
+        let now = Instant::now();
+        let (report, paused) = {
+            let mut control = lock_control(&self.control);
+            control.tick(now);
+            (control.report_due(now), control.paused())
+        };
         let mut sender = lock_sender(video);
         if let Some(report) = report {
             sender.queue_feedback(&report);
+        }
+        if paused {
+            return;
         }
         for _ in 0..MAX_DATAGRAMS_PER_TURN {
             match sender.next_datagram(Instant::now()) {
@@ -635,6 +665,7 @@ struct ReceiveLoop {
     rebinder: Rebinder,
     jitter: Arc<Mutex<JitterBuffer>>,
     video: Arc<Mutex<Reassembler>>,
+    video_out: Option<Arc<Mutex<VideoSender>>>,
     control: Arc<Mutex<VideoControl>>,
     authorization: Arc<Authorization>,
     stop: Arc<AtomicBool>,
@@ -675,7 +706,8 @@ impl ReceiveLoop {
                 continue;
             }
             if feedback {
-                receive_feedback(&mut self.inbound, &self.control, &self.shared, datagram);
+                let out = self.video_out.as_deref();
+                receive_feedback(&mut self.inbound, out, &self.control, &self.shared, datagram);
                 continue;
             }
             if Rebinder::is_challenge(datagram) {
@@ -751,13 +783,16 @@ fn receive_video(
 /// Runs under the video gate the caller holds.
 fn receive_feedback(
     inbound: &mut Inbound,
+    out: Option<&Mutex<VideoSender>>,
     control: &Mutex<VideoControl>,
     shared: &Mutex<Shared>,
     datagram: &[u8],
 ) {
     match inbound.open_feedback(datagram) {
         Ok(report) => {
-            let outcome = lock_control(control).on_feedback(report);
+            let now = Instant::now();
+            let queue_ms = out.map_or(0, |out| lock_sender(out).queue_age_ms(now));
+            let outcome = lock_control(control).on_feedback(report, now, queue_ms);
             let mut stats = lock(shared);
             match outcome {
                 Ok(()) => stats.stats.video_feedback += 1,

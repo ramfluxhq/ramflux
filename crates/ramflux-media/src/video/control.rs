@@ -15,9 +15,12 @@ use std::time::{Duration, Instant};
 
 use super::feedback::{Error as FeedbackError, Feedback, FeedbackState, KeyframeRequests};
 use super::packet::FragmentHeader;
+use super::rate::{Mode, RateController, Rung, Sample};
 
 /// Spacing of reports while video flows (or a keyframe request is pending).
 pub const REPORT_INTERVAL: Duration = Duration::from_millis(200);
+/// Highest rung until a negotiated maximum exists (V0: 720p30).
+const DEFAULT_MAX_RUNG: Rung = Rung::High;
 
 /// Counters of the peer's video as this side receives it.
 #[derive(Debug, Default)]
@@ -68,6 +71,7 @@ impl Inbound {
 /// The video control state of one call.
 #[derive(Debug)]
 pub struct VideoControl {
+    rate: RateController,
     inbound: Inbound,
     report_seq: u64,
     last_report: Option<Instant>,
@@ -84,11 +88,29 @@ impl Default for VideoControl {
     }
 }
 
+/// The loss, delay trend and queue of one accepted report, relative to the
+/// previous accepted one (cumulative counters become a window).
+fn sample_between(previous: Option<&Feedback>, report: &Feedback, queue_ms: u32) -> Sample {
+    let (received_before, missing_before, delay_before) =
+        previous.map_or((0, 0, 0), |p| (p.received_packets, p.missing_packets, p.delay_delta_us));
+    let received = report.received_packets.saturating_sub(received_before);
+    let missing = report.missing_packets.saturating_sub(missing_before);
+    let expected = received.saturating_add(missing);
+    let loss_per_mille = if expected == 0 {
+        0
+    } else {
+        u32::try_from(missing.saturating_mul(1000) / expected).unwrap_or(1000)
+    };
+    let delay_growth_us = i64::from(report.delay_delta_us) - i64::from(delay_before);
+    Sample { loss_per_mille, delay_growth_us, queue_ms }
+}
+
 impl VideoControl {
     /// A fresh control state (no reports, no requests).
     #[must_use]
     pub fn new() -> Self {
         Self {
+            rate: RateController::new(DEFAULT_MAX_RUNG),
             inbound: Inbound::default(),
             report_seq: 0,
             last_report: None,
@@ -120,19 +142,46 @@ impl VideoControl {
     }
 
     /// Accepts a report about this side's outgoing video. A stale or foreign
-    /// report is refused and changes nothing. A feedback grants no authority:
-    /// it only records the peer's acknowledgement and keyframe request.
+    /// report is refused and changes nothing. An accepted report feeds the
+    /// rate controller (`queue_ms` is this side's current send queue age) and
+    /// records the peer's acknowledgement and keyframe request. Feedback
+    /// grants no authority.
     ///
     /// # Errors
     ///
     /// The refusal of [`FeedbackState::accept`].
-    pub fn on_feedback(&mut self, report: Feedback) -> Result<(), FeedbackError> {
+    pub fn on_feedback(
+        &mut self,
+        report: Feedback,
+        now: Instant,
+        queue_ms: u32,
+    ) -> Result<(), FeedbackError> {
+        let sample = sample_between(self.outbound.last(), &report, queue_ms);
         self.outbound.accept(report)?;
+        self.rate.on_report(now, sample);
         // A revision never requested (or regressing) is ignored; the report
         // itself was accepted.
         let _ = self.requests.acknowledge(report.keyframe_ack_revision);
         self.peer_request = self.peer_request.max(report.keyframe_request_revision);
         Ok(())
+    }
+
+    /// Runs the rate rules when a tick is due (the engine calls this each turn).
+    pub fn tick(&mut self, now: Instant) {
+        self.rate.tick(now);
+    }
+
+    /// The current target video bitrate, bits per second.
+    #[must_use]
+    pub fn target_bps(&self) -> u32 {
+        self.rate.target_bps()
+    }
+
+    /// Whether video is paused by the rate rules (stale feedback or a starved
+    /// Low rung). Cleared only by a fresh video activation.
+    #[must_use]
+    pub fn paused(&self) -> bool {
+        self.rate.mode() == Mode::Paused
     }
 
     /// Asks the peer for a keyframe; several asks coalesce into one revision.
