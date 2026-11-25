@@ -17,6 +17,8 @@ use crate::prelude::*;
 pub const GATEWAY_PUSH_ROUTE_PATH: &str = "/notify/v1/push-route";
 /// Gateway path the deregistration request is signed for.
 pub const GATEWAY_PUSH_ROUTE_DELETE_PATH: &str = "/notify/v1/push-route/delete";
+/// Signed path of the own-device push test (`device.push_route.test`).
+pub const GATEWAY_PUSH_ROUTE_TEST_PATH: &str = "/notify/v1/push-route/test";
 /// Re-register once less than this much node-assigned route lifetime remains.
 pub const GATEWAY_PUSH_ROUTE_RENEW_BEFORE_SECONDS: u64 = 15 * 86_400;
 
@@ -88,6 +90,30 @@ impl std::fmt::Debug for GatewayPushRouteRegistration {
             .field("provider", &self.provider)
             .finish_non_exhaustive()
     }
+}
+
+/// Own-device push test request. The target is always the calling device.
+#[derive(Clone, Debug, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayPushRouteTestRequest {
+    /// `alert` (default) or `voip`; `voip` is refused by the node for now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+}
+
+/// Signed session frame of the push test.
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GatewayPushRouteTestFrame {
+    pub signed_request: ramflux_protocol::SignedRequest,
+    pub body: GatewayPushRouteTestRequest,
+}
+
+/// Node answer of the push test: `queued` means accepted into the wake queue, not delivered.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GatewayPushRouteTestAnswer {
+    pub status: String,
+    pub reason: Option<String>,
+    pub retry_after_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
@@ -474,6 +500,83 @@ impl GatewaySessionEngine {
 
     /// Reads frames until the answer to `request_id`, buffering deliveries meanwhile. Any other
     /// unrelated push is dispatched immediately; a drain or close ends the wait.
+    /// Sends the own-device push test and waits for its answer by request id.
+    /// # Errors
+    /// Returns transport, signing or session-ending errors; refusals are answers.
+    pub async fn test_push_route(
+        &mut self,
+        class: Option<String>,
+    ) -> Result<GatewayPushRouteTestAnswer, SdkError> {
+        let body = GatewayPushRouteTestRequest { class };
+        let signed_request = self.session_bound_request(GATEWAY_PUSH_ROUTE_TEST_PATH, &body)?;
+        let request_id = signed_request.request_id.clone();
+        self.write_push_route_frame(GatewayClientFrame::PushRouteTest {
+            request: Box::new(GatewayPushRouteTestFrame { signed_request, body }),
+        })
+        .await?;
+        match tokio::time::timeout(
+            PUSH_ROUTE_REPLY_TIMEOUT,
+            self.await_push_test_reply(&request_id),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                self.terminal_reason =
+                    Some(crate::bus::connection_manager::DisconnectReason::CallTimeout);
+                Err(SdkError::GatewaySessionRejected(
+                    "push test answer pending; retry on the next session".into(),
+                ))
+            }
+        }
+    }
+
+    async fn await_push_test_reply(
+        &mut self,
+        request_id: &str,
+    ) -> Result<GatewayPushRouteTestAnswer, SdkError> {
+        loop {
+            let frame = self.read_stream_frame("push test answer").await?;
+            if let GatewayServerFrame::PushRouteTested {
+                request_id: id,
+                status,
+                reason,
+                retry_after_ms,
+            } = &frame
+            {
+                if id == request_id {
+                    return Ok(GatewayPushRouteTestAnswer {
+                        status: status.clone(),
+                        reason: reason.clone(),
+                        retry_after_ms: *retry_after_ms,
+                    });
+                }
+            }
+            if let GatewayServerFrame::Nack { reason } = &frame {
+                return Err(SdkError::GatewaySessionRejected(reason.clone()));
+            }
+            let terminal = matches!(
+                frame,
+                GatewayServerFrame::Drain { .. } | GatewayServerFrame::Close { .. }
+            );
+            if terminal {
+                self.terminal_reason = Some(if matches!(frame, GatewayServerFrame::Drain { .. }) {
+                    crate::bus::connection_manager::DisconnectReason::Drain
+                } else {
+                    crate::bus::connection_manager::DisconnectReason::Close
+                });
+                self.deferred_frames.push_back(frame);
+                return Err(SdkError::GatewaySessionRejected("gateway session is ending".into()));
+            }
+            if self.deferred_frames.len() >= 64 {
+                return Err(SdkError::GatewaySessionRejected(
+                    "too many unrelated push route frames".into(),
+                ));
+            }
+            self.deferred_frames.push_back(frame);
+        }
+    }
+
     async fn await_push_reply(&mut self, request_id: &str) -> Result<Option<u64>, SdkError> {
         loop {
             let frame = self.read_stream_frame("push route answer").await?;
@@ -706,7 +809,8 @@ pub(super) fn push_route_reply_id(frame: &GatewayServerFrame) -> Option<&str> {
     match frame {
         GatewayServerFrame::PushRouteRegistered { request_id, .. } => request_id.as_deref(),
         GatewayServerFrame::PushRouteRefused { request_id, .. }
-        | GatewayServerFrame::PushRouteDeregistered { request_id, .. } => Some(request_id),
+        | GatewayServerFrame::PushRouteDeregistered { request_id, .. }
+        | GatewayServerFrame::PushRouteTested { request_id, .. } => Some(request_id),
         _ => None,
     }
 }

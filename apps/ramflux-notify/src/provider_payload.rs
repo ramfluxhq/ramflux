@@ -24,6 +24,8 @@ pub const WEB_ENCRYPTED_BODY_LIMIT: usize = 4096;
 
 const MESSAGE_LOC_KEY: &str = "RF_PUSH_MESSAGE";
 const CALL_LOC_KEY: &str = "RF_PUSH_CALL";
+/// Localization key of the push test alert (plain alert, priority 10, no sound change).
+const TEST_LOC_KEY: &str = "RF_PUSH_TEST";
 const ALERT_SOUND: &str = "default";
 const CALL_INTERRUPTION_LEVEL: &str = "time-sensitive";
 const LOC_ARGS_NONE: &[&str] = &[];
@@ -108,6 +110,7 @@ pub struct ProviderRequestParts {
 pub const fn provider_class_for_internal(class: &NotificationDeliveryClass) -> WakeClass {
     match *class {
         NotificationDeliveryClass::CallWakeNotification => WakeClass::CallWake,
+        NotificationDeliveryClass::PushTestNotification => WakeClass::Test,
         NotificationDeliveryClass::SelfDeviceControlNotification
         | NotificationDeliveryClass::UserContentNotification
         | NotificationDeliveryClass::AiTaskNotification
@@ -126,7 +129,7 @@ pub const fn select_apns_mode(
 ) -> ProviderWireMode {
     match class {
         WakeClass::CallWake if voip_route_available && voip_enabled => ProviderWireMode::ApnsVoip,
-        WakeClass::CallWake | WakeClass::Message => ProviderWireMode::ApnsAlert,
+        WakeClass::CallWake | WakeClass::Message | WakeClass::Test => ProviderWireMode::ApnsAlert,
     }
 }
 
@@ -207,6 +210,7 @@ fn class_name(class: WakeClass) -> &'static str {
     match class {
         WakeClass::Message => "message",
         WakeClass::CallWake => "call_wake",
+        WakeClass::Test => "test",
     }
 }
 
@@ -242,6 +246,8 @@ fn collapse_for_class(
         (WakeClass::Message, None) => Err(ProviderBuildError::MissingCollapseKey),
         (WakeClass::CallWake, None) => Ok(None),
         (WakeClass::CallWake, Some(_)) => Err(ProviderBuildError::UnexpectedCollapseKey),
+        (WakeClass::Test, None) => Ok(None),
+        (WakeClass::Test, Some(_)) => Err(ProviderBuildError::UnexpectedCollapseKey),
     }
 }
 
@@ -291,7 +297,7 @@ fn apns_alert_body(
 ) -> Result<Vec<u8>, ProviderBuildError> {
     let interruption_level = match class {
         WakeClass::CallWake => Some(CALL_INTERRUPTION_LEVEL),
-        WakeClass::Message => None,
+        WakeClass::Message | WakeClass::Test => None,
     };
     serde_json::to_vec(&ApnsAlertBody {
         aps: ApnsAlertAps {
@@ -309,6 +315,7 @@ fn alert_loc_key(class: WakeClass) -> &'static str {
     match class {
         WakeClass::Message => MESSAGE_LOC_KEY,
         WakeClass::CallWake => CALL_LOC_KEY,
+        WakeClass::Test => TEST_LOC_KEY,
     }
 }
 
@@ -316,6 +323,7 @@ fn rf_code(class: WakeClass) -> &'static str {
     match class {
         WakeClass::Message => "m",
         WakeClass::CallWake => "call",
+        WakeClass::Test => "t",
     }
 }
 

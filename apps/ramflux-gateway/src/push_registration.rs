@@ -236,7 +236,7 @@ enum Answer {
     Refused(PushRouteRefusal),
 }
 
-async fn bind_session<T: serde::Serialize>(
+pub(crate) async fn bind_session<T: serde::Serialize>(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     path: &str,
@@ -273,7 +273,7 @@ fn refused(request_id: String, code: PushRouteRefusal) -> GatewayServerFrame {
     }
 }
 
-async fn reply_or_log(send: &GatewaySendHandle, frame: &GatewayServerFrame) {
+pub(crate) async fn reply_or_log(send: &GatewaySendHandle, frame: &GatewayServerFrame) {
     let mut send = send.lock().await;
     if let Err(error) = ramflux_transport::write_gateway_session_json(&mut **send, frame).await {
         tracing::debug!(%error, "push route reply not delivered; session closed");
@@ -281,7 +281,7 @@ async fn reply_or_log(send: &GatewaySendHandle, frame: &GatewayServerFrame) {
 }
 
 /// Current router authority for exactly this session's device; revoked records are refused.
-async fn session_authority(
+pub(crate) async fn session_authority(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
 ) -> anyhow::Result<Option<ramflux_node_core::DeviceAuthKeyResponse>> {
@@ -363,7 +363,7 @@ async fn deregister(
 }
 
 /// Async mesh request: dropping it at the control bound cancels the exchange.
-async fn post_notify<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+pub(crate) async fn post_notify<T: serde::Serialize, R: serde::de::DeserializeOwned>(
     context: &GatewayQuicContext,
     path: &str,
     control: &T,

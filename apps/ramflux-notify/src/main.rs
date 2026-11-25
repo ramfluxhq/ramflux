@@ -636,6 +636,19 @@ fn handle_notify_mesh_quic_request(
                 })?,
             })
         }
+        ("POST", ramflux_node_core::PUSH_ROUTE_TEST_PATH) => {
+            let body: S13WakeRequest =
+                serde_json::from_value(request.body.clone()).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?;
+            let answer = push_test::handle(ingress, body)?;
+            Ok(ramflux_transport::GatewayQuicResponse {
+                status: 200,
+                body: serde_json::to_value(answer).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?,
+            })
+        }
         ("POST", "/s13/notify/wake") => {
             let mut body: S13WakeRequest =
                 serde_json::from_value(request.body.clone()).map_err(|source| {

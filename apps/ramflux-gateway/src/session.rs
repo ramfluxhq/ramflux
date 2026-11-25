@@ -1030,6 +1030,9 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
                     )
                     .await;
                 }
+                ramflux_node_core::GatewayClientFrame::PushRouteTest { request } => {
+                    crate::push_test::handle(&send, &context, &runtime, *request).await;
+                }
                 ramflux_node_core::GatewayClientFrame::PushRouteDeregister { request } => {
                     let queue = route_control.get_or_insert_with(|| {
                         crate::push_registration::RouteControlQueue::for_session(

@@ -33,6 +33,7 @@ mod pre_auth_transport_tests;
 mod principal_directory;
 mod push_queue;
 mod push_registration;
+mod push_test;
 mod quic_dispatch;
 #[cfg(test)]
 mod real_router_fixture;
