@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Where the operation stands. Transitions only move forward, except a retryable failure,
 /// which leaves the record Pending in its last durable phase.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SendPhase {
     /// Admitted and fingerprinted; no prepare has been claimed yet.
@@ -40,6 +40,10 @@ pub(crate) struct SendRecord {
     pub(crate) completed_at: Option<i64>,
     #[serde(default)]
     pub(crate) phase: SendPhase,
+    /// Set when a lock or suspend drain stopped the upload. A replay starts paused and uploads
+    /// nothing until the owner resumes it.
+    #[serde(default)]
+    pub(crate) paused: bool,
 }
 
 impl SendRecord {
@@ -51,7 +55,16 @@ impl SendRecord {
             completed: false,
             completed_at: None,
             phase: SendPhase::Reserved,
+            paused: false,
         }
+    }
+}
+
+/// Moves the record to `next` if that is forward progress. A replay that re-runs an earlier
+/// stage never rewinds the record.
+pub(crate) fn advance(record: &mut SendRecord, next: SendPhase) {
+    if next > record.phase {
+        record.phase = next;
     }
 }
 

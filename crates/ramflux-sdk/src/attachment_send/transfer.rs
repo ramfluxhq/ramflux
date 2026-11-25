@@ -6,7 +6,7 @@
 //! durable record is the encrypted account-DB ACK journal, from which the list derives the
 //! unique count of a pending send after a restart.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,14 +33,22 @@ struct Control {
     last_emit: Option<Instant>,
 }
 
-/// One row per upload that is running in this process.
+/// Pause intents that arrived before their worker registered (planning, sealing, the first
+/// journal load). Bounded: a pause for an admitted send is one entry per prepare.
+const MAX_PAUSE_INTENTS: usize = 256;
+
+/// One row per upload that is running in this process, plus the pauses waiting for one.
 struct Registry {
     running: Mutex<BTreeMap<Key, Control>>,
+    intents: Mutex<BTreeSet<Key>>,
     changed: Condvar,
 }
 
-static REGISTRY: Registry =
-    Registry { running: Mutex::new(BTreeMap::new()), changed: Condvar::new() };
+static REGISTRY: Registry = Registry {
+    running: Mutex::new(BTreeMap::new()),
+    intents: Mutex::new(BTreeSet::new()),
+    changed: Condvar::new(),
+};
 
 /// Holds one running entry; dropping it removes the entry and wakes any paused worker.
 pub(crate) struct Live(Key);
@@ -81,6 +89,8 @@ pub(crate) fn enter(account: &str, prepare_id: &str, total_bytes: u64) -> Result
     if running.contains_key(&id) {
         return Err(Refusal::new(CODE_UPLOAD_REJECTED));
     }
+    // A pause requested before this worker existed holds from its first slice.
+    let paused = REGISTRY.intents.lock().is_ok_and(|mut intents| intents.remove(&id));
     let revision = u64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -89,7 +99,7 @@ pub(crate) fn enter(account: &str, prepare_id: &str, total_bytes: u64) -> Result
     .unwrap_or(u64::MAX);
     running.insert(
         id.clone(),
-        Control { paused: false, total_bytes, unique_bytes: 0, revision, last_emit: None },
+        Control { paused, total_bytes, unique_bytes: 0, revision, last_emit: None },
     );
     Ok(Live(id))
 }
@@ -148,16 +158,28 @@ pub(crate) fn set_unique(account: &str, prepare_id: &str, bytes: u64) {
     }
 }
 
-/// Pauses or resumes a running upload. The worker stops before its next slice.
+/// Pauses or resumes an upload. The worker stops before its next slice. A pause for a prepare
+/// whose worker has not registered yet is kept as an intent and applied when it does.
 /// # Errors
-/// Returns `not_ready` when no upload of this prepare is running in this process.
+/// Returns `not_ready` when the prepare has no running upload and no pause is pending for it
+/// (a resume with nothing to resume, or too many pending pauses).
 pub(crate) fn set_paused(account: &str, prepare_id: &str, paused: bool) -> Result<(), Refusal> {
+    let id = key(account, prepare_id);
     let mut running = lock()?;
-    let control =
-        running.get_mut(&key(account, prepare_id)).ok_or_else(|| Refusal::new(CODE_NOT_READY))?;
-    control.paused = paused;
-    REGISTRY.changed.notify_all();
-    Ok(())
+    if let Some(control) = running.get_mut(&id) {
+        control.paused = paused;
+        REGISTRY.changed.notify_all();
+        return Ok(());
+    }
+    let mut intents = REGISTRY.intents.lock().map_err(|_| Refusal::new(CODE_CANCELLED))?;
+    if paused && intents.len() < MAX_PAUSE_INTENTS {
+        intents.insert(id);
+        return Ok(());
+    }
+    if !paused && intents.remove(&id) {
+        return Ok(());
+    }
+    Err(Refusal::new(CODE_NOT_READY))
 }
 
 /// Every running upload of one account, ordered by prepare id.

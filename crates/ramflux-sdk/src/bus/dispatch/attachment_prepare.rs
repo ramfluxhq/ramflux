@@ -32,6 +32,8 @@ pub(in crate::bus) struct PrepareSend<'a> {
     pub prepares: &'a [String],
     pub caption: &'a str,
     pub message_id: &'a str,
+    /// The conversation operation whose durable record carries the stage.
+    pub operation: &'a str,
     pub thread: &'a Value,
     pub principal: &'a str,
     pub account_id: &'a str,
@@ -79,6 +81,7 @@ pub(in crate::bus) async fn publish_prepares(
         prepares,
         caption,
         message_id,
+        operation,
         thread,
         principal,
         account_id,
@@ -140,6 +143,11 @@ pub(in crate::bus) async fn publish_prepares(
     if current.keys() != planned.keys() {
         remember_roster(&account.client, message_id, &current)?;
     }
+    super::conversation_send::record_phase(
+        &account.client,
+        operation,
+        crate::attachment_send::send_journal::SendPhase::Wrapping,
+    )?;
     let wrapped = blocking({
         let job = Arc::clone(&job);
         let targets = current.targets.clone();

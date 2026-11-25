@@ -87,24 +87,45 @@ pub(in crate::bus) async fn send_account(
         RamfluxClient::attachment_message_content(&intent.text, &intent.media)?
     } else {
         let ids: Vec<String> = intent.prepares.iter().map(|item| item.prepare_id.clone()).collect();
-        super::attachment_prepare::publish_prepares(
+        record_phase(&account.client, operation, send_journal::SendPhase::Preparing)?;
+        if take_paused(&account.client, operation)? {
+            // A drain paused this upload before a restart: it stays paused until the owner resumes.
+            for prepare in &ids {
+                crate::attachment_send::transfer::set_paused(account_id, prepare, true)?;
+            }
+        }
+        let outcome = super::attachment_prepare::publish_prepares(
             account,
             super::attachment_prepare::PrepareSend {
                 prepares: &ids,
                 caption: &intent.text,
                 message_id: &message_id,
+                operation,
                 thread: &thread,
                 principal: &principal,
                 account_id,
                 conversation_id: &intent.conversation_id,
             },
         )
-        .await?
+        .await;
+        match outcome {
+            Ok(content) => content,
+            Err(error) => {
+                // The first admission handed its upload to the worker: the stage is Uploading.
+                if account.attachment_send.upload.is_some() {
+                    record_phase(&account.client, operation, send_journal::SendPhase::Uploading)?;
+                }
+                return Err(error);
+            }
+        }
     };
     if !intent.prepares.is_empty() {
         let pin = crate::attachment_send::authority(&account.client)?;
         account.client.attachment_binding =
             Some(crate::attachment_send::Binding::of(account, &pin)?);
+    }
+    if !intent.prepares.is_empty() {
+        record_phase(&account.client, operation, send_journal::SendPhase::Delivering)?;
     }
     let sent = Box::pin(deliver(
         account,
@@ -384,6 +405,63 @@ fn complete_intent(client: &RamfluxClient, operation: &str) -> Result<(), SdkErr
         Ok(())
     })
 }
+/// Runs `change` on the durable record of `operation` in one transaction and stores the result.
+/// A completed record is final and is left as it is.
+fn update_record(
+    client: &RamfluxClient,
+    operation: &str,
+    change: impl FnOnce(&mut send_journal::SendRecord) -> Option<bool>,
+) -> Result<bool, SdkError> {
+    let db = client.account_db()?;
+    db.write_transaction(|| {
+        let key = send_journal::key(operation);
+        let mut record = db
+            .load_actor_state::<send_journal::SendRecord>(&key)?
+            .ok_or_else(|| invalid("operation receipt absent", "operation_receipt_absent"))?;
+        if record.completed {
+            return Ok(false);
+        }
+        let Some(previous) = change(&mut record) else { return Ok(false) };
+        db.persist_actor_state(&key, &record)?;
+        Ok(previous)
+    })
+}
+
+/// Records a forward phase transition before the work of that phase starts.
+pub(in crate::bus) fn record_phase(
+    client: &RamfluxClient,
+    operation: &str,
+    phase: send_journal::SendPhase,
+) -> Result<(), SdkError> {
+    update_record(client, operation, |record| {
+        send_journal::advance(record, phase);
+        Some(true)
+    })
+    .map(|_| ())
+}
+
+/// Persists whether a lock or suspend drain stopped this operation's upload.
+pub(in crate::bus) fn record_paused(
+    client: &RamfluxClient,
+    operation: &str,
+    paused: bool,
+) -> Result<(), SdkError> {
+    update_record(client, operation, |record| {
+        record.paused = paused;
+        Some(true)
+    })
+    .map(|_| ())
+}
+
+/// Reads and clears the persisted drain pause. The replay that follows starts paused.
+fn take_paused(client: &RamfluxClient, operation: &str) -> Result<bool, SdkError> {
+    update_record(client, operation, |record| {
+        let was = record.paused;
+        record.paused = false;
+        Some(was)
+    })
+}
+
 fn reserve_intent(client: &RamfluxClient, operation: &str, body: &Value) -> Result<(), SdkError> {
     let key = send_journal::key(operation);
     let canonical = zeroize::Zeroizing::new(ramflux_protocol::canonical_json_bytes(body)?);
@@ -479,6 +557,7 @@ mod retention_tests {
                 completed: false,
                 completed_at: None,
                 phase: Default::default(),
+                paused: false,
             },
         )?;
         super::super::conversation_journal::prune(&account.client, now)?;
@@ -496,6 +575,7 @@ mod retention_tests {
                         completed: false,
                         completed_at: None,
                         phase: Default::default(),
+                        paused: false,
                     },
                 )?;
             }
@@ -524,6 +604,7 @@ mod retention_tests {
                     completed: true,
                     completed_at: Some(completed_at),
                     phase: Default::default(),
+                    paused: false,
                 },
             )?;
         }

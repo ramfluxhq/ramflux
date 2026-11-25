@@ -153,6 +153,18 @@ impl AttachmentSends {
         if targets.is_empty() {
             return;
         }
+        // A lock or suspend drain is durable: a replay after restart starts paused.
+        if only.is_none()
+            && let Some(account) = account
+        {
+            for operation in &targets {
+                let _ = super::super::dispatch::conversation_send::record_paused(
+                    &account.client,
+                    operation,
+                    true,
+                );
+            }
+        }
         let deadline = Instant::now() + DRAIN_DEADLINE;
         while targets.iter().any(|operation| self.parked.contains_key(operation)) {
             for operation in &targets {
