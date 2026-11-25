@@ -84,6 +84,7 @@ pub(crate) async fn exchange(
     )
     .await?;
     if state(&current)?.policy.is_none() {
+        require_primary_device(config)?;
         current = submit(
             config,
             transport,
@@ -105,6 +106,27 @@ pub(crate) async fn exchange(
         Some(change) => submit(config, transport, &pin, &current, change, deadline).await,
         None => Ok(current),
     }
+}
+
+/// Reach initialisation is a primary-only write. A secondary device waits with a typed retry
+/// hint until the primary has initialised the policy, instead of submitting a refused change.
+fn require_primary_device(config: &GatewaySessionConfig) -> Result<(), SdkError> {
+    let custody = config.custody.as_ref().ok_or(SdkError::NetworkingPending)?;
+    let account = crate::custody::load_account(
+        &custody.account_root,
+        &custody.account_id,
+        crate::custody::network_now()?,
+    )?;
+    let primary = &account.record().body.master_certificate.body.primary_device_ref;
+    if account.local_device_id()? == primary.device_id.as_str() {
+        return Ok(());
+    }
+    Err(SdkError::NetworkingPendingContext {
+        retry_after_ms: Some(2_000),
+        networking: Box::new(
+            serde_json::json!({"phase":"pending","reason":"reach_requires_primary"}),
+        ),
+    })
 }
 
 async fn submit(

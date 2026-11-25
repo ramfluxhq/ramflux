@@ -31,6 +31,17 @@ pub(crate) fn pending_key(device: &DeviceRef) -> String {
     )
 }
 
+/// Minimum spacing between two endorsements of one secondary device (SECONDARY-LAYER-01).
+pub(crate) const RENEWAL_SPACING_SECONDS: u64 = 3600;
+
+/// Actor-state key of the last time the primary endorsed one exact secondary device epoch.
+pub(crate) fn last_endorsed_key(device: &DeviceRef) -> String {
+    format!(
+        "layer-renewal/last-endorsed/{}/{}/{}",
+        device.account_anchor, device.device_id, device.device_epoch
+    )
+}
+
 impl super::RamfluxClient {
     /// Authenticate and store one renewal request. Siblings that are not the current primary
     /// ignore it without writes.
@@ -103,6 +114,14 @@ impl super::RamfluxClient {
         }
         if declaration.declaration_sequence == current {
             return Ok(());
+        }
+        let due = renewal_due(endorsed, now);
+        let spaced = endorsed.is_none_or(|endorsed| {
+            declaration.issued_at
+                >= endorsed.declaration.issued_at.saturating_add(RENEWAL_SPACING_SECONDS)
+        });
+        if !due && !spaced {
+            return Err(refused("own layer renewal is not due"));
         }
         let digest = *blake3::hash(bytes).as_bytes();
         let key = pending_key(&declaration.device);

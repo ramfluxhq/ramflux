@@ -287,7 +287,9 @@ pub(crate) fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Box<P
         // endorsed declaration is adopted as soon as it lands.
         if account.client.own_layer_renewal_in_flight()? {
             let own = account.principal_commitment.clone();
-            let _ = account.head_refresh.enqueue(own);
+            if !account.head_refresh.enqueue(own) {
+                tracing::debug!("own head refresh not queued for an in-flight layer renewal");
+            }
         }
         return Ok(None);
     }

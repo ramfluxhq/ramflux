@@ -23,11 +23,14 @@ impl HomeService {
                 conversation_id,
                 operation_id,
             } => {
+                let now = crate::helpers::now_unix_seconds()
+                    .map_err(|_| std::io::Error::other("reply clock"))?;
                 let permission = self.directory.authorize_reply(
                     root,
                     &peer_root,
                     &conversation_id,
                     &operation_id,
+                    now,
                 )?;
                 Ok(w::NativeUsernameReply::ReplyAuthorized { permission })
             }

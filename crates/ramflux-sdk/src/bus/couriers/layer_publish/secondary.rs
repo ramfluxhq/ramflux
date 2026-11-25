@@ -11,7 +11,9 @@
 use super::{Plan, submit};
 use crate::SdkError;
 use crate::bus::state::LocalBusAccountState;
-use crate::client::layer_renewal::{PendingLayerRenewal, pending_key};
+use crate::client::layer_renewal::{
+    PendingLayerRenewal, RENEWAL_SPACING_SECONDS, last_endorsed_key, pending_key,
+};
 use crate::custody::pairing::{HeadKind, HeadWrite};
 use crate::gateway::GatewayCustodyConfig;
 use ramflux_protocol::DeviceSetStatus;
@@ -99,6 +101,7 @@ pub(super) fn prepare_next(
             signed: pending.signed.clone(),
         },
     )?;
+    db.persist_actor_state(&last_endorsed_key(&device), &now)?;
     let write = endorse_write(account, config, operation_id, now, device, pending.signed)?;
     submit(account, config, write)
 }
@@ -162,6 +165,21 @@ fn eligible(
     if row.message_layer.as_ref().is_some_and(|endorsed| {
         endorsed.declaration.declaration_sequence >= declaration.declaration_sequence
     }) {
+        return Ok(false);
+    }
+    let endorsed = row.message_layer.as_ref();
+    let spaced = endorsed.is_none_or(|endorsed| {
+        declaration.issued_at
+            >= endorsed.declaration.issued_at.saturating_add(RENEWAL_SPACING_SECONDS)
+    });
+    if !super::renewal_due(endorsed, now) && !spaced {
+        return Ok(false);
+    }
+    let db = account.client.account_db()?;
+    if db
+        .load_actor_state::<u64>(&last_endorsed_key(&declaration.device))?
+        .is_some_and(|last| now < last.saturating_add(RENEWAL_SPACING_SECONDS))
+    {
         return Ok(false);
     }
     // A request at or below the retained pin is a stale or rolled-back statement.

@@ -6,7 +6,7 @@
 
 use crate::RfError;
 use crate::cli::{CentreAction, CentreCommand, CentreEnrolRequest, CentreKey};
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use ramflux_crypto::node_enrolment::{enrolment_message, node_key_fingerprint};
 use ramflux_protocol::encode_base64url;
 use std::net::IpAddr;
@@ -55,20 +55,21 @@ fn enrol_request(options: &CentreEnrolRequest) -> Result<(), RfError> {
     let seed = read_seed(&options.node_signing_seed)?;
     let new_key = SigningKey::from_bytes(&seed);
     let new_public = new_key.verifying_key().to_bytes();
-    let (key_gen, replaces, old_seed) = if options.rotate {
+    let (key_gen, replaces, old_key) = if options.rotate {
         let old_path = options
             .old_node_signing_seed
             .as_deref()
             .ok_or_else(|| invalid("--rotate requires --old-node-signing-seed"))?;
         let old_seed = read_seed(old_path)?;
-        let old_public = SigningKey::from_bytes(&old_seed).verifying_key().to_bytes();
+        let old_key = SigningKey::from_bytes(&old_seed);
+        let old_public = old_key.verifying_key().to_bytes();
         if old_public == new_public {
             return Err(invalid("rotation needs two different keys"));
         }
         check_key_gen(options.old_key_gen)?;
         let next = options.old_key_gen.checked_add(1).ok_or_else(|| invalid("key_gen overflow"))?;
         check_key_gen(next)?;
-        (next, Some(encode_base64url(old_public)), Some(old_seed))
+        (next, Some(encode_base64url(old_public)), Some(old_key))
     } else {
         check_key_gen(options.key_gen)?;
         (options.key_gen, None, None)
@@ -92,11 +93,11 @@ fn enrol_request(options: &CentreEnrolRequest) -> Result<(), RfError> {
     let mut request = format!(
         "{REQUEST_PREFIX}{}.{}",
         encode_base64url(&body_bytes),
-        ramflux_crypto::sign_canonical_bytes_with_seed(&message, *seed)
+        encode_base64url(new_key.sign(&message).to_bytes())
     );
-    if let Some(old_seed) = old_seed {
+    if let Some(old_key) = old_key {
         request.push('.');
-        request.push_str(&ramflux_crypto::sign_canonical_bytes_with_seed(&message, *old_seed));
+        request.push_str(&encode_base64url(old_key.sign(&message).to_bytes()));
     }
     println!("{request}");
     eprintln!("key_gen: {key_gen}");

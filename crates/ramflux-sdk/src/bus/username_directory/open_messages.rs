@@ -124,6 +124,9 @@ pub(super) fn reply(
     let w::NativeUsernameReply::ReplyAuthorized { permission } = result.reply else {
         return Err(w::DirectoryCode::DirectoryUnavailable.into());
     };
+    if permission.expires_at <= crate::custody::network_now()? {
+        return Err(SdkError::LocalBus("reply permission expired".into()));
+    }
     let row = account
         .client
         .account_db()?

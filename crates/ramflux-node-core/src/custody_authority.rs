@@ -424,13 +424,13 @@ fn log_pruned_evidence(anchor: &str, before: u64, after: u64) {
 
 fn log_conflict(alert: &ramflux_crypto::custody::CustodyConflictAlert) {
     tracing::error!(
-        account_anchor = %alert.account_anchor,
         range_index = alert.range_index,
         conflict_kind = ?alert.kind,
         accepted_record_hash = %alert.accepted_record_hash,
         conflicting_record_hash = %alert.conflicting_record_hash,
         "custody authority conflict requires operator review and a new master certificate"
     );
+    tracing::debug!(account_anchor = %alert.account_anchor, "custody authority conflict account");
 }
 
 impl RouterCore {

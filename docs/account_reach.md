@@ -1,9 +1,13 @@
 # Account reach
 
-Reach and discovery are independent. Accounts start in `contacts_only` mode at
-revision 1. Opening an account does not accept contacts or make a hidden name
-searchable. The primary device authorizes each policy revision; linked devices
-read the home-committed policy.
+Reach and discovery are independent. An account starts with no reach row (revision 0);
+the first read creates `contacts_only` at revision 1. Opening an account does not accept
+contacts or make a hidden name searchable. The primary device authorizes each policy
+revision; linked devices read the home-committed policy.
+
+Observers treat a reach policy as a hint. Target rule, not yet enforced by the verifiers: when
+a verifier holds the current authority for the account root, `authority_head_hash` must be on
+that authority chain.
 
 `account.reach.get {}` returns `{mode, revision, policy}` from the authenticated
 home. `account.reach.set {mode, expected_revision, operation_id}` commits the next

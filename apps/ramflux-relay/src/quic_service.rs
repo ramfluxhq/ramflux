@@ -76,7 +76,7 @@ pub(crate) fn relay_client_quic_dispatch(
         let object_rejected_total = metrics.record_object_rejected();
         tracing::info!(
             method = %request.method,
-            path = %request.path,
+            path = %ramflux_node_core::log_path(&request.path),
             status = response.status,
             ingress_total,
             object_rejected_total,
@@ -85,7 +85,7 @@ pub(crate) fn relay_client_quic_dispatch(
     } else {
         tracing::debug!(
             method = %request.method,
-            path = %request.path,
+            path = %ramflux_node_core::log_path(&request.path),
             status = response.status,
             ingress_total,
             "relay client QUIC ingress served"

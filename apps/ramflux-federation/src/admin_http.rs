@@ -301,7 +301,7 @@ fn log_admin_request(
 ) {
     tracing::info!(
         method = %request.method,
-        path = %request.path,
+        path = %ramflux_node_core::log_path(&request.path),
         local_node_id = %discovery.node_id,
         "federation admin HTTP request received"
     );

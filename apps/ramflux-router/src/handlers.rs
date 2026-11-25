@@ -469,8 +469,21 @@ impl MeshResponse {
 /// Per-route caller policy (default deny, like federation `mesh_auth`): each entry names the
 /// only mesh service identities admitted to that route. Routes without an entry keep their
 /// own handler checks.
-const ROUTE_CALLER_POLICY: &[(&str, &str, &[&str])] =
-    &[("POST", "/mvp6/registration/policy", &["ramflux-admin"])];
+///
+/// Real callers (verified in code): `/mvp6/friend/request`, `/mvp7/lifecycle/{event,cancel,finalize}`
+/// and `/mvp7/abuse/report` are forwarded to the router only by the gateway's itest HTTP proxy
+/// (`apps/ramflux-gateway/src/itest_http.rs`, identity `ramflux-gateway`); `/mvp7/federation/tombstone/apply`
+/// is sent only by the federation itest HTTP handler (`apps/ramflux-federation/src/itest_http.rs`,
+/// identity `ramflux-federation`). No other service identity calls these routes.
+const ROUTE_CALLER_POLICY: &[(&str, &str, &[&str])] = &[
+    ("POST", "/mvp6/registration/policy", &["ramflux-admin"]),
+    ("POST", "/mvp6/friend/request", &["ramflux-gateway"]),
+    ("POST", "/mvp7/lifecycle/event", &["ramflux-gateway"]),
+    ("POST", "/mvp7/lifecycle/cancel", &["ramflux-gateway"]),
+    ("POST", "/mvp7/lifecycle/finalize", &["ramflux-gateway"]),
+    ("POST", "/mvp7/abuse/report", &["ramflux-gateway"]),
+    ("POST", "/mvp7/federation/tombstone/apply", &["ramflux-federation"]),
+];
 
 fn route_caller_refusal(method: &str, path: &str, peer_service_id: &str) -> Option<MeshResponse> {
     ROUTE_CALLER_POLICY

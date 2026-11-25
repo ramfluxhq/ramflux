@@ -12,37 +12,67 @@ use redb::{ReadableDatabase, ReadableTable};
 
 pub use ramflux_protocol::account_reach::ReachRecord as ReachCommit;
 
+/// Reply permissions one owner may hold at once; a new one beyond this is refused.
+pub const MAX_REPLY_PERMISSIONS_PER_OWNER: usize = 4096;
+/// Validity of one stored reply permission, in seconds.
+pub const REPLY_PERMISSION_TTL_SECONDS: u64 = 86_400;
+
 impl HomeDirectory {
     /// Commit one authenticated owner's conversation permission before its reply is queued.
+    /// The conversation must be the shared DM scope of the owner and peer, and an owner holds
+    /// at most `MAX_REPLY_PERMISSIONS_PER_OWNER` live permissions.
     /// # Errors
-    /// Refuses invalid roots, operation substitution and unavailable durable storage.
+    /// Refuses invalid roots, operation substitution, foreign conversation ids, the per-owner
+    /// cap and unavailable durable storage.
     pub fn authorize_reply(
         &self,
         owner: &str,
         peer: &str,
         conversation: &str,
         operation: &str,
+        now: u64,
     ) -> Result<ramflux_protocol::account_reach::ReplyPermission> {
         super::super::fixed(owner)?;
         super::super::fixed(peer)?;
+        let expected = ramflux_protocol::message::dm_scope::derive(peer, owner)
+            .map_err(|_| CheckpointError::Refused("reply_conversation"))?;
+        super::super::require(expected == conversation, "reply_conversation")?;
         let _guard = self.publication_guard()?;
         let tx = self.db.begin_write().map_err(storage)?;
         let mut table = tx.open_table(super::META).map_err(storage)?;
-        let key = format!(
-            "reply-permission:{owner}:{}",
-            super::super::transport::digest(&(peer, conversation))?
-        );
+        let prefix = format!("reply-permission:{owner}:");
+        let key = format!("{prefix}{}", super::super::transport::digest(&(peer, conversation))?);
+        let existing: Option<ramflux_protocol::account_reach::ReplyPermission> =
+            match table.get(key.as_str()).map_err(storage)? {
+                Some(old) => Some(serde_json::from_slice(old.value())?),
+                None => None,
+            };
+        if let Some(old) = existing.as_ref()
+            && old.expires_at > now
+        {
+            return Ok(old.clone());
+        }
+        if existing.is_none() {
+            let mut live = 0_usize;
+            for row in table.range(prefix.as_str()..).map_err(storage)? {
+                let (row_key, _) = row.map_err(storage)?;
+                if !row_key.value().starts_with(prefix.as_str()) {
+                    break;
+                }
+                live = live.saturating_add(1);
+                if live >= MAX_REPLY_PERMISSIONS_PER_OWNER {
+                    return Err(CheckpointError::Refused("reply_permission_cap"));
+                }
+            }
+        }
         let permission = ramflux_protocol::account_reach::ReplyPermission {
             owner_root: owner.into(),
             peer_root: peer.into(),
             conversation_id: conversation.into(),
             operation_id: operation.into(),
             revision: 1,
+            expires_at: now.saturating_add(REPLY_PERMISSION_TTL_SECONDS),
         };
-        if let Some(old) = table.get(key.as_str()).map_err(storage)? {
-            let old = serde_json::from_slice(old.value())?;
-            return Ok(old);
-        }
         table.insert(key.as_str(), canonical(&permission)?.as_slice()).map_err(storage)?;
         drop(table);
         tx.commit().map_err(storage)?;

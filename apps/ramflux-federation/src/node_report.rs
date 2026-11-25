@@ -43,6 +43,7 @@ const DEFAULT_FULL_EVERY_S: u64 = 3600;
 const MIN_FULL_EVERY_S: u64 = 300;
 const MAX_FULL_EVERY_S: u64 = 86_400;
 const DEFAULT_RETRY_MS: u64 = 2000;
+const MIN_RETRY_MS: u64 = 1000;
 const MAX_RETRY_MS: u64 = 3_600_000;
 const CONNECT_BACKOFF: Duration = Duration::from_secs(60);
 /// Back-off after `unknown_key` or `suspended_key` (section 3.4): 5 min, doubling to 60 min.
@@ -276,7 +277,7 @@ pub(crate) fn parse_reply(bytes: &[u8]) -> Reply {
                 .get("retry_after_ms")
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_RETRY_MS)
-                .min(MAX_RETRY_MS);
+                .clamp(MIN_RETRY_MS, MAX_RETRY_MS);
             Reply::Retry { after: Duration::from_millis(ms) }
         }
         _ => retry,
@@ -299,7 +300,8 @@ fn jitter(base: Duration) -> Duration {
 
 /// Refusal back-off with jitter, bounded to 5..=60 minutes (section 3.4, owner-decided range).
 fn refusal_wait(step: Duration) -> Duration {
-    jitter(step).clamp(REFUSAL_BACKOFF_MIN, REFUSAL_BACKOFF_MAX)
+    jitter(step.min(REFUSAL_BACKOFF_MAX.saturating_sub(REFUSAL_BACKOFF_MAX / 10)))
+        .clamp(REFUSAL_BACKOFF_MIN, REFUSAL_BACKOFF_MAX)
 }
 
 /// Doubles the refusal back-off, staying within 5..=60 minutes.
@@ -479,32 +481,35 @@ async fn run(
                     pending = Some((frame, ts));
                     jitter(after)
                 }
-                Reply::Rejected { reason } => match reason.as_str() {
-                    "revoked_key" => {
-                        tracing::error!(
-                            "node report: centre revoked this key; reports stopped until the configuration changes"
-                        );
-                        return;
+                Reply::Rejected { reason } => {
+                    let shown: String = reason.chars().take(64).collect();
+                    match reason.as_str() {
+                        "revoked_key" => {
+                            tracing::error!(
+                                "node report: centre revoked this key; reports stopped until the configuration changes"
+                            );
+                            return;
+                        }
+                        "unknown_key" | "suspended_key" => {
+                            let wait = refusal_wait(refusal_step);
+                            refusal_step = next_refusal_step(refusal_step);
+                            tracing::warn!(
+                                reason = ?shown,
+                                retry_in_s = wait.as_secs(),
+                                "node report: key not admitted; reports paused with back-off"
+                            );
+                            wait
+                        }
+                        "unsupported" => {
+                            tracing::warn!(reason = ?shown, "node report: centre does not accept this report");
+                            jitter(UNSUPPORTED_RETRY)
+                        }
+                        _ => {
+                            tracing::warn!(reason = ?shown, "node report: rejected");
+                            jitter(Duration::from_secs(directives.full_every_s))
+                        }
                     }
-                    "unknown_key" | "suspended_key" => {
-                        let wait = refusal_wait(refusal_step);
-                        refusal_step = next_refusal_step(refusal_step);
-                        tracing::warn!(
-                            %reason,
-                            retry_in_s = wait.as_secs(),
-                            "node report: key not admitted; reports paused with back-off"
-                        );
-                        wait
-                    }
-                    "unsupported" => {
-                        tracing::warn!(%reason, "node report: centre does not accept this report");
-                        jitter(UNSUPPORTED_RETRY)
-                    }
-                    _ => {
-                        tracing::warn!(%reason, "node report: rejected");
-                        jitter(Duration::from_secs(directives.full_every_s))
-                    }
-                },
+                }
             },
         };
         if !sleep_or_cancel(wait, &shutdown).await {

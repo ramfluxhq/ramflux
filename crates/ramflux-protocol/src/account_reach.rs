@@ -63,4 +63,6 @@ pub struct ReplyPermission {
     pub conversation_id: String,
     pub operation_id: String,
     pub revision: u64,
+    /// Unix seconds after which the permission is no longer honoured by the reader.
+    pub expires_at: u64,
 }

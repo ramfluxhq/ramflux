@@ -19,7 +19,7 @@ fn decode(bytes: &[u8], key: &str) -> Result<ReachRecord, StorageError> {
 
 impl BackupDatabase {
     pub(super) fn merge_account_reach(&self) -> Result<(), StorageError> {
-        self.db.execute("INSERT OR REPLACE INTO main.runtime_actor_state(state_kind,state_json) SELECT state_kind,state_json FROM incoming.runtime_actor_state r WHERE length(state_kind)<=128 AND state_kind>='reach/fence/' AND state_kind<'reach/fence0' AND CAST(state_json AS TEXT)='true' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid)", [])?;
+        self.db.execute("INSERT OR REPLACE INTO main.runtime_actor_state(state_kind,state_json) SELECT state_kind,state_json FROM incoming.runtime_actor_state r WHERE length(state_kind)<=128 AND state_kind>='reach/fence/' AND state_kind<'reach/fence0' AND CAST(state_json AS TEXT)='true' AND EXISTS(SELECT 1 FROM incoming.runtime_actor_state f WHERE f.state_kind='reach/floor/'||substr(r.state_kind,13)) AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid)", [])?;
         let mut after = String::new();
         loop {
             let mut statement = self.db.prepare("SELECT CASE WHEN length(state_kind)<=128 THEN state_kind END,CASE WHEN length(state_json)<=1048576 THEN state_json END FROM incoming.runtime_actor_state r WHERE state_kind> ?1 AND state_kind>='reach/floor/' AND state_kind<'reach/floor0' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid) ORDER BY state_kind LIMIT 8")?;
