@@ -456,6 +456,30 @@ int32_t ramflux_v2_set_host_credential_provider(uint64_t handle,
 int32_t ramflux_v2_diag_support_key(struct RamfluxBuffer **out);
 
 /*
+ Capture one 20 ms frame of host PCM. Input is never altered.
+ Callback touches: slot atomics, capture ring atomics and counters. No allocation, lock,
+ registry, log, I/O, codec or wait.
+ Returns 0, or 1 (shape/token/generation), 12 (closed gate), 15 (capture ring full), 26 (closed).
+ */
+int32_t ramflux_v2_media_capture(uint64_t client,
+                                 uint64_t media_token,
+                                 uint64_t io_generation,
+                                 const int16_t *pcm,
+                                 size_t samples);
+
+/*
+ Render one 20 ms frame into host memory. Underrun is zero-filled success (0).
+ Callback touches: slot atomics, render ring atomics and counters, and the lent buffer only.
+ No allocation, lock, registry, log, I/O, codec or wait. Every failure with a valid buffer
+ zero-fills it; an invalid buffer is left untouched.
+ */
+int32_t ramflux_v2_media_render(uint64_t client,
+                                uint64_t media_token,
+                                uint64_t io_generation,
+                                int16_t *pcm,
+                                size_t samples);
+
+/*
  Read one committed account snapshot. Does not start a supervisor or take a writer lease.
 
  Config is `{data_root, account_id}`. The host supplies the shared OS custody provider.
@@ -477,7 +501,9 @@ int32_t ramflux_v2_shared_snapshot(const uint8_t *config,
  A release failure rolls back parked files and returns `StorageFailed` (8).
  Diagnostics contain `SuspendFailed` and `suspend_release_failed` or `suspend_rollback_failed`.
  Call resume after any failure, then reopen the event subscription from its cursor.
- Call off the UI thread. A killed process is a cold start and must unlock again.
+ A live or pending call in any account returns `AccountBusy` (18) before anything is cancelled
+ or parked. Idle suspend is unchanged. Call off the UI thread. A killed process is a cold
+ start and must unlock again.
  */
 int32_t ramflux_v2_client_suspend(uint64_t handle);
 

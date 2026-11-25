@@ -328,7 +328,7 @@ pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
     "ramflux.message.v1.ContactSafetyVerifyResult";
 /// blake3 of the generated message descriptor set.
 pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
-    "424943ce9bcc6b1b629366deed741bd9dbd2c9bd154643346cd8ced5051ee78d";
+    "4592908138d7d8c4663410190eb494c646b94994b579388f4bff8b4a41bc1546";
 /// Immutable product commit whose tree contains this CAS policy and descriptor.
 pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "dd18e6794fb5477f687e4818c1c2d081ce684ffa";
 

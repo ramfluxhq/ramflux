@@ -31,12 +31,27 @@ progress; no notification result is constructed.
 
 ## Negotiation and requests
 
-Call `ramflux_v2_negotiate(2, 0, &buffer)` before opening a client. Negotiation
+Call `ramflux_v2_negotiate(2, 0, &buffer)` before opening a client, or
+`(2, 1, &buffer)` when the host needs the voice bridge. Negotiation
 returns the binding major/minor, BLAKE3 fingerprint of the message descriptor,
 carrier protocol, operation inventory and limits. Binding version and message
 schema version are independent. A major mismatch or a newer minimum minor
 returns UnsupportedVersion (3). A host must compare the descriptor with the one
 its typed message binding was built against.
+
+Minor 1 (ABI 2.1) adds `voice_media`: `{version:1, ownership:"in_process",
+pcm:{sample_format:"s16_native", sample_rate_hz:48000, channels:1,
+frame_samples:960}, max_sessions:1}`. Absent means unavailable. The methods
+`call.media.open`, `.status`, `.set_muted`, `.audio_active`, `.audio_route` and
+`.close` are execute methods of capability `call`; their bodies carry decimal
+u64 strings. `call.media.session` stays denied. Two PCM exports carry audio
+without any other path: `ramflux_v2_media_capture(client, media_token,
+io_generation, pcm, samples)` and `ramflux_v2_media_render(...)`. Each call
+takes exactly 960 samples (1,920 bytes) of native-endian signed 16-bit mono PCM
+at 48 kHz. Codes: 0 success (including underrun silence on render), 1 invalid
+shape, token or stale generation, 12 valid closed gate, 15 capture queue full,
+26 retired token or client. Callbacks take no locks, allocate nothing and log
+nothing; the host lends memory for one call and keeps no pointer.
 
 `client_open` accepts I-JSON `{ "data_root": "/absolute/private/path",
 "builtin_nodes": [] }`. It creates one current-thread supervisor and acquires

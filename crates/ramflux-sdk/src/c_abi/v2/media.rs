@@ -8,6 +8,21 @@
 use crate::client::call::media_contract::PCM_FRAME_SAMPLES;
 use crate::client::call::pcm_bridge::{PcmError, bind_client, capture_frame, render_frame};
 
+/// Negotiation 2.1 `voice_media` capability. Absent from a 2.0 negotiation means unavailable.
+pub(super) fn voice_media_capability() -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "ownership": "in_process",
+        "pcm": {
+            "sample_format": "s16_native",
+            "sample_rate_hz": 48000,
+            "channels": 1,
+            "frame_samples": PCM_FRAME_SAMPLES,
+        },
+        "max_sessions": 1,
+    })
+}
+
 /// Bind the PCM callbacks to the client that completed a `call.media.open` successfully. The
 /// host learns the token only from this completion, so no callback can precede the binding.
 pub(super) fn bind_open(handle: u64, completion: &[u8]) {

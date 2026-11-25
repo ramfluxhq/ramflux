@@ -170,7 +170,15 @@ is delayed. Repeated status reconciliation cannot extend that deadline; an actua
 lease renewal can. Terminal calls, definitive authority loss, lock and shutdown
 fence output, join workers and discard the session. Restart retains public call
 history with the existing restart reason and cannot recover consumed media keys.
-These typed controls add no C ABI execute methods or direct PCM exports.
+The C ABI exposes the same controls as execute methods (`call.media.*`, see
+`docs/design/c-abi-v2.md`) and two PCM exports. Only one process-wide
+in-process session exists (`max_sessions: 1`). Suspend refuses with
+`AccountBusy` (18) while any account has a live or pending call, before anything
+is cancelled. A call admitted after that probe also yields 18, not a storage
+failure. Stats-only `call.media.changed` rows are coalesced to at most 4 per
+second; control and terminal changes are journaled at once. A media tick on the
+in-process loop (every 125 ms) reconciles the session, so a terminal change is
+journaled within that tick and a pending stats row is published after its window.
 
 ## Node configuration and acceptance
 
