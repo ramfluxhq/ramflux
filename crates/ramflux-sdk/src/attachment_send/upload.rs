@@ -25,6 +25,10 @@ pub(crate) trait AckJournal: Send + Sync {
     /// # Errors
     /// Returns a stable refusal when the checkpoint is not durable.
     fn save(&self, key: &str, acks: &[u8]) -> Result<(), Refusal>;
+    /// Appends one transfer snapshot to the account-DB journal under `source` (its dedup key).
+    /// # Errors
+    /// Returns a stable refusal when the snapshot is not durable.
+    fn emit(&self, source: &str, body: &serde_json::Value) -> Result<(), Refusal>;
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -45,8 +49,20 @@ pub(crate) struct JournalSink {
 }
 
 pub(crate) enum JournalCall {
-    Load { key: String, reply: tokio::sync::oneshot::Sender<Result<Option<Vec<u8>>, Refusal>> },
-    Save { key: String, acks: Vec<u8>, reply: tokio::sync::oneshot::Sender<Result<(), Refusal>> },
+    Load {
+        key: String,
+        reply: tokio::sync::oneshot::Sender<Result<Option<Vec<u8>>, Refusal>>,
+    },
+    Save {
+        key: String,
+        acks: Vec<u8>,
+        reply: tokio::sync::oneshot::Sender<Result<(), Refusal>>,
+    },
+    Emit {
+        source: String,
+        body: serde_json::Value,
+        reply: tokio::sync::oneshot::Sender<Result<(), Refusal>>,
+    },
 }
 
 /// Bounded: the worker has at most one call in flight, so this only absorbs scheduling jitter.
@@ -75,6 +91,18 @@ impl AckJournal for JournalSink {
             .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
         answer.blocking_recv().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?
     }
+
+    fn emit(&self, source: &str, body: &serde_json::Value) -> Result<(), Refusal> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.tx
+            .blocking_send(JournalCall::Emit {
+                source: source.to_owned(),
+                body: body.clone(),
+                reply,
+            })
+            .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+        answer.blocking_recv().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?
+    }
 }
 
 /// Validates one journal entry. The journal hands back the bitmap bytes already unwrapped from
@@ -97,6 +125,19 @@ fn checkpoint(input: &PublishInput<'_>, row: &Row) -> Result<(), Refusal> {
 /// slice. A relay-only ACK is uncertain locally and is replayed byte for byte. Returns true
 /// when all segments were already committed, including recovery of a lost Commit reply.
 pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bool, Refusal> {
+    let outcome = put_segments_inner(input, row);
+    match &outcome {
+        Ok(true) => publish_transfer(input, row, "uploaded", None, false, true)?,
+        // The failure snapshot is best effort: the refusal itself is what the caller acts on.
+        Err(refusal) => {
+            let _ = publish_transfer(input, row, "failed", Some(refusal.code), true, true);
+        }
+        Ok(false) => {}
+    }
+    outcome
+}
+
+fn put_segments_inner(input: &PublishInput<'_>, row: &mut Row) -> Result<bool, Refusal> {
     let layout = SegmentLayout {
         plaintext_length: row.plaintext_length.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
         network_chunk_bytes: u32::try_from(CHUNK).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?,
@@ -118,6 +159,7 @@ pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bo
         decode_acks(input.journal.load(&journal_key(&row.prepare_id, upload))?, count)?;
     let _running = super::transfer::enter(input.store.account_id(), &row.prepare_id, total)?;
     super::transfer::set_unique(input.store.account_id(), &row.prepare_id, ack_unique(row)?);
+    publish_transfer(input, row, "uploading", None, false, true)?;
     let mut committed = None;
     for segment in 0..count {
         let index = u32::try_from(segment).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
@@ -151,6 +193,7 @@ pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bo
         *ack = if is_committed { status.received_bitmap } else { *ack & status.received_bitmap };
         checkpoint(input, row)?;
         super::transfer::set_unique(input.store.account_id(), &row.prepare_id, ack_unique(row)?);
+        publish_transfer(input, row, "uploading", None, false, false)?;
         if !is_committed {
             put_slices(input, row, segment, &cipher)?;
         }
@@ -245,6 +288,9 @@ fn put_slices(
             continue;
         }
         // A paused upload stops before the next slice; nothing is sent while it waits.
+        if super::transfer::is_paused(input.store.account_id(), &row.prepare_id) {
+            publish_transfer(input, row, "paused", None, true, true)?;
+        }
         super::transfer::gate(input.store.account_id(), &row.prepare_id)?;
         let op = OwnerAttachmentOperation::put(&OwnerPut {
             audience: input.audience,
@@ -267,8 +313,60 @@ fn put_slices(
         *row.upload_acks.get_mut(segment).ok_or(Refusal::new(CODE_SEAL_FAILED))? |= bit;
         checkpoint(input, row)?;
         super::transfer::set_unique(input.store.account_id(), &row.prepare_id, ack_unique(row)?);
+        publish_transfer(input, row, "uploading", None, false, false)?;
     }
     Ok(())
+}
+
+/// Ciphertext bytes of the whole upload: plaintext plus one 16-byte AEAD tag per segment.
+pub(crate) fn ciphertext_total(row: &Row) -> Result<u64, Refusal> {
+    let plaintext = row.plaintext_length.ok_or(Refusal::new(CODE_SEAL_FAILED))?;
+    let segments =
+        u64::try_from(row.segment_digests.len()).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+    segments
+        .checked_mul(16)
+        .and_then(|tags| tags.checked_add(plaintext))
+        .ok_or(Refusal::new(CODE_SEAL_FAILED))
+}
+
+/// Appends one `attachment.transfer.changed` snapshot. Counts are ciphertext bytes; the body
+/// carries no paths, names, captions, keys, grants or raw errors.
+fn publish_transfer(
+    input: &PublishInput<'_>,
+    row: &Row,
+    phase: &str,
+    reason: Option<&str>,
+    retryable: bool,
+    force: bool,
+) -> Result<(), Refusal> {
+    let account = input.store.account_id();
+    let Some(revision) = super::transfer::claim_emit(account, &row.prepare_id, force) else {
+        return Ok(());
+    };
+    let unique = ack_unique(row)?;
+    let total = ciphertext_total(row)?;
+    let body = serde_json::json!({
+        "transfer_id": row.prepare_id,
+        "prepare_id": row.prepare_id,
+        "operation_id": row.operation_id,
+        "client_message_id": serde_json::Value::Null,
+        "message_id": row.message_id,
+        "import_id": serde_json::Value::Null,
+        "direction": "upload",
+        "phase": phase,
+        "generation": row.payload_generation,
+        "total_bytes": total,
+        "accepted_bytes": total,
+        "uploaded_bytes": unique,
+        "unique_bytes": unique,
+        "verified_bytes": serde_json::Value::Null,
+        "expires_at": row.expires_at,
+        "reason_code": reason,
+        "retryable": retryable,
+    });
+    let source =
+        format!("attachment-transfer/{}/{}/{revision}", row.prepare_id, row.payload_generation);
+    input.journal.emit(&source, &body)
 }
 
 /// In-memory journal for the store fixtures; production always uses [`JournalSink`].
@@ -289,6 +387,10 @@ impl AckJournal for MemoryJournal {
     fn save(&self, key: &str, acks: &[u8]) -> Result<(), Refusal> {
         let mut map = self.0.lock().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
         map.insert(key.to_owned(), acks.to_vec());
+        Ok(())
+    }
+
+    fn emit(&self, _source: &str, _body: &serde_json::Value) -> Result<(), Refusal> {
         Ok(())
     }
 }

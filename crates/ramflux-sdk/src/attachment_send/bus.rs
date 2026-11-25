@@ -470,13 +470,10 @@ pub(crate) fn transfer_list(
             .load_actor_state::<AckRecord>(&journal_key(&row.prepare_id, upload))
             .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
         row.upload_acks = acks.map_or_else(Vec::new, |record| record.acks);
-        let total = row.plaintext_length.unwrap_or(0).saturating_add(
-            16_u64.saturating_mul(u64::try_from(row.segment_digests.len()).unwrap_or(u64::MAX)),
-        );
         durable.push(super::transfer::Snapshot {
             prepare_id: row.prepare_id.clone(),
             paused: false,
-            total_bytes: total,
+            total_bytes: upload::ciphertext_total(&row)?,
             unique_bytes: upload::ack_unique(&row)?,
         });
     }

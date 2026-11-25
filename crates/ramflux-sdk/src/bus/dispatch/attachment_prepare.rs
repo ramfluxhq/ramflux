@@ -206,8 +206,22 @@ fn answer(account: &LocalBusAccountState, call: JournalCall) {
         (JournalCall::Load { reply, .. }, Err(refusal)) => {
             let _ = reply.send(Err(refusal));
         }
-        (JournalCall::Save { reply, .. }, Err(refusal)) => {
+        (JournalCall::Save { reply, .. }, Err(refusal))
+        | (JournalCall::Emit { reply, .. }, Err(refusal)) => {
             let _ = reply.send(Err(refusal));
+        }
+        (JournalCall::Emit { source, body, reply }, Ok(db)) => {
+            let appended = db
+                .append_journal(
+                    &source,
+                    crate::attachment_send::transfer::TRANSFER_TOPIC,
+                    &body,
+                    crate::time::now_unix_timestamp(),
+                    None,
+                )
+                .map(|_| ())
+                .map_err(|_| Refusal::new(CODE_SEAL_FAILED));
+            let _ = reply.send(appended);
         }
         (JournalCall::Load { key, reply }, Ok(db)) => {
             let loaded = db

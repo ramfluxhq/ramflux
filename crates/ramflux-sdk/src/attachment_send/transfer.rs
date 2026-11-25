@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::codes::{CODE_CANCELLED, CODE_NOT_READY, CODE_UPLOAD_REJECTED, Refusal};
 
@@ -18,11 +18,19 @@ type Key = (String, String);
 /// How often a paused worker re-checks its flag. Bounded so a cancelled entry is noticed.
 const PAUSE_POLL: Duration = Duration::from_millis(250);
 
+/// Journal topic of transfer snapshots; subscribers receive it as a stream frame.
+pub(crate) const TRANSFER_TOPIC: &str = "attachment.transfer.changed";
+/// Progress snapshots of one transfer are at most this far apart; phase changes never wait.
+const EMIT_INTERVAL: Duration = Duration::from_millis(250);
+
 #[derive(Default)]
 struct Control {
     paused: bool,
     total_bytes: u64,
     unique_bytes: u64,
+    /// Monotonic per transfer; seeded from the clock so it keeps rising across restarts.
+    revision: u64,
+    last_emit: Option<Instant>,
 }
 
 /// One row per upload that is running in this process.
@@ -73,8 +81,41 @@ pub(crate) fn enter(account: &str, prepare_id: &str, total_bytes: u64) -> Result
     if running.contains_key(&id) {
         return Err(Refusal::new(CODE_UPLOAD_REJECTED));
     }
-    running.insert(id.clone(), Control { paused: false, total_bytes, unique_bytes: 0 });
+    let revision = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis()),
+    )
+    .unwrap_or(u64::MAX);
+    running.insert(
+        id.clone(),
+        Control { paused: false, total_bytes, unique_bytes: 0, revision, last_emit: None },
+    );
     Ok(Live(id))
+}
+
+/// Whether the upload is paused right now (the worker announces the pause once, then waits).
+pub(crate) fn is_paused(account: &str, prepare_id: &str) -> bool {
+    REGISTRY
+        .running
+        .lock()
+        .is_ok_and(|running| running.get(&key(account, prepare_id)).is_some_and(|c| c.paused))
+}
+
+/// Claims the right to publish one snapshot now and returns its revision. A progress snapshot
+/// (`force` false) is published at most once per interval; a phase change always is.
+pub(crate) fn claim_emit(account: &str, prepare_id: &str, force: bool) -> Option<u64> {
+    let mut running = REGISTRY.running.lock().ok()?;
+    let control = running.get_mut(&key(account, prepare_id))?;
+    let now = Instant::now();
+    let due =
+        force || control.last_emit.is_none_or(|last| now.duration_since(last) >= EMIT_INTERVAL);
+    if !due {
+        return None;
+    }
+    control.last_emit = Some(now);
+    control.revision = control.revision.saturating_add(1);
+    Some(control.revision)
 }
 
 /// Blocks while the upload is paused. Returns `cancelled` when the entry has gone away.
