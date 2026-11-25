@@ -232,6 +232,10 @@ impl RamfluxClient {
             if !engine.audio_active(active) {
                 return Err(SdkError::LocalBusPermissionDenied);
             }
+            if active {
+                // Video authority is separate from audio; packets still need admitted keys.
+                let _ = engine.video_active(true);
+            }
         }
         Ok(owned.snapshot())
     }

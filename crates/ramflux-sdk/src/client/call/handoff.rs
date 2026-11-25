@@ -36,6 +36,8 @@ struct MovedMedia {
     send_key: Zeroizing<[u8; 32]>,
     receive_kid: u64,
     receive_key: Zeroizing<[u8; 32]>,
+    /// Video send and receive keys, only when both exist (CALLS-VIDEO-V1). Video KIDs are audio KIDs + 2.
+    video: Option<(Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>)>,
 }
 
 fn unavailable(message: &str) -> SdkError {
@@ -198,6 +200,10 @@ impl RamfluxClient {
         let device_id = call.local.device_id.clone();
         let call_id = call.row.call_id.clone();
         let send_key = std::mem::replace(&mut call.send_key, Zeroizing::new([0; 32]));
+        let video = match (call.video_send_key.take(), call.video.take_key()) {
+            (Some(send), Some(receive)) => Some((send, receive)),
+            _ => None,
+        };
         if let Some(allocation) = call.allocation.as_mut() {
             call.allocation_credentials = Some(super::lease::credentials_commitment(allocation));
             allocation.token.zeroize();
@@ -218,6 +224,7 @@ impl RamfluxClient {
             send_key,
             receive_kid: u64::from(outgoing),
             receive_key,
+            video,
         })
     }
 }
@@ -275,5 +282,15 @@ fn assemble_session(
     let token = std::mem::take(&mut *moved.token);
     let session = MediaSession::new(moved.endpoint, token, AES_256_GCM_SHA512_128, send, receive)
         .with_rebind(rebind);
+    let session = match moved.video.take() {
+        Some((video_send, video_receive)) => {
+            tracing::info!(call_id = %receipt.call_id, "video keys fed to media session");
+            session.with_video(
+                DirectionKey::new(moved.send_kid + 2, BaseKey::new(video_send.to_vec())),
+                DirectionKey::new(moved.receive_kid + 2, BaseKey::new(video_receive.to_vec())),
+            )
+        }
+        None => session,
+    };
     Ok((session, receipt))
 }

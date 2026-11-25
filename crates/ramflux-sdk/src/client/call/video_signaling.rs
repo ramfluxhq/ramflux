@@ -100,6 +100,11 @@ impl VideoTrackPeer {
         self.negotiated
     }
 
+    /// Moves the admitted peer receive key out for the media session, once.
+    pub(crate) fn take_key(&mut self) -> Option<Zeroizing<[u8; 32]>> {
+        self.key.take()
+    }
+
     /// Admits one peer track control. The first control carries the key; later
     /// controls must carry none. Every refusal happens before any state changes.
     pub(crate) fn admit(
