@@ -969,6 +969,39 @@ fn layer4_roster(
     Ok(SdkDeviceManifestResponse::from_native(native)?)
 }
 
+/// Primary declares layer 4 and enrolled secondary `device_id` is genuinely undeclared: the
+/// enrollment declaration that `enroll_sibling` writes (#620, LAYER-SECONDARY-01) is removed from
+/// the re-signed roster and from its manifest projection, so the floor rules apply to it.
+fn undeclared_secondary_roster(
+    fixture: &Fixture,
+    device_id: &str,
+    issued: u64,
+) -> TestResult<SdkDeviceManifestResponse> {
+    let manifest = layer4_roster(fixture, Some(device_id), issued)?;
+    let mut native = native_of(&manifest)?;
+    let primary = primary_key(fixture)?;
+    let mut body = native.publication.record.body.clone();
+    body.previous_record_hash =
+        Some(ramflux_protocol::custody::object_hash(&native.publication.record)?);
+    let (range, revision) = ramflux_protocol::custody::decode_epoch(body.device_set_epoch)?;
+    body.device_set_epoch =
+        ramflux_protocol::custody::encode_epoch(range, revision.checked_add(1).ok_or("revision")?)?;
+    body.issued_at = issued;
+    body.devices
+        .iter_mut()
+        .find(|row| row.device_id == device_id)
+        .ok_or("roster device")?
+        .message_layer = None;
+    native
+        .devices
+        .iter_mut()
+        .find(|row| row.device_ref.device_id == device_id)
+        .ok_or("manifest device")?
+        .message_layer = None;
+    native.publication.record = primary.sign_record(body)?;
+    Ok(SdkDeviceManifestResponse::from_native(native)?)
+}
+
 fn assert_layer_refusal(result: Result<(), SdkError>, required: u32) -> TestResult {
     match result {
         Err(SdkError::LocalBusRefused { code, body, .. }) if code == "PeerUpgradeRequired" => {
@@ -996,7 +1029,7 @@ async fn undeclared_device_scopes() -> TestResult {
     let member = Fixture::with_device("m4-member", "member").await?;
     let undeclared = Fixture::with_device("m4-undeclared", "undeclared").await?;
     let issued = wall_now()? + 1;
-    let owner_m = layer4_roster(&owner, Some("phone"), issued)?;
+    let owner_m = undeclared_secondary_roster(&owner, "phone", issued)?;
     let owner_primary_only = layer4_roster(&owner, None, issued)?;
     let member_m = layer4_roster(&member, None, issued)?;
     persist_declared(&sender, &owner_primary_only)?;
