@@ -153,6 +153,8 @@ pub struct EngineStats {
     pub video_idr_sent: u64,
     /// Keyframe requests the itest synthetic source raised after a reassembly drop.
     pub video_keyframe_requests: u64,
+    /// Peer keyframe requests the itest synthetic source answered with an IDR.
+    pub video_keyframes_answered: u64,
     /// Video access units dropped before sending (queue full, or waiting for a keyframe).
     pub video_send_dropped: u64,
     /// Video datagrams that failed to send or to seal.
@@ -614,6 +616,9 @@ fn synthetic_feeder(
             if answer {
                 lock_control(feed.control).apply_keyframe(request);
                 applied = request;
+            }
+            if answer {
+                lock(shared).stats.video_keyframes_answered += 1;
             }
             index = index.saturating_add(1);
         }
