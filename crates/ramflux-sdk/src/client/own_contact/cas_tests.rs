@@ -227,10 +227,13 @@ fn enroll_sibling(
     let qualified =
         ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(&verified, "sibling")?;
     native.devices.push(ramflux_protocol::custody::CustodyManifestDevice {
+        message_layer: crate::custody::layer_declaration::endorsed_for(
+            &native.publication.record,
+            &sibling,
+        ),
         device_ref: sibling,
         target_delivery_id: qualified.storage_key().into(),
         prekey_bundle: serde_json::to_value(credentials.prekey_bundle()?)?,
-        message_layer: None,
     });
     let fetched = crate::prekey::SdkDeviceManifestResponse::from_native(native.clone())?;
     own.client.persist_observed_identity_directory_now(&fetched)?;
