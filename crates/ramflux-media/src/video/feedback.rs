@@ -10,17 +10,17 @@
 //! |---:|---:|---|
 //! | 0 | 1 | version (1) |
 //! | 1 | 1 | flags (no bits defined yet; must be zero) |
-//! | 2 | 2 | reserved |
-//! | 4 | 4 | track_revision |
-//! | 8 | 8 | report_seq |
-//! | 16 | 8 | highest_video_counter |
-//! | 24 | 8 | received_packets |
-//! | 32 | 8 | missing_packets |
-//! | 40 | 8 | received_bytes |
-//! | 48 | 4 | delay_delta_us (i32) |
-//! | 52 | 4 | keyframe_request_revision |
-//! | 56 | 4 | keyframe_ack_revision |
-//! | 60 | 4 | reserved |
+//! | 2 | 2 | `reserved` |
+//! | 4 | 4 | `track_revision` |
+//! | 8 | 8 | `report_seq` |
+//! | 16 | 8 | `highest_video_counter` |
+//! | 24 | 8 | `received_packets` |
+//! | 32 | 8 | `missing_packets` |
+//! | 40 | 8 | `received_bytes` |
+//! | 48 | 4 | `delay_delta_us` (i32) |
+//! | 52 | 4 | `keyframe_request_revision` |
+//! | 56 | 4 | `keyframe_ack_revision` |
+//! | 60 | 4 | `reserved` |
 //!
 //! Counters are cumulative per track. Feedback grants no authority: it only
 //! adjusts rate and asks for keyframes within negotiated caps.
