@@ -745,11 +745,14 @@ impl SendLoop {
         if let Some(report) = report {
             sender.queue_feedback(&report);
         }
-        if paused {
-            return;
-        }
+        // A paused sender still sends its feedback so the peer does not see stale reports.
         for _ in 0..MAX_DATAGRAMS_PER_TURN {
-            match sender.next_datagram(Instant::now()) {
+            let next = if paused {
+                sender.next_feedback_datagram(Instant::now())
+            } else {
+                sender.next_datagram(Instant::now())
+            };
+            match next {
                 Ok(Some(datagram)) => {
                     let sent = self.socket.send_to(&datagram, self.endpoint).is_ok();
                     let mut shared = lock(&self.shared);

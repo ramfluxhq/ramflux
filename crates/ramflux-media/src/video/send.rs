@@ -238,13 +238,36 @@ impl VideoSender {
     /// [`PipelineError::Sframe`] when the sending counter is exhausted; the
     /// session must then start a fresh call.
     pub fn next_datagram(&mut self, now: Instant) -> Result<Option<Vec<u8>>, PipelineError> {
-        let Some(bound) = self.next_bound() else {
+        self.send_next(now, false)
+    }
+
+    /// The next feedback datagram only. A paused sender uses it so reports still reach the peer
+    /// and video stays quiet.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::next_datagram`].
+    pub fn next_feedback_datagram(
+        &mut self,
+        now: Instant,
+    ) -> Result<Option<Vec<u8>>, PipelineError> {
+        self.send_next(now, true)
+    }
+
+    fn send_next(
+        &mut self,
+        now: Instant,
+        feedback_only: bool,
+    ) -> Result<Option<Vec<u8>>, PipelineError> {
+        let bound = if feedback_only { self.feedback_bound() } else { self.next_bound() };
+        let Some(bound) = bound else {
             return Ok(None);
         };
         if !self.pacer.allows(now, bound) {
             return Ok(None);
         }
-        let Some(packet) = self.pop_front_packet() else {
+        let packet = if feedback_only { self.feedback.take() } else { self.pop_front_packet() };
+        let Some(packet) = packet else {
             return Ok(None);
         };
         let protected = self.sframe.encrypt(&packet.metadata, &packet.body)?;
@@ -257,13 +280,23 @@ impl VideoSender {
 
     /// Worst-case datagram size of the next packet, before sealing.
     fn next_bound(&mut self) -> Option<usize> {
+        if self.feedback.is_some() {
+            return self.feedback_bound();
+        }
+        let overhead = self.overhead();
+        self.front_packet().map(|packet| overhead + packet.metadata.len() + packet.body.len())
+    }
+
+    /// Worst-case datagram size of the queued feedback report, if any.
+    fn feedback_bound(&self) -> Option<usize> {
+        let report = self.feedback.as_ref()?;
+        Some(self.overhead() + report.metadata.len() + report.body.len())
+    }
+
+    fn overhead(&self) -> usize {
         let relay_overhead =
             if self.token.is_empty() { 0 } else { relay::LENGTH_PREFIX + self.token.len() };
-        let overhead = relay_overhead + self.sframe_overhead;
-        if let Some(report) = self.feedback.as_ref() {
-            return Some(overhead + report.metadata.len() + report.body.len());
-        }
-        self.front_packet().map(|packet| overhead + packet.metadata.len() + packet.body.len())
+        relay_overhead + self.sframe_overhead
     }
 
     /// The first packet of the oldest unsent access unit; empty units are

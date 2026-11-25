@@ -127,6 +127,11 @@ pub enum Mode {
     Paused,
 }
 
+/// Whether a sample is congested: loss above 5%, delay growth above 100 ms or a queue above 100 ms.
+fn congested(sample: Sample) -> bool {
+    sample.loss_per_mille > 50 || sample.delay_growth_us > 100_000 || sample.queue_ms > 100
+}
+
 /// The endpoint's video rate, driven by [`Sample`]s and a clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RateController {
@@ -178,9 +183,15 @@ impl RateController {
     }
 
     /// Records a feedback sample received at `now`.
+    /// A paused endpoint resumes at the Low rung on the first fresh report whose window is not
+    /// congested: the peer keeps reporting while this side sends nothing, so the path is
+    /// observed again and a sticky pause would never end.
     pub fn on_report(&mut self, now: Instant, sample: Sample) {
         self.latest = Some(sample);
         self.last_report = Some(now);
+        if self.mode == Mode::Paused && !congested(sample) {
+            self.resume();
+        }
     }
 
     /// Evaluates the rules when a full [`TICK`] has passed since the last evaluation.
@@ -205,10 +216,8 @@ impl RateController {
 
     fn evaluate_sample(&mut self) {
         let Some(sample) = self.latest else { return };
-        let congested =
-            sample.loss_per_mille > 50 || sample.delay_growth_us > 100_000 || sample.queue_ms > 100;
         let clean = sample.loss_per_mille < 20 && sample.queue_ms < 50;
-        if congested {
+        if congested(sample) {
             self.clean_ticks = 0;
             self.target_bps /= 2;
             self.step_down();
