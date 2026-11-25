@@ -144,7 +144,8 @@ pub(super) fn resume(
 }
 
 /// A pending request is served only while its device is still an active row, the endorsed
-/// sequence is older, the declaration is unexpired and it verifies against the certificate.
+/// sequence is older, the declaration is unexpired, it is due or spaced (see below) and it
+/// verifies against the certificate.
 fn eligible(
     account: &LocalBusAccountState,
     pending: &PendingLayerRenewal,
@@ -167,20 +168,23 @@ fn eligible(
     }) {
         return Ok(false);
     }
+    // A due renewal is always served. A renewal that is not due yet is served only when both
+    // its declaration and this primary's last endorsement of the device are a full spacing
+    // window old, so only early, non-due renewals are refused.
     let endorsed = row.message_layer.as_ref();
-    let spaced = endorsed.is_none_or(|endorsed| {
-        declaration.issued_at
-            >= endorsed.declaration.issued_at.saturating_add(RENEWAL_SPACING_SECONDS)
-    });
-    if !super::renewal_due(endorsed, now) && !spaced {
-        return Ok(false);
-    }
-    let db = account.client.account_db()?;
-    if db
-        .load_actor_state::<u64>(&last_endorsed_key(&declaration.device))?
-        .is_some_and(|last| now < last.saturating_add(RENEWAL_SPACING_SECONDS))
-    {
-        return Ok(false);
+    if !super::renewal_due(endorsed, now) {
+        let declaration_spaced = endorsed.is_none_or(|endorsed| {
+            declaration.issued_at
+                >= endorsed.declaration.issued_at.saturating_add(RENEWAL_SPACING_SECONDS)
+        });
+        let endorsement_spaced = account
+            .client
+            .account_db()?
+            .load_actor_state::<u64>(&last_endorsed_key(&declaration.device))?
+            .is_none_or(|last| now >= last.saturating_add(RENEWAL_SPACING_SECONDS));
+        if !(declaration_spaced && endorsement_spaced) {
+            return Ok(false);
+        }
     }
     // A request at or below the retained pin is a stale or rolled-back statement.
     if born.retained_layer_sequence(&declaration.device)? >= declaration.declaration_sequence {
