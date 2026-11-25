@@ -259,7 +259,7 @@ impl GatewaySessionEngine {
                 let matched = matches!(expected, Some(ExpectedReply::PushRoute))
                     && request_id.is_some()
                     && super::push_route::push_route_reply_id(frame) == request_id;
-                if let Err(error) = self.apply_push_route_reply(frame.clone()) {
+                if let Err(error) = self.apply_push_route_reply(frame) {
                     tracing::warn!(%error, "push route registration refused");
                 }
                 if !matched && let Some(host) = &self.host {

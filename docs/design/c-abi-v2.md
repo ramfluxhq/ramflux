@@ -770,6 +770,18 @@ the named admission refusal. A group `message.focus` returns the typed
 `unsupported_for_group` refusal; group typing is outside the beta scope.
 
 
+### Push route refusals
+
+`device.push_route.set` (and `ramflux_v2_execute` with it) reports a node refusal
+as a typed business error, not a validation error. A gateway `push_route_refused`
+answer with `code` `provider_unavailable`, `rejected`, `rejected_owner`,
+`unavailable` or `superseded` completes the operation with the C status
+`CapabilityRejected` (4), `name` and `reason_code` `push_route_refused`, and
+`response.error.details` `{"refusal":"<code>"}`. A newer node's unknown code is
+reported as `unavailable`. No retry hint is carried: the gateway frame has none,
+so `retry_after_ms` is absent. Retry timing stays the SDK's backoff; hosts do not parse
+the message text.
+
 ### Suspend failure recovery
 
 `ramflux_v2_client_suspend` rolls back a failed release by reopening parked files
@@ -780,6 +792,10 @@ reason `suspend_release_failed`. If reopening also fails, admission stays fenced
 and the reason is `suspend_rollback_failed`; no new work is admitted into partially
 reopened owners. Call `ramflux_v2_client_resume` after any failed suspend (including
 a timeout), check its result, and reopen the event subscription from the last cursor.
-Resume needs no unlock prompt. The worker publishes the completed lifecycle state
+Resume needs no unlock prompt. An open config may set `"resume_wait_ms"` (0 to 5000,
+default 250) to let resume retry the data root lock (`daemon.lock`) for that long.
+The wait only polls the kernel lock; it never asks the holder to yield, unlike
+`session_lease`. When the lock is still held after the wait, resume returns
+`AccountBusy` (18) and the client stays suspended. The worker publishes the completed lifecycle state
 even if the synchronous caller times out. Normal successful suspend still cancels
 the subscription, releases files and stops networking; resume reopens them.

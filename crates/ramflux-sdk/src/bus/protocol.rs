@@ -10,6 +10,8 @@ pub struct LocalBusConfig {
     /// Explicit directory origin and trust pin; native hosts never read process environment.
     pub username_directory: Option<ramflux_protocol::username_directory::NativeDirectoryPin>,
     pub(crate) session_lease: Option<super::session_lease::SessionLeaseConfig>,
+    /// Resume-only wait for `daemon.lock` (no yield request). None uses the default 250 ms.
+    pub(crate) resume_wait: Option<std::time::Duration>,
     /// Shared host network reports; retain a clone to notify running account sessions.
     pub network_monitor: crate::NetworkMonitor,
     /// Auto ordering for every account owned by this daemon.
@@ -1102,6 +1104,7 @@ impl LocalBusConfig {
         Self {
             username_directory: None,
             session_lease: None,
+            resume_wait: None,
             network_monitor: crate::NetworkMonitor::new(),
             connection_race: crate::ConnectionRace::default(),
             #[cfg(all(feature = "http-connect-proxy", not(windows)))]

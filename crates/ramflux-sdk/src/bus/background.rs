@@ -20,6 +20,17 @@ pub(crate) fn client_suspended() -> SdkError {
     }
 }
 
+impl super::LocalBusConfig {
+    /// Resume-only wait for the data root lock: retries the kernel lock for up to `wait`
+    /// (capped at five seconds) and never asks the holder to yield, unlike `session_lease`.
+    /// After the wait, resume fails with `DataRootInUse` as before.
+    #[must_use]
+    pub fn with_resume_wait(mut self, wait: std::time::Duration) -> Self {
+        self.resume_wait = Some(wait.min(std::time::Duration::from_secs(5)));
+        self
+    }
+}
+
 #[cfg(feature = "c-abi")]
 impl Supervisor {
     pub(super) async fn suspend_for_background(&self) -> Result<(), SdkError> {
@@ -104,9 +115,12 @@ impl Supervisor {
         if self.root_lease.borrow().is_some() {
             return Ok(());
         }
-        let lease = match self.config.session_lease {
-            Some(lease) => super::session_lease::acquire(&self.config.data_root, lease).await?,
-            None => super::data_root_lock::DataRootLock::acquire(&self.config.data_root)?,
+        let lease = if let Some(lease) = self.config.session_lease {
+            super::session_lease::acquire(&self.config.data_root, lease).await?
+        } else {
+            let wait =
+                self.config.resume_wait.unwrap_or(super::data_root_lock::PREVIOUS_HOLDER_WAIT);
+            super::data_root_lock::DataRootLock::acquire_within(&self.config.data_root, wait)?
         };
         *self.root_lease.borrow_mut() = Some(lease);
         Ok(())
