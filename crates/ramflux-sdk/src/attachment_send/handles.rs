@@ -111,26 +111,10 @@ pub(crate) fn begin(
     let now = bus::unix_now()?;
     reap(now);
     let fingerprint = import_journal::fingerprint(&body.message_id, body.index);
-    let (resumed, import_id) =
-        match import_journal::load_binding(account.client.account_db()?, &body.operation_id)? {
-            Some(binding) => {
-                if binding.fingerprint != fingerprint {
-                    return Err(Refusal::new(CODE_DUPLICATE).into());
-                }
-                if let Some(job) = live_job(&binding.import_id, now) {
-                    if job.account != id {
-                        return Err(Refusal::new(CODE_NOT_OWNER).into());
-                    }
-                    return Ok(local_bus_ok(job_view(&binding.import_id, &job)));
-                }
-                let record =
-                    import_journal::load_record(account.client.account_db()?, &binding.import_id)?
-                        .ok_or(Refusal::new(CODE_NOT_READY))?;
-                import_journal::admissible(&record, now)?;
-                (Some(record), binding.import_id)
-            }
-            None => (None, fresh_id()?),
-        };
+    let (resumed, import_id) = match resolve(&account.client, &id, &body, &fingerprint, now)? {
+        Resolved::Live(job, import_id) => return Ok(local_bus_ok(job_view(&import_id, &job))),
+        Resolved::Admit { resumed, import_id } => (resumed, import_id),
+    };
     let source = Source::find(&account.client, &id, &body)?;
     let length = source.length();
     let (generation, expires_at, revision) = match &resumed {
@@ -216,6 +200,39 @@ pub(crate) fn begin(
     account.attachment_send.import =
         Some(ParkedImport { import_id: import_id.clone(), calls, done: done_rx, stop });
     Ok(local_bus_ok(view(&import_id, generation, "pending", 0, length, expires_at)))
+}
+
+/// What `begin` resolves to: the live handle of a resumed import, or the admission to make.
+enum Resolved {
+    Live(Arc<Job>, String),
+    Admit { resumed: Option<ImportRecord>, import_id: String },
+}
+
+/// Matches an operation to its durable import: a fresh id, a live handle, or the record to resume.
+fn resolve(
+    client: &crate::RamfluxClient,
+    account_id: &str,
+    body: &BeginBody,
+    fingerprint: &str,
+    now: u64,
+) -> Result<Resolved, SdkError> {
+    let Some(binding) = import_journal::load_binding(client.account_db()?, &body.operation_id)?
+    else {
+        return Ok(Resolved::Admit { resumed: None, import_id: fresh_id()? });
+    };
+    if binding.fingerprint != fingerprint {
+        return Err(Refusal::new(CODE_DUPLICATE).into());
+    }
+    if let Some(job) = live_job(&binding.import_id, now) {
+        if job.account != account_id {
+            return Err(Refusal::new(CODE_NOT_OWNER).into());
+        }
+        return Ok(Resolved::Live(job, binding.import_id));
+    }
+    let record = import_journal::load_record(client.account_db()?, &binding.import_id)?
+        .ok_or(Refusal::new(CODE_NOT_READY))?;
+    import_journal::admissible(&record, now)?;
+    Ok(Resolved::Admit { resumed: Some(record), import_id: binding.import_id })
 }
 
 /// Writes the durable record, and the operation binding on first admission, before a worker

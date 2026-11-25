@@ -268,6 +268,18 @@ impl AccountRuntime {
         Ok(false)
     }
 
+    /// A download admitted by this command runs off the actor; its journal is served from the loop.
+    fn park_download_worker(&mut self) {
+        if let Some(import) = self
+            .state
+            .accounts
+            .get_mut(&self.id)
+            .and_then(|account| account.attachment_send.import.take())
+        {
+            self.attachment_sends.park_import(import);
+        }
+    }
+
     async fn apply_command(&mut self, mut command: AccountCommand) -> Result<bool, SdkError> {
         if self.park_command(&mut command).await? {
             return Ok(false);
@@ -336,15 +348,7 @@ impl AccountRuntime {
                 receive_gate_hook,
             )
             .await;
-        if let Some(import) = self
-            .state
-            .accounts
-            .get_mut(&self.id)
-            .and_then(|account| account.attachment_send.import.take())
-        {
-            // A download worker runs off the actor; the reply below still goes out now.
-            self.attachment_sends.park_import(import);
-        }
+        self.park_download_worker();
         if let Some(upload) = self
             .state
             .accounts

@@ -231,20 +231,19 @@ pub(crate) fn stream_remote(
             }
             _ => None,
         };
-        let cipher = match cached {
-            Some(bytes) => bytes,
-            None => {
-                let fresh = fetch_segment(plane, opened, index)?;
-                if segment_digest(&fresh).map_err(|_| Refusal::new(CODE_SEAL_FAILED))? != expected {
-                    return Err(Refusal::new(CODE_SEAL_FAILED));
-                }
-                if let Some(cache) = cache.as_mut() {
-                    super::import_cache::write(cache.dir, index, &fresh)?;
-                    cache.verified[index as usize] = true;
-                    (cache.checkpoint)(&cache.verified)?;
-                }
-                fresh
+        let cipher = if let Some(bytes) = cached {
+            bytes
+        } else {
+            let fresh = fetch_segment(plane, opened, index)?;
+            if segment_digest(&fresh).map_err(|_| Refusal::new(CODE_SEAL_FAILED))? != expected {
+                return Err(Refusal::new(CODE_SEAL_FAILED));
             }
+            if let Some(cache) = cache.as_mut() {
+                super::import_cache::write(cache.dir, index, &fresh)?;
+                cache.verified[index as usize] = true;
+                (cache.checkpoint)(&cache.verified)?;
+            }
+            fresh
         };
         let plain =
             open_segment(&opened.key, &opened.object_id, opened.layout, u64::from(index), &cipher)
