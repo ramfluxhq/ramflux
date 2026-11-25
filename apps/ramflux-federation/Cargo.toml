@@ -16,6 +16,9 @@ itest-http = ["ramflux-node-core/itest-http"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 compio = { version = "=0.19.1", optional = true }
+# SO_PEERCRED without rustix: rustix 1.1 types UCred.pid as NonZero, and a peer in another PID
+# namespace (separate containers) reports pid 0, which turns the Ok value into a bogus Err.
+nix = { version = "0.29", default-features = false, features = ["socket"] }
 
 [dependencies]
 zeroize = { workspace = true }

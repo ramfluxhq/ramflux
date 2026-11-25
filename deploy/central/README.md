@@ -34,7 +34,18 @@ Container, after init (owned by the role UID, mode 0600 inside `<role>/etc`):
 ## (d) Init command
 `username-start.sh prepare` (root, no network, one shot). It prepares the three volumes, sets
 first-start markers and copies the role secrets into `<role>/etc`. Then `witness` and `center`
-start; markers are consumed on first start and restart never reconstructs a store.
+start. A marker (`<role>/.initialize`) passes `--username-initialize` (witness) or
+`--username-rebuild` (centre) only while the role's store (`WITNESS_DB` / `PRIMARY_DB`) does not
+exist; the first start that finds the store removes the marker. So a start that fails before the
+store is written keeps the marker and the restart retries; once the store exists, a restart never
+reconstructs it. A store left by an interrupted rebuild is refused by the product on resume; the
+operator then removes that store file and recreates the marker (`touch`, role UID, mode 0600).
+The centre's rebuild also needs the witness to be in recovery (started with the marker, or with
+`--username-recovery`).
+
+Witness and centre run in separate containers, so each sees the other's SO_PEERCRED pid as 0
+(different PID namespaces). Only the peer UID is checked; it is mapped identically because both
+containers run in the same rootless user namespace.
 
 ## Provisioning and the pin
     python3 deploy/central/publish-username-pin.py --dir ~/rf-username \
@@ -45,8 +56,10 @@ throwaway CA is made: scratch runs only. Production uses the centre's CA (plan s
 The bundle is delivered out of band (plan section 0; production publication is owner decision O1).
 
 ## Gaps against the plan (for the controller)
-- Plan section 1.2 puts the TCP listener on the centre unit. The code puts it on the witness:
-  `username_directory/mod.rs` says the witness owns every public response writer. The units follow
-  the code (witness publishes 127.0.0.1:8443; centre has no network).
+- Plan section 1.2 puts the TCP listener on the centre unit. The code puts it on the witness, and
+  the code is authoritative: `username_directory/witness.rs` binds `RAMFLUX_USERNAME_LISTEN_ADDR`
+  (TCP and QUIC) and the centre role refuses `LISTEN_ADDR`; `mod.rs`: "Witness owns every public
+  response writer". The centre (primary) has no listener and runs with `Network=none`. Plan 1.2
+  should read: witness unit = public listener; centre unit = no network.
 - The centre's signing key and the TLS certificate come from the centre's own CA. Provisioning
   here does not create them in production.

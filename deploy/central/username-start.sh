@@ -3,7 +3,10 @@
 # Username centre container entrypoint (witness and centre roles only). Role-only copy of the
 # witness and centre arms of deploy/scripts/demo-username-start.sh, plus `prepare`, which
 # provisions the three volumes once (copy of demo-username-init.sh for these roles).
-# Restart never authorizes store reconstruction: a marker is consumed on first start.
+# A marker authorizes store creation only until the store exists. It is consumed on the first start
+# that finds the store already written (the previous start created it), so a start that fails
+# before creating the store (bad config, witness unreachable) keeps the marker and retries.
+# Restart after the store exists never authorizes reconstruction again.
 set -eu
 umask 077
 root=/var/lib/ramflux/username
@@ -41,8 +44,10 @@ case "${1:-}" in
     exit 0 ;;
   witness)
     shift
-    marker=$root/witness/.initialize
-    if [ -f "$marker" ]; then rm "$marker"; set -- "$@" --username-initialize; fi
+    marker=$root/witness/.initialize store=${RAMFLUX_USERNAME_WITNESS_DB:?}
+    if [ -f "$marker" ]; then
+      if [ -e "$store" ]; then rm "$marker"; else set -- "$@" --username-initialize; fi
+    fi
     set -- --config "$root/witness/etc/federation.toml" "$@"
     exec /usr/local/bin/ramflux-federation "$@" ;;
   center)
@@ -53,8 +58,10 @@ case "${1:-}" in
       remaining=$((remaining - 1))
       sleep 1
     done
-    marker=$root/center/.initialize
-    if [ -f "$marker" ]; then rm "$marker"; set -- "$@" --username-rebuild; fi
+    marker=$root/center/.initialize store=${RAMFLUX_USERNAME_PRIMARY_DB:?}
+    if [ -f "$marker" ]; then
+      if [ -e "$store" ]; then rm "$marker"; else set -- "$@" --username-rebuild; fi
+    fi
     set -- --config "$root/center/etc/federation.toml" "$@"
     exec /usr/local/bin/ramflux-federation "$@" ;;
   *) echo 'usage: username-start.sh prepare|witness|center [args]' >&2; exit 1 ;;
