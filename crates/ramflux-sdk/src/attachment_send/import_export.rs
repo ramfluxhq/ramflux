@@ -33,8 +33,8 @@ pub(crate) fn publish(source: &Path, length: u64, dest: &Path) -> Result<(), Ref
         .map_err(|_| Refusal::new(CODE_SEAL_FAILED))
 }
 
-/// The destination's directory: absolute, free of `..` and `.` components, a real directory
-/// (not a symlink) that exists.
+/// The destination's directory: absolute, free of `..` and `.` components, and every ancestor a
+/// real directory (not a symlink) that exists.
 fn destination_parent(dest: &Path) -> Result<PathBuf, Refusal> {
     if !dest.is_absolute()
         || dest.components().any(|part| matches!(part, Component::ParentDir | Component::CurDir))
@@ -42,9 +42,13 @@ fn destination_parent(dest: &Path) -> Result<PathBuf, Refusal> {
         return Err(Refusal::new(CODE_PATH_REFUSED));
     }
     let parent = dest.parent().ok_or(Refusal::new(CODE_PATH_REFUSED))?;
-    let meta = fs::symlink_metadata(parent).map_err(|_| Refusal::new(CODE_PATH_REFUSED))?;
-    if meta.file_type().is_symlink() || !meta.is_dir() {
-        return Err(Refusal::new(CODE_PATH_REFUSED));
+    // Every ancestor must be a real directory, not only the last one: a symlinked ancestor would
+    // redirect the publish outside the directory the caller named.
+    for ancestor in parent.ancestors().filter(|path| !path.as_os_str().is_empty()) {
+        let meta = fs::symlink_metadata(ancestor).map_err(|_| Refusal::new(CODE_PATH_REFUSED))?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(Refusal::new(CODE_PATH_REFUSED));
+        }
     }
     Ok(parent.to_path_buf())
 }
