@@ -1,39 +1,55 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Node side of the central node directory (K4, CENTRAL-BATCH-PLAN-02 section 4).
+//! Node side of the central node directory (K4), frozen in
+//! `NN-CENTRAL-OVERNIGHT-PLAN-2026-11-26.md` section 3 and amended by section 3a.
 //!
-//! PENDING CENTRE CONFIRMATION: no centre document defines this wire yet. The framing and fields
-//! below are the plan's assumption (section 4.1) and must be confirmed or replaced by the centre.
-//!
-//! Off unless `[node_directory]` and `[node_report]` are both configured. A snapshot is complete,
-//! signed by the directory key and re-verified when loaded from disk. It can cross-check a pin
-//! (refuse a key mismatch at installation) and apply sanctions. It never removes an existing pin.
+//! Session `rfc-dir-1` is the only source (own session with the centre, never peers). A snapshot
+//! is verified, fenced by `seq`, and then learned into sticky sanction state: the latest sanction per
+//! `node_key` and per `domain`, kept durably. Expiry only stops learning; it never erases what was
+//! learned, `revoked` is permanent, and a domain with a live entry binds it to that node key.
+//! Off unless `[node_directory]` and `[node_report]` are both configured.
 
 pub(crate) mod sanction;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use ramflux_node_core::{NodeCoreError, NodeDirectoryConfig, NodeDirectorySanctionMode};
+use ramflux_node_core::{NodeDirectoryConfig, NodeDirectorySanctionMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// Domain string of the directory snapshot signature (the plan's assumption, section 4.1).
+/// ALPN of the directory session (`rfc-dir-1`).
+pub(crate) const ALPN: &[u8] = b"rfc-dir-1";
+/// Reply limit of the directory session: `1 <= R <= 5_608_192` (5,600,000-byte document plus 8 KiB).
+pub(crate) const REPLY_LIMIT: usize = 5_608_192;
+const REQUEST_DOMAIN: &[u8] = b"rfc-dir-request";
 const SNAPSHOT_DOMAIN: &[u8] = b"rfc-directory-snapshot";
-const SNAPSHOT_VERSION: u64 = 1;
+const DSV: u64 = 1;
+const DV: u64 = 1;
 const MAX_ENTRIES: usize = 10_000;
-const MAX_CLOCK_SKEW_S: u64 = 60;
+const MAX_BODY_LEN: usize = 4_194_304;
+/// Serialised document bound (section 3.2).
+const MAX_DOC_LEN: usize = 5_600_000;
+const SNAPSHOT_LIFETIME_MS: u64 = 86_400_000;
+/// Section 3a point 2: `issued_at` and `seq` may not run more than 300 s ahead.
+const FUTURE_SKEW_MS: u64 = 300_000;
+const POLL_MIN_S: u64 = 60;
+const POLL_MAX_S: u64 = 3600;
 const MAX_JSON_INT: u64 = (1 << 53) - 1;
+/// Frame payload bound `L <= 4096`; the payload is `fv || alg || n || body || sig`.
+const REQUEST_PAYLOAD_LIMIT: usize = 4096;
+const REQUEST_OVERHEAD: usize = 4 + 2 + 64;
 const FILE_NAME: &str = "directory.v1.json";
 const LOG_TARGET: &str = "ramflux_federation_directory";
 
-/// Entry state from the centre: `a` active, `l` limited, `s` suspended, `r` revoked.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Entry state: `active`, `suspended` (includes an enrolment past expiry) or `revoked` (tombstone).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum State {
     Active,
-    Limited,
     Suspended,
     Revoked,
 }
@@ -41,20 +57,18 @@ pub(crate) enum State {
 impl State {
     fn parse(value: &str) -> Option<Self> {
         match value {
-            "a" => Some(Self::Active),
-            "l" => Some(Self::Limited),
-            "s" => Some(Self::Suspended),
-            "r" => Some(Self::Revoked),
+            "active" => Some(Self::Active),
+            "suspended" => Some(Self::Suspended),
+            "revoked" => Some(Self::Revoked),
             _ => None,
         }
     }
 
     pub(crate) fn code(self) -> &'static str {
         match self {
-            Self::Active => "a",
-            Self::Limited => "l",
-            Self::Suspended => "s",
-            Self::Revoked => "r",
+            Self::Active => "active",
+            Self::Suspended => "suspended",
+            Self::Revoked => "revoked",
         }
     }
 
@@ -63,82 +77,209 @@ impl State {
     }
 }
 
+/// One snapshot entry. `domain` is lowercase ASCII.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Entry {
-    /// Node key, canonical base64url of the 32 key bytes.
+    /// Enrolled node key, canonical base64url of the 32 key bytes.
     pub(crate) key: String,
     pub(crate) domain: String,
     pub(crate) state: State,
 }
 
-/// One verified complete snapshot.
+/// One verified snapshot document with its signed body.
 #[derive(Debug)]
 pub(crate) struct Snapshot {
     pub(crate) seq: u64,
     pub(crate) issued_at: u64,
+    pub(crate) expires_at: u64,
     body: Vec<u8>,
-    entries: BTreeMap<String, Entry>,
-    domains: BTreeMap<String, String>,
+    entries: Vec<Entry>,
 }
 
-/// The wire envelope of a snapshot: `{key_id, body, sig}`, all base64url except `key_id`.
+/// The snapshot document `{key_id, body, sig}` (closed members).
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct Envelope {
+#[serde(deny_unknown_fields)]
+pub(crate) struct Doc {
     pub(crate) key_id: String,
     pub(crate) body: String,
     pub(crate) sig: String,
 }
 
+/// Latest sanction learned for one node key. `revoked` is never cleared.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct KeySanction {
+    pub(crate) state: State,
+    pub(crate) domain: String,
+}
+
+/// Binding learned for one domain: the key of its live entry, or `None` when only revoked
+/// entries were learned for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DomainBinding {
+    pub(crate) live_key: Option<String>,
+}
+
+/// Sticky state, persisted with the held document.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Sticky {
+    /// The highest snapshot seq learned from. Learning requires a higher seq.
+    pub(crate) learned_seq: u64,
+    pub(crate) keys: BTreeMap<String, KeySanction>,
+    pub(crate) domains: BTreeMap<String, DomainBinding>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Persisted {
+    /// Fingerprint of the verify keys the held document was checked against.
+    verify: String,
+    doc: Option<Doc>,
+    sticky: Sticky,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Applied {
-    /// The centre had nothing new (`directory: null`, or the same snapshot again).
+    /// The held snapshot already has this seq and these bytes.
     Unchanged,
-    /// A newer snapshot replaced the held one.
+    /// A higher seq replaced the held snapshot.
     Updated { seq: u64 },
 }
 
+/// A parsed `rfc-dir-1` reply.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Reply {
+    Ok { poll_s: u64, applied: Applied },
+    Unavailable { retry_after_ms: u64 },
+    Throttled { retry_after_ms: u64 },
+    Rejected { reason: String },
+}
+
 struct Runtime {
-    config: NodeDirectoryConfig,
+    verify: Vec<(String, String)>,
+    fingerprint: String,
+    sanction: NodeDirectorySanctionMode,
     centre_id: String,
     path: PathBuf,
-    held: Option<(Snapshot, Envelope)>,
+    held: Option<(Snapshot, Doc)>,
+    sticky: Sticky,
 }
 
 static RUNTIME: OnceLock<RwLock<Runtime>> = OnceLock::new();
 
-/// Activates the directory. Called once at start-up when `[node_directory]` and `[node_report]`
-/// are configured. A persisted snapshot is re-verified; one that fails is ignored with a warning.
+/// The node identity used in directory requests (the report identity).
+#[derive(Clone)]
+pub(crate) struct DirIdentity {
+    pub(crate) seed: [u8; 32],
+    pub(crate) centre_id: String,
+    pub(crate) node_key: String,
+    pub(crate) key_gen: u64,
+}
+
+impl DirIdentity {
+    /// `L:u32be || fv || alg || n:u16be || body || sig`, signed over
+    /// `"rfc-dir-request" || 0x00 || fv || alg || len(centre_id) || centre_id || n || body`.
+    pub(crate) fn request_frame(&self) -> Result<Vec<u8>, String> {
+        let body = json!({
+            "dv": DV,
+            "node_key": self.node_key,
+            "key_gen": self.key_gen,
+            "ts": now_ms(),
+            "have_seq": held_seq(),
+        });
+        let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
+        if body.len() + REQUEST_OVERHEAD > REQUEST_PAYLOAD_LIMIT {
+            return Err("request body too large".to_owned());
+        }
+        let centre_len = u16::try_from(self.centre_id.len()).map_err(|_| "centre_id")?;
+        let body_len = u16::try_from(body.len()).map_err(|_| "request body")?;
+        let mut message = Vec::with_capacity(
+            REQUEST_DOMAIN.len() + 1 + 4 + 2 + self.centre_id.len() + body.len(),
+        );
+        message.extend_from_slice(REQUEST_DOMAIN);
+        message.push(0);
+        message.extend_from_slice(&[1, 1]);
+        message.extend_from_slice(&centre_len.to_be_bytes());
+        message.extend_from_slice(self.centre_id.as_bytes());
+        message.extend_from_slice(&body_len.to_be_bytes());
+        message.extend_from_slice(&body);
+        let sig = ramflux_crypto::sign_canonical_bytes_with_seed(&message, self.seed);
+        let sig = ramflux_protocol::decode_base64url(&sig).map_err(|e| e.to_string())?;
+        if sig.len() != 64 {
+            return Err("signature length".to_owned());
+        }
+        let payload_len = 2 + 2 + body.len() + 64;
+        let mut frame = Vec::with_capacity(4 + payload_len);
+        frame.extend_from_slice(&u32::try_from(payload_len).map_err(|_| "frame")?.to_be_bytes());
+        frame.extend_from_slice(&[1, 1]);
+        frame.extend_from_slice(&body_len.to_be_bytes());
+        frame.extend_from_slice(&body);
+        frame.extend_from_slice(&sig);
+        Ok(frame)
+    }
+}
+
+/// Activates the directory from `[node_directory]`. The persisted state is loaded and checked:
+/// a bad state file stops start-up (sanctions must not be silently lost). A held document whose
+/// verify keys differ from the configured ones is dropped (fence reset); sticky state is kept.
 pub(crate) fn start(
-    config: NodeDirectoryConfig,
+    config: &NodeDirectoryConfig,
     centre_id: &str,
-    redb_path: &std::path::Path,
+    redb_path: &Path,
 ) -> Result<(), String> {
-    let path = redb_path.parent().unwrap_or(std::path::Path::new(".")).join(FILE_NAME);
-    let now = crate::now_unix_seconds().map_err(|error| error.to_string())?;
-    let held = match std::fs::read(&path) {
-        Ok(bytes) => match serde_json::from_slice::<Envelope>(&bytes)
-            .map_err(|error| error.to_string())
-            .and_then(|envelope| {
-                verify(&config, centre_id, &envelope, now, None)
-                    .map(|snapshot| (snapshot, envelope))
-            }) {
-            Ok(pair) => Some(pair),
-            Err(error) => {
-                tracing::warn!(target: LOG_TARGET, %error, "persisted directory snapshot ignored");
-                None
+    let path = redb_path.parent().unwrap_or(Path::new(".")).join(FILE_NAME);
+    let verify: Vec<(String, String)> =
+        config.verify.iter().map(|k| (k.key_id.clone(), k.public_key.clone())).collect();
+    let fingerprint = fingerprint(&verify);
+    let now = now_ms();
+    let mut held = None;
+    let mut sticky = Sticky::default();
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let persisted: Persisted = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("directory state unreadable: {error}"))?;
+            sticky = persisted.sticky;
+            if persisted.verify == fingerprint {
+                if let Some(doc) = persisted.doc {
+                    match verify_doc(&verify, centre_id, &doc, now, None, false) {
+                        Ok(snapshot) => held = Some((snapshot, doc)),
+                        Err(error) => {
+                            tracing::warn!(target: LOG_TARGET, %error, "persisted directory snapshot ignored");
+                        }
+                    }
+                }
+            } else {
+                tracing::info!(target: LOG_TARGET, "directory verify keys changed; fence reset");
             }
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("read directory snapshot: {error}")),
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("read directory state: {error}")),
+    }
+    let runtime = Runtime {
+        verify,
+        fingerprint,
+        sanction: config.sanction,
+        centre_id: centre_id.to_owned(),
+        path,
+        held,
+        sticky,
     };
-    let runtime = Runtime { config, centre_id: centre_id.to_owned(), path, held };
+    persist(
+        &runtime.path,
+        &runtime.fingerprint,
+        runtime.held.as_ref().map(|(_, d)| d),
+        &runtime.sticky,
+    )?;
     let seq = runtime.held.as_ref().map_or(0, |(snapshot, _)| snapshot.seq);
     RUNTIME.set(RwLock::new(runtime)).map_err(|_| "node directory already started".to_owned())?;
     tracing::info!(target: LOG_TARGET, held_seq = seq, "node directory enabled");
     Ok(())
 }
 
-/// Sequence of the held snapshot (`have` in the next request); 0 when none is held.
+/// Whether the directory is configured.
+pub(crate) fn enabled() -> bool {
+    RUNTIME.get().is_some()
+}
+
+/// Sequence of the held snapshot (`have_seq`); 0 when none.
 pub(crate) fn held_seq() -> u64 {
     RUNTIME
         .get()
@@ -147,65 +288,117 @@ pub(crate) fn held_seq() -> u64 {
         .unwrap_or(0)
 }
 
-/// Whether the directory is configured (requests may then be sent).
-pub(crate) fn enabled() -> bool {
-    RUNTIME.get().is_some()
-}
-
-/// Parses and applies the reply to a directory request: `u32be || JSON`,
-/// `{"status":"accepted","directory":null | {key_id,body,sig}}`.
-pub(crate) fn accept_reply(bytes: &[u8]) -> Result<Applied, String> {
+/// Parses a `rfc-dir-1` reply: `R:u32be || JSON`. The fence uses only the signed body's `seq`.
+pub(crate) fn accept_reply(bytes: &[u8]) -> Result<Reply, String> {
     let Some((len_bytes, json_bytes)) = bytes.split_first_chunk::<4>() else {
-        return Err("reply framing".to_owned());
+        return Err("malformed: reply framing".to_owned());
     };
     if u32::from_be_bytes(*len_bytes) as usize != json_bytes.len() {
-        return Err("reply length mismatch".to_owned());
+        return Err("malformed: reply length".to_owned());
     }
     let value: Value = ramflux_protocol::parse_i_json(json_bytes).map_err(|e| e.to_string())?;
+    let uint = |key: &str| value.get(key).and_then(Value::as_u64);
     match value.get("status").and_then(Value::as_str) {
-        Some("accepted") => {}
-        other => return Err(format!("status {}", other.unwrap_or("missing"))),
-    }
-    let envelope = match value.get("directory") {
-        None | Some(Value::Null) => return Ok(Applied::Unchanged),
-        Some(directory) => {
-            serde_json::from_value::<Envelope>(directory.clone()).map_err(|e| e.to_string())?
+        Some("ok") => {
+            let poll_s = uint("poll_s")
+                .filter(|poll| (POLL_MIN_S..=POLL_MAX_S).contains(poll))
+                .ok_or("malformed: poll_s outside 60..=3600")?;
+            let reply_seq = uint("seq").ok_or("malformed: reply seq")?;
+            let applied = match value.get("snapshot") {
+                None => {
+                    tracing::debug!(reply_seq, "node directory: no snapshot (seq hint only)");
+                    Applied::Unchanged
+                }
+                Some(doc) => {
+                    let doc: Doc =
+                        serde_json::from_value(doc.clone()).map_err(|e| e.to_string())?;
+                    install(doc, reply_seq)?
+                }
+            };
+            Ok(Reply::Ok { poll_s, applied })
         }
-    };
-    install(envelope)
+        Some("unavailable") => {
+            Ok(Reply::Unavailable { retry_after_ms: uint("retry_after_ms").unwrap_or(2000) })
+        }
+        Some("throttled") => {
+            Ok(Reply::Throttled { retry_after_ms: uint("retry_after_ms").unwrap_or(5000) })
+        }
+        Some("rejected") => Ok(Reply::Rejected {
+            reason: value.get("reason").and_then(Value::as_str).unwrap_or("").to_owned(),
+        }),
+        other => Err(format!("malformed: status {}", other.unwrap_or("missing"))),
+    }
 }
 
-fn install(envelope: Envelope) -> Result<Applied, String> {
-    let now = crate::now_unix_seconds().map_err(|error| error.to_string())?;
+/// Verifies a snapshot, checks the reply seq against the signed seq, applies the fence, learns
+/// the sticky state and persists it. Nothing changes unless every step passes.
+fn install(doc: Doc, reply_seq: u64) -> Result<Applied, String> {
+    let now = now_ms();
+    let doc_bytes = serde_json::to_vec(&doc).map_err(|e| e.to_string())?;
+    if doc_bytes.len() > MAX_DOC_LEN {
+        return Err("directory document too large".to_owned());
+    }
     let lock = RUNTIME.get().ok_or_else(|| "node directory not configured".to_owned())?;
     let mut runtime = lock.write().map_err(|_| "directory lock poisoned".to_owned())?;
-    let snapshot = verify(
-        &runtime.config,
+    let snapshot = verify_doc(
+        &runtime.verify,
         &runtime.centre_id,
-        &envelope,
+        &doc,
         now,
-        runtime.held.as_ref().map(|(snapshot, _)| snapshot),
+        runtime.held.as_ref().map(|(s, _)| s),
+        true,
     )?;
+    if snapshot.seq != reply_seq {
+        return Err("malformed: reply seq differs from signed body seq".to_owned());
+    }
     if runtime.held.as_ref().is_some_and(|(held, _)| held.seq == snapshot.seq) {
         return Ok(Applied::Unchanged);
     }
-    let bytes = serde_json::to_vec(&envelope).map_err(|e| e.to_string())?;
-    let tmp = runtime.path.with_extension("json.tmp");
-    std::fs::write(&tmp, &bytes).map_err(|error| format!("write directory snapshot: {error}"))?;
-    std::fs::rename(&tmp, &runtime.path)
-        .map_err(|error| format!("store directory snapshot: {error}"))?;
+    let mut sticky = runtime.sticky.clone();
+    if snapshot.seq > sticky.learned_seq {
+        learn(&mut sticky, &snapshot);
+        sticky.learned_seq = snapshot.seq;
+    }
+    persist(&runtime.path, &runtime.fingerprint, Some(&doc), &sticky)?;
     let seq = snapshot.seq;
-    runtime.held = Some((snapshot, envelope));
-    tracing::info!(target: LOG_TARGET, seq, "node directory snapshot accepted");
+    runtime.held = Some((snapshot, doc));
+    runtime.sticky = sticky;
+    tracing::info!(target: LOG_TARGET, seq, "node directory snapshot adopted");
     Ok(Applied::Updated { seq })
 }
 
-/// Signed message of a snapshot: `domain || 0x00 || u16be len(centre_id) || centre_id || u32be len(body) || body`.
-fn signed_message(centre_id: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+/// Folds a valid snapshot into the sticky state (section 3a points 1, 4 and 5).
+fn learn(sticky: &mut Sticky, snapshot: &Snapshot) {
+    for entry in &snapshot.entries {
+        let revoked_already =
+            sticky.keys.get(&entry.key).is_some_and(|known| known.state == State::Revoked);
+        if !revoked_already {
+            sticky.keys.insert(
+                entry.key.clone(),
+                KeySanction { state: entry.state, domain: entry.domain.clone() },
+            );
+        }
+    }
+    let mut domains: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+    for entry in &snapshot.entries {
+        let live = domains.entry(entry.domain.as_str()).or_insert(None);
+        if entry.state != State::Revoked {
+            *live = Some(entry.key.as_str());
+        }
+    }
+    for (domain, live) in domains {
+        sticky
+            .domains
+            .insert(domain.to_owned(), DomainBinding { live_key: live.map(str::to_owned) });
+    }
+}
+
+/// Signed message: `"rfc-directory-snapshot" || 0x00 || u16be len(centre_id) || centre_id || u32be len(body) || body`.
+fn snapshot_message(centre_id: &str, body: &[u8]) -> Result<Vec<u8>, String> {
     let centre_len = u16::try_from(centre_id.len()).map_err(|_| "centre_id too long".to_owned())?;
     let body_len = u32::try_from(body.len()).map_err(|_| "body too long".to_owned())?;
     let mut message =
-        Vec::with_capacity(SNAPSHOT_DOMAIN.len() + 1 + 6 + centre_id.len() + body.len());
+        Vec::with_capacity(SNAPSHOT_DOMAIN.len() + 1 + 2 + centre_id.len() + 4 + body.len());
     message.extend_from_slice(SNAPSHOT_DOMAIN);
     message.push(0);
     message.extend_from_slice(&centre_len.to_be_bytes());
@@ -215,162 +408,214 @@ fn signed_message(centre_id: &str, body: &[u8]) -> Result<Vec<u8>, String> {
     Ok(message)
 }
 
-/// Verifies a complete snapshot against the configured key, the centre and the held sequence.
-fn verify(
-    config: &NodeDirectoryConfig,
+/// Doc members, key id, signature, body rules, freshness (`future`), expiry (when `check_expiry`)
+/// and the fence against the held snapshot.
+fn verify_doc(
+    verify: &[(String, String)],
     centre_id: &str,
-    envelope: &Envelope,
+    doc: &Doc,
     now: u64,
     held: Option<&Snapshot>,
+    check_expiry: bool,
 ) -> Result<Snapshot, String> {
-    if envelope.key_id != config.key_id {
-        return Err("directory key id does not match configuration".to_owned());
+    let key_id_ok = !doc.key_id.is_empty()
+        && doc.key_id.len() <= 32
+        && doc.key_id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !key_id_ok {
+        return Err("directory key id grammar".to_owned());
     }
-    let body = ramflux_protocol::decode_base64url(&envelope.body).map_err(|e| e.to_string())?;
-    let message = signed_message(centre_id, &body)?;
-    ramflux_crypto::verify_canonical_signature(&message, &envelope.sig, &config.public_key)
+    let Some((_, public_key)) = verify.iter().find(|(id, _)| *id == doc.key_id) else {
+        return Err("directory key id is not pinned".to_owned());
+    };
+    let body = ramflux_protocol::decode_base64url(&doc.body).map_err(|e| e.to_string())?;
+    if !(2..=MAX_BODY_LEN).contains(&body.len()) {
+        return Err("directory body length".to_owned());
+    }
+    let message = snapshot_message(centre_id, &body)?;
+    ramflux_crypto::verify_canonical_signature(&message, &doc.sig, public_key)
         .map_err(|_| "directory signature rejected".to_owned())?;
-    let snapshot = parse_body(&body, centre_id, now)?;
+    let snapshot = parse_body(&body, centre_id)?;
+    if snapshot.issued_at > now.saturating_add(FUTURE_SKEW_MS) {
+        return Err("future: issued_at ahead of edge clock".to_owned());
+    }
+    if snapshot.seq > snapshot.issued_at.saturating_add(FUTURE_SKEW_MS) {
+        return Err("future: seq ahead of issued_at".to_owned());
+    }
+    if check_expiry && snapshot.expires_at <= now {
+        return Err("directory snapshot expired".to_owned());
+    }
     match held {
-        Some(held) if snapshot.seq < held.seq => {
-            Err("directory snapshot is older than held".to_owned())
-        }
+        Some(held) if snapshot.seq < held.seq => Err("rollback: seq below held".to_owned()),
         Some(held) if snapshot.seq == held.seq && held.body != snapshot.body => {
-            Err("directory snapshot repeats a sequence with different bytes".to_owned())
+            Err("conflict: seq repeated with other bytes".to_owned())
         }
         _ => Ok(snapshot),
     }
 }
 
-fn parse_body(body: &[u8], centre_id: &str, now: u64) -> Result<Snapshot, String> {
+fn parse_body(body: &[u8], centre_id: &str) -> Result<Snapshot, String> {
     let value: Value = ramflux_protocol::parse_i_json(body).map_err(|e| e.to_string())?;
     let uint = |key: &str| value.get(key).and_then(Value::as_u64);
-    if uint("sv") != Some(SNAPSHOT_VERSION) {
+    if uint("dsv") != Some(DSV) {
         return Err("unsupported directory snapshot version".to_owned());
     }
     if value.get("centre_id").and_then(Value::as_str) != Some(centre_id) {
         return Err("directory centre_id does not match".to_owned());
     }
-    let seq = uint("seq").filter(|seq| (1..=MAX_JSON_INT).contains(seq)).ok_or("directory seq")?;
+    let seq = uint("seq").filter(|s| (1..=MAX_JSON_INT).contains(s)).ok_or("directory seq")?;
     let issued_at = uint("issued_at").ok_or("directory issued_at")?;
-    if issued_at > now.saturating_add(MAX_CLOCK_SKEW_S) {
-        return Err("directory snapshot issued in the future".to_owned());
+    let expires_at = uint("expires_at").ok_or("directory expires_at")?;
+    if issued_at.checked_add(SNAPSHOT_LIFETIME_MS) != Some(expires_at) {
+        return Err("directory expires_at is not issued_at + 24 h".to_owned());
     }
-    let nodes = value.get("nodes").and_then(Value::as_array).ok_or("directory nodes")?;
+    let nodes = value.get("entries").and_then(Value::as_array).ok_or("directory entries")?;
     if nodes.len() > MAX_ENTRIES {
         return Err("directory snapshot has too many entries".to_owned());
     }
-    let mut entries = BTreeMap::new();
-    let mut domains = BTreeMap::new();
-    let mut previous: Option<String> = None;
+    let mut entries: Vec<Entry> = Vec::with_capacity(nodes.len());
+    let mut previous: Option<Vec<u8>> = None;
     for node in nodes {
         let entry = parse_entry(node)?;
-        if previous.as_ref().is_some_and(|prev| prev >= &entry.key) {
-            return Err("directory entries must be strictly sorted by key".to_owned());
+        let raw = ramflux_protocol::decode_base64url(&entry.key).map_err(|e| e.to_string())?;
+        if previous.as_ref().is_some_and(|prev| prev >= &raw) {
+            return Err("directory entries must be strictly sorted by node_key".to_owned());
         }
-        if domains.insert(entry.domain.clone(), entry.key.clone()).is_some() {
-            return Err("directory domain repeated".to_owned());
-        }
-        previous = Some(entry.key.clone());
-        entries.insert(entry.key.clone(), entry);
+        previous = Some(raw);
+        entries.push(entry);
     }
-    Ok(Snapshot { seq, issued_at, body: body.to_vec(), entries, domains })
+    // Section 3a point 1: a domain is unique among active and suspended entries only.
+    let mut live_domains = std::collections::BTreeSet::new();
+    for entry in entries.iter().filter(|e| e.state != State::Revoked) {
+        if !live_domains.insert(entry.domain.as_str()) {
+            return Err("directory domain repeated among live entries".to_owned());
+        }
+    }
+    Ok(Snapshot { seq, issued_at, expires_at, body: body.to_vec(), entries })
 }
 
 fn parse_entry(node: &Value) -> Result<Entry, String> {
     let text = |key: &str| node.get(key).and_then(Value::as_str).ok_or("directory entry field");
-    let key_bytes = ramflux_protocol::decode_base64url(text("k")?).map_err(|e| e.to_string())?;
-    if key_bytes.len() != 32 {
-        return Err("directory node key must be 32 bytes".to_owned());
+    let raw = ramflux_protocol::decode_base64url(text("node_key")?).map_err(|e| e.to_string())?;
+    if raw.len() != 32 {
+        return Err("directory node_key must be 32 bytes".to_owned());
     }
-    let key = ramflux_protocol::encode_base64url(&key_bytes);
-    if text("k")? != key {
-        return Err("directory node key is not canonical".to_owned());
+    let key = ramflux_protocol::encode_base64url(&raw);
+    if text("node_key")? != key {
+        return Err("directory node_key is not canonical".to_owned());
     }
-    let domain = text("d")?;
-    if !crate::peer_pin::node_id_ok(domain) {
+    let domain = text("domain")?.to_ascii_lowercase();
+    if !crate::peer_pin::node_id_ok(&domain) {
         return Err("directory domain rejected".to_owned());
     }
-    let state = State::parse(text("s")?).ok_or("directory state")?;
-    // Trust level and key generation are validated but not used by the node yet.
-    if !matches!(text("tl")?, "limited" | "standard" | "publisher") {
-        return Err("directory trust level".to_owned());
+    let state = State::parse(text("state")?).ok_or("directory state")?;
+    if !matches!(text("trust")?, "limited" | "standard" | "publisher") {
+        return Err("directory trust".to_owned());
     }
     let key_gen_ok = node
-        .get("g")
+        .get("key_gen")
         .and_then(Value::as_u64)
         .is_some_and(|generation| (1..=MAX_JSON_INT).contains(&generation));
-    if !key_gen_ok {
-        return Err("directory key generation".to_owned());
+    let changed_ok = node.get("changed_at").and_then(Value::as_u64).is_some();
+    if !key_gen_ok || !changed_ok {
+        return Err("directory entry key_gen or changed_at".to_owned());
     }
-    Ok(Entry { key, domain: domain.to_owned(), state })
+    Ok(Entry { key, domain, state })
 }
 
-/// Pin cross-check at installation: a directory entry for `domain` must carry the same node key.
-/// No entry means no cross-check (the directory is optional).
-pub(crate) fn check_pin(domain: &str, node_public_key: &str) -> Result<(), NodeCoreError> {
+/// The sanction decision for a peer with `domain` and (when known) `node_key`. It reads sticky
+/// state only, so an expired snapshot still applies what it taught. Returns the refusal reason.
+pub(crate) fn decide(domain: &str, key: Option<&str>) -> Result<(), &'static str> {
     let Some(lock) = RUNTIME.get() else { return Ok(()) };
-    let runtime = lock.read().map_err(|_| directory_unavailable())?;
-    let Some((snapshot, _)) = runtime.held.as_ref() else { return Ok(()) };
-    let Some(key) = snapshot.domains.get(domain) else { return Ok(()) };
-    let presented = ramflux_protocol::decode_base64url(node_public_key)
-        .map(|bytes| ramflux_protocol::encode_base64url(&bytes))
-        .unwrap_or_default();
-    if &presented == key {
-        Ok(())
-    } else {
-        tracing::warn!(target: LOG_TARGET, %domain, "directory key mismatch; pin refused");
-        Err(NodeCoreError::ItestHttp("directory_key_mismatch".to_owned()))
+    let Ok(runtime) = lock.read() else { return Err("unavailable") };
+    let domain = domain.to_ascii_lowercase();
+    let presented = match key {
+        Some(key) => Some(
+            ramflux_protocol::decode_base64url(key)
+                .map(|bytes| ramflux_protocol::encode_base64url(&bytes))
+                .map_err(|_| "malformed")?,
+        ),
+        None => None,
+    };
+    if let Some(key) = presented.as_deref()
+        && runtime.sticky.keys.get(key).is_some_and(|known| known.state.sanctioned())
+    {
+        return Err("sanctioned");
+    }
+    match runtime.sticky.domains.get(&domain) {
+        Some(DomainBinding { live_key: None }) => Err("domain_revoked"),
+        Some(DomainBinding { live_key: Some(bound) }) => match presented.as_deref() {
+            Some(key) if key != bound => Err("domain_binding"),
+            _ => Ok(()),
+        },
+        None => Ok(()),
     }
 }
 
-pub(crate) fn directory_unavailable() -> NodeCoreError {
-    NodeCoreError::ItestHttp("node directory unavailable".to_owned())
+/// The configured sanction mode, when the directory is configured.
+pub(crate) fn sanction_mode() -> Option<NodeDirectorySanctionMode> {
+    RUNTIME.get().and_then(|lock| lock.read().ok()).map(|runtime| runtime.sanction)
 }
 
-/// Read-only admin view (`GET /admin/federation/directory`).
+/// Read-only admin view (`POST /admin/federation/directory`).
 pub(crate) fn admin_view() -> Value {
     let Some(lock) = RUNTIME.get() else { return json!({ "enabled": false }) };
     let Ok(runtime) = lock.read() else {
         return json!({ "enabled": true, "error": "unavailable" });
     };
-    let mode = match runtime.config.sanction {
+    let mode = match runtime.sanction {
         NodeDirectorySanctionMode::Refuse => "refuse",
         NodeDirectorySanctionMode::Observe => "observe",
     };
-    let Some((snapshot, _)) = runtime.held.as_ref() else {
-        return json!({ "enabled": true, "sanction": mode, "seq": 0, "issued_at": null,
-            "entries": 0, "sanctioned": [] });
-    };
-    let sanctioned: Vec<Value> = snapshot
-        .entries
-        .values()
-        .filter(|entry| entry.state.sanctioned())
-        .map(|entry| json!({ "k": entry.key, "d": entry.domain, "s": entry.state.code() }))
+    let sanctioned: Vec<Value> = runtime
+        .sticky
+        .keys
+        .iter()
+        .filter(|(_, known)| known.state.sanctioned())
+        .map(|(key, known)| json!({ "k": key, "d": known.domain, "s": known.state.code() }))
         .collect();
+    let (seq, expires_at, usable) = match runtime.held.as_ref() {
+        Some((snapshot, _)) => {
+            (snapshot.seq, Some(snapshot.expires_at), snapshot.expires_at > now_ms())
+        }
+        None => (0, None, false),
+    };
     json!({
         "enabled": true,
         "sanction": mode,
-        "seq": snapshot.seq,
-        "issued_at": snapshot.issued_at,
-        "entries": snapshot.entries.len(),
+        "seq": seq,
+        "expires_at": expires_at,
+        "usable": usable,
+        "learned_seq": runtime.sticky.learned_seq,
+        "sticky_keys": runtime.sticky.keys.len(),
         "sanctioned": sanctioned,
     })
 }
 
-/// The mode the operator configured; `refuse` is the default.
-pub(crate) fn sanction_mode() -> Option<NodeDirectorySanctionMode> {
-    RUNTIME.get().and_then(|lock| lock.read().ok()).map(|runtime| runtime.config.sanction)
+/// Writes the persisted state atomically (temporary file, then rename).
+fn persist(
+    path: &Path,
+    fingerprint: &str,
+    doc: Option<&Doc>,
+    sticky: &Sticky,
+) -> Result<(), String> {
+    let persisted =
+        Persisted { verify: fingerprint.to_owned(), doc: doc.cloned(), sticky: sticky.clone() };
+    let bytes = serde_json::to_vec(&persisted).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &bytes).map_err(|error| format!("write directory state: {error}"))?;
+    std::fs::rename(&tmp, path).map_err(|error| format!("store directory state: {error}"))
 }
 
-/// Looks up the sanction state of `domain` in the held snapshot.
-pub(crate) fn sanction_of(domain: &str) -> Result<Option<State>, NodeCoreError> {
-    let Some(lock) = RUNTIME.get() else { return Ok(None) };
-    let runtime = lock.read().map_err(|_| directory_unavailable())?;
-    let Some((snapshot, _)) = runtime.held.as_ref() else { return Ok(None) };
-    Ok(snapshot
-        .domains
-        .get(domain)
-        .and_then(|key| snapshot.entries.get(key))
-        .map(|entry| entry.state))
+fn fingerprint(verify: &[(String, String)]) -> String {
+    let mut parts: Vec<String> = verify.iter().map(|(id, key)| format!("{id}:{key}")).collect();
+    parts.sort();
+    parts.join("\n")
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
 }

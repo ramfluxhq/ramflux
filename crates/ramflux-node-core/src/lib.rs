@@ -17,8 +17,8 @@ pub use log_path::log_path;
 mod node_directory_config;
 mod node_report_config;
 pub use node_directory_config::{
-    NodeDirectoryConfig, NodeDirectorySanctionMode, load_node_directory_config,
-    load_node_directory_config_file,
+    NodeDirectoryConfig, NodeDirectorySanctionMode, NodeDirectoryVerifyKey,
+    load_node_directory_config, load_node_directory_config_file,
 };
 pub use node_report_config::{
     NodeReportCentreConfig, NodeReportConfig, NodeReportRegionConfig, load_node_report_config,

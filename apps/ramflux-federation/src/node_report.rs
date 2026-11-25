@@ -39,8 +39,6 @@ const MAX_CAPS: usize = 16;
 const MAX_JSON_INT: u64 = (1 << 53) - 1;
 /// A retry resends the same bytes only while `ts` is this close to now (section 3.3).
 const RETRY_WINDOW_MS: u64 = 50_000;
-/// Version of the directory request kind (K4 section 4.1); sent only when the centre advertises it.
-const DIRECTORY_KV: u64 = 1;
 const DEFAULT_FULL_EVERY_S: u64 = 3600;
 const MIN_FULL_EVERY_S: u64 = 300;
 const MAX_FULL_EVERY_S: u64 = 86_400;
@@ -52,6 +50,10 @@ const REFUSAL_BACKOFF_MIN: Duration = Duration::from_mins(5);
 const REFUSAL_BACKOFF_MAX: Duration = Duration::from_hours(1);
 const UNSUPPORTED_RETRY: Duration = Duration::from_secs(3600);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
+/// `rfc-dir-1` back-off: 2 s doubling to 300 s (section 3.1 of the centre plan).
+const DIRECTORY_BACKOFF_MIN: Duration = Duration::from_secs(2);
+const DIRECTORY_BACKOFF_MAX: Duration = Duration::from_secs(300);
+const DIRECTORY_DEFAULT_POLL_S: u64 = 300;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ReportError {
@@ -204,7 +206,6 @@ pub(crate) struct Directives {
     hello_kv_max: u64,
     min_rv: u64,
     min_hello_kv: u64,
-    directory_kv_max: u64,
     full_every_s: u64,
 }
 
@@ -215,7 +216,6 @@ impl Default for Directives {
             hello_kv_max: HELLO_KV,
             min_rv: 0,
             min_hello_kv: 0,
-            directory_kv_max: 0,
             full_every_s: DEFAULT_FULL_EVERY_S,
         }
     }
@@ -243,7 +243,6 @@ impl Directives {
         self.hello_kv_max = kind("hello");
         self.min_rv = uint("min_rv");
         self.min_hello_kv = min_kind("hello");
-        self.directory_kv_max = kind("directory");
         if let Some(seconds) = dir.get("full_every_s").and_then(Value::as_u64)
             && (MIN_FULL_EVERY_S..=MAX_FULL_EVERY_S).contains(&seconds)
         {
@@ -336,21 +335,6 @@ struct Reporter {
 }
 
 impl Reporter {
-    /// The signed directory request (K4 section 4.1), built fresh for every request.
-    fn next_directory(&self) -> Result<Vec<u8>, ReportError> {
-        let body = json!({
-            "rv": RV,
-            "kind": "directory",
-            "kv": DIRECTORY_KV,
-            "node_key": self.node_key,
-            "key_gen": self.key_gen,
-            "ts": now_ms(),
-            "have": crate::node_directory::held_seq(),
-        });
-        let body = serde_json::to_vec(&body).map_err(|_| ReportError::Body("serialize"))?;
-        encode_frame(&self.seed, &self.centre_id, &body)
-    }
-
     /// Returns the frame and its `ts`; the frame is what a retry resends.
     fn next_hello(&mut self) -> Result<(Vec<u8>, u64), ReportError> {
         self.seq = self.seq.checked_add(1).ok_or(ReportError::Body("seq overflow"))?;
@@ -369,7 +353,7 @@ impl Reporter {
     }
 }
 
-fn client_config(ca_path: &str) -> Result<quinn::ClientConfig, String> {
+fn client_config(ca_path: &str, alpn: &[u8]) -> Result<quinn::ClientConfig, String> {
     let pem = std::fs::read(ca_path).map_err(|error| format!("read ca_cert: {error}"))?;
     let mut roots = rustls::RootCertStore::empty();
     for cert in rustls_pemfile::certs(&mut pem.as_slice()) {
@@ -384,7 +368,7 @@ fn client_config(ca_path: &str) -> Result<quinn::ClientConfig, String> {
     .map_err(|error| error.to_string())?
     .with_root_certificates(roots)
     .with_no_client_auth();
-    tls.alpn_protocols = vec![ALPN.to_vec()];
+    tls.alpn_protocols = vec![alpn.to_vec()];
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
         .map_err(|error| error.to_string())?;
     Ok(quinn::ClientConfig::new(Arc::new(crypto)))
@@ -396,8 +380,14 @@ async fn send_once(
     centre: SocketAddr,
     server_name: &str,
     frame: &[u8],
+    client: Option<quinn::ClientConfig>,
+    reply_limit: usize,
 ) -> Sent {
-    let connection = match endpoint.connect(centre, server_name) {
+    let connecting = match client {
+        Some(client) => endpoint.connect_with(client, centre, server_name),
+        None => endpoint.connect(centre, server_name),
+    };
+    let connection = match connecting {
         Ok(connecting) => match tokio::time::timeout(IO_TIMEOUT, connecting).await {
             Err(_) => return Sent::Failed("connect timeout".to_owned()),
             Ok(Err(error)) if access_closed(&error) => return Sent::AccessClosed,
@@ -421,7 +411,7 @@ async fn send_once(
     if let Err(error) = send.finish() {
         return Sent::Failed(error.to_string());
     }
-    let read = tokio::time::timeout(IO_TIMEOUT, recv.read_to_end(MAX_REPLY_LEN)).await;
+    let read = tokio::time::timeout(IO_TIMEOUT, recv.read_to_end(reply_limit)).await;
     let reply = match read {
         Err(_) => return Sent::Failed("reply timeout".to_owned()),
         Ok(Ok(reply)) => reply,
@@ -475,7 +465,9 @@ async fn run(
                 }
             },
         };
-        let wait = match send_once(&endpoint, centre, &server_name, &frame).await {
+        let wait = match send_once(&endpoint, centre, &server_name, &frame, None, MAX_REPLY_LEN)
+            .await
+        {
             Sent::Failed(error) => {
                 tracing::warn!(%error, "node report: centre unreachable");
                 jitter(CONNECT_BACKOFF)
@@ -492,11 +484,6 @@ async fn run(
                     refusal_step = REFUSAL_BACKOFF_MIN;
                     if let Some(dir) = dir {
                         directives.apply(&dir);
-                    }
-                    if crate::node_directory::enabled()
-                        && directives.directory_kv_max >= DIRECTORY_KV
-                    {
-                        fetch_directory(&endpoint, centre, &server_name, &reporter).await;
                     }
                     jitter(Duration::from_secs(directives.full_every_s))
                 }
@@ -538,28 +525,76 @@ async fn run(
     }
 }
 
-/// One directory request after an accepted hello. Failures are logged; the hello cadence continues.
-async fn fetch_directory(
-    endpoint: &quinn::Endpoint,
+/// Pull loop of `rfc-dir-1` (centre plan section 3.1): one request at start, then every `poll_s`.
+/// Transport failures back off from 2 s doubling to 300 s. Runs only when `[node_directory]` is set.
+async fn run_directory(
+    endpoint: quinn::Endpoint,
     centre: SocketAddr,
-    server_name: &str,
-    reporter: &Reporter,
+    server_name: String,
+    client: quinn::ClientConfig,
+    identity: crate::node_directory::DirIdentity,
+    shutdown: CancellationToken,
 ) {
-    let frame = match reporter.next_directory() {
-        Ok(frame) => frame,
-        Err(error) => {
-            tracing::warn!(?error, "node directory: request could not be built");
+    let mut backoff = DIRECTORY_BACKOFF_MIN;
+    loop {
+        let frame = match identity.request_frame() {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::error!(%error, "node directory: request could not be built; poll stopped");
+                return;
+            }
+        };
+        let sent = send_once(
+            &endpoint,
+            centre,
+            &server_name,
+            &frame,
+            Some(client.clone()),
+            crate::node_directory::REPLY_LIMIT,
+        )
+        .await;
+        let wait = match sent {
+            Sent::Failed(error) => {
+                tracing::warn!(%error, "node directory: centre unreachable");
+                backoff_step(&mut backoff)
+            }
+            Sent::AccessClosed => {
+                tracing::warn!("node directory: edge closed the connection (access); backing off");
+                backoff_step(&mut backoff)
+            }
+            Sent::Reply(bytes) => {
+                backoff = DIRECTORY_BACKOFF_MIN;
+                match crate::node_directory::accept_reply(&bytes) {
+                    Ok(crate::node_directory::Reply::Ok { poll_s, applied }) => {
+                        tracing::debug!(?applied, "node directory: poll ok");
+                        Duration::from_secs(poll_s)
+                    }
+                    Ok(
+                        crate::node_directory::Reply::Unavailable { retry_after_ms }
+                        | crate::node_directory::Reply::Throttled { retry_after_ms },
+                    ) => Duration::from_millis(retry_after_ms.min(MAX_RETRY_MS)),
+                    Ok(crate::node_directory::Reply::Rejected { reason }) => {
+                        tracing::warn!(%reason, "node directory: centre rejected the poll");
+                        Duration::from_secs(DIRECTORY_DEFAULT_POLL_S)
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "node directory: reply refused");
+                        Duration::from_secs(DIRECTORY_DEFAULT_POLL_S)
+                    }
+                }
+            }
+        };
+        if !sleep_or_cancel(wait, &shutdown).await {
             return;
         }
-    };
-    match send_once(endpoint, centre, server_name, &frame).await {
-        Sent::Reply(bytes) => match crate::node_directory::accept_reply(&bytes) {
-            Ok(applied) => tracing::debug!(?applied, "node directory: reply applied"),
-            Err(error) => tracing::warn!(%error, "node directory: reply refused"),
-        },
-        Sent::AccessClosed => tracing::warn!("node directory: edge closed the connection (access)"),
-        Sent::Failed(error) => tracing::warn!(%error, "node directory: request failed"),
     }
+}
+
+/// Returns the current back-off and doubles it for the next failure, capped at 300 s.
+fn backoff_step(backoff: &mut Duration) -> Duration {
+    let wait = *backoff;
+    *backoff = backoff.saturating_mul(2).min(DIRECTORY_BACKOFF_MAX);
+    wait
 }
 
 /// Starts the sender when `[node_report]` is configured. Errors stay local: the node keeps serving.
@@ -582,31 +617,6 @@ pub(crate) fn start(
     start_directory(config, &report);
     if let Err(error) = spawn(config, discovery, seed, &report) {
         tracing::error!(%error, "node report not started");
-    }
-}
-
-/// The directory needs the report's centre and identity. Without `[node_report]` it stays off.
-fn start_directory(config: &NodeServiceConfig, report: &NodeReportConfig) {
-    let directory = match ramflux_node_core::load_node_directory_config(std::env::args().skip(1)) {
-        Ok(Some(directory)) => directory,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::error!(%error, "node directory not started: invalid [node_directory]");
-            return;
-        }
-    };
-    let redb_path = ramflux_node_core::effective_redb_path(config);
-    if let Err(error) = crate::node_directory::start(directory, &report.centre.id, &redb_path) {
-        tracing::error!(%error, "node directory not started");
-    }
-}
-
-fn warn_directory_without_report() {
-    if matches!(
-        ramflux_node_core::load_node_directory_config(std::env::args().skip(1)),
-        Ok(Some(_))
-    ) {
-        tracing::error!("node directory not started: [node_directory] needs [node_report]");
     }
 }
 
@@ -638,8 +648,22 @@ fn spawn(
         seq: 0,
     };
     let centre: SocketAddr = report.centre.addr.parse().map_err(|_| "centre addr".to_owned())?;
-    let client = client_config(&report.centre.ca_cert)?;
+    let client = client_config(&report.centre.ca_cert, ALPN)?;
     let server_name = report.centre.server_name.clone();
+    // The directory uses the same edge and CA on its own ALPN; off unless [node_directory] is set.
+    let directory = if crate::node_directory::enabled() {
+        Some((
+            client_config(&report.centre.ca_cert, crate::node_directory::ALPN)?,
+            crate::node_directory::DirIdentity {
+                seed,
+                centre_id: report.centre.id.clone(),
+                node_key: discovery.node_public_key.clone(),
+                key_gen: report.key_gen,
+            },
+        ))
+    } else {
+        None
+    };
     ramflux_node_core::spawn_service_worker("ramflux-node-report", move |shutdown| {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
@@ -660,10 +684,51 @@ fn spawn(
                 return;
             };
             endpoint.set_default_client_config(client);
-            run(reporter, endpoint, centre, server_name, shutdown).await;
+            let directory_task = async {
+                if let Some((client, identity)) = directory {
+                    run_directory(
+                        endpoint.clone(),
+                        centre,
+                        server_name.clone(),
+                        client,
+                        identity,
+                        shutdown.clone(),
+                    )
+                    .await;
+                }
+            };
+            tokio::join!(
+                run(reporter, endpoint.clone(), centre, server_name.clone(), shutdown.clone()),
+                directory_task
+            );
         });
     })
     .map_err(|error| error.to_string())
+}
+
+/// The directory needs the report's centre and identity. Without `[node_report]` it stays off.
+fn start_directory(config: &NodeServiceConfig, report: &NodeReportConfig) {
+    let directory = match ramflux_node_core::load_node_directory_config(std::env::args().skip(1)) {
+        Ok(Some(directory)) => directory,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::error!(%error, "node directory not started: invalid [node_directory]");
+            return;
+        }
+    };
+    let redb_path = ramflux_node_core::effective_redb_path(config);
+    if let Err(error) = crate::node_directory::start(&directory, &report.centre.id, &redb_path) {
+        tracing::error!(%error, "node directory not started");
+    }
+}
+
+fn warn_directory_without_report() {
+    if matches!(
+        ramflux_node_core::load_node_directory_config(std::env::args().skip(1)),
+        Ok(Some(_))
+    ) {
+        tracing::error!("node directory not started: [node_directory] needs [node_report]");
+    }
 }
 
 #[cfg(test)]
