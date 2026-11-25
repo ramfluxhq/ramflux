@@ -165,10 +165,22 @@ impl AttachmentSends {
                 );
             }
         }
+        // A cancel stops its uploads outright: a paused worker waits in `gate`, which only returns
+        // once its registry entry is gone, so the entry goes now and the worker ends at once.
+        let cancelling = only.is_some();
+        if cancelling {
+            for operation in &targets {
+                if let Some(parked) = self.parked.get(operation) {
+                    for prepare in prepares_of(&parked.command) {
+                        transfer::forget(account_id, prepare);
+                    }
+                }
+            }
+        }
         let deadline = Instant::now() + DRAIN_DEADLINE;
         while targets.iter().any(|operation| self.parked.contains_key(operation)) {
             for operation in &targets {
-                if let Some(parked) = self.parked.get(operation) {
+                if let Some(parked) = self.parked.get(operation).filter(|_| !cancelling) {
                     for prepare in prepares_of(&parked.command) {
                         // A worker not yet in the transfer registry is paused on the next pass.
                         let _ = transfer::set_paused(account_id, prepare, true);

@@ -148,6 +148,19 @@ pub(crate) fn gate(account: &str, prepare_id: &str) -> Result<(), Refusal> {
     }
 }
 
+/// Stops one prepare's upload for a cancel. The registry entry and any pending pause go away, so
+/// the worker's next `gate` returns `cancelled` and it sends no further slice.
+pub(crate) fn forget(account: &str, prepare_id: &str) {
+    let id = key(account, prepare_id);
+    if let Ok(mut running) = REGISTRY.running.lock() {
+        running.remove(&id);
+    }
+    if let Ok(mut intents) = REGISTRY.intents.lock() {
+        intents.remove(&id);
+    }
+    REGISTRY.changed.notify_all();
+}
+
 /// Sets the unique count to the bytes the journaled ACK bitmap confirms. It is recomputed from
 /// the bitmap, not accumulated, so a replayed or lost confirmation can never double-count.
 pub(crate) fn set_unique(account: &str, prepare_id: &str, bytes: u64) {
