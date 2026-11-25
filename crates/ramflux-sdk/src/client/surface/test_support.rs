@@ -243,8 +243,6 @@ async fn enroll_surface_sibling(
     account_id: &str,
     device: &str,
 ) -> TestResult<RamfluxClient> {
-    use ramflux_protocol::custody::CustodyAuthority;
-    use zeroize::Zeroizing;
     let mut native = source.local_own_copy_manifest()?.custody.ok_or("native manifest")?;
     let primary = vault.primary_for_public_key(
         &native.publication.record.body.master_certificate.body.self_signing_public_key,
@@ -273,7 +271,7 @@ async fn enroll_surface_sibling(
         native.publication.compacted_ids.as_deref(),
         custodian.as_ref(),
     )?;
-    let mut seeds = Zeroizing::new([0u8; 64]);
+    let mut seeds = zeroize::Zeroizing::new([0u8; 64]);
     getrandom::fill(&mut *seeds).map_err(|_| SdkError::CustodyRandomUnavailable)?;
     let signing: [u8; 32] = seeds.get(..32).ok_or("signing seed")?.try_into()?;
     let agreement: [u8; 32] = seeds.get(32..).ok_or("agreement seed")?.try_into()?;
@@ -311,7 +309,7 @@ async fn enroll_surface_sibling(
     crate::custody::accept_publication(
         source.account_index()?.root(),
         &source_id,
-        &CustodyAuthority {
+        &ramflux_protocol::custody::CustodyAuthority {
             publication: native.publication.clone(),
             custodian_publication: native.custodian_publication.clone(),
         },
