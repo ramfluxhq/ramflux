@@ -189,7 +189,7 @@ pub fn write_push_central_state(
     let bytes = serde_json::to_vec(state)
         .map_err(|error| invalid(format!("encode push state: {error}")))?;
     let tmp = path.with_extension("tmp");
-    let result = (|| -> std::io::Result<()> {
+    let renamed = (|| -> std::io::Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -200,17 +200,17 @@ pub fn write_push_central_state(
         file.sync_all()?;
         std::fs::rename(&tmp, path)
     })();
-    let synced = result.and_then(|()| {
-        // Fsync the directory so the rename itself is durable.
-        match path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
-            Some(dir) => std::fs::File::open(dir)?.sync_all(),
-            None => Ok(()),
-        }
-    });
-    synced.map_err(|error| {
+    if let Err(error) = renamed {
         let _ = std::fs::remove_file(&tmp);
-        invalid(format!("write push state: {error}"))
-    })
+        return Err(invalid(format!("write push state: {error}")));
+    }
+    // Fsync the directory so the rename itself is durable. The new file is in place either way.
+    match path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        Some(dir) => std::fs::File::open(dir)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|error| invalid(format!("sync push state directory: {error}"))),
+        None => Ok(()),
+    }
 }
 
 /// Blocking client used by notify: connect, one request, one reply, 12 s total bound.

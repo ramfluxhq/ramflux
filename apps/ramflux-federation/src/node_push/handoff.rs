@@ -3,7 +3,7 @@
 
 //! Local Unix socket that notify uses to hand wake batches to the push session.
 //! One request and one reply per connection, both `u32be length || JSON`.
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,11 +42,6 @@ pub(crate) async fn serve(socket: PathBuf, shared: Arc<PushShared>) -> Result<()
     // The socket is created by this process, so its owner is the effective uid we serve as.
     let owner =
         std::fs::metadata(&socket).map_err(|error| format!("handoff socket: {error}"))?.uid();
-    let dir_owner =
-        socket.parent().and_then(|parent| std::fs::metadata(parent).ok()).map(|meta| meta.uid());
-    if dir_owner != Some(owner) {
-        return Err("handoff directory is not owned by this user".to_owned());
-    }
     let limit = Arc::new(Semaphore::new(MAX_HANDOFF_TASKS));
     loop {
         match listener.accept().await {
@@ -73,20 +68,23 @@ pub(crate) async fn serve(socket: PathBuf, shared: Arc<PushShared>) -> Result<()
     }
 }
 
-/// The socket directory is created with mode 0700 when absent; an existing directory must have no
-/// group or other permission bits at all.
+/// The socket directory is created with mode 0700 when absent; an existing directory must be owned
+/// by the effective uid and have no group or other permission bits at all. Checked before the
+/// stale socket is removed or a new one is bound.
 fn prepare_parent(socket: &Path) -> Result<(), String> {
     let parent = socket.parent().ok_or("handoff_socket has no parent directory")?;
     if !parent.exists() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("handoff directory: {error}"))?;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("handoff directory mode: {error}"))?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .map_err(|error| format!("handoff directory: {error}"))?;
     }
-    let mode = std::fs::metadata(parent)
-        .map_err(|error| format!("handoff directory: {error}"))?
-        .permissions()
-        .mode();
-    if mode & 0o077 != 0 {
+    let meta = std::fs::metadata(parent).map_err(|error| format!("handoff directory: {error}"))?;
+    if meta.uid() != rustix::process::geteuid().as_raw() {
+        return Err("handoff directory is not owned by this user".to_owned());
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
         return Err("handoff directory must be mode 0700".to_owned());
     }
     Ok(())
