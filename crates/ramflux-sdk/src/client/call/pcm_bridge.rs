@@ -14,6 +14,11 @@
 //! discards the oldest ones (consumer side, lock-free) until the newest remain, then renders
 //! one. The producer never evicts. A full ring (last resort, host not reading) makes the
 //! producer drop the new frame and count it in `render_drops`.
+//!
+//! Threading (C0 SPSC rule): at most one host thread calls capture and at most one calls
+//! render for a given `media_token` at a time. The two may run concurrently with each other.
+//! Concurrent callers of the same endpoint can overwrite a slot and garble a frame; memory
+//! stays safe because every shared field is an atomic.
 
 use crate::client::call::media_contract::PCM_FRAME_SAMPLES;
 use ramflux_media::codec::Frame;
@@ -219,8 +224,9 @@ fn control() -> std::sync::MutexGuard<'static, ()> {
 fn enter(client: u64, token: u64, generation: u64) -> Result<Guard, PcmError> {
     SLOT.guards.fetch_add(1, Ordering::SeqCst);
     let guard = Guard;
-    // Tokens are nonzero. Zero is also the empty marker of RECEIPTS and must never match it.
-    if token == 0 {
+    // Tokens and clients are nonzero. Zero is also the empty marker of RECEIPTS, and an unbound
+    // slot holds client 0: neither may ever match a callback.
+    if token == 0 || client == 0 {
         return Err(PcmError::InvalidArgument);
     }
     if SLOT.published.load(Ordering::SeqCst)
@@ -313,6 +319,13 @@ pub(crate) fn publish(token: u64, generation: u64) -> Result<(), crate::SdkError
     SLOT.generation.store(generation, Ordering::SeqCst);
     SLOT.capture.reset(capture_storage());
     SLOT.render.reset(render_storage());
+    // Counters are per session: a new token starts from zero, never from the last call's totals.
+    SLOT.captured.store(0, Ordering::SeqCst);
+    SLOT.capture_drops.store(0, Ordering::SeqCst);
+    SLOT.render_underruns.store(0, Ordering::SeqCst);
+    SLOT.render_drops.store(0, Ordering::SeqCst);
+    #[cfg(feature = "c-abi")]
+    SLOT.render_discards.store(0, Ordering::SeqCst);
     SLOT.fenced.store(generation, Ordering::SeqCst);
     SLOT.published.store(true, Ordering::SeqCst);
     Ok(())
@@ -322,7 +335,10 @@ pub(crate) fn publish(token: u64, generation: u64) -> Result<(), crate::SdkError
 #[cfg(feature = "c-abi")]
 pub(crate) fn bind_client(token: u64, client: u64) -> bool {
     let _control = control();
-    if !SLOT.published.load(Ordering::SeqCst) || SLOT.token.load(Ordering::SeqCst) != token {
+    if client == 0
+        || !SLOT.published.load(Ordering::SeqCst)
+        || SLOT.token.load(Ordering::SeqCst) != token
+    {
         return false;
     }
     SLOT.client.store(client, Ordering::SeqCst);
@@ -411,20 +427,27 @@ impl Playback for PcmPlayback {
     }
 }
 
-/// Move the slot to `generation` after an I/O generation change. Stores the new generation
-/// (callbacks of the old one now refuse), waits for in-flight callbacks, then advances the
-/// epoch so frames queued before the change are discarded. Returns `false` at the deadline;
-/// activation stays refused until a later call completes the fence.
-pub(crate) fn set_generation(token: u64, generation: u64) -> bool {
+/// Mirror the engine's `generation` and the callback gate `open` into the slot, in one call.
+/// Unchanged generation (already fenced): `open` is stored once and nothing else moves, so the
+/// gate never passes through a false value on a steady call. Changed generation: the new
+/// generation is stored (old-generation callbacks refuse), the gate is closed, in-flight
+/// callbacks drain, the epoch advances so frames queued before the change are discarded, and
+/// `open` is stored last. Returns `false` at the deadline with the gate closed; activation
+/// stays refused until a later call completes the fence.
+pub(crate) fn set_generation(token: u64, generation: u64, open: bool) -> bool {
     let _control = control();
-    if SLOT.token.load(Ordering::SeqCst) != token {
+    // A retired (unpublished) slot stays closed: only a live session's gate can move.
+    if !SLOT.published.load(Ordering::SeqCst) || SLOT.token.load(Ordering::SeqCst) != token {
         return false;
+    }
+    if SLOT.fenced.load(Ordering::SeqCst) == generation
+        && SLOT.generation.load(Ordering::SeqCst) == generation
+    {
+        SLOT.open.store(open, Ordering::SeqCst);
+        return true;
     }
     SLOT.generation.store(generation, Ordering::SeqCst);
     SLOT.open.store(false, Ordering::SeqCst);
-    if SLOT.fenced.load(Ordering::SeqCst) == generation {
-        return true;
-    }
     let started = Instant::now();
     while SLOT.guards.load(Ordering::SeqCst) != 0 {
         if started.elapsed() >= DRAIN_DEADLINE {
@@ -434,6 +457,7 @@ pub(crate) fn set_generation(token: u64, generation: u64) -> bool {
     }
     SLOT.epoch.fetch_add(1, Ordering::SeqCst);
     SLOT.fenced.store(generation, Ordering::SeqCst);
+    SLOT.open.store(open, Ordering::SeqCst);
     true
 }
 
@@ -442,11 +466,16 @@ pub(crate) fn fenced(token: u64, generation: u64) -> bool {
     SLOT.token.load(Ordering::SeqCst) == token && SLOT.fenced.load(Ordering::SeqCst) == generation
 }
 
-/// Public counters for the status row: `(captured, capture_drops, render_underruns)`.
-pub(crate) fn counters() -> (u64, u64, u64) {
-    (
-        SLOT.captured.load(Ordering::Relaxed),
-        SLOT.capture_drops.load(Ordering::Relaxed),
-        SLOT.render_underruns.load(Ordering::Relaxed),
-    )
+/// Public counters of `token` for the status row: `(captured, capture_drops, render_underruns)`.
+/// `None` once the slot no longer holds `token` (drained, or reused by a later session).
+pub(crate) fn counters(token: u64) -> Option<(u64, u64, u64)> {
+    let _control = control();
+    if token == 0 || SLOT.token.load(Ordering::SeqCst) != token {
+        return None;
+    }
+    Some((
+        SLOT.captured.load(Ordering::SeqCst),
+        SLOT.capture_drops.load(Ordering::SeqCst),
+        SLOT.render_underruns.load(Ordering::SeqCst),
+    ))
 }

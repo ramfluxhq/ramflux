@@ -18,9 +18,12 @@ use std::time::Duration;
 /// A release failure rolls back parked files and returns `StorageFailed` (8).
 /// Diagnostics contain `SuspendFailed` and `suspend_release_failed` or `suspend_rollback_failed`.
 /// Call resume after any failure, then reopen the event subscription from its cursor.
-/// A live or pending call in any account returns `AccountBusy` (18) before anything is cancelled
-/// or parked. Idle suspend is unchanged. Call off the UI thread. A killed process is a cold
-/// start and must unlock again.
+/// A live or pending call in any account is probed before anything is cancelled or parked and
+/// returns `AccountBusy` (18) from that probe. Known race: a call admitted after the probe and
+/// before the file release is refused by the release and returns `AccountBusy` (18) after the
+/// rollback, so operations cancelled in that window are lost and the event subscription must be
+/// reopened from its cursor after any 18. Idle suspend is unchanged. Call off the UI thread. A
+/// killed process is a cold start and must unlock again.
 #[unsafe(no_mangle)]
 #[must_use]
 pub extern "C" fn ramflux_v2_client_suspend(handle: u64) -> i32 {

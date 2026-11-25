@@ -173,9 +173,11 @@ history with the existing restart reason and cannot recover consumed media keys.
 The C ABI exposes the same controls as execute methods (`call.media.*`, see
 `docs/design/c-abi-v2.md`) and two PCM exports. Only one process-wide
 in-process session exists (`max_sessions: 1`). Suspend refuses with
-`AccountBusy` (18) while any account has a live or pending call, before anything
-is cancelled. A call admitted after that probe also yields 18, not a storage
-failure. Stats-only `call.media.changed` rows are coalesced to at most 4 per
+`AccountBusy` (18) while any account has a live or pending call; that probe runs
+before anything is cancelled or parked. A call admitted after the probe is refused
+by the file release and also yields 18 after the rollback, not a storage failure;
+operations cancelled in that window are lost, so the host reopens its event
+subscription from its cursor after any 18. Stats-only `call.media.changed` rows are coalesced to at most 4 per
 second; control and terminal changes are journaled at once. A media tick on the
 in-process loop (every 125 ms) reconciles the session, so a terminal change is
 journaled within that tick and a pending stats row is published after its window.

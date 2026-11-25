@@ -69,6 +69,9 @@ fn lend_mut<'a>(pcm: *mut i16, samples: usize) -> Option<&'a mut [i16]> {
 /// Capture one 20 ms frame of host PCM. Input is never altered.
 /// Callback touches: slot atomics, capture ring atomics and counters. No allocation, lock,
 /// registry, log, I/O, codec or wait.
+/// Threading (SPSC): at most one thread may call capture at a time for a given `media_token`.
+/// Capture and render may run concurrently with each other. Concurrent capture calls can
+/// overwrite a slot and garble a frame; memory stays safe.
 /// Returns 0, or 1 (shape/token/generation), 12 (closed gate), 15 (capture ring full), 26 (closed).
 #[unsafe(no_mangle)]
 #[must_use]
@@ -89,6 +92,8 @@ pub extern "C" fn ramflux_v2_media_capture(
 }
 
 /// Render one 20 ms frame into host memory. Underrun is zero-filled success (0).
+/// Threading (SPSC): at most one thread may call render at a time for a given `media_token`.
+/// Render and capture may run concurrently with each other.
 /// Callback touches: slot atomics, render ring atomics and counters, and the lent buffer only.
 /// No allocation, lock, registry, log, I/O, codec or wait. Every failure with a valid buffer
 /// zero-fills it; an invalid buffer is left untouched.

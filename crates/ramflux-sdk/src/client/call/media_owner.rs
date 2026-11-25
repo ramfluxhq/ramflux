@@ -108,6 +108,16 @@ pub(crate) fn content_part(value: &serde_json::Value) -> serde_json::Value {
     content
 }
 
+/// Copy bridge counters `(captured, capture_drops, render_underruns)` into a host state.
+fn fill_counters(
+    host: &mut HostAudio,
+    (captured, capture_drops, render_underruns): (u64, u64, u64),
+) {
+    host.captured_frames = captured;
+    host.capture_drops = capture_drops;
+    host.render_underruns = render_underruns;
+}
+
 /// Dropping the owner (account close, lock, revoke or client release) stops it: admission
 /// closes, workers join and callbacks drain before the storage is released.
 impl Drop for OwnedMedia {
@@ -193,13 +203,13 @@ impl OwnedMedia {
         *journal = Some(JournalMark { at: Instant::now(), control, content });
     }
 
-    /// Copy of the host-reported state with the live PCM counters filled in.
+    /// Copy of the host-reported state with this session's PCM counters filled in: live while
+    /// the bridge holds the token, the values frozen at stop afterwards.
     pub(crate) fn host_state(&self) -> HostAudio {
         let mut host = self.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner).host;
-        let (captured, capture_drops, render_underruns) = pcm_bridge::counters();
-        host.captured_frames = captured;
-        host.capture_drops = capture_drops;
-        host.render_underruns = render_underruns;
+        if let Some(counters) = pcm_bridge::counters(self.token) {
+            fill_counters(&mut host, counters);
+        }
         host
     }
 
@@ -219,7 +229,16 @@ impl OwnedMedia {
         let mut running = self.running.lock().map_err(|_| unavailable())?;
         if let Ok(engine) = result {
             let generation = engine.gate().generation;
-            pcm_bridge::publish(self.token, generation).map_err(|_| unavailable())?;
+            if pcm_bridge::publish(self.token, generation).is_err() {
+                // Same bookkeeping as an engine start failure: the engine never became callable,
+                // so it is stopped (workers joined) here and no half-open owner is left behind.
+                running.last.stats = engine.stop_with_stats();
+                running.last.gate.reason = Some(GateReason::Terminal);
+                running.last.gate.audio_active = false;
+                running.last.gate.retired = true;
+                running.last.drained = true;
+                return Err(unavailable());
+            }
             running.engine = Some(engine);
             Ok(())
         } else {
@@ -235,6 +254,10 @@ impl OwnedMedia {
         // Unpublish first so no new callback passes; then join the engine workers; then drain.
         pcm_bridge::retire(self.token);
         let mut running = self.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // No callback passes after retire: freeze this session's counters for later status reads.
+        if let Some(counters) = pcm_bridge::counters(self.token) {
+            fill_counters(&mut running.host, counters);
+        }
         if let Some(engine) = running.engine.take() {
             let mut gate = engine.fence(reason);
             running.last.stats = engine.stats();
@@ -250,16 +273,19 @@ impl OwnedMedia {
         running.last.drained = pcm_bridge::drain(self.token, DRAIN_DEADLINE);
     }
 
-    /// Mirror the engine's I/O generation into the callbacks, then open them only while the
-    /// SDK authority and the OS audio gate both allow audio.
+    /// Mirror the engine's I/O generation into the callbacks and set the callback gate in the
+    /// same bridge call: open only while the SDK authority and the OS audio gate both allow audio.
     fn sync_pcm(&self, running: &Running) {
         let Some(engine) = running.engine.as_ref() else {
             pcm_bridge::set_open(self.token, false);
             return;
         };
         let gate = engine.gate();
-        let fenced = pcm_bridge::set_generation(self.token, gate.generation);
-        pcm_bridge::set_open(self.token, fenced && gate.reason.is_none() && gate.audio_active);
+        pcm_bridge::set_generation(
+            self.token,
+            gate.generation,
+            gate.reason.is_none() && gate.audio_active,
+        );
     }
 
     /// Accepted route change: rotate the I/O generation so no old-generation audio survives.
@@ -391,10 +417,6 @@ impl RamfluxClient {
         self.media_reservation.borrow_mut().take();
     }
 
-    /// Reconcile the owned session with SDK truth, then journal any row it changed (terminal
-    /// changes at once, pending stats once their window has closed).
-    /// # Errors
-    /// Returns the journal error when a changed row cannot be written.
     /// Journal the owned session's `M` row when it is due (see `OwnedMedia::journal_due`) and
     /// return it. `force` journals regardless, for controls and close. Reads the engine snapshot
     /// directly, so it never re-enters reconciliation.
@@ -413,7 +435,8 @@ impl RamfluxClient {
         }
         owned.update_host(|_| {});
         let value = media_view(&owned.snapshot(), owned.token(), seq, owned.host_state());
-        let revision = value["status_revision"].as_str().unwrap_or("0");
+        let revision =
+            value.get("status_revision").and_then(serde_json::Value::as_str).unwrap_or("0");
         self.account_db()?.append_journal(
             &format!("media:{}:{revision}", owned.token()),
             "call.media.changed",
@@ -425,6 +448,10 @@ impl RamfluxClient {
         Ok(Some(value))
     }
 
+    /// Reconcile the owned session with SDK truth, then journal any row it changed (terminal
+    /// changes at once, pending stats once their window has closed).
+    /// # Errors
+    /// Returns the journal error when a changed row cannot be written.
     pub(crate) fn reconcile_in_process_media(&self) -> Result<(), SdkError> {
         if let Some(owned) = &self.in_process_media {
             self.reconcile_owned_media(owned);

@@ -159,9 +159,13 @@ impl Supervisor {
     /// Reconcile every account's media session; the in-process loop calls this on a short tick.
     pub(super) async fn media_tick(&self) -> Result<(), SdkError> {
         let accounts = self.accounts.borrow().values().cloned().collect::<Vec<_>>();
+        // One failing account must not skip the others: tick all, report the first error.
+        let mut first_error = None;
         for actor in &accounts {
-            actor.media_tick().await?;
+            if let Err(error) = actor.media_tick().await {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }

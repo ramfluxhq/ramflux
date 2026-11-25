@@ -52,6 +52,10 @@ at 48 kHz. Codes: 0 success (including underrun silence on render), 1 invalid
 shape, token or stale generation, 12 valid closed gate, 15 capture queue full,
 26 retired token or client. Callbacks take no locks, allocate nothing and log
 nothing; the host lends memory for one call and keeps no pointer.
+SPSC rule: at most one host thread calls capture at a time for a given
+`media_token`, and at most one calls render at a time; capture and render may run
+concurrently with each other. Concurrent callers of one endpoint can garble a frame
+(memory stays safe, all shared fields are atomics).
 
 `client_open` accepts I-JSON `{ "data_root": "/absolute/private/path",
 "builtin_nodes": [] }`. It creates one current-thread supervisor and acquires
@@ -817,3 +821,10 @@ The wait only polls the kernel lock; it never asks the holder to yield, unlike
 `AccountBusy` (18) and the client stays suspended. The worker publishes the completed lifecycle state
 even if the synchronous caller times out. Normal successful suspend still cancels
 the subscription, releases files and stops networking; resume reopens them.
+
+A live or pending call in any account makes suspend return `AccountBusy` (18),
+reason `live_call_active`. The probe runs before anything is cancelled or parked.
+A call admitted after the probe is refused by the file release; the parked files
+are rolled back and suspend also returns 18. In that race operations and the event
+subscription were already cancelled, so after any 18 the host reopens the event
+subscription from its cursor.

@@ -459,6 +459,9 @@ int32_t ramflux_v2_diag_support_key(struct RamfluxBuffer **out);
  Capture one 20 ms frame of host PCM. Input is never altered.
  Callback touches: slot atomics, capture ring atomics and counters. No allocation, lock,
  registry, log, I/O, codec or wait.
+ Threading (SPSC): at most one thread may call capture at a time for a given `media_token`.
+ Capture and render may run concurrently with each other. Concurrent capture calls can
+ overwrite a slot and garble a frame; memory stays safe.
  Returns 0, or 1 (shape/token/generation), 12 (closed gate), 15 (capture ring full), 26 (closed).
  */
 int32_t ramflux_v2_media_capture(uint64_t client,
@@ -469,6 +472,8 @@ int32_t ramflux_v2_media_capture(uint64_t client,
 
 /*
  Render one 20 ms frame into host memory. Underrun is zero-filled success (0).
+ Threading (SPSC): at most one thread may call render at a time for a given `media_token`.
+ Render and capture may run concurrently with each other.
  Callback touches: slot atomics, render ring atomics and counters, and the lent buffer only.
  No allocation, lock, registry, log, I/O, codec or wait. Every failure with a valid buffer
  zero-fills it; an invalid buffer is left untouched.
@@ -501,9 +506,12 @@ int32_t ramflux_v2_shared_snapshot(const uint8_t *config,
  A release failure rolls back parked files and returns `StorageFailed` (8).
  Diagnostics contain `SuspendFailed` and `suspend_release_failed` or `suspend_rollback_failed`.
  Call resume after any failure, then reopen the event subscription from its cursor.
- A live or pending call in any account returns `AccountBusy` (18) before anything is cancelled
- or parked. Idle suspend is unchanged. Call off the UI thread. A killed process is a cold
- start and must unlock again.
+ A live or pending call in any account is probed before anything is cancelled or parked and
+ returns `AccountBusy` (18) from that probe. Known race: a call admitted after the probe and
+ before the file release is refused by the release and returns `AccountBusy` (18) after the
+ rollback, so operations cancelled in that window are lost and the event subscription must be
+ reopened from its cursor after any 18. Idle suspend is unchanged. Call off the UI thread. A
+ killed process is a cold start and must unlock again.
  */
 int32_t ramflux_v2_client_suspend(uint64_t handle);
 
