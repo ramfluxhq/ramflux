@@ -67,4 +67,4 @@ ramflux-storage = { workspace = true }
 workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-dbus-secret-service = { version = "=4.1.0", default-features = false, features = ["crypto-rust", "vendored"] }
+dbus-secret-service = { version = "=4.2.0", default-features = false, features = ["crypto-rust", "vendored"] }
