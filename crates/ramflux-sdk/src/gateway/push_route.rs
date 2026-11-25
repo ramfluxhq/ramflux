@@ -51,6 +51,13 @@ pub struct GatewayPushRouteRegistration {
     pub webpush_p256dh: Option<String>,
     #[serde(default)]
     pub webpush_auth: Option<String>,
+    /// Application identifier the token is sealed with. Host input only: never sent to the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    /// `Some(true)` when the token field is a sealed route (central mode). Absent on direct
+    /// registrations, so their signed body is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<bool>,
 }
 
 /// APNs host the node will use. FCM and Web Push are production only.
@@ -110,6 +117,8 @@ pub enum GatewayPushRouteRefusal {
     Superseded,
     /// Verifiably not the routes' bound owner: retrying cannot succeed.
     RejectedOwner,
+    /// Local refusal: central mode has no usable key set or pin, so nothing was sent.
+    PushKeysetUnavailable,
     /// A code from a newer node; retried like `unavailable` so it never breaks the session.
     #[serde(other)]
     Unknown,
@@ -124,6 +133,7 @@ impl GatewayPushRouteRefusal {
             Self::ProviderUnavailable => "provider_unavailable",
             Self::Rejected => "rejected",
             Self::RejectedOwner => "rejected_owner",
+            Self::PushKeysetUnavailable => "push_keyset_unavailable",
             Self::Superseded => "superseded",
             Self::Unavailable | Self::Unknown => "unavailable",
         }
@@ -201,6 +211,11 @@ impl PushRouteRetry {
                 self.failures = 0;
                 self.not_before = sent_at.saturating_add(PUSH_ROUTE_PERMANENT_RETRY_SECONDS);
             }
+            GatewayPushRouteRefusal::PushKeysetUnavailable => {
+                // Contract retry (A1.5): the next connect, with no long wait.
+                self.failures = 0;
+                self.not_before = sent_at;
+            }
             GatewayPushRouteRefusal::Unavailable | GatewayPushRouteRefusal::Unknown => {
                 self.failures = self.failures.saturating_add(1);
                 let jitter = ramflux_crypto::random_32().map_or(0, |bytes| bytes[0]);
@@ -277,7 +292,12 @@ impl GatewaySessionEngine {
             .collect();
         let mut last = None;
         for registration in routes {
-            last = self.send_provider_registration(now, registration).await?;
+            match self.send_provider_registration(now, registration).await {
+                Ok(answer) => last = answer,
+                // A local refusal (no usable key set) skips this route; the others still go.
+                Err(SdkError::PushRouteRefused(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(last)
     }
@@ -336,6 +356,19 @@ impl GatewaySessionEngine {
         body: GatewayPushRouteRegistration,
     ) -> Result<Option<String>, SdkError> {
         let provider = body.provider;
+        let mut body = body;
+        let app = body.app.take();
+        let body = if self.config.push.is_central() {
+            self.config.push.retry_save();
+            crate::push_keyset::seal_registration(
+                &self.config,
+                body,
+                app,
+                crate::push_keyset::unix_millis_now(),
+            )?
+        } else {
+            body
+        };
         let signed_request = self.session_bound_request(GATEWAY_PUSH_ROUTE_PATH, &body)?;
         let request_id = signed_request.request_id.clone();
         self.write_push_route_frame(GatewayClientFrame::PushRouteRegister {
@@ -600,6 +633,7 @@ impl GatewaySessionEngine {
     }
 
     pub(crate) async fn refresh_push_route_at(&mut self, now: u64) {
+        self.config.push.retry_save();
         self.expire_stale_push_controls(now);
         if self.config.push_route_clear_pending {
             self.refresh_delete_all(now).await;
@@ -781,6 +815,8 @@ mod tests {
             endpoint: Some("https://push.example/sub".into()),
             webpush_p256dh: Some("p256dh".into()),
             webpush_auth: Some("auth".into()),
+            app: None,
+            sealed: None,
         }
     }
 
@@ -975,6 +1011,8 @@ mod tests {
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
+            app: None,
+            sealed: None,
         }
     }
 
@@ -988,6 +1026,8 @@ mod tests {
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
+            app: None,
+            sealed: None,
         }
     }
 
@@ -1012,6 +1052,8 @@ mod tests {
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
+            app: None,
+            sealed: None,
         };
         let value = serde_json::to_value(&body).expect("json");
         assert_eq!(value["provider"], "webpush");
