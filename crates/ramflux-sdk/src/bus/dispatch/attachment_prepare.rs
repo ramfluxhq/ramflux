@@ -291,8 +291,12 @@ pub(in crate::bus) fn answer(account: &LocalBusAccountState, call: JournalCall) 
             let _ = reply.send(loaded);
         }
         (JournalCall::Import { key, record, event, reply }, Ok(db)) => {
-            let saved =
-                crate::attachment_send::import_journal::settle_guarded(db, &key, &record, event);
+            let saved = crate::attachment_send::import_journal::settle_guarded(
+                db,
+                &key,
+                &record,
+                event.as_ref(),
+            );
             let _ = reply.send(saved);
         }
         (JournalCall::Save { key, acks, reply }, Ok(db)) => {

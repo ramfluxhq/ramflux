@@ -276,7 +276,7 @@ pub(crate) fn settle_guarded(
     db: &ramflux_storage::AccountDb,
     key: &str,
     bytes: &[u8],
-    event: Option<(String, Value)>,
+    event: Option<&(String, Value)>,
 ) -> Result<(), Refusal> {
     let stored = db
         .load_actor_state::<AckRecord>(key)
@@ -290,7 +290,7 @@ pub(crate) fn settle_guarded(
     // event is, and a crash never leaves a bit without the snapshot that announces it.
     db.write_transaction(|| -> Result<(), ramflux_storage::StorageError> {
         db.persist_actor_state(key, &AckRecord { acks: bytes.to_vec() })?;
-        if let Some((source, body)) = &event {
+        if let Some((source, body)) = event {
             db.append_journal(
                 source,
                 super::transfer::TRANSFER_TOPIC,
