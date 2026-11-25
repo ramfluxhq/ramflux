@@ -123,7 +123,7 @@ pub struct VideoSender {
     packetizer: Packetizer,
     sframe: sframe::Sender,
     token: Zeroizing<Vec<u8>>,
-    /// Worst-case bytes SFrame adds to a payload: header and AEAD tag.
+    /// Worst-case bytes `SFrame` adds to a payload: header and AEAD tag.
     sframe_overhead: usize,
     queue: VecDeque<Queued>,
     idr_needed: bool,
@@ -188,7 +188,7 @@ impl VideoSender {
         }
         let packets = self.packetizer.packetize(au)?;
         self.idr_needed = false;
-        let packets = packets.into_iter().filter_map(split_packet).collect();
+        let packets = packets.iter().filter_map(|packet| split_packet(packet)).collect();
         self.queue.push_back(Queued { packets, at: now });
         Ok(Submitted { queued: true, dropped })
     }
@@ -284,7 +284,7 @@ impl VideoSender {
 
 /// Splits `rtp || video header || fragment` into its authenticated metadata
 /// and its fragment.
-fn split_packet(packet: Vec<u8>) -> Option<Pending> {
+fn split_packet(packet: &[u8]) -> Option<Pending> {
     let (metadata, body) = packet.split_at_checked(METADATA_LEN)?;
     Some(Pending { metadata: metadata.to_vec(), body: body.to_vec() })
 }

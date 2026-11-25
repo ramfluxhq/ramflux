@@ -27,9 +27,9 @@
 
 use std::time::{Duration, Instant};
 
-/// RTP payload type of feedback (PT113), on the video SFrame key.
+/// RTP payload type of feedback (PT113), on the video `SFrame` key.
 pub const FEEDBACK_PAYLOAD_TYPE: u8 = 113;
-/// Largest feedback datagram (RTP header, SFrame header, report, tag).
+/// Largest feedback datagram (RTP header, `SFrame` header, report, tag).
 pub const MAX_FEEDBACK_DATAGRAM: usize = 160;
 /// Exact length of a feedback report.
 pub const FEEDBACK_LEN: usize = 64;

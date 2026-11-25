@@ -104,11 +104,10 @@ fn sample_between(previous: Option<&Feedback>, report: &Feedback, queue_ms: u32)
     let received = report.received_packets.saturating_sub(received_before);
     let missing = report.missing_packets.saturating_sub(missing_before);
     let expected = received.saturating_add(missing);
-    let loss_per_mille = if expected == 0 {
-        0
-    } else {
-        u32::try_from(missing.saturating_mul(1000) / expected).unwrap_or(1000)
-    };
+    let loss_per_mille = missing
+        .saturating_mul(1000)
+        .checked_div(expected)
+        .map_or(0, |per_mille| u32::try_from(per_mille).unwrap_or(1000));
     let delay_growth_us = i64::from(report.delay_delta_us) - i64::from(delay_before);
     Sample { loss_per_mille, delay_growth_us, queue_ms }
 }
