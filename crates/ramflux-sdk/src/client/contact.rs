@@ -350,6 +350,7 @@ impl RamfluxClient {
             Ok(link)
         })?;
         self.finish_pair_retirement()?;
+        self.stage_block_decisions(blocked_at)?;
         Ok(link)
     }
 
@@ -380,11 +381,13 @@ impl RamfluxClient {
         unblocked_at: i64,
     ) -> Result<FriendLinkRecord, SdkError> {
         let db = self.account_db()?;
-        db.write_transaction(|| -> Result<_, SdkError> {
+        let link = db.write_transaction(|| -> Result<_, SdkError> {
             let link = db.unblock_friend_link(link_id, unblocked_at)?;
             self.append_contact_control_event("friend.unblocked", &link)?;
             Ok(link)
-        })
+        })?;
+        self.stage_block_decisions(unblocked_at)?;
+        Ok(link)
     }
 
     /// Records an inbound friend request as a pending friend link awaiting the

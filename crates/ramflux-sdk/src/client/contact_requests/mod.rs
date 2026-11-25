@@ -354,6 +354,9 @@ impl RamfluxClient {
                         now_unix_timestamp().saturating_add(DECLINE_COOLDOWN_SECONDS)
                     },
                 )?;
+                if state == "blocked" {
+                    self.stage_block_decisions(now_unix_timestamp())?;
+                }
             }
             let own = self.owned_device_identity()?;
             if state == "accepted" {

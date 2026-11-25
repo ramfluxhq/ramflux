@@ -30,6 +30,7 @@ fn payload_operation_and_tag(payload: &g::control::Payload) -> (u32, u32) {
         g::control::Payload::OwnMessageCopy(_) => (15, 30),
         g::control::Payload::Friend(_) => (16, 31),
         g::control::Payload::AgentSync(_) => (17, 32),
+        g::control::Payload::BlockSync(_) => (18, 33),
     }
 }
 
@@ -109,8 +110,25 @@ pub fn validate_control_native(control: &g::Control) -> Result<(), SdkError> {
         Some(g::control::Payload::OwnMessageCopy(body)) => validate_own_message_copy(body),
         Some(g::control::Payload::Friend(body)) => validate_friend(body),
         Some(g::control::Payload::AgentSync(body)) => validate_agent_sync(body),
+        Some(g::control::Payload::BlockSync(body)) => validate_block_sync(body),
         None => Err(operation_mismatch()),
     }
+}
+
+/// Structural checks of a block-set packet: a source, a bounded set and known kinds.
+/// # Errors
+/// Refuses a missing source, an oversized set or an unknown decision kind.
+fn validate_block_sync(body: &g::BlockDecisionSync) -> Result<(), SdkError> {
+    if body.source.is_none() || body.owner_anchor.is_empty() {
+        return Err(refused("block sync requires an owner and a source"));
+    }
+    if body.decisions.len() > super::block_sync::MAX_BLOCK_DECISIONS {
+        return Err(refused("block set too large"));
+    }
+    if body.decisions.iter().any(|decision| !matches!(decision.kind.as_str(), "contact_request" | "friend_link")) {
+        return Err(refused("block decision kind"));
+    }
+    Ok(())
 }
 
 /// Sender must own the received object reference.

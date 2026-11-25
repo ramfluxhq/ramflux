@@ -469,6 +469,8 @@ impl RamfluxClient {
             self.apply_generated_object_revoke(opened, entry, identity, revoke, bytes)?;
         } else if let Some(g::control::Payload::AgentSync(packet)) = control.payload.as_ref() {
             self.apply_generated_agent_sync(opened, entry, packet)?;
+        } else if let Some(g::control::Payload::BlockSync(packet)) = control.payload.as_ref() {
+            self.apply_generated_block_sync(entry, packet)?;
         } else if matches!(control.operation, 8 | 10) {
             return Err(SdkError::GeneratedRefused {
                 code: crate::error::GeneratedRefusalCode::Content,

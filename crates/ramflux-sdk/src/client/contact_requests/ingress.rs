@@ -101,6 +101,11 @@ impl RamfluxClient {
             return Err(invalid("contact requester root is malformed"));
         }
         let db = self.account_db()?;
+        // A restored device refuses strangers until a sibling has sent the block set (or the
+        // bounded window ended): a stale archive must not admit a blocked requester.
+        if db.block_sync_pending(now_unix_timestamp())? {
+            return Err(SdkError::InboundPending("block_sync".into()));
+        }
         if db.contact_request_fence(&root, now_unix_timestamp())?.is_some()
             || db.contact_request(&root, "inbound")?.is_some_and(|record| {
                 record.state == "blocked"

@@ -85,7 +85,11 @@ impl RamfluxClient {
             Some(true) => Ok(PairingHistoryProgress::Complete),
             Some(false) => Ok(PairingHistoryProgress::Pending),
             None => match self.stage_generated_history_transfer(&target) {
-                Ok(_) => Ok(PairingHistoryProgress::Pending),
+                Ok(_) => {
+                    // BLOCK-PERSIST-01: the new device gets the block set with its history.
+                    self.stage_block_decisions_to(&target, crate::prelude::now_unix_timestamp())?;
+                    Ok(PairingHistoryProgress::Pending)
+                }
                 // The sibling is not sync-admitted or its prekey is not published yet.
                 Err(SdkError::GeneratedRefused { .. } | SdkError::InboundPending(_)) => {
                     Ok(PairingHistoryProgress::Pending)
