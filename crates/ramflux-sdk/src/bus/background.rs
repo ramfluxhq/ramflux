@@ -20,7 +20,7 @@ pub(crate) fn client_suspended() -> SdkError {
     }
 }
 
-/// Refusal for suspend while a call is live or pending. Maps to C ABI AccountBusy (18).
+/// Refusal for suspend while a call is live or pending. Maps to C ABI `AccountBusy` (18).
 #[cfg(feature = "c-abi")]
 pub(crate) fn live_call_refused() -> SdkError {
     SdkError::LocalBusRefused {
