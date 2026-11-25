@@ -54,7 +54,7 @@ impl super::RamfluxClient {
             return Ok(());
         }
         let bytes = renewal.signed_declaration_json.as_slice();
-        let signed: SignedLayerDeclaration = serde_json::from_slice(bytes)
+        let signed: SignedLayerDeclaration = ramflux_protocol::parse_i_json(bytes)
             .map_err(|_| refused("own layer renewal declaration malformed"))?;
         if canonical_json_bytes(&signed)? != bytes {
             return Err(refused("own layer renewal declaration is not canonical"));
