@@ -28,6 +28,11 @@ pub(crate) struct Store {
 }
 
 impl Store {
+    /// The account this store belongs to; transfer control is keyed by it.
+    pub(crate) fn account_id(&self) -> &str {
+        &self.account
+    }
+
     /// # Errors
     /// Returns `seal_failed` when the account directory cannot be created.
     pub(crate) fn open(

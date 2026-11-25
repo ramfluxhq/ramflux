@@ -637,6 +637,16 @@ impl Supervisor {
             "account.list" => {
                 return self.account_list().await;
             }
+            "attachment.transfer.list"
+            | "attachment.transfer.pause"
+            | "attachment.transfer.resume" => {
+                // Transfer control never waits on the account actor, which an upload holds.
+                let id = request_account_id(&request)?.to_owned();
+                if !self.accounts.borrow().contains_key(&id) {
+                    return Err(self.account_unavailable(&id));
+                }
+                return Ok(reply(crate::attachment_send::transfer_body(&request)?));
+            }
             "account.switch" => {
                 let id = request_account_id(&request)?.to_owned();
                 self.require_restore_ready(&id, false)?;

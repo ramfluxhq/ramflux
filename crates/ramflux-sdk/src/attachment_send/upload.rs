@@ -111,6 +111,13 @@ pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bo
     if row.segment_digests.len() != count {
         return Err(Refusal::new(CODE_SEAL_FAILED));
     }
+    // Ciphertext bytes of the whole upload: each segment carries a 16-byte AEAD tag.
+    let total = u64::try_from(count)
+        .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?
+        .checked_mul(16)
+        .and_then(|tags| tags.checked_add(layout.plaintext_length))
+        .ok_or(Refusal::new(CODE_SEAL_FAILED))?;
+    let _running = super::transfer::enter(input.store.account_id(), &row.prepare_id, total)?;
     // The journal, never meta.json, is the only source of ACKs; a fresh upload id finds none.
     let upload = row.upload_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?;
     row.upload_acks =
@@ -146,12 +153,22 @@ pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bo
         let ack = row.upload_acks.get_mut(segment).ok_or(Refusal::new(CODE_SEAL_FAILED))?;
         // Never silently trust a local checkpoint if the relay no longer confirms it.
         *ack = if is_committed { status.received_bitmap } else { *ack & status.received_bitmap };
+        let confirmed = acked_bytes(length, *ack);
         checkpoint(input, row)?;
+        super::transfer::credit(input.store.account_id(), &row.prepare_id, confirmed);
         if !is_committed {
             put_slices(input, row, segment, &cipher)?;
         }
     }
     Ok(committed == Some(true))
+}
+
+/// Ciphertext bytes of the slices whose ACK bit is set, for a segment of `length` bytes.
+fn acked_bytes(length: u64, ack: u8) -> u64 {
+    (0..8_u64)
+        .filter(|slice| (ack >> slice) & 1 == 1)
+        .map(|slice| length.saturating_sub(slice * CHUNK).min(CHUNK))
+        .sum()
 }
 
 fn query(row: &Row, index: u32) -> Result<UploadQuery, Refusal> {
@@ -214,6 +231,8 @@ fn put_slices(
         if row.upload_acks.get(segment).is_some_and(|ack| ack & bit != 0) {
             continue;
         }
+        // A paused upload stops before the next slice; nothing is sent while it waits.
+        super::transfer::gate(input.store.account_id(), &row.prepare_id)?;
         let op = OwnerAttachmentOperation::put(&OwnerPut {
             audience: input.audience,
             object_id: row.object_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
@@ -235,6 +254,11 @@ fn put_slices(
         }
         *row.upload_acks.get_mut(segment).ok_or(Refusal::new(CODE_SEAL_FAILED))? |= bit;
         checkpoint(input, row)?;
+        super::transfer::credit(
+            input.store.account_id(),
+            &row.prepare_id,
+            u64::try_from(body.len()).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?,
+        );
     }
     Ok(())
 }

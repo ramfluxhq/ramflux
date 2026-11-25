@@ -446,3 +446,42 @@ struct GenerationBody {
 struct MessageBody {
     message_id: String,
 }
+
+/// Transfer control of this process's running uploads. Served beside the account actor, so it
+/// answers while an upload holds that actor; it never waits on the upload itself.
+/// # Errors
+/// Returns a local-bus error for a missing or oversized `prepare_id`, and `not_ready` when the
+/// prepare has no running upload.
+pub(crate) fn transfer_body(request: &LocalBusFrame) -> Result<Value, SdkError> {
+    let account = request_account_id(request)?;
+    match request.method.as_str() {
+        "attachment.transfer.list" => {
+            let transfers: Vec<Value> = super::transfer::snapshot(account)
+                .into_iter()
+                .map(|row| {
+                    json!({
+                        "prepare_id": row.prepare_id,
+                        "paused": row.paused,
+                        "total_bytes": row.total_bytes,
+                        "unique_bytes": row.unique_bytes,
+                    })
+                })
+                .collect();
+            Ok(json!({ "transfers": transfers }))
+        }
+        "attachment.transfer.pause" | "attachment.transfer.resume" => {
+            let prepare = request
+                .body
+                .get("prepare_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 256)
+                .ok_or_else(|| {
+                    SdkError::LocalBus("prepare_id must contain 1 to 256 bytes".into())
+                })?;
+            let paused = request.method == "attachment.transfer.pause";
+            super::transfer::set_paused(account, prepare, paused)?;
+            Ok(json!({ "prepare_id": prepare, "paused": paused }))
+        }
+        other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
+    }
+}
