@@ -326,7 +326,7 @@ pub(super) fn listen(home: Arc<HomeService>) -> Result<()> {
                             })();
                             if let Err(error) = result {
                                 tracing::debug!(%error, "username home profile connection closed");
-                                warn_drop("home_profile", address, stage, &error);
+                                warn_drop("home_profile", address.ip(), stage, &error);
                             }
                         });
                     match spawned {
@@ -337,7 +337,7 @@ pub(super) fn listen(home: Arc<HomeService>) -> Result<()> {
                 Ok((_socket, address)) => {
                     warn_drop(
                         "home_profile",
-                        address,
+                        address.ip(),
                         "accept",
                         &"connection refused by admission limits",
                     );

@@ -97,6 +97,7 @@ mod schema_receipt_identity;
 mod sqlite_work;
 
 pub use account_db::AccountDb;
+pub use account_db::checkpoint_writer::ProjectionCheckpointWriter;
 pub use account_db::full_transfer::{
     CellRule, CodecRule, EncryptedStageChunk, FamilyRule, FamilySelector, FieldRule,
     FullAppliedDataReceipt, FullBaseSourceEncoding, FullDuplexReceipt, FullForwardReader,

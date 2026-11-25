@@ -34,6 +34,8 @@ async fn session_host_applies_interleaved_push_routes_before_notifying_the_subsc
                                 endpoint: None,
                                 webpush_p256dh: None,
                                 webpush_auth: None,
+                                app: None,
+                                sealed: None,
                             },
                         );
                         Ok(())

@@ -353,7 +353,7 @@ impl Reporter {
     }
 }
 
-fn client_config(ca_path: &str, alpn: &[u8]) -> Result<quinn::ClientConfig, String> {
+pub(crate) fn client_config(ca_path: &str, alpn: &[u8]) -> Result<quinn::ClientConfig, String> {
     let pem = std::fs::read(ca_path).map_err(|error| format!("read ca_cert: {error}"))?;
     let mut roots = rustls::RootCertStore::empty();
     for cert in rustls_pemfile::certs(&mut pem.as_slice()) {

@@ -195,14 +195,19 @@ impl WitnessState {
                                         if sender.try_send(incoming).is_err() {
                                             warn_drop(
                                                 "witness_public",
-                                                address,
+                                                address.ip(),
                                                 "accept",
                                                 &"hand-off channel full or closed",
                                             );
                                         }
                                     }
                                     Err(error) => {
-                                        warn_drop("witness_public", address, "tls/request", &error);
+                                        warn_drop(
+                                            "witness_public",
+                                            address.ip(),
+                                            "tls/request",
+                                            &error,
+                                        );
                                     }
                                 }
                             },
@@ -211,7 +216,7 @@ impl WitnessState {
                 } else {
                     warn_drop(
                         "witness_public",
-                        address,
+                        address.ip(),
                         "accept",
                         &"connection refused by admission limits",
                     );
