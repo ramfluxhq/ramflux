@@ -115,7 +115,7 @@ impl RamfluxClient {
         let (session, receipt) = assemble_session(moved)?;
         let call = self.voice_calls.get(call_id).ok_or_else(fresh_call)?;
         self.in_process_media =
-            Some(Box::new(super::media_owner::OwnedMedia::new(session, receipt.clone(), call)));
+            Some(Box::new(super::media_owner::OwnedMedia::new(session, receipt.clone(), call)?));
         Ok(receipt)
     }
 

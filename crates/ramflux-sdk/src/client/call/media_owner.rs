@@ -4,6 +4,7 @@
 //! One process-wide audio reservation and the account writer's engine lifetime.
 
 use super::handoff::InProcessMediaReceipt;
+use super::media_contract::{HostAudio, issue_media_token};
 use crate::{SdkError, client::RamfluxClient};
 use ramflux_media::authorization::{GateReason, GateSnapshot};
 use ramflux_media::{Capture, Engine, EngineStats, MediaSession, Playback};
@@ -32,6 +33,8 @@ pub struct InProcessMediaStatus {
 
 pub(crate) struct OwnedMedia {
     pub receipt: InProcessMediaReceipt,
+    /// Opaque public handle; process-lifetime, never reused.
+    token: u64,
     pub session: Mutex<Option<MediaSession>>,
     binding: Binding,
     running: Mutex<Running>,
@@ -48,6 +51,7 @@ struct Running {
     lease_expires_at: u64,
     engine: Option<Engine>,
     last: InProcessMediaStatus,
+    host: HostAudio,
 }
 
 fn audio_busy() -> SdkError {
@@ -72,8 +76,9 @@ impl OwnedMedia {
         session: MediaSession,
         receipt: InProcessMediaReceipt,
         call: &super::state::LiveCall,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, SdkError> {
+        Ok(Self {
+            token: issue_media_token()?,
             binding: Binding {
                 call_ref: call.call_ref.clone(),
                 caller: call.caller.clone(),
@@ -94,10 +99,31 @@ impl OwnedMedia {
                     stats: EngineStats::default(),
                     drained: false,
                 },
+                host: HostAudio::default(),
             }),
             receipt,
             session: Mutex::new(Some(session)),
-        }
+        })
+    }
+
+    /// Apply a host-state change under the owner lock and advance the public revision.
+    pub(crate) fn update_host(&self, change: impl FnOnce(&mut HostAudio)) {
+        let mut running = self.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        change(&mut running.host);
+        running.host.status_revision = running.host.status_revision.saturating_add(1);
+    }
+
+    /// Mute or unmute the engine's capture path (checkpoint 3 adds the completion fence).
+    pub(crate) fn set_engine_muted(&self, muted: bool) -> Result<(), SdkError> {
+        let running = self.running.lock().map_err(|_| unavailable())?;
+        let engine = running.engine.as_ref().ok_or_else(unavailable)?;
+        engine.set_muted(muted);
+        Ok(())
+    }
+
+    /// Copy of the host-reported state; the engine lock is not held by the caller.
+    pub(crate) fn host_state(&self) -> HostAudio {
+        self.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner).host
     }
 
     fn start(
@@ -248,6 +274,11 @@ impl RamfluxClient {
         owned.stop(GateReason::Terminal);
         self.media_reservation.borrow_mut().take();
         Ok(owned.snapshot())
+    }
+
+    /// Owned session bound to this public media token, if it is still held by this writer.
+    pub(crate) fn media_by_token(&self, token: u64) -> Option<&OwnedMedia> {
+        self.in_process_media.as_deref().filter(|owned| owned.token == token)
     }
 
     pub(crate) fn stop_in_process_media(&self, reason: GateReason) {

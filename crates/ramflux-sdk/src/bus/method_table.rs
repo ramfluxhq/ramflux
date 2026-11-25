@@ -52,7 +52,8 @@ methods! {
     LocalRead(Always) => Reader: ["search.query", "search.index.status"];
     LocalRead(Always) => Supervisor: ["search.cancel", "search.cursor.close", "search.index.rebuild.cancel"];
     LocalMutation(Always) => Actor: ["search.index.rebuild"];
-    LocalRead(Always) => Actor: ["account.config.get", "diag.residue"];
+    LocalRead(Always) => Actor: ["account.config.get", "diag.residue", "call.media.status"];
+    LocalMutation(Always) => Actor: ["call.media.open", "call.media.set_muted", "call.media.audio_active", "call.media.audio_route", "call.media.close"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     NeedsNetwork(AuthorityFromNode) => Actor: ["attachment.enable"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin", "username.mutate", "profile.update", "account.reach.set"];

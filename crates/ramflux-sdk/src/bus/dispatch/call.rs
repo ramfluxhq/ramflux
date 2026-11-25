@@ -26,6 +26,9 @@ pub(crate) async fn dispatch(
     let account_id = request_account_id(request)?;
     let account = local_bus_account_mut(state, account_id)?;
     recover(account)?;
+    if request.method.starts_with("call.media.") {
+        return call_media::dispatch(account, request);
+    }
     let now = now_unix_timestamp();
     if request.method == "call.list" {
         return Ok(local_bus_ok(list(&account.client)?));
@@ -213,6 +216,8 @@ fn media(account: &mut LocalBusAccountState, id: &str) -> Result<LocalBusDispatc
     c.media_taken = true;
     Ok(local_bus_ok(value))
 }
+#[path = "call_media.rs"]
+mod call_media;
 #[path = "call_driver.rs"]
 mod driver;
 pub(crate) use driver::background::pass as signaling_pass;
