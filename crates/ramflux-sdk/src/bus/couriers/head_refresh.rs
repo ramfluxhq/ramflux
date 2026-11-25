@@ -382,6 +382,9 @@ fn apply_verified(
     };
     if ready {
         account.head_refresh.pending.remove(root);
+        if root == account.principal_commitment {
+            adopt_own_authority(account, &manifest)?;
+        }
         inbound::refreshed(account, root)?;
         // A due pair reset waits here instead of treating a cold head as failure.
         if let Some(connection) = &account.connection {
@@ -389,6 +392,27 @@ fn apply_verified(
         }
     }
     Ok(ready)
+}
+
+/// The own directory head is verified and fresh: accept it into the local account so a secondary
+/// sees its endorsed declaration without waiting for an unrelated event. Unchanged or fenced
+/// publications are no-ops inside `accept_publication`.
+fn adopt_own_authority(
+    account: &mut LocalBusAccountState,
+    manifest: &SdkDeviceManifestResponse,
+) -> Result<(), SdkError> {
+    let Some(native) = &manifest.custody else { return Ok(()) };
+    let authority = ramflux_protocol::custody::CustodyAuthority {
+        publication: native.publication.clone(),
+        custodian_publication: native.custodian_publication.clone(),
+    };
+    let id = account.client.account_db()?.local_account_id.clone();
+    let root = account.client.account_index()?.root().to_path_buf();
+    let now = crate::custody::network_now()?;
+    crate::custody::accept_publication(&root, &id, &authority, now)?;
+    let current = crate::custody::load_data_account(&root, &id, now)?;
+    account.client.born_v3_account = Some(Box::new(current));
+    Ok(())
 }
 
 /// Invoked only on the account writer. All network inputs are owned values.

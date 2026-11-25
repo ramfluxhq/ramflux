@@ -124,7 +124,13 @@ fn enroll_phone(
     certificate.agreement_identity_public_key =
         ramflux_protocol::encode_base64url(&agreement.public);
     certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-    Ok(signer.enroll_device(&verified(current)?, signer.certify_branch(certificate)?, now)?)
+    let message_layer = ramflux_crypto::custody::sign_enrollment_layer(&branch, &certificate)?;
+    Ok(signer.enroll_device(
+        &verified(current)?,
+        signer.certify_branch(certificate)?,
+        message_layer,
+        now,
+    )?)
 }
 
 #[tokio::test]

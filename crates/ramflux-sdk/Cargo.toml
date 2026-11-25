@@ -20,6 +20,9 @@ itest-memory-vault = []
 test-support = []
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = []
+# SECONDARY-LAYER-01 integration only: a declaration lives 180 s and is renewed 60 s before
+# expiry, so expiry rows run in minutes. Default builds keep the 24 h validity.
+itest-short-layer-lease = []
 c-abi = ["dep:ramflux-client-model"]
 # Bundle the independently versioned renderer into this same Rust library.
 card-runtime = ["c-abi", "dep:ramflux-card", "ramflux-card/c-abi"]

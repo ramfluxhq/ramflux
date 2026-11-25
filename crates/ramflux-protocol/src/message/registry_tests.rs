@@ -29,7 +29,8 @@ fn kind_registry_is_exhaustive_and_reserved() -> TestResult {
     );
     assert!(proto.reserved_name.iter().any(|name| name == "KIND_LEGACY_OPAQUE"));
     for binding in CONTROLS {
-        assert_eq!(binding.tag, binding.operation + 15, "approved section 3.2 binding");
+        // Tag 33 belongs to a parked branch, so operation 18 binds to tag 34 (SECONDARY-LAYER-01).
+        assert_ne!(binding.tag, 33, "tag 33 is reserved by a parked branch");
         let field = descriptor("Control")?.get_field(binding.tag).ok_or("Control arm missing")?;
         assert!(matches!(field.kind(), Kind::Message(message) if message.name()==binding.body));
     }

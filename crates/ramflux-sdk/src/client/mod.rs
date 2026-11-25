@@ -66,6 +66,7 @@ pub mod home_migration;
 pub mod identity;
 pub mod identity_authority;
 pub(crate) mod inbox_failure;
+pub(crate) mod layer_renewal;
 #[cfg(test)]
 mod legacy_activation_guard_tests;
 pub mod mcp_a2ui;

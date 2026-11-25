@@ -188,6 +188,9 @@ pub use own_context_types::*;
 #[path = "own_group_consent.rs"]
 mod own_group_consent_types;
 pub use own_group_consent_types::*;
+#[path = "own_layer_renewal.rs"]
+mod own_layer_renewal_types;
+pub use own_layer_renewal_types::*;
 #[path = "own_message_copy.rs"]
 mod own_message_copy_types;
 pub use own_message_copy_types::*;
