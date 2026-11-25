@@ -20,11 +20,33 @@ The host joins custody blocking jobs before releasing its session lease.
 On C status 0, the SDK-owned output buffer contains one of:
 
 ```json
-{"outcome":"busy"}
-{"outcome":"locked"}
-{"outcome":"deadline"}
-{"outcome":"fetched","items":[{"envelope_id":"opaque-id","inbox_seq":"42"}]}
+{"outcome":"busy","show":null,"unread_total":null,"clears":[],"calls":[],"receipts_sent":"0"}
+{"outcome":"locked","show":null,"unread_total":null,"clears":[],"calls":[],"receipts_sent":"0"}
+{"outcome":"deadline","show":null,"unread_total":null,"clears":[],"calls":[],"receipts_sent":"0"}
+{"outcome":"fetched","show":true,"unread_total":"6","clears":[],"calls":[],"receipts_sent":"0"}
 ```
+
+Every field is always present, and counts are decimal strings. The fields mean:
+
+- `show`: true only when this call newly applied an incoming visible message (direct or
+  group, not own, not a receipt or control) that is still unread, undeleted, after the
+  conversation clear cursor and not muted at decision time. False means suppress this wake.
+  Null on non-fetched outcomes means unknown; the client keeps its generic fallback.
+- `unread_total`: the ordinary account unread total from the directory read model, across
+  every conversation and independent of page size. Muted conversations still count, so a
+  muted receipt can raise it while `show` stays false.
+- `clears`: `["messages"]` only when no notification-eligible unread message remains
+  account-wide (unread, unmuted, visible, incoming). Successful results never request both
+  `clears` and `show`.
+- `calls` is always `[]` in this card. `receipts_sent` is always `"0"`: no courier starts.
+
+Candidates are written in the same transaction as the first projection of an incoming
+visible message, so a kill before commit leaves no candidate and a kill after commit keeps
+it. A decision revalidates every pending candidate and consumes all of them in one
+transaction before the result is returned (at most once; a kill between that commit and the
+platform post can lose an alert). At most 256 candidates are kept; at the cap the oldest is
+evicted. Repeats and fresh processes do not re-create a candidate for an already projected
+message.
 
 Free the output with `ramflux_v2_buffer_free`. Invalid inputs, wrong custody,
 unavailable node configuration and network/authentication failures retain ordinary
@@ -45,8 +67,9 @@ run over one TCP/TLS gateway session. No supervisor, actor, courier, subscriber,
 media engine, card runtime, download or automatic reconnect loop is started.
 Transport and runtime are closed before ownership is released.
 
-One page contains at most 32 encrypted envelopes. The output identifies those
-envelopes without exposing plaintext. Empty `items` means an empty fetched page.
+One page contains at most 32 encrypted envelopes. The output carries only the decision
+above and never exposes plaintext, identifiers or read cursors. An empty page is a
+fetched result whose decision still reflects pending candidates and unread state.
 The host uses the ordinary negotiated receive ledger: W1 projection, receipt,
 terminal or held cover, ACK intent and receive cursor commit under the same
 writer/erasure/incarnation fence. Receive policy may durably hold an entry or
