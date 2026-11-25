@@ -603,7 +603,7 @@ pub(crate) async fn submit_envelope_mesh_async_with_source(
 
 fn record_decoded(envelope: &ramflux_protocol::Envelope) {
     ramflux_node_core::record_router_submit_started();
-    tracing::info!(
+    tracing::debug!(
         envelope_id = %envelope.envelope_id,
         target_delivery_id = %envelope.target_delivery_id,
         source_device_id = %envelope.source_device_id,

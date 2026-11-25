@@ -466,12 +466,31 @@ impl MeshResponse {
     }
 }
 
+/// Per-route caller policy (default deny, like federation `mesh_auth`): each entry names the
+/// only mesh service identities admitted to that route. Routes without an entry keep their
+/// own handler checks.
+const ROUTE_CALLER_POLICY: &[(&str, &str, &[&str])] =
+    &[("POST", "/mvp6/registration/policy", &["ramflux-admin"])];
+
+fn route_caller_refusal(method: &str, path: &str, peer_service_id: &str) -> Option<MeshResponse> {
+    ROUTE_CALLER_POLICY
+        .iter()
+        .find(|(policy_method, policy_path, _)| *policy_method == method && *policy_path == path)
+        .and_then(|(_, _, admitted)| {
+            (!admitted.contains(&peer_service_id))
+                .then(|| MeshResponse::text("403 Forbidden", "route requires an admitted caller"))
+        })
+}
+
 pub(crate) fn handle_mesh_request_value(
     request: ramflux_transport::MeshHttpRequest,
     router: &crate::router_runtime::RouterHandle,
     peer: impl MeshPeerArgument,
 ) -> anyhow::Result<MeshResponse> {
     let peer = peer.identity();
+    if let Some(response) = route_caller_refusal(&request.method, &request.path, &peer.service_id) {
+        return Ok(response);
+    }
     if let Some(response) = registration_peer_gate(&request, router, &peer) {
         return Ok(response);
     }
@@ -858,7 +877,7 @@ fn handle_mesh_fast_path_value(
         }
         ("POST", "/s1/session/upsert") => {
             let response = handle_s1_session_upsert(body, router.state(), router.store())?;
-            tracing::info!(
+            tracing::debug!(
                 target_delivery_id = %response.target_delivery_id,
                 session_id = %response.session_id,
                 "router mesh session upsert returned"
@@ -1236,7 +1255,7 @@ pub(crate) fn handle_mvp1_identity_register(
             }));
         }
     };
-    tracing::info!(
+    tracing::debug!(
         principal_id = %request.proof.principal_id,
         device_id = %request.proof.device_id,
         target_delivery_id = %request.target_delivery_id,
@@ -1282,11 +1301,14 @@ pub(crate) fn handle_mvp1_identity_register(
         }
     };
     tracing::info!(
+        session_bound = response.session_bound,
+        "router mvp1 identity registration outcome"
+    );
+    tracing::debug!(
         principal_id = %response.principal_id,
         device_id = %response.device_id,
         target_delivery_id = %response.target_delivery_id,
-        session_bound = response.session_bound,
-        "router mvp1 identity registration outcome"
+        "router mvp1 identity registration ids"
     );
     Ok(serde_json::to_value(response)?)
 }
@@ -1448,11 +1470,11 @@ fn handle_mvp1_prekey_publish(
         state.persist_identity_registry(store)?;
         response
     };
-    tracing::info!(
+    tracing::info!(has_bundle = response.bundle.is_some(), "router mvp1 prekey publish outcome");
+    tracing::debug!(
         device_id = %response.device_id,
-        has_bundle = response.bundle.is_some(),
         target_delivery_id = ?response.target_delivery_id,
-        "router mvp1 prekey publish outcome"
+        "router mvp1 prekey publish ids"
     );
     Ok(response)
 }
@@ -1470,11 +1492,11 @@ fn handle_mvp1_prekey_fetch(
     } else {
         state.mvp1_prekey_checked(device_id)?
     };
-    tracing::info!(
+    tracing::info!(has_bundle = response.bundle.is_some(), "router mvp1 prekey fetch outcome");
+    tracing::debug!(
         device_id = %response.device_id,
-        has_bundle = response.bundle.is_some(),
         target_delivery_id = ?response.target_delivery_id,
-        "router mvp1 prekey fetch outcome"
+        "router mvp1 prekey fetch ids"
     );
     Ok(response)
 }
