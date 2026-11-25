@@ -550,7 +550,8 @@ async fn run_directory(
             &server_name,
             &frame,
             Some(client.clone()),
-            crate::node_directory::REPLY_LIMIT,
+            // The reply is `R:u32be || JSON`; the limit covers the prefix too.
+            crate::node_directory::REPLY_LIMIT + 4,
         )
         .await;
         let wait = match sent {
@@ -572,7 +573,7 @@ async fn run_directory(
                     Ok(
                         crate::node_directory::Reply::Unavailable { retry_after_ms }
                         | crate::node_directory::Reply::Throttled { retry_after_ms },
-                    ) => Duration::from_millis(retry_after_ms.min(MAX_RETRY_MS)),
+                    ) => Duration::from_millis(retry_after_ms.clamp(1_000, MAX_RETRY_MS)),
                     Ok(crate::node_directory::Reply::Rejected { reason }) => {
                         tracing::warn!(%reason, "node directory: centre rejected the poll");
                         Duration::from_secs(DIRECTORY_DEFAULT_POLL_S)
@@ -597,27 +598,40 @@ fn backoff_step(backoff: &mut Duration) -> Duration {
     wait
 }
 
-/// Starts the sender when `[node_report]` is configured. Errors stay local: the node keeps serving.
+/// Starts the sender when `[node_report]` is configured. A broken `[node_directory]` (or one
+/// without `[node_report]`) is a start-up error: the node must not run without its sanctions.
+/// Without `[node_report]` a sender failure stays local, and the node keeps serving.
 pub(crate) fn start(
     config: &NodeServiceConfig,
     discovery: &FederationDiscoverySurface,
     seed: [u8; 32],
-) {
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let directory = ramflux_node_core::load_node_directory_config(std::env::args().skip(1))
+        .map_err(|error| {
+            ramflux_node_core::NodeCoreError::InvalidConfiguration(format!(
+                "[node_directory]: {error}"
+            ))
+        })?;
     let report = match ramflux_node_core::load_node_report_config(std::env::args().skip(1)) {
         Ok(Some(report)) => report,
-        Ok(None) => {
-            warn_directory_without_report();
-            return;
+        Ok(None) | Err(_) if directory.is_some() => {
+            return Err(ramflux_node_core::NodeCoreError::InvalidConfiguration(
+                "[node_directory] needs a valid [node_report]".to_owned(),
+            ));
         }
+        Ok(None) => return Ok(()),
         Err(error) => {
             tracing::error!(%error, "node report not started: invalid [node_report]");
-            return;
+            return Ok(());
         }
     };
-    start_directory(config, &report);
+    if let Some(directory) = directory {
+        start_directory(config, &directory, &report)?;
+    }
     if let Err(error) = spawn(config, discovery, seed, &report) {
         tracing::error!(%error, "node report not started");
     }
+    Ok(())
 }
 
 fn spawn(
@@ -706,29 +720,16 @@ fn spawn(
     .map_err(|error| error.to_string())
 }
 
-/// The directory needs the report's centre and identity. Without `[node_report]` it stays off.
-fn start_directory(config: &NodeServiceConfig, report: &NodeReportConfig) {
-    let directory = match ramflux_node_core::load_node_directory_config(std::env::args().skip(1)) {
-        Ok(Some(directory)) => directory,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::error!(%error, "node directory not started: invalid [node_directory]");
-            return;
-        }
-    };
+/// The directory needs the report's centre and identity. A failed start is fatal.
+fn start_directory(
+    config: &NodeServiceConfig,
+    directory: &ramflux_node_core::NodeDirectoryConfig,
+    report: &NodeReportConfig,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
     let redb_path = ramflux_node_core::effective_redb_path(config);
-    if let Err(error) = crate::node_directory::start(&directory, &report.centre.id, &redb_path) {
-        tracing::error!(%error, "node directory not started");
-    }
-}
-
-fn warn_directory_without_report() {
-    if matches!(
-        ramflux_node_core::load_node_directory_config(std::env::args().skip(1)),
-        Ok(Some(_))
-    ) {
-        tracing::error!("node directory not started: [node_directory] needs [node_report]");
-    }
+    crate::node_directory::start(directory, &report.centre.id, &redb_path).map_err(|error| {
+        ramflux_node_core::NodeCoreError::InvalidConfiguration(format!("[node_directory]: {error}"))
+    })
 }
 
 #[cfg(test)]

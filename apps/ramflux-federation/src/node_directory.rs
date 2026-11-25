@@ -36,6 +36,7 @@ const MAX_DOC_LEN: usize = 5_600_000;
 const SNAPSHOT_LIFETIME_MS: u64 = 86_400_000;
 /// Section 3a point 2: `issued_at` and `seq` may not run more than 300 s ahead.
 const FUTURE_SKEW_MS: u64 = 300_000;
+const MIN_RETRY_MS: u64 = 1_000;
 const POLL_MIN_S: u64 = 60;
 const POLL_MAX_S: u64 = 3600;
 const MAX_JSON_INT: u64 = (1 << 53) - 1;
@@ -178,14 +179,19 @@ impl DirIdentity {
     /// `L:u32be || fv || alg || n:u16be || body || sig`, signed over
     /// `"rfc-dir-request" || 0x00 || fv || alg || len(centre_id) || centre_id || n || body`.
     pub(crate) fn request_frame(&self) -> Result<Vec<u8>, String> {
-        let body = json!({
-            "dv": DV,
-            "node_key": self.node_key,
-            "key_gen": self.key_gen,
-            "ts": now_ms(),
-            "have_seq": held_seq(),
-        });
-        let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
+        self.request_frame_at(now_ms(), held_seq())
+    }
+
+    /// The frame for edge time `ts_ms` and the held sequence `have_seq` (pure; `request_frame`
+    /// supplies the system clock and the held sequence).
+    pub(crate) fn request_frame_at(&self, ts_ms: u64, have_seq: u64) -> Result<Vec<u8>, String> {
+        // Member order is the frozen wire order (the signature covers these exact bytes).
+        let body = format!(
+            "{{\"dv\":{DV},\"node_key\":{},\"key_gen\":{},\"ts\":{ts_ms},\"have_seq\":{have_seq}}}",
+            serde_json::to_string(&self.node_key).map_err(|e| e.to_string())?,
+            self.key_gen,
+        )
+        .into_bytes();
         if body.len() + REQUEST_OVERHEAD > REQUEST_PAYLOAD_LIMIT {
             return Err("request body too large".to_owned());
         }
@@ -247,6 +253,8 @@ pub(crate) fn start(
                     }
                 }
             } else {
+                // Sanctions stay (section 3a point 4); only the sequence fence restarts.
+                sticky.learned_seq = 0;
                 tracing::info!(target: LOG_TARGET, "directory verify keys changed; fence reset");
             }
         }
@@ -288,42 +296,83 @@ pub(crate) fn held_seq() -> u64 {
         .unwrap_or(0)
 }
 
-/// Parses a `rfc-dir-1` reply: `R:u32be || JSON`. The fence uses only the signed body's `seq`.
+/// Refuses any member outside `allowed` (section 3.2: parsers are strict).
+fn closed_members(value: &Value, allowed: &[&str]) -> Result<(), String> {
+    let object = value.as_object().ok_or("malformed: object expected")?;
+    if object.keys().all(|key| allowed.contains(&key.as_str())) {
+        Ok(())
+    } else {
+        Err("malformed: unknown member".to_owned())
+    }
+}
+
+/// Parses a `rfc-dir-1` reply: `R:u32be || JSON`, `1 <= R <= REPLY_LIMIT`. The fence uses only
+/// the signed body's `seq`.
 pub(crate) fn accept_reply(bytes: &[u8]) -> Result<Reply, String> {
+    match parse_reply(bytes)? {
+        Parsed::Ok { poll_s, reply_seq, doc } => {
+            let applied = match doc {
+                None => {
+                    tracing::debug!(reply_seq, "node directory: no snapshot (seq hint only)");
+                    Applied::Unchanged
+                }
+                Some(doc) => install(doc, reply_seq)?,
+            };
+            Ok(Reply::Ok { poll_s, applied })
+        }
+        Parsed::Unavailable { retry_after_ms } => Ok(Reply::Unavailable { retry_after_ms }),
+        Parsed::Throttled { retry_after_ms } => Ok(Reply::Throttled { retry_after_ms }),
+        Parsed::Rejected { reason } => Ok(Reply::Rejected { reason }),
+    }
+}
+
+/// A reply after framing and strict parsing, before any state change (pure).
+#[derive(Debug)]
+pub(crate) enum Parsed {
+    Ok { poll_s: u64, reply_seq: u64, doc: Option<Doc> },
+    Unavailable { retry_after_ms: u64 },
+    Throttled { retry_after_ms: u64 },
+    Rejected { reason: String },
+}
+
+/// Framing and strict parsing of `R:u32be || JSON`; no state is read or written.
+pub(crate) fn parse_reply(bytes: &[u8]) -> Result<Parsed, String> {
     let Some((len_bytes, json_bytes)) = bytes.split_first_chunk::<4>() else {
         return Err("malformed: reply framing".to_owned());
     };
-    if u32::from_be_bytes(*len_bytes) as usize != json_bytes.len() {
+    if u32::from_be_bytes(*len_bytes) as usize != json_bytes.len()
+        || !(1..=REPLY_LIMIT).contains(&json_bytes.len())
+    {
         return Err("malformed: reply length".to_owned());
     }
     let value: Value = ramflux_protocol::parse_i_json(json_bytes).map_err(|e| e.to_string())?;
+    closed_members(&value, &["status", "seq", "poll_s", "snapshot", "retry_after_ms", "reason"])?;
     let uint = |key: &str| value.get(key).and_then(Value::as_u64);
+    // A retry hint below one second would make the poll loop spin (no hot loop).
+    let retry = |default: u64| -> Result<u64, String> {
+        let retry = uint("retry_after_ms").unwrap_or(default);
+        if retry < MIN_RETRY_MS {
+            return Err("malformed: retry_after_ms below 1000".to_owned());
+        }
+        Ok(retry)
+    };
     match value.get("status").and_then(Value::as_str) {
         Some("ok") => {
             let poll_s = uint("poll_s")
                 .filter(|poll| (POLL_MIN_S..=POLL_MAX_S).contains(poll))
                 .ok_or("malformed: poll_s outside 60..=3600")?;
             let reply_seq = uint("seq").ok_or("malformed: reply seq")?;
-            let applied = match value.get("snapshot") {
-                None => {
-                    tracing::debug!(reply_seq, "node directory: no snapshot (seq hint only)");
-                    Applied::Unchanged
-                }
+            let doc = match value.get("snapshot") {
+                None => None,
                 Some(doc) => {
-                    let doc: Doc =
-                        serde_json::from_value(doc.clone()).map_err(|e| e.to_string())?;
-                    install(doc, reply_seq)?
+                    Some(serde_json::from_value::<Doc>(doc.clone()).map_err(|e| e.to_string())?)
                 }
             };
-            Ok(Reply::Ok { poll_s, applied })
+            Ok(Parsed::Ok { poll_s, reply_seq, doc })
         }
-        Some("unavailable") => {
-            Ok(Reply::Unavailable { retry_after_ms: uint("retry_after_ms").unwrap_or(2000) })
-        }
-        Some("throttled") => {
-            Ok(Reply::Throttled { retry_after_ms: uint("retry_after_ms").unwrap_or(5000) })
-        }
-        Some("rejected") => Ok(Reply::Rejected {
+        Some("unavailable") => Ok(Parsed::Unavailable { retry_after_ms: retry(2000)? }),
+        Some("throttled") => Ok(Parsed::Throttled { retry_after_ms: retry(5000)? }),
+        Some("rejected") => Ok(Parsed::Rejected {
             reason: value.get("reason").and_then(Value::as_str).unwrap_or("").to_owned(),
         }),
         other => Err(format!("malformed: status {}", other.unwrap_or("missing"))),
@@ -334,10 +383,6 @@ pub(crate) fn accept_reply(bytes: &[u8]) -> Result<Reply, String> {
 /// the sticky state and persists it. Nothing changes unless every step passes.
 fn install(doc: Doc, reply_seq: u64) -> Result<Applied, String> {
     let now = now_ms();
-    let doc_bytes = serde_json::to_vec(&doc).map_err(|e| e.to_string())?;
-    if doc_bytes.len() > MAX_DOC_LEN {
-        return Err("directory document too large".to_owned());
-    }
     let lock = RUNTIME.get().ok_or_else(|| "node directory not configured".to_owned())?;
     let mut runtime = lock.write().map_err(|_| "directory lock poisoned".to_owned())?;
     let snapshot = verify_doc(
@@ -418,6 +463,10 @@ fn verify_doc(
     held: Option<&Snapshot>,
     check_expiry: bool,
 ) -> Result<Snapshot, String> {
+    let doc_bytes = serde_json::to_vec(doc).map_err(|e| e.to_string())?;
+    if doc_bytes.len() > MAX_DOC_LEN {
+        return Err("directory document too large".to_owned());
+    }
     let key_id_ok = !doc.key_id.is_empty()
         && doc.key_id.len() <= 32
         && doc.key_id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
@@ -455,6 +504,7 @@ fn verify_doc(
 
 fn parse_body(body: &[u8], centre_id: &str) -> Result<Snapshot, String> {
     let value: Value = ramflux_protocol::parse_i_json(body).map_err(|e| e.to_string())?;
+    closed_members(&value, &["dsv", "centre_id", "seq", "issued_at", "expires_at", "entries"])?;
     let uint = |key: &str| value.get(key).and_then(Value::as_u64);
     if uint("dsv") != Some(DSV) {
         return Err("unsupported directory snapshot version".to_owned());
@@ -494,6 +544,7 @@ fn parse_body(body: &[u8], centre_id: &str) -> Result<Snapshot, String> {
 }
 
 fn parse_entry(node: &Value) -> Result<Entry, String> {
+    closed_members(node, &["node_key", "key_gen", "domain", "state", "trust", "changed_at"])?;
     let text = |key: &str| node.get(key).and_then(Value::as_str).ok_or("directory entry field");
     let raw = ramflux_protocol::decode_base64url(text("node_key")?).map_err(|e| e.to_string())?;
     if raw.len() != 32 {
@@ -503,7 +554,11 @@ fn parse_entry(node: &Value) -> Result<Entry, String> {
     if text("node_key")? != key {
         return Err("directory node_key is not canonical".to_owned());
     }
-    let domain = text("domain")?.to_ascii_lowercase();
+    let domain = text("domain")?;
+    if domain.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Err("directory domain must be lowercase".to_owned());
+    }
+    let domain = domain.to_owned();
     if !crate::peer_pin::node_id_ok(&domain) {
         return Err("directory domain rejected".to_owned());
     }
@@ -602,8 +657,21 @@ fn persist(
         Persisted { verify: fingerprint.to_owned(), doc: doc.cloned(), sticky: sticky.clone() };
     let bytes = serde_json::to_vec(&persisted).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &bytes).map_err(|error| format!("write directory state: {error}"))?;
-    std::fs::rename(&tmp, path).map_err(|error| format!("store directory state: {error}"))
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|error| format!("write directory state: {error}"))?;
+        file.write_all(&bytes).map_err(|error| format!("write directory state: {error}"))?;
+        file.sync_all().map_err(|error| format!("sync directory state: {error}"))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|error| format!("store directory state: {error}"))?;
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|error| format!("sync directory state dir: {error}"))
 }
 
 fn fingerprint(verify: &[(String, String)]) -> String {

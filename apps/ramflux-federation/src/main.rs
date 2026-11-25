@@ -114,7 +114,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         let router = Arc::new(router_mesh_client(&config)?);
         let mesh_observability = Arc::new(FederationMeshObservability::default());
         let discovery = federation_discovery_surface(&config, node_signing_seed);
-        node_report::start(&config, &discovery, node_signing_seed);
+        node_report::start(&config, &discovery, node_signing_seed)?;
         #[cfg(unix)]
         username_directory::start_home(&config, Arc::clone(&router), &discovery).map_err(
             |error| {
