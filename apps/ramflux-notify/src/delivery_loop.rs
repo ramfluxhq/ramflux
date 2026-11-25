@@ -196,6 +196,9 @@ fn deliver_entry(
     provider_workers: &ConcurrentProviderPushWorkerPool,
     entry: &NotifyQueueEntry,
 ) -> Result<bool, ramflux_node_core::NodeCoreError> {
+    if let Some(central) = super::central_handoff::active() {
+        return central.deliver(store, entry);
+    }
     let pushes = store.prepare_provider_pushes_for_entry(entry)?;
     if pushes.is_empty() {
         tracing::debug!("notify async delivery found no provider pushes for pending entry");

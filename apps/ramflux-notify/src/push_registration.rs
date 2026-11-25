@@ -144,6 +144,7 @@ mod tests {
             provider_ca_pem_ref: None,
         });
         let mut registration = PushRouteRegistration {
+            sealed: false,
             provider: PushProviderKind::Fcm,
             token: "token".into(),
             route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),

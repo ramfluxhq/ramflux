@@ -25,8 +25,18 @@ pub struct DevicePushRoute {
     pub webpush_p256dh: Option<String>,
     #[serde(default)]
     pub webpush_auth: Option<String>,
-    pub registered_at: u64,
+    pub registered_at_ms: u64,
     pub expires_at: u64,
+    /// The route's `st` is a sealed central token (central mode). Raw tokens are never stored
+    /// for central routes.
+    #[serde(default)]
+    pub sealed: bool,
+    /// A `reseal` answer from the centre: the route is skipped until the device re-registers.
+    #[serde(default)]
+    pub needs_reseal: bool,
+    /// An `unserved` answer pauses the route until this Unix ms time (3600 s).
+    #[serde(default)]
+    pub unserved_until_ms: u64,
     /// Server-allocated id. It is never reused. Zero was not admitted here.
     #[serde(default)]
     pub route_generation: u64,
@@ -63,6 +73,15 @@ impl DevicePushRoute {
     }
 }
 
+/// Unix time in milliseconds on this node's clock. Route registration and `invalid_route` times
+/// are compared in this unit (A5).
+#[must_use]
+pub(crate) fn now_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
 fn rejected() -> NodeCoreError {
     NodeCoreError::Unauthorized("push route registration rejected".into())
 }
@@ -90,6 +109,10 @@ pub fn admit_push_registration(
     now: u64,
 ) -> Result<DevicePushRoute, PushRouteRefusal> {
     registration.validate().map_err(|_| PushRouteRefusal::Rejected)?;
+    if registration.sealed {
+        // Direct mode never accepts a sealed token (A2.4, no plaintext or sealed fallback).
+        return Err(PushRouteRefusal::Rejected);
+    }
     let credential = credentials
         .iter()
         .find(|credential| {
@@ -107,7 +130,45 @@ pub fn admit_push_registration(
         endpoint,
         webpush_p256dh: registration.webpush_p256dh.clone(),
         webpush_auth: registration.webpush_auth.clone(),
-        registered_at: now,
+        registered_at_ms: now_unix_millis(),
+        sealed: false,
+        needs_reseal: false,
+        unserved_until_ms: 0,
+        expires_at: now.saturating_add(PUSH_ROUTE_TTL_SECONDS),
+        route_generation: 0,
+        route_tag: registration.route_tag.clone(),
+        environment: registration.environment,
+        capability: registration.capability,
+    })
+}
+
+/// Build the stored route for a sealed central registration (A2.3). The node stores the sealed
+/// token `st` byte for byte, has no local provider credential, and uses the fixed endpoint
+/// `rfc-push`; the provider host and credential are the centre's.
+///
+/// # Errors
+/// Refuses a registration that is not sealed or fails validation.
+pub fn admit_sealed_push_registration(
+    authority: &DeviceAuthKeyResponse,
+    registration: &PushRouteRegistration,
+    now: u64,
+) -> Result<DevicePushRoute, PushRouteRefusal> {
+    registration.validate().map_err(|_| PushRouteRefusal::Rejected)?;
+    if !registration.sealed {
+        return Err(PushRouteRefusal::Rejected);
+    }
+    Ok(DevicePushRoute {
+        device_delivery_id: authority.target_delivery_id.clone(),
+        provider: registration.provider.clone(),
+        credential_id: None,
+        token: registration.token.clone(),
+        endpoint: "rfc-push".to_owned(),
+        webpush_p256dh: None,
+        webpush_auth: None,
+        registered_at_ms: now_unix_millis(),
+        sealed: true,
+        needs_reseal: false,
+        unserved_until_ms: 0,
         expires_at: now.saturating_add(PUSH_ROUTE_TTL_SECONDS),
         route_generation: 0,
         route_tag: registration.route_tag.clone(),

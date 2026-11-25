@@ -687,7 +687,7 @@ fn register_current_notify_route(
     store.set_push_route_authorizer(|_| Ok(true));
     let now = now_unix_seconds();
     let mut route = notify_webpush_route(target, credential);
-    route.registered_at = now;
+    route.registered_at_ms = now;
     route.expires_at = now + 600;
     store.register_authenticated_push_route(&authority, &route)?;
     Ok(())
