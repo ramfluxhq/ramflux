@@ -1079,7 +1079,7 @@
       "key_export": false,
       "message_descriptor_blake3": "b81c4216fc565566fe75bdc8b9958afc22aebb40e643d5952fc1cb563553fd4a",
       "name": "contact.verify",
-      "product_pin": "d0936a0a8c1357656cbbc896129787c07793fd25",
+      "product_pin": "206666d26134babcfc491af326b308d4deb8cb83",
       "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
       "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,
