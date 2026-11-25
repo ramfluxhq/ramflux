@@ -147,6 +147,12 @@ pub struct EngineStats {
     pub video_access_units: u64,
     /// Video datagrams sent.
     pub video_sent: u64,
+    /// Bytes of the video datagrams sent (the bitrate evidence).
+    pub video_sent_bytes: u64,
+    /// IDR access units the itest synthetic source queued (periodic or answering a request).
+    pub video_idr_sent: u64,
+    /// Keyframe requests the itest synthetic source raised after a reassembly drop.
+    pub video_keyframe_requests: u64,
     /// Video access units dropped before sending (queue full, or waiting for a keyframe).
     pub video_send_dropped: u64,
     /// Video datagrams that failed to send or to seal.
@@ -591,14 +597,20 @@ fn synthetic_feeder(
         }
         if drops > seen_drops {
             seen_drops = drops;
-            let _ = lock_control(feed.control).request_keyframe();
+            if lock_control(feed.control).request_keyframe().is_ok() {
+                lock(shared).stats.video_keyframe_requests += 1;
+            }
         }
         if feed.authorization.lock().admitted_video() {
             let request = lock_control(feed.control).peer_request();
             let answer = request != applied;
             let idr = answer || index % IDR_EVERY == 0;
             let au = access_unit(index, idr);
-            let _ = submit_video_on(feed.authorization, feed.control, out, shared, &au);
+            let queued = submit_video_on(feed.authorization, feed.control, out, shared, &au)
+                .is_ok_and(|outcome| outcome.queued);
+            if idr && queued {
+                lock(shared).stats.video_idr_sent += 1;
+            }
             if answer {
                 lock_control(feed.control).apply_keyframe(request);
                 applied = request;
@@ -738,6 +750,7 @@ impl SendLoop {
                     let mut shared = lock(&self.shared);
                     if sent {
                         shared.stats.video_sent += 1;
+                        shared.stats.video_sent_bytes += u64::try_from(datagram.len()).unwrap_or(0);
                     } else {
                         shared.stats.video_send_errors += 1;
                     }
