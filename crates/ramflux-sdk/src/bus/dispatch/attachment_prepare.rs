@@ -18,10 +18,12 @@ use ramflux_protocol::large_attachment::QualifiedOwner;
 use ramflux_protocol::message::outer::{MAX_INNER_BYTES, MAX_UNPADDED_PLAINTEXT_BYTES};
 use serde_json::{Value, json};
 
+use crate::attachment_send::upload::{AckRecord, JournalCall, JournalSink};
 use crate::attachment_send::{
     AuthorityPin, CODE_AUTHORITY_UNAVAILABLE, CODE_CANCELLED, CODE_LAYOUT_INVALID,
-    CODE_MANIFEST_TOO_LARGE, CODE_STREAM_CLOSED, MAX_ATTACHMENTS, Phase, Plane, PublishInput,
-    Recipient, Refusal, Row, Store, authority, open_store, unix_now, upload_all, wrap_all,
+    CODE_MANIFEST_TOO_LARGE, CODE_SEAL_FAILED, CODE_STREAM_CLOSED, MAX_ATTACHMENTS, Phase, Plane,
+    PublishInput, Recipient, Refusal, Row, Store, authority, open_store, unix_now, upload_all,
+    wrap_all,
 };
 use crate::client::attachment_roster::{MediaRoster, RosterScope};
 use crate::prelude::*;
@@ -30,6 +32,8 @@ pub(in crate::bus) struct PrepareSend<'a> {
     pub prepares: &'a [String],
     pub caption: &'a str,
     pub message_id: &'a str,
+    /// The conversation operation whose durable record carries the stage.
+    pub operation: &'a str,
     pub thread: &'a Value,
     pub principal: &'a str,
     pub account_id: &'a str,
@@ -44,11 +48,13 @@ struct Job {
     key: ed25519_dalek::SigningKey,
     pin: AuthorityPin,
     caption: String,
+    journal: JournalSink,
 }
 
 impl Job {
     fn input<'a>(&'a self, targets: &'a [crate::attachment_send::MediaDevice]) -> PublishInput<'a> {
         PublishInput {
+            journal: &self.journal,
             store: &self.store,
             plane: self.plane.as_ref(),
             owner: &self.owner,
@@ -67,6 +73,40 @@ impl Job {
 /// # Errors
 /// Returns a stable refusal before Reserve when the roster or the Inner does not fit,
 /// and `authority_unavailable` when the source pin is absent.
+/// First admission: the upload worker runs off the actor and the send resumes later.
+fn park_upload(
+    account: &mut LocalBusAccountState,
+    job: &Arc<Job>,
+    targets: Vec<crate::attachment_send::MediaDevice>,
+    rows: Vec<Row>,
+    calls: tokio::sync::mpsc::Receiver<JournalCall>,
+) -> SdkError {
+    let worker = tokio::task::spawn_blocking({
+        let job = Arc::clone(job);
+        move || {
+            let _ = upload_all(&job.input(&targets), &rows);
+        }
+    });
+    account.attachment_send.upload =
+        Some(crate::bus::account_runtime::attachment_sends::ParkedUpload { calls, worker });
+    Refusal::new(crate::bus::account_runtime::attachment_sends::PARKED).into()
+}
+
+/// This device as the owner of the upload.
+fn local_owner(
+    account: &LocalBusAccountState,
+    pin: &AuthorityPin,
+) -> Result<QualifiedOwner, SdkError> {
+    let branch = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    Ok(QualifiedOwner {
+        account_anchor: account.client.own_account_anchor()?,
+        device_id: branch.device_id.clone(),
+        device_epoch: branch.device_epoch,
+        signing_public_key: branch.signing_key.verifying_key().to_bytes(),
+        home_node_id: pin.home.clone(),
+    })
+}
+
 pub(in crate::bus) async fn publish_prepares(
     account: &mut LocalBusAccountState,
     request: PrepareSend<'_>,
@@ -75,6 +115,7 @@ pub(in crate::bus) async fn publish_prepares(
         prepares,
         caption,
         message_id,
+        operation,
         thread,
         principal,
         account_id,
@@ -93,33 +134,42 @@ pub(in crate::bus) async fn publish_prepares(
         return RamfluxClient::attachment_message_content(caption, &media);
     }
     let plane = crate::attachment_send::plane_for(account)?;
-    let branch = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let owner = QualifiedOwner {
-        account_anchor: account.client.own_account_anchor()?,
-        device_id: branch.device_id.clone(),
-        device_epoch: branch.device_epoch,
-        signing_public_key: branch.signing_key.verifying_key().to_bytes(),
-        home_node_id: pin.home.clone(),
-    };
-    let key = branch.signing_key.clone();
-    let job = Arc::new(Job { store, plane, owner, key, pin, caption: caption.to_owned() });
+    let owner = local_owner(account, &pin)?;
+    let key = account
+        .client
+        .device_branch
+        .as_ref()
+        .ok_or(SdkError::IdentityRootMissing)?
+        .signing_key
+        .clone();
+    let (journal, mut calls) = JournalSink::channel();
+    let job = Arc::new(Job { store, plane, owner, key, pin, caption: caption.to_owned(), journal });
     let scope = Scope::of(account, thread, principal, &job.pin)?;
 
     let planned = scope.plan(account, &job.pin).await?;
     remember_roster(&account.client, message_id, &planned)?;
-    let rows = blocking({
+    if account.attachment_send.parking {
+        return Err(park_upload(account, &job, planned.targets.clone(), rows, calls));
+    }
+    // The worker blocks on relay I/O; the account task serves its journal calls meanwhile.
+    let mut upload = tokio::task::spawn_blocking({
         let job = Arc::clone(&job);
         let targets = planned.targets.clone();
         let rows = rows.clone();
         move || upload_all(&job.input(&targets), &rows)
-    })
-    .await?;
+    });
+    let rows = serve_journal(account, &mut calls, &mut upload).await?;
 
     // The upload may have taken long enough for a device to join, leave or lose its layer.
     let current = scope.plan(account, &job.pin).await?;
     if current.keys() != planned.keys() {
         remember_roster(&account.client, message_id, &current)?;
     }
+    super::conversation_send::record_phase(
+        &account.client,
+        operation,
+        crate::attachment_send::send_journal::SendPhase::Wrapping,
+    )?;
     let wrapped = blocking({
         let job = Arc::clone(&job);
         let targets = current.targets.clone();
@@ -150,9 +200,21 @@ pub(in crate::bus) async fn publish_prepares(
         return Err(Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into());
     }
 
+    finish_content(account, caption, message_id, prepares, &media)
+}
+
+/// Checks that the authored Inner fits, records each attachment object against its message and
+/// returns the content body.
+fn finish_content(
+    account: &LocalBusAccountState,
+    caption: &str,
+    message_id: &str,
+    prepares: &[String],
+    media: &[ramflux_protocol::message::MediaRef],
+) -> Result<ramflux_protocol::message::Content, SdkError> {
     let inner = ramflux_protocol::message::Message {
         text: caption.to_owned(),
-        media: media.clone(),
+        media: media.to_vec(),
         ..Default::default()
     }
     .encode_to_vec();
@@ -169,7 +231,67 @@ pub(in crate::bus) async fn publish_prepares(
             &json!({ "message_id": message_id, "prepare_id": prepare }),
         )?;
     }
-    RamfluxClient::attachment_message_content(caption, &media)
+    RamfluxClient::attachment_message_content(caption, media)
+}
+
+/// Answers journal calls until the upload worker finishes. Calls are served in order on the
+/// account task, so each ACK is durable before the worker sends the next slice.
+async fn serve_journal<T>(
+    account: &LocalBusAccountState,
+    calls: &mut tokio::sync::mpsc::Receiver<JournalCall>,
+    upload: &mut tokio::task::JoinHandle<Result<T, Refusal>>,
+) -> Result<T, SdkError> {
+    loop {
+        tokio::select! {
+            biased;
+            Some(call) = calls.recv() => answer(account, call),
+            joined = &mut *upload => {
+                return match joined {
+                    Ok(result) => result.map_err(SdkError::from),
+                    Err(_) => Err(Refusal::new(CODE_CANCELLED).into()),
+                };
+            }
+        }
+    }
+}
+
+/// Every call gets exactly one reply, so the worker never waits on a dropped account task.
+pub(in crate::bus) fn answer(account: &LocalBusAccountState, call: JournalCall) {
+    let db = account.client.account_db().map_err(|_| Refusal::new(CODE_SEAL_FAILED));
+    match (call, db) {
+        (JournalCall::Load { reply, .. }, Err(refusal)) => {
+            let _ = reply.send(Err(refusal));
+        }
+        (JournalCall::Save { reply, .. } | JournalCall::Emit { reply, .. }, Err(refusal)) => {
+            let _ = reply.send(Err(refusal));
+        }
+        (JournalCall::Emit { source, body, reply }, Ok(db)) => {
+            let appended = db
+                .append_journal(
+                    &source,
+                    crate::attachment_send::transfer::TRANSFER_TOPIC,
+                    &body,
+                    crate::time::now_unix_timestamp(),
+                    None,
+                )
+                .map(|_| ())
+                .map_err(|_| Refusal::new(CODE_SEAL_FAILED));
+            let _ = reply.send(appended);
+        }
+        (JournalCall::Load { key, reply }, Ok(db)) => {
+            let loaded = db
+                .load_actor_state::<AckRecord>(&key)
+                .map(|record| record.map(|record| record.acks))
+                .map_err(|_| Refusal::new(CODE_SEAL_FAILED));
+            let _ = reply.send(loaded);
+        }
+        (JournalCall::Save { key, acks, reply }, Ok(db)) => {
+            let saved = db
+                .persist_actor_state(&key, &AckRecord { acks })
+                .map_err(|_| Refusal::new(CODE_SEAL_FAILED));
+            let _ = reply.send(saved);
+        }
+    }
 }
 
 /// # Errors

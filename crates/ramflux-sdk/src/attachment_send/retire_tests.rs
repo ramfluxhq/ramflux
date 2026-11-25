@@ -175,6 +175,7 @@ impl Fixture {
         let targets: Vec<MediaDevice> = peers.iter().map(|peer| peer.device.clone()).collect();
         let wrapped = publish::publish_all(
             &PublishInput {
+                journal: &crate::attachment_send::upload::TEST_JOURNAL,
                 store: &self.store,
                 plane: &self.listener,
                 owner: &self.owner,

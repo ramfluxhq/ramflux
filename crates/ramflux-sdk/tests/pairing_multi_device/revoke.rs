@@ -34,6 +34,7 @@ fn revoke(source: &Device, target: &str) -> Result<PublishedHead, SdkError> {
         recipient_ref: None,
         revoked_id: Some(target.into()),
         certificate: None,
+        message_layer: None,
         display_name: None,
         now: node::now()?,
         branch_vault_ref: branch,

@@ -167,6 +167,7 @@ impl AccountSessionHarness {
         let (connection_sender, connection_work) = mpsc::channel(2);
         let (head_completion_sender, head_rx) = mpsc::channel(1);
         let mut runtime = AccountRuntime {
+            attachment_sends: Default::default(),
             timeouts,
             id,
             state,

@@ -260,6 +260,7 @@ enum ControlOperation {
   CONTROL_OWN_MESSAGE_COPY = 15;
   CONTROL_FRIEND = 16;
   CONTROL_AGENT_SYNC = 17;
+  CONTROL_OWN_LAYER_RENEWAL = 18;
 }
 message Control {
   ControlOperation operation = 1;
@@ -284,7 +285,15 @@ message Control {
     OwnMessageCopy own_message_copy = 30;
     FriendControl friend = 31;
     AgentHostPacket agent_sync = 32;
+    // Tag 33 is reserved by a parked branch; own layer renewal takes the next free tag.
+    OwnLayerRenewal own_layer_renewal = 34;
   }
+}
+// Secondary-device request for a fresh primary-endorsed message-layer declaration (SECONDARY-LAYER-01).
+// signed_declaration_json is the canonical native SignedLayerDeclaration, at most 4096 bytes.
+message OwnLayerRenewal {
+  QualifiedDevice primary = 1;
+  bytes signed_declaration_json = 2;
 }
 // Agent creation custody traffic between the paired Human's own devices (AGENT-IDENTITY-01).
 message AgentHostPacket {

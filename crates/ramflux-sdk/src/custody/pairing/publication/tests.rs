@@ -261,7 +261,11 @@ fn certify(
     harness: &Harness,
     device_id: &str,
     now: u64,
-) -> TestResult<(DeviceRef, Envelope<ramflux_protocol::custody::BranchCertificate>)> {
+) -> TestResult<(
+    DeviceRef,
+    Envelope<ramflux_protocol::custody::BranchCertificate>,
+    ramflux_protocol::custody::SignedLayerDeclaration,
+)> {
     let account = harness.account(now)?;
     let primary = harness.primary(now)?;
     let branch = ramflux_crypto::create_device_branch(
@@ -284,13 +288,14 @@ fn certify(
         encode_base64url(branch.signing_key.verifying_key().to_bytes());
     certificate.agreement_identity_public_key = encode_base64url(agreement.public);
     certificate.cert_id = encode_base64url(ramflux_crypto::random_32()?);
+    let message_layer = ramflux_crypto::custody::sign_enrollment_layer(&branch, &certificate)?;
     let certified = primary.certify_branch(certificate)?;
     let reference = DeviceRef {
         account_anchor: account.record().body.account_anchor.clone(),
         device_id: device_id.into(),
         device_epoch: 1,
     };
-    Ok((reference, certified))
+    Ok((reference, certified, message_layer))
 }
 
 fn enroll_write(
@@ -299,7 +304,7 @@ fn enroll_write(
     now: u64,
 ) -> TestResult<(HeadWrite, DeviceRef)> {
     let publisher = harness.publisher(now)?;
-    let (recipient, certificate) = certify(harness, device_id, now)?;
+    let (recipient, certificate, message_layer) = certify(harness, device_id, now)?;
     let (branch_vault_ref, primary_vault_ref) = harness.vault_refs(now)?;
     Ok((
         HeadWrite {
@@ -315,6 +320,7 @@ fn enroll_write(
             recipient_ref: Some(recipient.clone()),
             revoked_id: None,
             certificate: Some(certificate),
+            message_layer: Some(message_layer),
             display_name: None,
             now,
             branch_vault_ref,
@@ -341,6 +347,7 @@ fn profile_write(harness: &Harness, name: &str, now: u64) -> TestResult<HeadWrit
         recipient_ref: None,
         revoked_id: None,
         certificate: None,
+        message_layer: None,
         display_name: Some(name.into()),
         now,
         branch_vault_ref,
@@ -365,6 +372,7 @@ fn revoke_write(harness: &Harness, device_id: &str, now: u64) -> TestResult<Head
         recipient_ref: None,
         revoked_id: Some(device_id.into()),
         certificate: None,
+        message_layer: None,
         display_name: None,
         now,
         branch_vault_ref,
@@ -382,8 +390,8 @@ fn persist_current(harness: &Harness, now: u64) -> TestResult<String> {
 fn enroll_sibling(harness: &Harness, now: u64) -> TestResult<Vec<Device>> {
     let account = harness.account(now)?;
     let primary = harness.primary(now)?;
-    let (_ref, certificate) = certify(harness, "sibling", now)?;
-    let record = primary.enroll_device(account.verified(), certificate, now)?;
+    let (_ref, certificate, message_layer) = certify(harness, "sibling", now)?;
+    let record = primary.enroll_device(account.verified(), certificate, message_layer, now)?;
     let authority = ramflux_protocol::custody::CustodyAuthority {
         publication: Publication { record: record.clone(), compacted_ids: None },
         custodian_publication: None,
@@ -679,7 +687,9 @@ fn seed_prepared(harness: &Harness, write: &HeadWrite) -> TestResult {
     let account = harness.account(write.now)?;
     let primary = harness.primary(write.now)?;
     let certificate = write.certificate.clone().ok_or("certificate")?;
-    let record = primary.enroll_device(account.verified(), certificate, write.now)?;
+    let message_layer = write.message_layer.clone().ok_or("message layer")?;
+    let record =
+        primary.enroll_device(account.verified(), certificate, message_layer, write.now)?;
     let publication = Publication { record: record.clone(), compacted_ids: None };
     let row = HeadRow {
         account_id: write.account_id.clone(),

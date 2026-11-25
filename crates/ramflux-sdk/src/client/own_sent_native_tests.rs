@@ -46,8 +46,13 @@ async fn native_own_sent_admission_tracks_enrollment_scope_and_revocation() -> T
     certificate.agreement_identity_public_key =
         ramflux_protocol::encode_base64url(agreement.public);
     certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-    native.publication.record =
-        primary.enroll_device(&current, primary.certify_branch(certificate)?, now)?;
+    let message_layer = ramflux_crypto::custody::sign_enrollment_layer(&branch, &certificate)?;
+    native.publication.record = primary.enroll_device(
+        &current,
+        primary.certify_branch(certificate)?,
+        message_layer,
+        now,
+    )?;
     own.client.observe_custody_manifest(&native, &own.manifest.principal_commitment, now)?;
     assert!(own.client.own_sent_has_siblings()?);
     assert!(own.client.local_own_copy_manifest().is_err(), "old cached roster must refresh");

@@ -303,6 +303,7 @@ pub(super) fn read(
             Ok(serde_json::json!({"conversations": client.conversation_list()?}))
         }
         "message.read" => generated_page(client, &request.body),
+        "attachment.transfer.list" => crate::attachment_send::transfer_list(client, request),
         _ => Err(SdkError::LocalBus("unsupported reader request".to_owned())),
     }
 }

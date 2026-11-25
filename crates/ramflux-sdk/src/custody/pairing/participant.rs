@@ -24,6 +24,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Requested declaration validity; the lease end still caps it.
+const DECLARATION_VALIDITY_SECONDS: u64 =
+    crate::bus::couriers::layer_publish::DECLARATION_VALIDITY_SECONDS;
+
 /// Public, frozen ceremony context. Never contains SAS keys, tokens or credentials.
 #[derive(Clone)]
 pub struct ParticipantContext {
@@ -394,6 +398,17 @@ impl LocalPairingParticipant {
             &common.account_anchor,
             &local.device_ref,
         )?;
+        // proposal() runs only while the phase is mutually_confirmed, before save_context_in has
+        // saved a proposal, so nothing has been sent that a retry must match: mint a fresh declaration.
+        let now = crate::custody::network_now()?;
+        let message_layer = crate::custody::layer_declaration::candidate(
+            &branch.signing,
+            local.device_ref.clone(),
+            ramflux_protocol::message::registry::COMPILED_LAYER,
+            1,
+            now,
+            common.lease_expires_at.min(now.saturating_add(DECLARATION_VALIDITY_SECONDS)),
+        )?;
         let body = EnrollmentBody {
             schema: "ramflux.identity.pairing.enrollment.v1".into(),
             version: 1,
@@ -408,6 +423,7 @@ impl LocalPairingParticipant {
             capabilities: common.capabilities.clone(),
             lease_expires_at: common.lease_expires_at,
             display_name: local.display_name.clone(),
+            message_layer,
         };
         body.validate().map_err(|error| super::transport::wire(&error))?;
         let signature = ramflux_protocol::encode_base64url(

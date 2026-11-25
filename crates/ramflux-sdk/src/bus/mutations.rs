@@ -33,11 +33,11 @@ pub(super) async fn execute(
     connection.topics.clone_from(&command.topics);
     let intent = super::mutation_intent::MutationIntent::new(&command.request)?;
     let key = intent.key;
-    if let Some(account) = state.accounts.get(account_id) {
-        let db = account.client.account_db()?;
-        if let Some(body) = intent.lookup(db)? {
-            return Ok(ActorResponse { body, events: Vec::new(), nodes: None, owner_copy: None });
-        }
+    let _live = intent.enter(account_id)?;
+    if let Some(account) = state.accounts.get(account_id)
+        && let Some(body) = intent.lookup(account.client.account_db()?)?
+    {
+        return Ok(ActorResponse { body, events: Vec::new(), nodes: None, owner_copy: None });
     }
     // Fetch owns a durable retryable failure receipt, including admission failures.
     // The account runtime uses its fetch worker; direct dispatch preserves that contract.
@@ -97,8 +97,7 @@ pub(super) async fn execute(
         super::control_state::commit(account, snapshot)?;
     }
     if let (Some(key), Some(account)) = (key, state.accounts.get(account_id)) {
-        let db = account.client.account_db()?;
-        db.complete_operation(key, &result.response_body)?;
+        account.client.account_db()?.complete_operation(key, &result.response_body)?;
     }
     let mut events = connection.drain_events();
     if let Some(event) = result.event {

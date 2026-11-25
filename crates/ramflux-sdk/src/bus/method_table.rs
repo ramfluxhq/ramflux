@@ -51,6 +51,8 @@ macro_rules! methods {
 methods! {
     LocalRead(Always) => Reader: ["search.query", "search.index.status"];
     LocalRead(Always) => Supervisor: ["search.cancel", "search.cursor.close", "search.index.rebuild.cancel"];
+    LocalRead(Always) => Reader: ["attachment.transfer.list"];
+    LocalMutation(Always) => Supervisor: ["attachment.transfer.pause", "attachment.transfer.resume"];
     LocalMutation(Always) => Actor: ["search.index.rebuild"];
     LocalRead(Always) => Actor: ["account.config.get", "diag.residue", "call.media.status"];
     LocalMutation(Always) => Actor: ["call.media.open", "call.media.set_muted", "call.media.audio_active", "call.media.audio_route", "call.media.close"];

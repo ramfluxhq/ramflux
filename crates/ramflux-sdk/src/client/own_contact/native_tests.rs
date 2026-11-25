@@ -51,8 +51,13 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
     certificate.agreement_identity_public_key =
         ramflux_protocol::encode_base64url(&agreement.public);
     certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-    native.publication.record =
-        primary.enroll_device(&current, primary.certify_branch(certificate)?, now)?;
+    let message_layer = ramflux_crypto::custody::sign_enrollment_layer(&branch, &certificate)?;
+    native.publication.record = primary.enroll_device(
+        &current,
+        primary.certify_branch(certificate)?,
+        message_layer,
+        now,
+    )?;
     own.client.observe_custody_manifest(&native, &own.manifest.principal_commitment, now)?;
     assert_eq!(own.client.stage_contact_backfill_batch()?, 0);
     assert_eq!(own.client.account_db()?.actor_state_usage("self-sync/repair/")?.0, 0);

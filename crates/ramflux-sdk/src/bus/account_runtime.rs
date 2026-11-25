@@ -21,6 +21,7 @@ mod transient;
 pub(super) use transient::TransientHost;
 mod agent_calls;
 mod agent_contacts;
+pub(crate) mod attachment_sends;
 mod connection;
 mod pairing_calls;
 mod pairing_data;
@@ -103,6 +104,7 @@ struct AccountRuntime {
     /// the push safety sweep.
     resume_receive_until: Option<tokio::time::Instant>,
     transient: TransientHost,
+    attachment_sends: attachment_sends::AttachmentSends,
     pairing: pairing_calls::Calls,
     username: username_calls::Calls,
     #[cfg(test)]
@@ -194,6 +196,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         ready_commands: ready_commands::Queue::default(),
         resume_receive_until: None,
         transient: TransientHost::default(),
+        attachment_sends: attachment_sends::AttachmentSends::default(),
         pairing: pairing_calls::Calls::default(),
         username: username_calls::Calls::default(),
         #[cfg(test)]
@@ -576,6 +579,10 @@ impl AccountRuntime {
                 break;
             }
         }
+        let account = self.state.accounts.get(&self.id);
+        self.attachment_sends
+            .drain(&self.id, account, None, attachment_sends::shutdown_draining)
+            .await;
         command_park::cancel(&self.id, || SdkError::NetworkingPending)?;
         Ok(())
     }
@@ -595,6 +602,9 @@ impl AccountRuntime {
             _ = self.shutdown.changed() => return Ok(true),
             command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
             command = self.receiver.recv() => command,
+            event = self.attachment_sends.next(), if self.attachment_sends.active() => {
+                return Box::pin(self.service_attachment_send(event)).await;
+            },
             () = std::future::ready(()), if head_demand::demand_active() && !self.head_rx.is_empty() => {
                 if let Ok(work) = self.head_rx.try_recv() {
                     *checkpoints += 1;

@@ -55,9 +55,12 @@ fn enroll(
     branch.branch_signing_public_key = public_key_base64url_from_seed(&[seed; 32]);
     branch.agreement_identity_public_key =
         encode_base64url(crate::X25519KeyPair::from_seed([seed + 1; 32]).public);
+    let signer = crate::create_device_branch(&record.body.principal_id, name, 1, [seed; 32]);
+    let message_layer = crate::custody::sign_enrollment_layer(&signer, &branch)?;
     Ok(primary.enroll_device(
         &verify_record(record, record.body.issued_at, None, None)?,
         primary.certify_branch(branch)?,
+        message_layer,
         record.body.issued_at,
     )?)
 }

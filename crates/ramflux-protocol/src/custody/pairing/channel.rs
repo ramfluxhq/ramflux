@@ -3,6 +3,7 @@
 
 //! Dormant confirmed-channel and transfer codecs; no publication authority.
 use super::super::Envelope;
+use super::super::SignedLayerDeclaration;
 use super::{
     Deserialize, DeviceRef, PairingWire, Result, Serialize, Transcript, WireError, b32, budget,
     decode_base64url, encode_base64url, header, integer, reference, require,
@@ -43,6 +44,24 @@ fn legacy(schema: &str, version: u32, name: &str) -> Result<()> {
     require(schema == name, "schema")?;
     require(version == 1, "version")
 }
+/// Shape of an enrollment's declaration: exact device identity, positive sequence, safe times and a
+/// 64-byte branch signature. Layer bounds and signatures are checked by the crypto validator.
+fn layer_declaration(value: &SignedLayerDeclaration, device: &DeviceRef) -> Result<()> {
+    let declaration = &value.declaration;
+    require(declaration.device == *device, "message_layer.device")?;
+    require(declaration.max_layer >= 1, "message_layer.max_layer")?;
+    require(declaration.declaration_sequence >= 1, "message_layer.declaration_sequence")?;
+    integer(declaration.declaration_sequence, "message_layer.declaration_sequence")?;
+    integer(declaration.issued_at, "message_layer.issued_at")?;
+    integer(declaration.expires_at, "message_layer.expires_at")?;
+    require(declaration.issued_at < declaration.expires_at, "message_layer.expires_at")?;
+    let signature = decode_base64url(&value.branch_signature)
+        .map_err(|_| WireError::Field("message_layer.branch_signature"))?;
+    require(
+        signature.len() == 64 && encode_base64url(&signature) == value.branch_signature,
+        "message_layer.branch_signature",
+    )
+}
 fn caps(v: &[String]) -> Result<()> {
     require(
         !v.is_empty()
@@ -69,6 +88,8 @@ pub struct EnrollmentBody {
     pub capabilities: Vec<String>,
     pub lease_expires_at: u64,
     pub display_name: String,
+    /// The recipient's branch-signed layer declaration, endorsed by the primary's roster (SECONDARY-LAYER-01).
+    pub message_layer: SignedLayerDeclaration,
 }
 impl PairingWire for EnrollmentBody {
     const LIMIT: usize = 11_700;
@@ -88,6 +109,7 @@ impl PairingWire for EnrollmentBody {
         reference(&self.recipient_ref)?;
         require(self.requested_role == "secondary", "requested_role")?;
         caps(&self.capabilities)?;
+        layer_declaration(&self.message_layer, &self.recipient_ref)?;
         require(
             self.display_name.len() <= 128
                 && crate::text_safety::free_text_is_safe(&self.display_name),

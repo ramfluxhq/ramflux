@@ -112,3 +112,26 @@ messages. Real state flapping remains observable and bounded.
 
 The stream is account scoped. Daemon-wide account/node directory subscriptions
 are a separate API concern.
+
+## Attachment transfer snapshots
+
+Topic `attachment.transfer.changed` carries the state of one outgoing attachment upload. A
+client subscribes with `bus.subscribe` and `topics: ["attachment.transfer.changed"]`; each
+event arrives as a `stream` frame whose `topic` is that name and whose `body` is the snapshot
+below. Events are appended to the account journal, so they replay in `seq` order and follow
+the journal's retention and resync rules.
+
+```json
+{"transfer_id":"prepare-id","prepare_id":"prepare-id","operation_id":"op","client_message_id":null,"message_id":null,"import_id":null,"direction":"upload","phase":"uploading","generation":1,"total_bytes":4194320,"accepted_bytes":4194320,"uploaded_bytes":524288,"unique_bytes":524288,"verified_bytes":null,"expires_at":1800000000,"reason_code":null,"retryable":false}
+```
+
+- `transfer_id` and `prepare_id` are the account-scoped prepare id. `generation` is the payload
+  generation.
+- All counts are ciphertext bytes. `accepted_bytes` is the sealed total, `uploaded_bytes` and
+  `unique_bytes` are the slice bytes confirmed by the durable ACK journal. A retry never
+  double-counts, so counts may only rise except when the relay stops confirming a slice.
+- `phase` is one of `uploading`, `paused`, `uploaded`, `failed`. `reason_code` and `retryable`
+  are set for `paused` (retryable) and `failed`.
+- Progress snapshots are published at most once every 250 ms per transfer; phase changes are
+  always published. `seq` increases monotonically across the account journal.
+- The body holds no paths, file names, captions, keys, grants or raw errors.
