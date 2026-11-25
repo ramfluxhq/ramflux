@@ -67,17 +67,18 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<(), StorageError> {
 }
 
 pub(crate) const CONSENT_DECISIONS: &str = "
-CREATE TABLE IF NOT EXISTS contact_link_decision(link_id TEXT PRIMARY KEY,state TEXT NOT NULL CHECK(state IN ('blocked','declined','lifted')),decided_at INTEGER NOT NULL);
-INSERT OR IGNORE INTO contact_link_decision SELECT link_id,CASE WHEN blocked=1 THEN 'blocked' WHEN state='rejected' THEN 'declined' ELSE 'lifted' END,min(max(updated_at,0),9223372036854775)*1000 FROM friend_link_projection WHERE state IN ('accepted','blocked','rejected');
+CREATE TABLE IF NOT EXISTS contact_link_decision(link_id TEXT PRIMARY KEY,state TEXT NOT NULL CHECK(state IN ('blocked','declined','lifted')),decided_at INTEGER NOT NULL,counter INTEGER NOT NULL DEFAULT 0,device_id TEXT NOT NULL DEFAULT '');
+INSERT OR IGNORE INTO contact_link_decision(link_id,state,decided_at) SELECT link_id,CASE WHEN blocked=1 THEN 'blocked' WHEN state='rejected' THEN 'declined' ELSE 'lifted' END,min(max(updated_at,0),9223372036854775)*1000 FROM friend_link_projection WHERE state IN ('accepted','blocked','rejected');
 
-CREATE TABLE IF NOT EXISTS contact_request_decision(root TEXT PRIMARY KEY,state TEXT NOT NULL CHECK(state IN ('blocked','declined','lifted')),decided_at INTEGER NOT NULL);
-INSERT OR IGNORE INTO contact_request_decision
+CREATE TABLE IF NOT EXISTS contact_request_decision(root TEXT PRIMARY KEY,state TEXT NOT NULL CHECK(state IN ('blocked','declined','lifted')),decided_at INTEGER NOT NULL,counter INTEGER NOT NULL DEFAULT 0,device_id TEXT NOT NULL DEFAULT '');
+INSERT OR IGNORE INTO contact_request_decision(root,state,decided_at)
  SELECT f.root,f.state,coalesce((SELECT min(max(max(updated_at),0),9223372036854775)*1000 FROM contact_request_projection WHERE contact_identity_commitment=f.root),0) FROM contact_request_fence f;
-INSERT OR IGNORE INTO contact_request_decision
+INSERT OR IGNORE INTO contact_request_decision(root,state,decided_at)
  SELECT contact_identity_commitment,'lifted',min(max(max(updated_at),0),9223372036854775)*1000 FROM contact_request_projection r
  WHERE state='accepted' AND NOT EXISTS(SELECT 1 FROM contact_request_fence f WHERE f.root=r.contact_identity_commitment)
  GROUP BY contact_identity_commitment;
 ";
+
 pub(crate) const HELD_MESSAGE_FENCES: &str = "
 CREATE TABLE IF NOT EXISTS contact_message_request_fence(sender_identity TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(sender_identity,message_id));
 CREATE TABLE IF NOT EXISTS contact_message_fence_retention(sender_identity TEXT NOT NULL,message_id TEXT NOT NULL,until INTEGER NOT NULL,PRIMARY KEY(sender_identity,message_id));

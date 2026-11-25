@@ -17,6 +17,9 @@ pub struct BlockDecision {
     pub device_id: ::prost::alloc::string::String,
     #[prost(int64, tag = "5")]
     pub decided_at: i64,
+    /// "contact_request" (root = contact identity commitment) or "friend_link" (root = link id).
+    #[prost(string, tag = "6")]
+    pub kind: ::prost::alloc::string::String,
 }
 impl serde::Serialize for BlockDecision {
     #[allow(deprecated)]
@@ -41,6 +44,9 @@ impl serde::Serialize for BlockDecision {
         if self.decided_at != 0 {
             len += 1;
         }
+        if !self.kind.is_empty() {
+            len += 1;
+        }
         let mut struct_ser =
             serializer.serialize_struct("ramflux.message.v1.BlockDecision", len)?;
         if !self.root.is_empty() {
@@ -63,6 +69,9 @@ impl serde::Serialize for BlockDecision {
             struct_ser
                 .serialize_field("decidedAt", ToString::to_string(&self.decided_at).as_str())?;
         }
+        if !self.kind.is_empty() {
+            struct_ser.serialize_field("kind", &self.kind)?;
+        }
         struct_ser.end()
     }
 }
@@ -72,8 +81,16 @@ impl<'de> serde::Deserialize<'de> for BlockDecision {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] =
-            &["root", "state", "counter", "device_id", "deviceId", "decided_at", "decidedAt"];
+        const FIELDS: &[&str] = &[
+            "root",
+            "state",
+            "counter",
+            "device_id",
+            "deviceId",
+            "decided_at",
+            "decidedAt",
+            "kind",
+        ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             Root,
@@ -81,6 +98,7 @@ impl<'de> serde::Deserialize<'de> for BlockDecision {
             Counter,
             DeviceId,
             DecidedAt,
+            Kind,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -107,6 +125,7 @@ impl<'de> serde::Deserialize<'de> for BlockDecision {
                             "counter" => Ok(GeneratedField::Counter),
                             "deviceId" | "device_id" => Ok(GeneratedField::DeviceId),
                             "decidedAt" | "decided_at" => Ok(GeneratedField::DecidedAt),
+                            "kind" => Ok(GeneratedField::Kind),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -129,6 +148,7 @@ impl<'de> serde::Deserialize<'de> for BlockDecision {
                 let mut counter__ = None;
                 let mut device_id__ = None;
                 let mut decided_at__ = None;
+                let mut kind__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -169,6 +189,12 @@ impl<'de> serde::Deserialize<'de> for BlockDecision {
                                 map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
                             );
                         }
+                        GeneratedField::Kind => {
+                            if kind__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("kind"));
+                            }
+                            kind__ = Some(map_.next_value()?);
+                        }
                     }
                 }
                 Ok(BlockDecision {
@@ -177,6 +203,7 @@ impl<'de> serde::Deserialize<'de> for BlockDecision {
                     counter: counter__.unwrap_or_default(),
                     device_id: device_id__.unwrap_or_default(),
                     decided_at: decided_at__.unwrap_or_default(),
+                    kind: kind__.unwrap_or_default(),
                 })
             }
         }

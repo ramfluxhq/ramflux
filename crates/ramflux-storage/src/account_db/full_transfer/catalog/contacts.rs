@@ -39,6 +39,23 @@ pub(super) const RULE_10: FamilyRule = table_rule!(
             RestrictUnion,
             CodecRule::Scalar { cell_type: CellType::I64 }
         ),
+        (
+            "counter",
+            I64,
+            false,
+            Transfer,
+            RestrictUnion,
+            CodecRule::Scalar { cell_type: CellType::I64 }
+        ),
+        (
+            "device_id",
+            Utf8,
+            false,
+            Transfer,
+            RestrictUnion,
+            CodecRule::Scalar { cell_type: CellType::Utf8 }
+        ),
+
     ]
 );
 
@@ -269,6 +286,23 @@ pub(super) const RULE_15: FamilyRule = table_rule!(
             RestrictUnion,
             CodecRule::Scalar { cell_type: CellType::I64 }
         ),
+        (
+            "counter",
+            I64,
+            false,
+            Transfer,
+            RestrictUnion,
+            CodecRule::Scalar { cell_type: CellType::I64 }
+        ),
+        (
+            "device_id",
+            Utf8,
+            false,
+            Transfer,
+            RestrictUnion,
+            CodecRule::Scalar { cell_type: CellType::Utf8 }
+        ),
+
     ]
 );
 

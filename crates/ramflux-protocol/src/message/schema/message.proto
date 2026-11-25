@@ -260,6 +260,7 @@ enum ControlOperation {
   CONTROL_OWN_MESSAGE_COPY = 15;
   CONTROL_FRIEND = 16;
   CONTROL_AGENT_SYNC = 17;
+  CONTROL_BLOCK_SYNC = 18;
 }
 message Control {
   ControlOperation operation = 1;
@@ -1653,4 +1654,6 @@ message BlockDecision {
   uint64 counter = 3;
   string device_id = 4;
   int64 decided_at = 5;
+  // "contact_request" (root = contact identity commitment) or "friend_link" (root = link id).
+  string kind = 6;
 }

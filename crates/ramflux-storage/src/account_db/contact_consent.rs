@@ -4,6 +4,7 @@
 //! Durable, ordered consent decisions, including explicit lifts of old denials.
 use super::AccountDb;
 use crate::{ContactLinkDecision, StorageError};
+use super::block_sync::next_block_counter;
 use rusqlite::{OptionalExtension, params};
 impl AccountDb {
     /// Reads the durable logical stamp of the latest consent decision for a link.
@@ -31,6 +32,7 @@ impl AccountDb {
         let root = root.to_owned();
         let denial = denial.map(|(state, until)| (state.to_owned(), until));
         let only = only.map(str::to_owned);
+        let device_id = self.local_block_device_id();
         self.write_transaction(|| {
             self.connection.call(move |db| {
                 let old: Option<String> = db.query_row("SELECT state FROM contact_request_fence WHERE root=?1", [&root], |r|r.get(0)).optional()?;
@@ -49,7 +51,8 @@ impl AccountDb {
                 db.execute("DELETE FROM contact_request_fence WHERE root=?1", [&root])?;
                 "lifted"
             };
-            db.execute("INSERT INTO contact_request_decision VALUES(?1,?2,?3) ON CONFLICT(root) DO UPDATE SET state=excluded.state,decided_at=excluded.decided_at",params![root,state,decided_at])?;
+            let counter = next_block_counter(db)?;
+            db.execute("INSERT INTO contact_request_decision(root,state,decided_at,counter,device_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(root) DO UPDATE SET state=excluded.state,decided_at=excluded.decided_at,counter=excluded.counter,device_id=excluded.device_id",params![root,state,decided_at,counter,device_id])?;
                 Ok(())
             }).map_err(StorageError::from)
         })?;
@@ -112,6 +115,7 @@ impl AccountDb {
         change: LinkConsentChange,
     ) -> Result<bool, StorageError> {
         let id = id.to_owned();
+        let device_id = self.local_block_device_id();
         self.write_transaction(|| self.connection.call(move |db| {
             let (state,changed)=match change {
                 LinkConsentChange::Establish {requester,target,at} => ("lifted",db.execute("INSERT OR REPLACE INTO friend_link_projection(link_id,requester_id,target_id,state,remove_scope,blocked,capability_revoked_at,updated_at) VALUES(?1,?2,?3,'accepted',NULL,0,NULL,?4)",params![id,requester,target,at])?),
@@ -124,7 +128,8 @@ impl AccountDb {
             };
             if changed==0 {return Ok(false)}
             let previous=db.query_row("SELECT decided_at FROM contact_link_decision WHERE link_id=?1",[&id],|r|r.get(0)).optional()?.unwrap_or(0);
-            db.execute("INSERT INTO contact_link_decision VALUES(?1,?2,?3) ON CONFLICT(link_id) DO UPDATE SET state=excluded.state,decided_at=excluded.decided_at",params![id,state,next_stamp(previous)?])?;
+            let counter = next_block_counter(db)?;
+            db.execute("INSERT INTO contact_link_decision(link_id,state,decided_at,counter,device_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(link_id) DO UPDATE SET state=excluded.state,decided_at=excluded.decided_at,counter=excluded.counter,device_id=excluded.device_id",params![id,state,next_stamp(previous)?,counter,device_id])?;
             Ok(true)
         }).map_err(StorageError::from))
     }
