@@ -43,6 +43,8 @@ pub(crate) struct PushShared {
     server_name: String,
     connection: AsyncMutex<Option<quinn::Connection>>,
     streams: Semaphore,
+    /// Raised when a stop is recorded, so the sync loop re-times its next sync (A-stop: 300 s).
+    stop_notify: tokio::sync::Notify,
 }
 
 /// What one request produced on the wire.
@@ -94,6 +96,7 @@ impl PushShared {
             server_name,
             connection: AsyncMutex::new(None),
             streams: Semaphore::new(MAX_STREAMS),
+            stop_notify: tokio::sync::Notify::new(),
         })
     }
 
@@ -115,6 +118,16 @@ impl PushShared {
         if let Ok(mut until) = self.stopped_until.lock() {
             *until = Some(Instant::now() + wait);
         }
+        self.stop_notify.notify_one();
+    }
+
+    /// Time left of the current stop, if any.
+    fn stop_remaining(&self) -> Option<Duration> {
+        self.stopped_until
+            .lock()
+            .ok()
+            .and_then(|until| *until)
+            .and_then(|instant| instant.checked_duration_since(Instant::now()))
     }
 
     /// Applies an `ok` reply: `dir`, `ks`, and the state file, written atomically.
@@ -200,6 +213,20 @@ impl PushShared {
             *slot = None;
         }
         failed.close(0u32.into(), b"");
+    }
+}
+
+/// Sleeps for `wait`, but a stop recorded meanwhile moves the wake-up to the end of the stop.
+pub(crate) async fn pause(shared: &PushShared, wait: Duration) {
+    let mut wait = wait;
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(wait) => return,
+            () = shared.stop_notify.notified() => match shared.stop_remaining() {
+                Some(left) => wait = left,
+                None => return,
+            },
+        }
     }
 }
 

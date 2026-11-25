@@ -93,7 +93,7 @@ pub(crate) fn start(discovery: &FederationDiscoverySurface, seed: [u8; 32]) -> R
             let sync = tokio::spawn(async move {
                 loop {
                     let wait = session::sync_once(&sync_shared).await;
-                    tokio::time::sleep(wait).await;
+                    session::pause(&sync_shared, wait).await;
                 }
             });
             shutdown.cancelled().await;
