@@ -65,6 +65,21 @@ pub(crate) fn check_selection(
     Ok(selected.accepted)
 }
 
+/// A fresh 32-byte video send key for one direction of the selected peer.
+pub(crate) fn fresh_key() -> Result<Zeroizing<[u8; 32]>, SdkError> {
+    Ok(Zeroizing::new(ramflux_crypto::random_32()?))
+}
+
+/// The first track control of a call: revision 1, the only control that carries the key.
+pub(crate) fn initial_track(max_rung: u32, key: &[u8; 32]) -> ramflux_protocol::CallAction {
+    ramflux_protocol::CallAction::VideoTrack {
+        revision: 1,
+        enabled: true,
+        max_rung,
+        base_key: Some(ramflux_protocol::encode_base64url(key)),
+    }
+}
+
 /// Video state for one call's selected peer device.
 #[derive(Clone, Default, Eq, PartialEq)]
 pub(crate) struct VideoTrackPeer {
@@ -78,6 +93,11 @@ impl VideoTrackPeer {
     /// Records the selection outcome. A declined selection never admits a track.
     pub(crate) fn negotiate(&mut self, accepted: bool) {
         self.negotiated = accepted;
+    }
+
+    /// Whether the selected peer accepted video (a declined selection leaves this false).
+    pub(crate) fn is_negotiated(&self) -> bool {
+        self.negotiated
     }
 
     /// Admits one peer track control. The first control carries the key; later
