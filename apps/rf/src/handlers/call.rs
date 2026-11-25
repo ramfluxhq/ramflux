@@ -9,8 +9,10 @@ pub(crate) async fn handle_call(socket: PathBuf, command: CallCommand) -> Result
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
         CallAction::Invite(invite) => {
-            let request =
-                LocalBusCallInviteRequest { conversation_id: invite.conversation, video: false };
+            let request = LocalBusCallInviteRequest {
+                conversation_id: invite.conversation,
+                video: invite.video,
+            };
             print_json(
                 &bus.request(
                     Some(invite.account),
@@ -22,7 +24,7 @@ pub(crate) async fn handle_call(socket: PathBuf, command: CallCommand) -> Result
             )
         }
         CallAction::Answer(answer) => {
-            let request = LocalBusCallAnswerRequest { call_id: answer.call };
+            let request = LocalBusCallAnswerRequest { call_id: answer.call, video: answer.video };
             print_json(
                 &bus.request(
                     Some(answer.account),

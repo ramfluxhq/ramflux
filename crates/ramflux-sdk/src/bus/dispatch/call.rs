@@ -38,7 +38,13 @@ pub(crate) async fn dispatch(
         let _: LocalBusCallHangupRequest = serde_json::from_value(request.body.clone())?;
         return media(account, id);
     }
-    let _: LocalBusCallHangupRequest = serde_json::from_value(request.body.clone())?;
+    let video_accept = if request.method == "call.answer" {
+        let answer: LocalBusCallAnswerRequest = serde_json::from_value(request.body.clone())?;
+        answer.video
+    } else {
+        let _: LocalBusCallHangupRequest = serde_json::from_value(request.body.clone())?;
+        false
+    };
     if request.method == "call.answer" {
         account.client.reserve_call_audio(id)?;
     }
@@ -51,9 +57,13 @@ pub(crate) async fn dispatch(
                 && next.row.state == "incoming_ringing"
                 && !next.expired(now) =>
         {
+            next.video_accept = video_accept;
             next.request_answer();
         }
-        "call.answer" => next.answer(now)?,
+        "call.answer" => {
+            next.video_accept = video_accept;
+            next.answer(now)?;
+        }
         "call.reject" => next.end(true, now)?,
         "call.hangup" => next.end(false, now)?,
         _ => return Err(invalid("unknown call method")),

@@ -28,6 +28,9 @@ pub(crate) struct CallInvite {
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
+    /// Offer video on this call (the callee must accept).
+    #[arg(long)]
+    pub(crate) video: bool,
 }
 
 #[derive(Args)]
@@ -36,6 +39,9 @@ pub(crate) struct CallAnswer {
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) call: String,
+    /// Accept the call's video offer. Without it video is declined and voice continues.
+    #[arg(long)]
+    pub(crate) video: bool,
 }
 
 #[derive(Args)]
