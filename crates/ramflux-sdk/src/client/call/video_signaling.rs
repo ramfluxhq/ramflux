@@ -82,6 +82,11 @@ pub(crate) fn fresh_key() -> Result<Zeroizing<[u8; 32]>, SdkError> {
     Ok(Zeroizing::new(ramflux_crypto::random_32()?))
 }
 
+/// Public, non-reversible commitment to a video key for logs (never the key bytes).
+pub(crate) fn key_commit(key: &[u8; 32]) -> String {
+    blake3::hash(key).to_hex().as_str()[..16].to_owned()
+}
+
 /// The first track control of a call: revision 1, the only control that carries the key.
 pub(crate) fn initial_track(max_rung: u32, key: &[u8; 32]) -> ramflux_protocol::CallAction {
     ramflux_protocol::CallAction::VideoTrack {

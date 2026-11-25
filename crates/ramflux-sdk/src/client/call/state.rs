@@ -508,6 +508,11 @@ impl LiveCall {
         let key = super::video_signaling::fresh_key()?;
         let body = super::video_signaling::initial_track(offer.max_rung, &key);
         self.video.negotiate(true);
+        tracing::info!(
+            call_id = %self.row.call_id,
+            key_commit = %super::video_signaling::key_commit(&key),
+            "video send key queued for the selected peer"
+        );
         self.video_send_key = Some(key);
         let control = self.control(body, now)?;
         self.pending.push(control);

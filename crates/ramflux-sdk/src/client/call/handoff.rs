@@ -201,7 +201,15 @@ impl RamfluxClient {
         let call_id = call.row.call_id.clone();
         let send_key = std::mem::replace(&mut call.send_key, Zeroizing::new([0; 32]));
         let video = match (call.video_send_key.take(), call.video.take_key()) {
-            (Some(send), Some(receive)) => Some((send, receive)),
+            (Some(send), Some(receive)) => {
+                tracing::info!(
+                    call_id = %call.row.call_id,
+                    send_commit = %super::video_signaling::key_commit(&send),
+                    receive_commit = %super::video_signaling::key_commit(&receive),
+                    "video keys selected for the media session"
+                );
+                Some((send, receive))
+            }
             _ => None,
         };
         if let Some(allocation) = call.allocation.as_mut() {
