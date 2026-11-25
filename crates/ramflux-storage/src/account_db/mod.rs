@@ -67,6 +67,7 @@ mod backup_account_reach;
 mod backup_username_candidates;
 mod backup_username_directory;
 mod directory_facts;
+mod notification;
 pub(crate) mod home_migration;
 pub mod identity_verification;
 pub mod journal;
