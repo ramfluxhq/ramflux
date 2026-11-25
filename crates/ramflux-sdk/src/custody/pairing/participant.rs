@@ -458,6 +458,12 @@ impl LocalPairingParticipant {
         else {
             return Ok(None);
         };
+        // The context column holds the full-transfer stage link while the phase is
+        // `mutually_confirmed` (full/stage.rs); the declaration JSON is written only by
+        // `save_context_in`, which sets `proposal_pending`. Parse it in that phase only.
+        if row.phase != "proposal_pending" {
+            return Ok(None);
+        }
         let Some(bytes) = row.context else {
             return Ok(None);
         };
