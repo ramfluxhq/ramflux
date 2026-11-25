@@ -105,6 +105,8 @@ pub(crate) fn authenticate(
 ) -> Result<(), NodeCoreError> {
     let now = crate::now_unix_seconds()?;
     precheck(request, &local.node_id, now)?;
+    crate::node_directory::sanction::check_peer(&request.source_node_id, "inbound")
+        .map_err(|_| refused())?;
     let snapshot = state.snapshot()?;
     if pinned(request, &snapshot, now)? {
         return Ok(());

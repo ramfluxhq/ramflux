@@ -36,6 +36,7 @@ pub(crate) fn ensure_forward_pin(
     if !node_id_ok(target) {
         return Err(invalid("federation peer id rejected"));
     }
+    crate::node_directory::sanction::check_peer(target, "outbound")?;
     let now = crate::now_unix_seconds()?;
     let snapshot = state.snapshot()?;
     if snapshot.peer_pin_blocked(target, now) {
@@ -131,6 +132,7 @@ pub(crate) fn install_candidate(
     if trust.peer_pin_blocked(&record.node_id, now) {
         return Err(invalid("federation node blocked"));
     }
+    crate::node_directory::check_pin(&record.node_id, &record.node_public_key)?;
     trust.admit_new_peer_pin(&record.node_id, now)?;
     let discovered = trust.resolve_discovery_result(
         &ramflux_node_core::FederationDiscoveryRequest {

@@ -27,6 +27,7 @@ mod itest_http;
 mod key_migration;
 mod mesh;
 mod mesh_auth;
+mod node_directory;
 mod node_report;
 mod pairing_full;
 mod pairing_http;

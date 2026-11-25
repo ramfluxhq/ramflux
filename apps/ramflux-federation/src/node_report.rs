@@ -39,6 +39,8 @@ const MAX_CAPS: usize = 16;
 const MAX_JSON_INT: u64 = (1 << 53) - 1;
 /// A retry resends the same bytes only while `ts` is this close to now (section 3.3).
 const RETRY_WINDOW_MS: u64 = 50_000;
+/// Version of the directory request kind (K4 section 4.1); sent only when the centre advertises it.
+const DIRECTORY_KV: u64 = 1;
 const DEFAULT_FULL_EVERY_S: u64 = 3600;
 const MIN_FULL_EVERY_S: u64 = 300;
 const MAX_FULL_EVERY_S: u64 = 86_400;
@@ -202,6 +204,7 @@ pub(crate) struct Directives {
     hello_kv_max: u64,
     min_rv: u64,
     min_hello_kv: u64,
+    directory_kv_max: u64,
     full_every_s: u64,
 }
 
@@ -212,6 +215,7 @@ impl Default for Directives {
             hello_kv_max: HELLO_KV,
             min_rv: 0,
             min_hello_kv: 0,
+            directory_kv_max: 0,
             full_every_s: DEFAULT_FULL_EVERY_S,
         }
     }
@@ -239,6 +243,7 @@ impl Directives {
         self.hello_kv_max = kind("hello");
         self.min_rv = uint("min_rv");
         self.min_hello_kv = min_kind("hello");
+        self.directory_kv_max = kind("directory");
         if let Some(seconds) = dir.get("full_every_s").and_then(Value::as_u64)
             && (MIN_FULL_EVERY_S..=MAX_FULL_EVERY_S).contains(&seconds)
         {
@@ -331,6 +336,21 @@ struct Reporter {
 }
 
 impl Reporter {
+    /// The signed directory request (K4 section 4.1), built fresh for every request.
+    fn next_directory(&self) -> Result<Vec<u8>, ReportError> {
+        let body = json!({
+            "rv": RV,
+            "kind": "directory",
+            "kv": DIRECTORY_KV,
+            "node_key": self.node_key,
+            "key_gen": self.key_gen,
+            "ts": now_ms(),
+            "have": crate::node_directory::held_seq(),
+        });
+        let body = serde_json::to_vec(&body).map_err(|_| ReportError::Body("serialize"))?;
+        encode_frame(&self.seed, &self.centre_id, &body)
+    }
+
     /// Returns the frame and its `ts`; the frame is what a retry resends.
     fn next_hello(&mut self) -> Result<(Vec<u8>, u64), ReportError> {
         self.seq = self.seq.checked_add(1).ok_or(ReportError::Body("seq overflow"))?;
@@ -473,6 +493,11 @@ async fn run(
                     if let Some(dir) = dir {
                         directives.apply(&dir);
                     }
+                    if crate::node_directory::enabled()
+                        && directives.directory_kv_max >= DIRECTORY_KV
+                    {
+                        fetch_directory(&endpoint, centre, &server_name, &reporter).await;
+                    }
                     jitter(Duration::from_secs(directives.full_every_s))
                 }
                 Reply::Retry { after } => {
@@ -513,6 +538,30 @@ async fn run(
     }
 }
 
+/// One directory request after an accepted hello. Failures are logged; the hello cadence continues.
+async fn fetch_directory(
+    endpoint: &quinn::Endpoint,
+    centre: SocketAddr,
+    server_name: &str,
+    reporter: &Reporter,
+) {
+    let frame = match reporter.next_directory() {
+        Ok(frame) => frame,
+        Err(error) => {
+            tracing::warn!(?error, "node directory: request could not be built");
+            return;
+        }
+    };
+    match send_once(endpoint, centre, server_name, &frame).await {
+        Sent::Reply(bytes) => match crate::node_directory::accept_reply(&bytes) {
+            Ok(applied) => tracing::debug!(?applied, "node directory: reply applied"),
+            Err(error) => tracing::warn!(%error, "node directory: reply refused"),
+        },
+        Sent::AccessClosed => tracing::warn!("node directory: edge closed the connection (access)"),
+        Sent::Failed(error) => tracing::warn!(%error, "node directory: request failed"),
+    }
+}
+
 /// Starts the sender when `[node_report]` is configured. Errors stay local: the node keeps serving.
 pub(crate) fn start(
     config: &NodeServiceConfig,
@@ -521,14 +570,43 @@ pub(crate) fn start(
 ) {
     let report = match ramflux_node_core::load_node_report_config(std::env::args().skip(1)) {
         Ok(Some(report)) => report,
-        Ok(None) => return,
+        Ok(None) => {
+            warn_directory_without_report();
+            return;
+        }
         Err(error) => {
             tracing::error!(%error, "node report not started: invalid [node_report]");
             return;
         }
     };
+    start_directory(config, &report);
     if let Err(error) = spawn(config, discovery, seed, &report) {
         tracing::error!(%error, "node report not started");
+    }
+}
+
+/// The directory needs the report's centre and identity. Without `[node_report]` it stays off.
+fn start_directory(config: &NodeServiceConfig, report: &NodeReportConfig) {
+    let directory = match ramflux_node_core::load_node_directory_config(std::env::args().skip(1)) {
+        Ok(Some(directory)) => directory,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::error!(%error, "node directory not started: invalid [node_directory]");
+            return;
+        }
+    };
+    let redb_path = ramflux_node_core::effective_redb_path(config);
+    if let Err(error) = crate::node_directory::start(directory, &report.centre.id, &redb_path) {
+        tracing::error!(%error, "node directory not started");
+    }
+}
+
+fn warn_directory_without_report() {
+    if matches!(
+        ramflux_node_core::load_node_directory_config(std::env::args().skip(1)),
+        Ok(Some(_))
+    ) {
+        tracing::error!("node directory not started: [node_directory] needs [node_report]");
     }
 }
 

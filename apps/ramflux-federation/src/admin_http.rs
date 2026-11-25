@@ -18,6 +18,11 @@ struct FederationAdminMeshObservabilityRequest {
 }
 
 #[derive(serde::Deserialize)]
+struct FederationAdminDirectoryRequest {
+    admin_token: String,
+}
+
+#[derive(serde::Deserialize)]
 struct HomeNodeMigrationForwardLocalRequest {
     #[serde(default)]
     admin_token: String,
@@ -214,6 +219,9 @@ fn admin_response(
         ("POST", "/s8/federation/mesh-observability") => {
             handle_admin_mesh_observability_request(&request, context, admin_token)?
         }
+        ("POST", "/admin/federation/directory") => {
+            handle_admin_directory_request(&request, admin_token)?
+        }
         ("POST", "/admin/federation/node-block") => {
             handle_admin_node_block(&request.body, context)?
         }
@@ -242,6 +250,16 @@ fn admin_response(
         _ => HttpResponse::text("404 Not Found", "not found"),
     };
     Ok(Some(response))
+}
+
+fn handle_admin_directory_request(
+    request: &ramflux_node_core::NodeHttpRequest,
+    admin_token: Option<&str>,
+) -> Result<HttpResponse, ramflux_node_core::NodeCoreError> {
+    let request: FederationAdminDirectoryRequest = serde_json::from_slice(&request.body)
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
+    require_admin_token(admin_token, &request.admin_token)?;
+    HttpResponse::json(&crate::node_directory::admin_view())
 }
 
 fn handle_admin_mesh_observability_request(
