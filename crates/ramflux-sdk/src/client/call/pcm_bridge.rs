@@ -253,7 +253,7 @@ pub(crate) fn render_frame(
     for _ in 0..=RENDER_FRAMES {
         match SLOT.render.pop(render_storage(), out) {
             Some(tag) if tag == epoch => return Ok(()),
-            Some(_) => continue,
+            Some(_) => {}
             None => break,
         }
     }

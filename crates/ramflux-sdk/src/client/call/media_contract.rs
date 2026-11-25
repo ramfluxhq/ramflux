@@ -184,7 +184,7 @@ pub(crate) fn media_view(
     host: HostAudio,
 ) -> Value {
     let authorized = matches!(status.gate.reason, None | Some(GateReason::AudioInactive));
-    let stats = &status.stats;
+    let counters = &status.stats;
     json!({
         "call_id": status.receipt.call_id,
         "call_seq": counter(call_seq),
@@ -208,15 +208,15 @@ pub(crate) fn media_view(
         },
         "stats": {
             "captured_frames": counter(host.captured_frames),
-            "sent_packets": counter(stats.sent),
-            "authenticated_frames": counter(stats.authenticated),
-            "decoded_frames": counter(stats.played),
-            "concealed_frames": counter(stats.concealed),
+            "sent_packets": counter(counters.sent),
+            "authenticated_frames": counter(counters.authenticated),
+            "decoded_frames": counter(counters.played),
+            "concealed_frames": counter(counters.concealed),
             "capture_drops": counter(host.capture_drops),
             "render_underruns": counter(host.render_underruns),
-            "send_errors": counter(stats.send_errors),
-            "rebinds": counter(stats.rebinds_answered),
-            "since_last_packet_ms": stats.since_last_packet_ms.map(counter),
+            "send_errors": counter(counters.send_errors),
+            "rebinds": counter(counters.rebinds_answered),
+            "since_last_packet_ms": counters.since_last_packet_ms.map(counter),
         },
     })
 }
