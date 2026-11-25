@@ -25,7 +25,8 @@ use std::{
 };
 
 /// Requested declaration validity; the lease end still caps it.
-const DECLARATION_VALIDITY_SECONDS: u64 = 86_400;
+const DECLARATION_VALIDITY_SECONDS: u64 =
+    crate::bus::couriers::layer_publish::DECLARATION_VALIDITY_SECONDS;
 
 /// Public, frozen ceremony context. Never contains SAS keys, tokens or credentials.
 #[derive(Clone)]

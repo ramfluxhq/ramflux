@@ -33,7 +33,11 @@ pub(crate) const DECLARATION_VALIDITY_SECONDS: u64 = 180;
 #[cfg(feature = "itest-short-layer-lease")]
 const RENEW_LEAD_SECONDS: u64 = 60;
 /// A certificate that leaves less than this cannot carry a useful declaration.
+#[cfg(not(feature = "itest-short-layer-lease"))]
 const MIN_REMAINING_SECONDS: u64 = 2 * 60 * 60;
+/// Integration lease: test branch certificates live about an hour, so the bound is short.
+#[cfg(feature = "itest-short-layer-lease")]
+const MIN_REMAINING_SECONDS: u64 = 60;
 const PUBLISH_DEADLINE: Duration = Duration::from_secs(30);
 const BACKOFF_BASE: Duration = Duration::from_secs(30);
 /// Account-DB key of the last typed renewal failure; `rf account status` reads it.
@@ -321,7 +325,8 @@ pub(crate) fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Box<P
     if expires_at < issued_at.saturating_add(MIN_REMAINING_SECONDS) {
         tracing::warn!("layer declaration renewal blocked: branch certificate too close to expiry");
         record_error(account, Some("LayerRenewalBlocked"));
-        return Ok(None);
+        // A blocked own renewal must not starve secondary endorsements behind it.
+        return secondary::prepare_next(account, &config, now);
     }
     let operation_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
     let validity = DeclarationValidity { issued_at, expires_at };
