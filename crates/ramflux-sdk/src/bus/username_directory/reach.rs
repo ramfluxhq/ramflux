@@ -24,6 +24,9 @@ pub(super) fn prepare_set(
         }
         return Ok(w::NativeUsernameAction::ReachSet { policy: Box::new(old) });
     }
+    if crate::account_reach::sync_pending(db, &account.principal_commitment)? {
+        return Err(crate::account_reach::sync_refusal());
+    }
     let floor: ReachRecord = db
         .load_actor_state(&format!("reach/floor/{}", account.principal_commitment))?
         .ok_or(SdkError::NetworkingPending)?;

@@ -35,6 +35,23 @@ pub(in crate::bus) fn delivery_status(
         )?));
     }
     if state.config.username_directory.is_some()
+        && crate::account_reach::sync_pending(
+            account.client.account_db()?,
+            &account.principal_commitment,
+        )?
+    {
+        return Ok(Some(prepare(
+            &LocalBusFrame::request(
+                "reach-sync",
+                Some(id.into()),
+                "account",
+                "account.reach.get",
+                serde_json::json!({}),
+            ),
+            state,
+        )?));
+    }
+    if state.config.username_directory.is_some()
         && account
             .client
             .account_db()?

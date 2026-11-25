@@ -14,6 +14,24 @@ use ramflux_protocol::{
 };
 use ramflux_storage::AccountDb;
 
+/// Local marker written by a restore import: the archived floor must not be exported or signed
+/// from until a live home read has been observed (see `apply`).
+fn sync_key(anchor: &str) -> String {
+    format!("reach/sync/{anchor}")
+}
+
+pub(crate) fn sync_pending(db: &AccountDb, anchor: &str) -> Result<bool, SdkError> {
+    Ok(db.load_actor_state::<bool>(&sync_key(anchor))?.unwrap_or(false))
+}
+
+/// Typed transient refusal: the client retries after the hint, and the home read clears it.
+pub(crate) fn sync_refusal() -> SdkError {
+    SdkError::NetworkingPendingContext {
+        retry_after_ms: Some(2_000),
+        networking: Box::new(serde_json::json!({"phase":"pending","reason":"reach_sync"})),
+    }
+}
+
 pub(crate) fn observe(db: &AccountDb, record: &ReachRecord, root: &str) -> Result<(), SdkError> {
     ramflux_crypto::account_reach::verify_reach_policy(&record.policy, &record.authority)?;
     if record.policy.body.account_anchor != root {
@@ -149,6 +167,7 @@ pub(crate) fn apply(
         &ReachRecord { policy: policy.clone(), authority: *view.authority.clone() },
         &result.own_record.body.account_anchor,
     )?;
+    db.remove_actor_state(&sync_key(&policy.body.account_anchor))?;
     let body = serde_json::json!({"mode":policy.body.mode,"revision":policy.body.revision,"policy":policy});
     if view.conflict {
         let error = crate::bindings::AdapterError {

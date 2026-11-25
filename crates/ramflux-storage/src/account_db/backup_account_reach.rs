@@ -58,6 +58,16 @@ impl BackupDatabase {
                     incoming
                 };
                 self.db.execute("INSERT INTO main.runtime_actor_state(state_kind,state_json) VALUES(?1,?2) ON CONFLICT(state_kind) DO UPDATE SET state_json=excluded.state_json", params![key, serde_json::to_vec(&selected)?])?;
+                // An archived floor is not the home's current state: the restored account must
+                // observe a live home reach read (the SDK clears this local marker) before it
+                // exports a card or signs a reach change. The marker is not an archived range.
+                self.db.execute(
+                    "INSERT OR REPLACE INTO main.runtime_actor_state(state_kind,state_json) VALUES(?1,?2)",
+                    params![
+                        format!("reach/sync/{}", selected.policy.body.account_anchor),
+                        serde_json::to_vec(&true)?
+                    ],
+                )?;
                 after = key;
             }
         }

@@ -417,6 +417,13 @@ pub(super) async fn export(
         if current.record() != native.record() || current.branch_pending() {
             return Err(SdkError::NetworkingPending);
         }
+        // A restored archive's reach floor may be older than the home's; never export it first.
+        if crate::account_reach::sync_pending(
+            account.client.account_db()?,
+            &current.record().body.account_anchor,
+        )? {
+            return Err(crate::account_reach::sync_refusal());
+        }
         let body = ramflux_protocol::custody::ContactCardV3 {
             reach: account.client.account_db()?.load_actor_state(&format!(
                 "reach/floor/{}",
