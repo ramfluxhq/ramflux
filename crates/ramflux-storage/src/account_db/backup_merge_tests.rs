@@ -101,11 +101,11 @@ fn stage_link_consent_order(source: &AccountDb, local: &AccountDb) -> TestResult
             rusqlite::params![link],
         )?;
         source.connection.execute(
-            "UPDATE contact_link_decision SET decided_at=?2 WHERE link_id=?1 AND state='blocked'",
+            "UPDATE contact_link_decision SET counter=?2 WHERE link_id=?1 AND state='blocked'",
             rusqlite::params![link, blocked_at],
         )?;
         local.connection.execute(
-            "UPDATE contact_link_decision SET decided_at=?2 WHERE link_id=?1 AND state='lifted'",
+            "UPDATE contact_link_decision SET counter=?2 WHERE link_id=?1 AND state='lifted'",
             rusqlite::params![link, lifted_at],
         )?;
     }

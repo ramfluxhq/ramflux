@@ -156,11 +156,11 @@ fn merge_prefers_restrictions_on_tied_link_and_request_decisions_and_newer_other
             source.reject_friend_link("link", 10)?;
         }
         source.connection.execute(
-            "UPDATE contact_link_decision SET decided_at=?1 WHERE link_id='link'",
+            "UPDATE contact_link_decision SET counter=?1 WHERE link_id='link'",
             rusqlite::params![denied_at],
         )?;
         local.connection.execute(
-            "UPDATE contact_link_decision SET decided_at=?1 WHERE link_id='link'",
+            "UPDATE contact_link_decision SET counter=?1 WHERE link_id='link'",
             rusqlite::params![lifted_at],
         )?;
         local.connection.execute_batch("UPDATE friend_link_projection SET updated_at=10")?;
@@ -169,13 +169,13 @@ fn merge_prefers_restrictions_on_tied_link_and_request_decisions_and_newer_other
         local.fence_contact_request("peer", denied, 0)?;
         local.clear_contact_request_fence("peer", None)?;
         local.connection.execute_batch("INSERT INTO contact_request_projection VALUES('peer','inbound','req','bob','link','accepted',x'7b7d',999,10)")?;
-        // Pin the wall-clock decision stamps so a same-millisecond tie is exercised exactly.
+        // Pin the Lamport counters (BLOCK-PERSIST-01: the only ordering key) so a tie is exercised exactly.
         source.connection.execute(
-            "UPDATE contact_request_decision SET decided_at=?1 WHERE root='peer'",
+            "UPDATE contact_request_decision SET counter=?1 WHERE root='peer'",
             rusqlite::params![denied_at],
         )?;
         local.connection.execute(
-            "UPDATE contact_request_decision SET decided_at=?1 WHERE root='peer' AND state='lifted'",
+            "UPDATE contact_request_decision SET counter=?1 WHERE root='peer' AND state='lifted'",
             rusqlite::params![lifted_at],
         )?;
         for reverse in [false, true] {
@@ -306,11 +306,11 @@ fn merge_clamps_link_projection_to_restrictive_decision_despite_projection_clock
             }
             local.establish_friend_link("link", "own", "peer")?;
             source.connection.execute(
-                "UPDATE contact_link_decision SET decided_at=?1",
+                "UPDATE contact_link_decision SET counter=?1",
                 rusqlite::params![denied_at],
             )?;
             local.connection.execute(
-                "UPDATE contact_link_decision SET decided_at=?1",
+                "UPDATE contact_link_decision SET counter=?1",
                 rusqlite::params![lifted_at],
             )?;
             // Projection clocks may order the rows opposite to their explicit decisions.
@@ -372,13 +372,13 @@ fn merge_clamps_a_newer_archive_block_without_a_link_projection() -> TestResult 
     blocked.establish_friend_link("link", "own", "peer")?;
     blocked.block_friend_link("link", 7)?;
     blocked.connection.execute_batch(
-        "UPDATE contact_link_decision SET decided_at=7001 WHERE link_id='link';
+        "UPDATE contact_link_decision SET counter=7001, decided_at=7000 WHERE link_id='link';
          DELETE FROM friend_link_projection WHERE link_id='link';",
     )?;
     accepted.establish_friend_link("link", "own", "peer")?;
     accepted
         .connection
-        .execute_batch("UPDATE contact_link_decision SET decided_at=7000 WHERE link_id='link'")?;
+        .execute_batch("UPDATE contact_link_decision SET counter=7000 WHERE link_id='link'")?;
 
     for reverse in [false, true] {
         let (incoming, live) = if reverse { (&accepted, &blocked) } else { (&blocked, &accepted) };

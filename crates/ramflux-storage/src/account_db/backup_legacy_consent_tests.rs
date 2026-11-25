@@ -28,7 +28,7 @@ fn stage(db: &AccountDb, state: &str, projection_at: i64) -> TestResult {
     if state == "lifted" {
         db.clear_contact_request_fence("peer", None)?;
     }
-    db.connection.execute_batch("UPDATE contact_link_decision SET decided_at=7000; UPDATE contact_request_decision SET decided_at=7000;")?;
+    db.connection.execute_batch("UPDATE contact_link_decision SET counter=0; UPDATE contact_request_decision SET counter=0;")?;
     Ok(())
 }
 

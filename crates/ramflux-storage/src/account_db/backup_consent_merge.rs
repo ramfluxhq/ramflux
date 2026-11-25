@@ -77,7 +77,7 @@ impl BackupDatabase {
         self.merge_link_consent_decisions()?;
         // A restored device may hold a stale block set: stay fail-closed until a sibling answers
         // or the bounded window ends (BLOCK-PERSIST-01 block_sync).
-        self.db.execute_batch(&format!("INSERT OR REPLACE INTO main.runtime_actor_state(state_kind,state_json) VALUES('{}',CAST(unixepoch()+{} AS TEXT))", super::block_sync::BLOCK_SYNC_PENDING_KEY, super::block_sync::BLOCK_SYNC_WINDOW_SECS))?;
+        self.db.execute_batch(&format!("INSERT OR REPLACE INTO main.runtime_actor_state(state_kind,state_json) VALUES('{}',CAST(CAST(unixepoch()+{} AS TEXT) AS BLOB))", super::block_sync::BLOCK_SYNC_PENDING_KEY, super::block_sync::BLOCK_SYNC_WINDOW_SECS))?;
         Ok(())
     }
     pub(super) fn apply_merged_link_consent(&self) -> Result<(), StorageError> {
