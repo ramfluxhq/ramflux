@@ -237,6 +237,11 @@ pub(crate) fn stream_remote(
     }
     let mut plain_digest = blake3::Hasher::new();
     let mut written = 0_u64;
+    let paused = cache.as_ref().map(|cache| cache.paused);
+    let gate = || match paused {
+        Some(paused) => hold_while_paused(paused, fenced),
+        None => Ok(()),
+    };
     for index in 0..count {
         if fenced() {
             return Err(Refusal::new(CODE_CANCELLED));
@@ -261,7 +266,7 @@ pub(crate) fn stream_remote(
         let cipher = if let Some(bytes) = cached {
             bytes
         } else {
-            let fresh = fetch_segment(plane, opened, index)?;
+            let fresh = fetch_segment(plane, opened, index, &gate)?;
             if segment_digest(&fresh).map_err(|_| Refusal::new(CODE_SEAL_FAILED))? != expected {
                 return Err(Refusal::new(CODE_SEAL_FAILED));
             }
@@ -290,10 +295,13 @@ fn finish_checks(written: u64, plain: [u8; 32], manifest: &MediaManifest) -> Res
     Ok(())
 }
 
+/// Fetches one encrypted segment in network chunks. `gate` runs before every relay read, so a
+/// paused download issues no further GET; it may block or refuse.
 pub(super) fn fetch_segment(
     plane: &dyn Plane,
     opened: &Opened,
     index: u32,
+    gate: &dyn Fn() -> Result<(), Refusal>,
 ) -> Result<Vec<u8>, Refusal> {
     let total = opened
         .layout
@@ -315,6 +323,7 @@ pub(super) fn fetch_segment(
             offset,
             length,
         };
+        gate()?;
         super::plane::read_bounded(&call)?;
         let part = plane.read(&call)?;
         if u64::try_from(part.len()).ok() != Some(length) {

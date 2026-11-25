@@ -386,7 +386,12 @@ impl Ledger {
         let event = due.then(|| {
             (
                 import_journal::event_source(&current),
-                import_journal::event_body(&current, phase, reason, false),
+                import_journal::event_body(
+                    &current,
+                    phase,
+                    reason,
+                    reason == Some(INTEGRITY_FAILED),
+                ),
             )
         });
         let key = import_journal::record_key(&current.import_id);
@@ -419,9 +424,11 @@ struct Task {
 
 impl Task {
     fn run(self) {
-        let Self { job, source, plane, ledger, done } = self;
+        let Self { job, source, plane, ledger, done: _done } = self;
         let result = stream(&job, &source, plane.as_deref(), &ledger);
-        drop(done);
+        // `_done` is released only when this function returns, after the final settle: the actor
+        // serves the journal calls until then. Releasing it earlier drops the final write and
+        // fails a finished download.
         match result.and_then(|()| ledger.settle(ImportPhase::Ready, None)) {
             Ok(()) => job.ready.store(true, Ordering::Release),
             Err(refusal) => {

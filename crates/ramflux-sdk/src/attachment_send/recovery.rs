@@ -204,11 +204,11 @@ fn copy_segments(
             let key = media.segment_key(index)?;
             let cipher = match source {
                 Segments::Owned(prepare) => read_owned(&context.store, prepare, index),
-                Segments::Remote(opened) => context
-                    .plane
-                    .as_ref()
-                    .ok_or(Refusal::new(CODE_NOT_GRANTEE))
-                    .and_then(|plane| import_job::fetch_segment(plane.as_ref(), opened, index)),
+                Segments::Remote(opened) => {
+                    context.plane.as_ref().ok_or(Refusal::new(CODE_NOT_GRANTEE)).and_then(|plane| {
+                        import_job::fetch_segment(plane.as_ref(), opened, index, &|| Ok(()))
+                    })
+                }
             }
             .map_err(|error| {
                 source_error = Some(error);
