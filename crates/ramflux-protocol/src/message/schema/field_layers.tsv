@@ -929,3 +929,13 @@ CallSummary	duration_seconds	8	1
 CallSummary	created_at	9	1
 CallSummary	answered_at	10	1
 CallSummary	ended_at	11	1
+Control	block_sync	33	5
+BlockDecisionSync	owner_anchor	1	5
+BlockDecisionSync	source	2	5
+BlockDecisionSync	decisions	3	5
+BlockDecision	root	1	5
+BlockDecision	state	2	5
+BlockDecision	counter	3	5
+BlockDecision	device_id	4	5
+BlockDecision	decided_at	5	5
+BlockDecision	kind	6	5
