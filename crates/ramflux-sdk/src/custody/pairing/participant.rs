@@ -397,21 +397,17 @@ impl LocalPairingParticipant {
             &common.account_anchor,
             &local.device_ref,
         )?;
-        // Ceremony retries reuse the exact declaration already saved for this operation.
-        let message_layer = match self.saved_message_layer(&context.invitation.body.request_id)? {
-            Some(saved) if saved.declaration.device == local.device_ref => saved,
-            _ => {
-                let now = crate::custody::network_now()?;
-                crate::custody::layer_declaration::candidate(
-                    &branch.signing,
-                    local.device_ref.clone(),
-                    ramflux_protocol::message::registry::COMPILED_LAYER,
-                    1,
-                    now,
-                    common.lease_expires_at.min(now.saturating_add(DECLARATION_VALIDITY_SECONDS)),
-                )?
-            }
-        };
+        // proposal() runs only while the phase is mutually_confirmed, before save_context_in has
+        // saved a proposal, so nothing has been sent that a retry must match: mint a fresh declaration.
+        let now = crate::custody::network_now()?;
+        let message_layer = crate::custody::layer_declaration::candidate(
+            &branch.signing,
+            local.device_ref.clone(),
+            ramflux_protocol::message::registry::COMPILED_LAYER,
+            1,
+            now,
+            common.lease_expires_at.min(now.saturating_add(DECLARATION_VALIDITY_SECONDS)),
+        )?;
         let body = EnrollmentBody {
             schema: "ramflux.identity.pairing.enrollment.v1".into(),
             version: 1,
@@ -446,37 +442,6 @@ impl LocalPairingParticipant {
         let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
         self.save_context_in(db, context, proposal)
     }
-    /// The recipient declaration saved with this operation's context, if any.
-    fn saved_message_layer(
-        &self,
-        operation_id: &str,
-    ) -> Result<Option<ramflux_protocol::custody::SignedLayerDeclaration>, SdkError> {
-        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
-        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
-        let Some(row) =
-            db.pairing_live_rows()?.into_iter().find(|row| row.operation_id == operation_id)
-        else {
-            return Ok(None);
-        };
-        // The context column holds the full-transfer stage link while the phase is
-        // `mutually_confirmed` (full/stage.rs); the declaration JSON is written only by
-        // `save_context_in`, which sets `proposal_pending`. Parse it in that phase only.
-        if row.phase != "proposal_pending" {
-            return Ok(None);
-        }
-        let Some(bytes) = row.context else {
-            return Ok(None);
-        };
-        let value: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|_| SdkError::PairingField("context"))?;
-        match value.get("message_layer") {
-            None | Some(serde_json::Value::Null) => Ok(None),
-            Some(declaration) => serde_json::from_value(declaration.clone())
-                .map(Some)
-                .map_err(|_| SdkError::PairingField("message_layer")),
-        }
-    }
-
     pub(crate) fn save_context_in(
         &self,
         db: &AccountDb,
@@ -491,7 +456,6 @@ impl LocalPairingParticipant {
             .ok_or(SdkError::PairingField("operation_id"))?;
         live.context = Some(ramflux_protocol::canonical_json_bytes(&serde_json::json!({
             "initiator": context.transcript.initiator, "responder": context.transcript.responder,
-            "message_layer": proposal.body.message_layer,
         }))?);
         live.transcript_hash = Some(context.transcript_hash.clone());
         live.proposal_hash = Some(object_hash(proposal)?);
