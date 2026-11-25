@@ -32,8 +32,12 @@ mod wake_admission;
 pub use route_authority::PUSH_ROUTE_FENCE_SECONDS;
 mod format;
 pub(crate) use send_gate::retire_call_wakes;
+mod central_routes;
+pub use central_routes::{CentralRouteSnapshot, FirstSendState};
 mod device_route;
-pub use device_route::{DevicePushRoute, admit_push_registration, push_provider_endpoint};
+pub use device_route::{
+    DevicePushRoute, admit_push_registration, admit_sealed_push_registration, push_provider_endpoint,
+};
 mod route_selection;
 pub use route_selection::{apns_topic_is_voip, voip_push_enabled};
 mod routes;

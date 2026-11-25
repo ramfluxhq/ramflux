@@ -4116,6 +4116,7 @@ dependencies = [
  "security-framework-sys",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "syn 2.0.117",
  "tempfile",
  "thiserror 2.0.21",

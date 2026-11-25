@@ -119,7 +119,7 @@ impl NotifyRedbStore {
             return Err(NodeCoreError::Unauthorized("push route owner rejected".into()));
         }
         let now = crate::now_unix_seconds();
-        if route.registered_at > now
+        if route.registered_at_ms > super::device_route::now_unix_millis()
             || route.expires_at <= now
             || route.expires_at > now.saturating_add(crate::PUSH_ROUTE_TTL_SECONDS)
         {

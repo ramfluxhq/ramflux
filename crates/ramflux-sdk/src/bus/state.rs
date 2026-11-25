@@ -548,6 +548,8 @@ impl LocalBusAccountState {
         self.gateway_config.resume_token = config.resume_token;
         self.gateway_config.last_seen_inbox_seq =
             self.gateway_config.last_seen_inbox_seq.max(config.last_seen_inbox_seq);
+        self.gateway_config.push_mode = config.push_mode;
+        self.gateway_config.push_keyset = config.push_keyset;
     }
 
     pub(crate) fn retire_session(&mut self, client: &SessionClient) -> Result<(), SdkError> {

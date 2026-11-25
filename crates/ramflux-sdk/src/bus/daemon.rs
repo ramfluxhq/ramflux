@@ -369,7 +369,7 @@ async fn dispatch_local_bus_remainder(
         method if method.starts_with("contact.") => {
             dispatch_contact_bus_request(request, state).await
         }
-        method if method.starts_with("device.") => {
+        method if method.starts_with("device.") || method == "push.keyset.get" => {
             Box::pin(dispatch_device_bus_request(request, state)).await
         }
         method if method.starts_with("group.") => {

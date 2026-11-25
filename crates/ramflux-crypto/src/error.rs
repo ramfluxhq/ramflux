@@ -61,6 +61,10 @@ pub enum CryptoError {
     TransparencyProofFailed,
     #[error("invalid home node migration proof: {0}")]
     InvalidHomeNodeMigrationProof(&'static str),
+    #[error("push token seal rejected: {0}")]
+    PushToken(&'static str),
+    #[error("push key set rejected: {0}")]
+    PushKeyset(&'static str),
     #[error("pairing rejected: {0}")]
     Pairing(&'static str),
     #[error("report opening inner exceeds u32 length")]
