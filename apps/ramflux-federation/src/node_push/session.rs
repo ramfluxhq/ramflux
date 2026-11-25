@@ -174,7 +174,10 @@ impl PushShared {
             recv.read_to_end(frame::MAX_REPLY_LEN + 4).await.map_err(|error| error.to_string())
         };
         match tokio::time::timeout(IO_TIMEOUT, outcome).await {
-            Err(_) => Exchange::Failed("reply timeout".to_owned()),
+            Err(_) => {
+                self.drop_connection(&connection).await;
+                Exchange::Failed("reply timeout".to_owned())
+            }
             Ok(Ok(bytes)) => match frame::decode_reply(&bytes) {
                 Ok(value) => Exchange::Reply(value),
                 Err(error) => Exchange::Failed(error),
@@ -183,9 +186,20 @@ impl PushShared {
                 if let Some(code) = closed_code(&connection) {
                     return Exchange::Closed(code);
                 }
+                self.drop_connection(&connection).await;
                 Exchange::Failed(error)
             }
         }
+    }
+
+    /// Forgets a connection that failed, so the next request dials again (a restarted edge would
+    /// otherwise stay unreachable until QUIC notices the dead peer).
+    async fn drop_connection(&self, failed: &quinn::Connection) {
+        let mut slot = self.connection.lock().await;
+        if slot.as_ref().is_some_and(|current| current.stable_id() == failed.stable_id()) {
+            *slot = None;
+        }
+        failed.close(0u32.into(), b"");
     }
 }
 
