@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Conversation intent resolves authenticated routes before using the ordinary SDK send paths.
+use crate::attachment_send::send_journal;
 use crate::prelude::*;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -365,43 +366,26 @@ fn delivery(target: &str, result: Result<LocalBusDispatchResult, SdkError>) -> V
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SendReceipt {
-    fingerprint: String,
-    expires_at: i64,
-    #[serde(default)]
-    completed: bool,
-    #[serde(default)]
-    completed_at: Option<i64>,
-}
 fn prepares_present(body: &Value) -> bool {
     body.get("prepares").and_then(Value::as_array).is_some_and(|rows| !rows.is_empty())
 }
 
-fn receipt_key(operation: &str) -> String {
-    format!(
-        "conversation-send/{}",
-        ramflux_crypto::blake3_256_base64url(
-            "ramflux.conversation.send.operation.v1",
-            operation.as_bytes()
-        )
-    )
-}
 fn complete_intent(client: &RamfluxClient, operation: &str) -> Result<(), SdkError> {
     let db = client.account_db()?;
     db.write_transaction(|| {
-        let key = receipt_key(operation);
+        let key = send_journal::key(operation);
         let mut receipt = db
-            .load_actor_state::<SendReceipt>(&key)?
+            .load_actor_state::<send_journal::SendRecord>(&key)?
             .ok_or_else(|| invalid("operation receipt absent", "operation_receipt_absent"))?;
         receipt.completed = true;
+        receipt.phase = send_journal::SendPhase::Sent;
         receipt.completed_at = Some(now_unix_timestamp());
         db.persist_actor_state(&key, &receipt)?;
         Ok(())
     })
 }
 fn reserve_intent(client: &RamfluxClient, operation: &str, body: &Value) -> Result<(), SdkError> {
-    let key = receipt_key(operation);
+    let key = send_journal::key(operation);
     let canonical = zeroize::Zeroizing::new(ramflux_protocol::canonical_json_bytes(body)?);
     let fingerprint =
         ramflux_crypto::blake3_256_base64url("ramflux.conversation.send.intent.v1", &canonical);
@@ -409,7 +393,7 @@ fn reserve_intent(client: &RamfluxClient, operation: &str, body: &Value) -> Resu
     let now = now_unix_timestamp();
     db.write_transaction(|| {
         super::conversation_journal::prune(client, now)?;
-        if let Some(old) = db.load_actor_state::<SendReceipt>(&key)? {
+        if let Some(old) = db.load_actor_state::<send_journal::SendRecord>(&key)? {
             if old.fingerprint != fingerprint {
                 if prepares_present(body) {
                     return Err(crate::attachment_send::Refusal::new(
@@ -427,10 +411,7 @@ fn reserve_intent(client: &RamfluxClient, operation: &str, body: &Value) -> Resu
         }
         super::conversation_journal::capacity(client, "conversation-send/")?;
         let expires_at = super::conversation_journal::expiry(client, now)?;
-        db.persist_actor_state(
-            &key,
-            &SendReceipt { fingerprint, expires_at, completed: false, completed_at: None },
-        )?;
+        db.persist_actor_state(&key, &send_journal::SendRecord::admitted(fingerprint, expires_at))?;
         Ok(())
     })
 }
@@ -492,11 +473,12 @@ mod retention_tests {
         let now = now_unix_timestamp();
         db.persist_actor_state(
             "conversation-send/expired",
-            &SendReceipt {
+            &send_journal::SendRecord {
                 fingerprint: "retired".into(),
                 expires_at: now - 1,
                 completed: false,
                 completed_at: None,
+                phase: Default::default(),
             },
         )?;
         super::super::conversation_journal::prune(&account.client, now)?;
@@ -508,11 +490,12 @@ mod retention_tests {
             for n in 0..super::super::conversation_journal::LIMIT {
                 db.persist_actor_state(
                     &format!("conversation-send/{n:04}"),
-                    &SendReceipt {
+                    &send_journal::SendRecord {
                         fingerprint: n.to_string(),
                         expires_at: now + 3600,
                         completed: false,
                         completed_at: None,
+                        phase: Default::default(),
                     },
                 )?;
             }
@@ -535,11 +518,12 @@ mod retention_tests {
         {
             db.persist_actor_state(
                 key,
-                &SendReceipt {
+                &send_journal::SendRecord {
                     fingerprint: key.into(),
                     expires_at: now + 3600,
                     completed: true,
                     completed_at: Some(completed_at),
+                    phase: Default::default(),
                 },
             )?;
         }
@@ -550,7 +534,7 @@ mod retention_tests {
         assert_eq!(db.actor_state_usage("conversation-send/")?.0, 1024);
         complete_intent(&account.client, "new-operation")?;
         let receipt = db
-            .load_actor_state::<SendReceipt>(&receipt_key("new-operation"))?
+            .load_actor_state::<send_journal::SendRecord>(&send_journal::key("new-operation"))?
             .ok_or("test: completed receipt")?;
         assert!(
             receipt.completed && receipt.completed_at.is_some(),

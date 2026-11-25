@@ -39,6 +39,7 @@ mod seal;
 mod seal_job;
 #[cfg(test)]
 mod section10;
+pub(crate) mod send_journal;
 mod store;
 mod targets;
 mod thumbnail;
