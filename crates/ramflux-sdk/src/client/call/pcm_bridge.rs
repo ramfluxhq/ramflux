@@ -41,10 +41,18 @@ pub(crate) enum PcmError {
     Closed = 26,
 }
 
-/// Single-producer, single-consumer ring of whole frames over shared atomic samples.
+/// Single-producer, single-consumer ring of whole frames over shared atomic samples. Each
+/// frame carries the fence epoch current when it was queued; stale epochs are discarded.
 struct Ring<const F: usize> {
     head: AtomicUsize,
     tail: AtomicUsize,
+}
+
+/// Sample atomics and per-frame epoch tags of one ring.
+#[derive(Clone, Copy)]
+struct Storage<'a> {
+    samples: &'a [AtomicI16],
+    tags: &'a [AtomicU64],
 }
 
 impl<const F: usize> Ring<F> {
@@ -53,41 +61,49 @@ impl<const F: usize> Ring<F> {
     }
 
     /// Producer only. Returns `false` when the ring is full or the shape is wrong.
-    fn push(&self, samples: &[AtomicI16], frame: &[i16]) -> bool {
+    fn push(&self, storage: Storage<'_>, tag: u64, frame: &[i16]) -> bool {
         let tail = self.tail.load(Ordering::Relaxed);
         if tail.wrapping_sub(self.head.load(Ordering::Acquire)) >= F || frame.len() != FRAME {
             return false;
         }
-        let base = (tail % F) * FRAME;
-        let Some(window) = samples.get(base..base + FRAME) else { return false };
+        let index = tail % F;
+        let base = index * FRAME;
+        let Some(window) = storage.samples.get(base..base + FRAME) else { return false };
+        let Some(slot_tag) = storage.tags.get(index) else { return false };
         for (slot, sample) in window.iter().zip(frame) {
             slot.store(*sample, Ordering::Relaxed);
         }
+        slot_tag.store(tag, Ordering::Relaxed);
         self.tail.store(tail.wrapping_add(1), Ordering::Release);
         true
     }
 
-    /// Consumer only. Returns `false` when empty.
-    fn pop(&self, samples: &[AtomicI16], out: &mut [i16]) -> bool {
+    /// Consumer only. Copies the oldest frame into `out` and returns its epoch tag.
+    fn pop(&self, storage: Storage<'_>, out: &mut [i16]) -> Option<u64> {
         let head = self.head.load(Ordering::Relaxed);
         if head == self.tail.load(Ordering::Acquire) || out.len() != FRAME {
-            return false;
+            return None;
         }
-        let base = (head % F) * FRAME;
-        let Some(window) = samples.get(base..base + FRAME) else { return false };
+        let index = head % F;
+        let base = index * FRAME;
+        let window = storage.samples.get(base..base + FRAME)?;
+        let tag = storage.tags.get(index)?.load(Ordering::Relaxed);
         for (sample, slot) in out.iter_mut().zip(window) {
             *sample = slot.load(Ordering::Relaxed);
         }
         self.head.store(head.wrapping_add(1), Ordering::Release);
-        true
+        Some(tag)
     }
 
-    /// Empty the ring and zero its samples. Only after both endpoints have stopped.
-    fn reset(&self, samples: &[AtomicI16]) {
+    /// Empty the ring and zero its storage. Only after both endpoints have stopped.
+    fn reset(&self, storage: Storage<'_>) {
         self.head.store(0, Ordering::SeqCst);
         self.tail.store(0, Ordering::SeqCst);
-        for sample in samples {
+        for sample in storage.samples {
             sample.store(0, Ordering::Relaxed);
+        }
+        for tag in storage.tags {
+            tag.store(0, Ordering::Relaxed);
         }
     }
 }
@@ -100,6 +116,10 @@ struct Slot {
     generation: AtomicU64,
     /// Callbacks currently inside the bridge; drain waits for zero.
     guards: AtomicUsize,
+    /// Fence epoch: bumped once per generation change, after in-flight callbacks drain.
+    epoch: AtomicU64,
+    /// Generation whose epoch fence has completed; activation requires it.
+    fenced: AtomicU64,
     captured: AtomicU64,
     capture_drops: AtomicU64,
     render_underruns: AtomicU64,
@@ -107,7 +127,9 @@ struct Slot {
     capture: Ring<CAPTURE_FRAMES>,
     render: Ring<RENDER_FRAMES>,
     capture_samples: [AtomicI16; CAPTURE_FRAMES * FRAME],
+    capture_tags: [AtomicU64; CAPTURE_FRAMES],
     render_samples: [AtomicI16; RENDER_FRAMES * FRAME],
+    render_tags: [AtomicU64; RENDER_FRAMES],
 }
 
 static SLOT: Slot = Slot {
@@ -116,6 +138,8 @@ static SLOT: Slot = Slot {
     token: AtomicU64::new(0),
     client: AtomicU64::new(0),
     generation: AtomicU64::new(0),
+    epoch: AtomicU64::new(1),
+    fenced: AtomicU64::new(0),
     guards: AtomicUsize::new(0),
     captured: AtomicU64::new(0),
     capture_drops: AtomicU64::new(0),
@@ -124,8 +148,18 @@ static SLOT: Slot = Slot {
     capture: Ring::new(),
     render: Ring::new(),
     capture_samples: [const { AtomicI16::new(0) }; CAPTURE_FRAMES * FRAME],
+    capture_tags: [const { AtomicU64::new(0) }; CAPTURE_FRAMES],
     render_samples: [const { AtomicI16::new(0) }; RENDER_FRAMES * FRAME],
+    render_tags: [const { AtomicU64::new(0) }; RENDER_FRAMES],
 };
+
+fn capture_storage() -> Storage<'static> {
+    Storage { samples: &SLOT.capture_samples, tags: &SLOT.capture_tags }
+}
+
+fn render_storage() -> Storage<'static> {
+    Storage { samples: &SLOT.render_samples, tags: &SLOT.render_tags }
+}
 
 static RECEIPTS: [AtomicU64; RECEIPT_CAP] = [const { AtomicU64::new(0) }; RECEIPT_CAP];
 static RECEIPT_NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -186,7 +220,8 @@ pub(crate) fn capture_frame(
     frame: &[i16],
 ) -> Result<(), PcmError> {
     let _guard = enter(client, token, generation)?;
-    if SLOT.capture.push(&SLOT.capture_samples, frame) {
+    let epoch = SLOT.epoch.load(Ordering::SeqCst);
+    if SLOT.capture.push(capture_storage(), epoch, frame) {
         SLOT.captured.fetch_add(1, Ordering::Relaxed);
         Ok(())
     } else {
@@ -213,10 +248,17 @@ pub(crate) fn render_frame(
             return Err(error);
         }
     };
-    if !SLOT.render.pop(&SLOT.render_samples, out) {
-        SLOT.render_underruns.fetch_add(1, Ordering::Relaxed);
-        out.fill(0);
+    let epoch = SLOT.epoch.load(Ordering::SeqCst);
+    // Frames queued before the last generation fence are stale: discard them, bounded.
+    for _ in 0..=RENDER_FRAMES {
+        match SLOT.render.pop(render_storage(), out) {
+            Some(tag) if tag == epoch => return Ok(()),
+            Some(_) => continue,
+            None => break,
+        }
     }
+    SLOT.render_underruns.fetch_add(1, Ordering::Relaxed);
+    out.fill(0);
     Ok(())
 }
 
@@ -230,8 +272,9 @@ pub(crate) fn publish(token: u64, generation: u64) -> Result<(), crate::SdkError
     SLOT.client.store(0, Ordering::SeqCst);
     SLOT.token.store(token, Ordering::SeqCst);
     SLOT.generation.store(generation, Ordering::SeqCst);
-    SLOT.capture.reset(&SLOT.capture_samples);
-    SLOT.render.reset(&SLOT.render_samples);
+    SLOT.capture.reset(capture_storage());
+    SLOT.render.reset(render_storage());
+    SLOT.fenced.store(generation, Ordering::SeqCst);
     SLOT.published.store(true, Ordering::SeqCst);
     Ok(())
 }
@@ -283,8 +326,8 @@ pub(crate) fn drain(token: u64, deadline: Duration) -> bool {
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    SLOT.capture.reset(&SLOT.capture_samples);
-    SLOT.render.reset(&SLOT.render_samples);
+    SLOT.capture.reset(capture_storage());
+    SLOT.render.reset(render_storage());
     SLOT.client.store(0, Ordering::SeqCst);
     SLOT.generation.store(0, Ordering::SeqCst);
     SLOT.token.store(0, Ordering::SeqCst);
@@ -299,7 +342,9 @@ impl Capture for PcmCapture {
         let deadline = Instant::now().checked_add(timeout)?;
         let mut frame = [0_i16; FRAME];
         loop {
-            if SLOT.capture.pop(&SLOT.capture_samples, &mut frame) {
+            if let Some(tag) = SLOT.capture.pop(capture_storage(), &mut frame)
+                && tag == SLOT.epoch.load(Ordering::SeqCst)
+            {
                 return Some(frame);
             }
             if Instant::now() >= deadline {
@@ -311,7 +356,7 @@ impl Capture for PcmCapture {
 
     fn discard_pending(&mut self) {
         let mut frame = [0_i16; FRAME];
-        while SLOT.capture.pop(&SLOT.capture_samples, &mut frame) {}
+        while SLOT.capture.pop(capture_storage(), &mut frame).is_some() {}
     }
 }
 
@@ -320,10 +365,42 @@ pub(crate) struct PcmPlayback;
 
 impl Playback for PcmPlayback {
     fn play(&mut self, frame: &Frame) {
-        if !SLOT.render.push(&SLOT.render_samples, frame) {
+        let epoch = SLOT.epoch.load(Ordering::SeqCst);
+        if !SLOT.render.push(render_storage(), epoch, frame) {
             SLOT.render_drops.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// Move the slot to `generation` after an I/O generation change. Stores the new generation
+/// (callbacks of the old one now refuse), waits for in-flight callbacks, then advances the
+/// epoch so frames queued before the change are discarded. Returns `false` at the deadline;
+/// activation stays refused until a later call completes the fence.
+pub(crate) fn set_generation(token: u64, generation: u64) -> bool {
+    let _control = control();
+    if SLOT.token.load(Ordering::SeqCst) != token {
+        return false;
+    }
+    SLOT.generation.store(generation, Ordering::SeqCst);
+    SLOT.open.store(false, Ordering::SeqCst);
+    if SLOT.fenced.load(Ordering::SeqCst) == generation {
+        return true;
+    }
+    let started = Instant::now();
+    while SLOT.guards.load(Ordering::SeqCst) != 0 {
+        if started.elapsed() >= DRAIN_DEADLINE {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    SLOT.epoch.fetch_add(1, Ordering::SeqCst);
+    SLOT.fenced.store(generation, Ordering::SeqCst);
+    true
+}
+
+/// Whether the epoch fence of `generation` has completed for `token`.
+pub(crate) fn fenced(token: u64, generation: u64) -> bool {
+    SLOT.token.load(Ordering::SeqCst) == token && SLOT.fenced.load(Ordering::SeqCst) == generation
 }
 
 /// Public counters for the status row: `(captured, capture_drops, render_underruns)`.

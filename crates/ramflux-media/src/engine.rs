@@ -304,8 +304,19 @@ impl Engine {
     }
 
     /// Mutes or unmutes the microphone (silence is sent while muted).
+    /// Set the mute flag, then fence the sender. The sender holds the authorization lock while
+    /// it processes one captured frame, so acquiring it here returns only after any frame that
+    /// read the old flag has been sent. Every later frame is silence.
     pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::SeqCst);
+        drop(self.authorization.lock());
+    }
+
+    /// Rotate the I/O generation after an accepted route change: audio closes, playout is
+    /// flushed, and the generation advances even if audio was already inactive.
+    pub fn rotate_io(&self) {
+        self.authorization.rotate();
+        self.flush_playout();
     }
 
     /// Whether the microphone is muted.

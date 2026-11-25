@@ -112,6 +112,19 @@ pub(crate) enum Permission {
     Denied,
 }
 
+impl HostAudio {
+    /// Whether the host's applied route and permission allow audio to be activated.
+    /// Receiver and speaker need qualified AEC; wired may bypass it.
+    pub(crate) fn ready_for_audio(&self) -> bool {
+        self.permission == Permission::Granted
+            && match self.route {
+                Route::Unavailable => false,
+                Route::Wired => true,
+                Route::Receiver | Route::Speaker => self.aec == Aec::Enabled,
+            }
+    }
+}
+
 /// Host-reported audio state kept beside the engine. Reports never open an SDK gate.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct HostAudio {
@@ -141,16 +154,13 @@ fn gate_name(reason: GateReason) -> &'static str {
 
 /// Public `gate_reason`: the engine's authority reason first, then host-side refusals.
 fn public_gate(status: &InProcessMediaStatus, host: HostAudio) -> Value {
-    if let Some(reason) = status.gate.reason {
-        return json!(gate_name(reason));
+    match status.gate.reason {
+        Some(reason) if reason != GateReason::AudioInactive => json!(gate_name(reason)),
+        _ if host.permission == Permission::Denied => json!("permission_denied"),
+        _ if host.route == Route::Unavailable => json!("route_unavailable"),
+        Some(GateReason::AudioInactive) => json!("audio_inactive"),
+        _ => Value::Null,
     }
-    if host.permission == Permission::Denied {
-        return json!("permission_denied");
-    }
-    if host.route == Route::Unavailable {
-        return json!("route_unavailable");
-    }
-    Value::Null
 }
 
 /// The public `phase` of a session.

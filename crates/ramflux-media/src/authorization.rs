@@ -115,6 +115,17 @@ impl Authorization {
         true
     }
 
+    /// Close audio and advance the I/O generation even when audio was already inactive.
+    /// Used when the host's applied route changes: every frame of the old generation is stale.
+    pub fn rotate(&self) {
+        let mut state = self.lock();
+        state.audio_active = false;
+        match state.generation.checked_add(1) {
+            Some(next) => state.generation = next,
+            None => state.retired = true,
+        }
+    }
+
     pub fn retire(&self, reason: GateReason) {
         let mut state = self.lock();
         state.close(Some(reason));

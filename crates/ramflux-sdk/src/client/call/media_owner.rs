@@ -184,13 +184,25 @@ impl OwnedMedia {
         running.last.drained = pcm_bridge::drain(self.token, DRAIN_DEADLINE);
     }
 
-    /// Open the callbacks only while the engine's authority and OS audio gate both allow audio.
+    /// Mirror the engine's I/O generation into the callbacks, then open them only while the
+    /// SDK authority and the OS audio gate both allow audio.
     fn sync_pcm(&self, running: &Running) {
-        let open = running.engine.as_ref().is_some_and(|engine| {
-            let gate = engine.gate();
-            gate.reason.is_none() && gate.audio_active
-        });
-        pcm_bridge::set_open(self.token, open);
+        let Some(engine) = running.engine.as_ref() else {
+            pcm_bridge::set_open(self.token, false);
+            return;
+        };
+        let gate = engine.gate();
+        let fenced = pcm_bridge::set_generation(self.token, gate.generation);
+        pcm_bridge::set_open(self.token, fenced && gate.reason.is_none() && gate.audio_active);
+    }
+
+    /// Accepted route change: rotate the I/O generation so no old-generation audio survives.
+    pub(crate) fn rotate_io(&self) {
+        let running = self.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(engine) = &running.engine {
+            engine.rotate_io();
+        }
+        self.sync_pcm(&running);
     }
 
     fn snapshot(&self) -> InProcessMediaStatus {

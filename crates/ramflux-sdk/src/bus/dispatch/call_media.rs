@@ -10,7 +10,7 @@ use crate::client::call::media_contract::{
     ActiveBody, MutedBody, OpenBody, RouteBody, TokenBody, media_view,
 };
 use crate::client::call::media_owner::OwnedMedia;
-use crate::client::call::pcm_bridge::{PcmCapture, PcmPlayback};
+use crate::client::call::pcm_bridge::{self, PcmCapture, PcmPlayback};
 use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 use serde::de::DeserializeOwned;
@@ -136,12 +136,21 @@ fn set_muted(account: &mut LocalBusAccountState, body: &MutedBody) -> Result<Val
 
 fn audio_active(account: &mut LocalBusAccountState, body: &ActiveBody) -> Result<Value, SdkError> {
     let call_id = binding(account, body.media_token, body.io_generation)?;
+    if body.active {
+        // Host readiness is required to activate, never to grant: the SDK gate decides.
+        let owned = owned_by_token(account, body.media_token)?;
+        if !owned.host_state().ready_for_audio()
+            || !pcm_bridge::fenced(body.media_token, body.io_generation)
+        {
+            return Err(invalid("audio route or permission not ready"));
+        }
+    }
     apply(account, MediaCommand::AudioActive { call_id: call_id.clone(), active: body.active })?;
     view(account, body.media_token, &call_id)
 }
 
-/// Records the applied OS route. Checkpoint 3 adds the deactivate, flush and generation-rotate
-/// side effects of an accepted change and the receiver/speaker AEC requirement.
+/// Records the applied OS route. An accepted change rotates the I/O generation: audio closes,
+/// both queues are flushed and the host must read the new generation before it activates.
 fn audio_route(account: &mut LocalBusAccountState, body: &RouteBody) -> Result<Value, SdkError> {
     let call_id = binding(account, body.media_token, body.io_generation)?;
     let owned = owned_by_token(account, body.media_token)?;
@@ -154,6 +163,7 @@ fn audio_route(account: &mut LocalBusAccountState, body: &RouteBody) -> Result<V
         host.aec = body.aec;
         host.permission = body.microphone_permission;
     });
+    owned.rotate_io();
     view(account, body.media_token, &call_id)
 }
 
