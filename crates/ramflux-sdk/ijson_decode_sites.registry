@@ -415,3 +415,4 @@ crates/ramflux-sdk/src/bus/username_directory.rs | prepare | 3 | E | excluded=ac
 crates/ramflux-sdk/src/bus/username_directory/open_messages.rs | prepare_reply | 1 | E | excluded=account reach policy or local message intent metadata; no message Envelope/Ack/Nack admission
 crates/ramflux-sdk/src/bus/username_directory/reach.rs | prepare_set | 1 | E | excluded=account reach policy or local message intent metadata; no message Envelope/Ack/Nack admission
 crates/ramflux-sdk/src/c_abi/v2/native_error.rs | details | 1 | E | excluded=typed public reach-conflict error projection after authenticated SDK validation; no signed message Envelope/Ack/Nack ingress
+crates/ramflux-sdk/src/bus/attachment_plane.rs | upload_status | 1 | A | strict=parse_i_json; admission=A ingress boundary: attachment upload-status reply from the home relay (untrusted peer bytes)
