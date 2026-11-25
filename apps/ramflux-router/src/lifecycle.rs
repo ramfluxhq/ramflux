@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+#[cfg(feature = "itest-http")]
 pub(crate) fn handle_mvp7_lifecycle_event(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
@@ -15,6 +16,7 @@ pub(crate) fn handle_mvp7_lifecycle_event(
     Ok(response)
 }
 
+#[cfg(feature = "itest-http")]
 pub(crate) fn handle_mvp7_lifecycle_cancel(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
@@ -26,6 +28,7 @@ pub(crate) fn handle_mvp7_lifecycle_cancel(
     Ok(response)
 }
 
+#[cfg(feature = "itest-http")]
 pub(crate) fn handle_mvp7_lifecycle_finalize(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
@@ -36,6 +39,7 @@ pub(crate) fn handle_mvp7_lifecycle_finalize(
     Ok(response)
 }
 
+#[cfg(feature = "itest-http")]
 pub(crate) fn handle_mvp7_lifecycle_get(
     path: &str,
     state: &ramflux_node_core::RouterCore,
@@ -44,6 +48,7 @@ pub(crate) fn handle_mvp7_lifecycle_get(
     state.mvp7_lifecycle(principal_id)
 }
 
+#[cfg(feature = "itest-http")]
 pub(crate) fn handle_mvp7_metadata_get(
     path: &str,
     state: &ramflux_node_core::RouterCore,
@@ -52,6 +57,7 @@ pub(crate) fn handle_mvp7_metadata_get(
     state.mvp7_metadata_summary(principal_id)
 }
 
+#[cfg(feature = "itest-http")]
 pub(crate) fn handle_mvp7_federated_tombstone(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
@@ -68,6 +74,7 @@ pub(crate) fn handle_mvp7_federated_tombstone(
     Ok(response)
 }
 
+#[cfg(feature = "itest-http")]
 pub(crate) fn handle_mvp7_abuse_report(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,
@@ -79,6 +86,7 @@ pub(crate) fn handle_mvp7_abuse_report(
     Ok(response)
 }
 
+#[cfg(feature = "itest-http")]
 pub(crate) fn handle_mvp7_abuse_report_get(
     path: &str,
     state: &ramflux_node_core::RouterCore,

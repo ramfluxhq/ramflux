@@ -43,6 +43,7 @@ impl HomeService {
             w::NativeUsernameAction::ReachSet { policy } => {
                 self.report_reach(root)?;
                 let state = self.directory.commit_reach(
+                    root,
                     *policy,
                     authority,
                     history,

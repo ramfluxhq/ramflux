@@ -7,6 +7,7 @@ mod session_push;
 use crate::identity_authority::handle_signed_device_set;
 use std::io::Write;
 
+#[cfg(feature = "itest-http")]
 use crate::lifecycle::{
     handle_mvp7_abuse_report, handle_mvp7_abuse_report_get, handle_mvp7_federated_tombstone,
     handle_mvp7_lifecycle_cancel, handle_mvp7_lifecycle_event, handle_mvp7_lifecycle_finalize,
@@ -469,30 +470,73 @@ impl MeshResponse {
 /// Per-route caller policy (default deny, like federation `mesh_auth`): each entry names the
 /// only mesh service identities admitted to that route. Routes without an entry keep their
 /// own handler checks.
-///
-/// Real callers (verified in code): `/mvp6/friend/request`, `/mvp7/lifecycle/{event,cancel,finalize}`
-/// and `/mvp7/abuse/report` are forwarded to the router only by the gateway's itest HTTP proxy
-/// (`apps/ramflux-gateway/src/itest_http.rs`, identity `ramflux-gateway`); `/mvp7/federation/tombstone/apply`
-/// is sent only by the federation itest HTTP handler (`apps/ramflux-federation/src/itest_http.rs`,
-/// identity `ramflux-federation`). No other service identity calls these routes.
-const ROUTE_CALLER_POLICY: &[(&str, &str, &[&str])] = &[
-    ("POST", "/mvp6/registration/policy", &["ramflux-admin"]),
-    ("POST", "/mvp6/friend/request", &["ramflux-gateway"]),
-    ("POST", "/mvp7/lifecycle/event", &["ramflux-gateway"]),
-    ("POST", "/mvp7/lifecycle/cancel", &["ramflux-gateway"]),
-    ("POST", "/mvp7/lifecycle/finalize", &["ramflux-gateway"]),
-    ("POST", "/mvp7/abuse/report", &["ramflux-gateway"]),
-    ("POST", "/mvp7/federation/tombstone/apply", &["ramflux-federation"]),
+const ROUTE_CALLER_POLICY: &[RouteCallerRule] =
+    &[RouteCallerRule::exact("POST", "/mvp6/registration/policy", &["ramflux-admin"])];
+
+/// Lifecycle, friend-request budget, abuse-report and federated-tombstone routes have no
+/// production caller (verified in code): they are sent only by the gateway itest HTTP proxy
+/// (`apps/ramflux-gateway/src/itest_http.rs`, identity `ramflux-gateway`) and the federation
+/// itest handler (`apps/ramflux-federation/src/itest_http.rs`, identity `ramflux-federation`).
+/// They are therefore compiled only with `itest-http`, and even there only the itest proxy
+/// identity is admitted. Production account deletion is the signed username-directory
+/// `Delete` operation on the home node, which never touches these routes.
+#[cfg(feature = "itest-http")]
+const ITEST_ROUTE_CALLER_POLICY: &[RouteCallerRule] = &[
+    RouteCallerRule::exact("POST", "/mvp6/friend/request", &["ramflux-gateway"]),
+    RouteCallerRule::exact("POST", "/mvp7/lifecycle/event", &["ramflux-gateway"]),
+    RouteCallerRule::exact("POST", "/mvp7/lifecycle/cancel", &["ramflux-gateway"]),
+    RouteCallerRule::exact("POST", "/mvp7/lifecycle/finalize", &["ramflux-gateway"]),
+    RouteCallerRule::prefix("GET", "/mvp7/lifecycle/", &["ramflux-gateway"]),
+    RouteCallerRule::prefix("GET", "/mvp7/metadata/", &["ramflux-gateway"]),
+    RouteCallerRule::exact("POST", "/mvp7/abuse/report", &["ramflux-gateway"]),
+    RouteCallerRule::prefix("GET", "/mvp7/abuse/report/", &["ramflux-gateway"]),
+    RouteCallerRule::exact("POST", "/mvp7/federation/tombstone/apply", &["ramflux-federation"]),
 ];
 
+struct RouteCallerRule {
+    method: &'static str,
+    path: &'static str,
+    prefix: bool,
+    admitted: &'static [&'static str],
+}
+
+impl RouteCallerRule {
+    const fn exact(
+        method: &'static str,
+        path: &'static str,
+        admitted: &'static [&'static str],
+    ) -> Self {
+        Self { method, path, prefix: false, admitted }
+    }
+
+    #[cfg(feature = "itest-http")]
+    const fn prefix(
+        method: &'static str,
+        path: &'static str,
+        admitted: &'static [&'static str],
+    ) -> Self {
+        Self { method, path, prefix: true, admitted }
+    }
+
+    fn matches(&self, method: &str, path: &str) -> bool {
+        self.method == method
+            && if self.prefix { path.starts_with(self.path) } else { self.path == path }
+    }
+}
+
+fn route_caller_rules() -> impl Iterator<Item = &'static RouteCallerRule> {
+    #[cfg(feature = "itest-http")]
+    let itest: &'static [RouteCallerRule] = ITEST_ROUTE_CALLER_POLICY;
+    #[cfg(not(feature = "itest-http"))]
+    let itest: &'static [RouteCallerRule] = &[];
+    ROUTE_CALLER_POLICY.iter().chain(itest)
+}
+
 fn route_caller_refusal(method: &str, path: &str, peer_service_id: &str) -> Option<MeshResponse> {
-    ROUTE_CALLER_POLICY
-        .iter()
-        .find(|(policy_method, policy_path, _)| *policy_method == method && *policy_path == path)
-        .and_then(|(_, _, admitted)| {
-            (!admitted.contains(&peer_service_id))
-                .then(|| MeshResponse::text("403 Forbidden", "route requires an admitted caller"))
-        })
+    route_caller_rules().find(|rule| rule.matches(method, path)).and_then(|rule| {
+        (!rule.admitted.contains(&peer_service_id))
+            .then(|| MeshResponse::text("403 Forbidden", "route requires an admitted caller"))
+    })
 }
 
 pub(crate) fn handle_mesh_request_value(
@@ -1003,6 +1047,44 @@ fn handle_mesh_device_lookup(
     Some(device_lookup_mesh_response(value))
 }
 
+/// Itest-only mesh routes (see `ITEST_ROUTE_CALLER_POLICY`): absent from production builds.
+#[cfg(feature = "itest-http")]
+fn handle_mesh_itest_value(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> Option<anyhow::Result<MeshResponse>> {
+    fn json<T: serde::Serialize>(value: anyhow::Result<T>) -> anyhow::Result<MeshResponse> {
+        Ok(MeshResponse::json("200 OK", serde_json::to_vec(&value?)?))
+    }
+    let (state, store) = (router.state(), router.store());
+    Some(match (method, path) {
+        ("POST", "/mvp6/friend/request") => json(handle_mvp6_friend_request(body, state, store)),
+        ("POST", "/mvp7/lifecycle/event") => json(handle_mvp7_lifecycle_event(body, state, store)),
+        ("POST", "/mvp7/lifecycle/cancel") => {
+            json(handle_mvp7_lifecycle_cancel(body, state, store))
+        }
+        ("POST", "/mvp7/lifecycle/finalize") => {
+            json(handle_mvp7_lifecycle_finalize(body, state, store))
+        }
+        ("GET", path) if path.starts_with("/mvp7/lifecycle/") => {
+            json(Ok(handle_mvp7_lifecycle_get(path, state)))
+        }
+        ("GET", path) if path.starts_with("/mvp7/metadata/") => {
+            json(Ok(handle_mvp7_metadata_get(path, state)))
+        }
+        ("POST", "/mvp7/federation/tombstone/apply") => {
+            json(handle_mvp7_federated_tombstone(body, state, store))
+        }
+        ("POST", "/mvp7/abuse/report") => json(handle_mvp7_abuse_report(body, state, store)),
+        ("GET", path) if path.starts_with("/mvp7/abuse/report/") => {
+            json(Ok(handle_mvp7_abuse_report_get(path, state)))
+        }
+        _ => return None,
+    })
+}
+
 fn handle_mesh_general_value(
     method: &str,
     path: &str,
@@ -1010,6 +1092,10 @@ fn handle_mesh_general_value(
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<MeshResponse> {
     if let Some(response) = handle_mesh_device_lookup(method, path, body, router) {
+        return response;
+    }
+    #[cfg(feature = "itest-http")]
+    if let Some(response) = handle_mesh_itest_value(method, path, body, router) {
         return response;
     }
     match (method, path) {
@@ -1031,45 +1117,9 @@ fn handle_mesh_general_value(
             let response = handle_mvp6_registration_policy(body, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
-        ("POST", "/mvp6/friend/request") => {
-            let response = handle_mvp6_friend_request(body, router.state(), router.store())?;
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
         ("POST", "/mvp10/own-devices/fanout") => mesh_fanout_response(body, router),
-        ("POST", "/mvp7/lifecycle/event") => {
-            let response = handle_mvp7_lifecycle_event(body, router.state(), router.store())?;
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
-        ("POST", "/mvp7/lifecycle/cancel") => {
-            let response = handle_mvp7_lifecycle_cancel(body, router.state(), router.store())?;
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
-        ("POST", "/mvp7/lifecycle/finalize") => {
-            let response = handle_mvp7_lifecycle_finalize(body, router.state(), router.store())?;
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
-        ("GET", path) if path.starts_with("/mvp7/lifecycle/") => {
-            let response = handle_mvp7_lifecycle_get(path, router.state());
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
-        ("GET", path) if path.starts_with("/mvp7/metadata/") => {
-            let response = handle_mvp7_metadata_get(path, router.state());
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
-        ("POST", "/mvp7/federation/tombstone/apply") => {
-            let response = handle_mvp7_federated_tombstone(body, router.state(), router.store())?;
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
         ("POST", "/admin/custody/budgets") => {
             let response = crate::lifecycle::handle_custody_budgets(body, router.store())?;
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
-        ("POST", "/mvp7/abuse/report") => {
-            let response = handle_mvp7_abuse_report(body, router.state(), router.store())?;
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
-        ("GET", path) if path.starts_with("/mvp7/abuse/report/") => {
-            let response = handle_mvp7_abuse_report_get(path, router.state());
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
         ("POST", "/mvp1/device/revoke") => {
@@ -1430,6 +1480,7 @@ fn handle_mvp6_registration_policy(
     Ok(response)
 }
 
+#[cfg(feature = "itest-http")]
 fn handle_mvp6_friend_request(
     body: &[u8],
     state: &ramflux_node_core::RouterCore,

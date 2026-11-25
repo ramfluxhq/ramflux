@@ -16,7 +16,12 @@ revision. Modes are `contacts_only` and `open`. A stale revision returns
 `details` object. Its stable generated numeric category is `InvalidArgument`. Operation IDs are
 nonempty opaque strings of at most 256 bytes. Reusing an operation with different
 policy bytes refuses; a completed retry never reopens an account subsequently
-closed by a newer revision. Offline changes retain their exact signed intent.
+closed by a newer revision. Offline changes retain their exact signed intent. Before a
+retained intent is resent, the device reads the home: if the operation already committed the
+intent is settled; if the authority or home head moved since signing, the same mode, expected
+revision and operation ID are signed again on the current heads. The home looks up the
+operation before checking signature and heads, so a retry of committed bytes returns the
+stored state.
 
 The home reports signed reach records with username-directory evidence. Directory
 and SDK observations reject rollback and same-revision substitution. Resolved
@@ -30,7 +35,9 @@ then durably queues an intent. Its result contains `conversation_id`, `message_i
 `placement` (`direct` for an open recipient, otherwise `requests`) and `state`.
 `contact.requests.reply {request_id, text, operation_id}` first commits a home
 permission scoped to the requesting root and conversation, then queues the reply
-on `requests`. It leaves the contact request pending. Blocks refuse new replies.
+on `requests`. A permission must use the shared DM scope of the two roots and expires after
+one day; an owner holds at most 4096 live permissions, and expired ones are deleted on the
+next write so they never count. It leaves the contact request pending. Blocks refuse new replies.
 Retries preserve the original intent identifiers and placement; changed text or
 recipient under the same operation ID refuses.
 

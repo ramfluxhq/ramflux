@@ -8,6 +8,11 @@ compile_error!("durability-test-hooks must not be enabled in a production build"
 
 #[cfg(all(feature = "itest-http", any(ramflux_production, ramflux_release_profile)))]
 compile_error!("itest-http must not be enabled in release or production builds");
+#[cfg(all(
+    feature = "itest-reply-permission-limits",
+    any(ramflux_production, ramflux_release_profile)
+))]
+compile_error!("itest-reply-permission-limits must not be enabled in release or production builds");
 
 mod attachment_wire;
 mod authority_refusal;

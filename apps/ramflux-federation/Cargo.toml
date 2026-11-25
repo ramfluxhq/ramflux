@@ -13,6 +13,7 @@ commercial-license = true
 default = []
 compio-mesh = ["dep:compio", "ramflux-transport/compio-mesh"]
 itest-http = ["ramflux-node-core/itest-http"]
+itest-reply-permission-limits = ["ramflux-node-core/itest-reply-permission-limits"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 compio = { version = "=0.19.1", optional = true }

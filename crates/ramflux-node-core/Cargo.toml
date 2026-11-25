@@ -14,6 +14,10 @@ test-support = []
 default = []
 durability-test-hooks = []
 itest-http = []
+# Real-run knob only (SECURITY-BACKREVIEW-FIX-02): one live reply permission per owner and a
+# 20 s permission lifetime, so a real run can show the cap and the expiry sweep. Forbidden in
+# release and production builds (lib.rs).
+itest-reply-permission-limits = []
 # RELAY-MEM-03-A0b (CTRL-093) DIAGNOSTIC/probe-only (default-off): enables redb's `cache_metrics`
 # and unlocks a fixed redb page-cache cap (via `RAMFLUX_RELAY_REDB_CACHE_BYTES`) + a `cache_stats`
 # accessor for the 1 GiB-control-vs-32 MiB-candidate experiment. NEVER in the default/production

@@ -129,6 +129,67 @@ fn require_primary_device(config: &GatewaySessionConfig) -> Result<(), SdkError>
     })
 }
 
+/// Resend a journaled reach intent only after a live home read decides what it still means:
+/// - the home already holds a policy with the intent's operation id: the operation committed
+///   (possibly as bytes re-signed on newer heads), so the read is the result and `settle`
+///   drops the intent;
+/// - the intent was signed on the current authority and home heads: resend its exact bytes;
+/// - a head moved (device added or removed, home migrated): sign the same mode,
+///   expected revision and operation id on the current heads and send that. The journal keeps
+///   the original intent; a later retry repeats this decision, and Ed25519 signing of the same
+///   body yields the same bytes, so the home's operation dedupe still applies.
+///
+/// A stale expected revision is answered by the home as a conflict, which also drops the
+/// intent, so no stored change is resubmitted forever.
+pub(crate) async fn resubmit(
+    config: &GatewaySessionConfig,
+    transport: &UsernameConnection,
+    pin: &w::NativeDirectoryPin,
+    intent: &ramflux_protocol::account_reach::ReachPolicy,
+    deadline: tokio::time::Instant,
+) -> Result<directory::UsernameNetworkReply, SdkError> {
+    let current = directory::exchange_username(
+        config,
+        transport,
+        pin.clone(),
+        w::NativeUsernameAction::ReachGet,
+        deadline,
+    )
+    .await?;
+    let view = state(&current)?;
+    if view
+        .policy
+        .as_ref()
+        .is_some_and(|policy| policy.body.operation_id == intent.body.operation_id)
+    {
+        return Ok(current);
+    }
+    let first = view.history.predecessors.first().unwrap_or(&view.history.home);
+    let home = ramflux_crypto::home_migration::verify_home_chain(
+        &view.history,
+        first,
+        crate::custody::network_now()?,
+    )?;
+    if intent.body.home_head_hash == home.hash()
+        && intent.body.authority_head_hash == object_hash(&current.own_record)?
+    {
+        return directory::exchange_username(
+            config,
+            transport,
+            pin.clone(),
+            w::NativeUsernameAction::ReachSet { policy: Box::new(intent.clone()) },
+            deadline,
+        )
+        .await;
+    }
+    let change = ReachChange {
+        mode: intent.body.mode,
+        expected_revision: intent.body.expected_revision,
+        operation_id: intent.body.operation_id.clone(),
+    };
+    submit(config, transport, pin, &current, change, deadline).await
+}
+
 async fn submit(
     config: &GatewaySessionConfig,
     transport: &UsernameConnection,

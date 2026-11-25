@@ -38,7 +38,7 @@ pub(super) struct Prepared {
 }
 enum Purpose {
     Reply { input: open_messages::Reply },
-    Reach { set: bool },
+    Reach { set: bool, stored: Option<Box<ramflux_protocol::account_reach::ReachPolicy>> },
     Resolve { name: String, nonce: String, add: bool, start: Option<open_messages::Start> },
     Status { requested: Option<String> },
     Draft { change: UsernameChange },
@@ -98,11 +98,15 @@ pub(super) fn prepare(
             if request.body != serde_json::json!({}) {
                 return Err(w::DirectoryCode::InvalidProfile.into());
             }
-            (w::NativeUsernameAction::ReachGet, Purpose::Reach { set: false })
+            (w::NativeUsernameAction::ReachGet, Purpose::Reach { set: false, stored: None })
         }
-        "account.reach.set" => {
-            (reach::prepare_set(account, &request.body)?, Purpose::Reach { set: true })
-        }
+        "account.reach.set" => match reach::prepare_set(account, &request.body)? {
+            reach::ReachSend::Fresh(action) => (action, Purpose::Reach { set: true, stored: None }),
+            reach::ReachSend::Stored(policy) => (
+                w::NativeUsernameAction::ReachSet { policy: policy.clone() },
+                Purpose::Reach { set: true, stored: Some(policy) },
+            ),
+        },
         "username.resolve" | "username.contact.add" => {
             let body: Resolve = serde_json::from_value(request.body.clone())?;
             let name = directory::normalize_name(&body.name)?;
@@ -150,15 +154,28 @@ impl Prepared {
         &self,
         deadline: tokio::time::Instant,
     ) -> Result<directory::UsernameNetworkReply, SdkError> {
-        if let Purpose::Reach { set: false } = &self.purpose {
-            return crate::account_reach::exchange(
-                &self.gateway,
-                &self.transport,
-                self.pin.clone(),
-                None,
-                deadline,
-            )
-            .await;
+        match &self.purpose {
+            Purpose::Reach { set: false, .. } => {
+                return crate::account_reach::exchange(
+                    &self.gateway,
+                    &self.transport,
+                    self.pin.clone(),
+                    None,
+                    deadline,
+                )
+                .await;
+            }
+            Purpose::Reach { set: true, stored: Some(intent) } => {
+                return crate::account_reach::resubmit(
+                    &self.gateway,
+                    &self.transport,
+                    &self.pin,
+                    intent,
+                    deadline,
+                )
+                .await;
+            }
+            _ => {}
         }
         self.exchange_with_recovery(deadline).await
     }

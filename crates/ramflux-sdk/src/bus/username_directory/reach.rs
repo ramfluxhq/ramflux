@@ -8,10 +8,18 @@ use ramflux_protocol::{
     username_directory as w,
 };
 
+/// What a reach set sends: a newly journaled policy, or the journaled intent of an earlier
+/// attempt, which the exchange re-checks against a live home read before resending
+/// (`crate::account_reach::resubmit`).
+pub(super) enum ReachSend {
+    Fresh(w::NativeUsernameAction),
+    Stored(Box<ReachPolicy>),
+}
+
 pub(super) fn prepare_set(
     account: &LocalBusAccountState,
     body: &serde_json::Value,
-) -> Result<w::NativeUsernameAction, SdkError> {
+) -> Result<ReachSend, SdkError> {
     let change: ReachChange = serde_json::from_value(body.clone())?;
     let db = account.client.account_db()?;
     let key = format!("reach/change/{}", account.principal_commitment);
@@ -22,7 +30,7 @@ pub(super) fn prepare_set(
         {
             return Err(w::DirectoryCode::OperationPending.into());
         }
-        return Ok(w::NativeUsernameAction::ReachSet { policy: Box::new(old) });
+        return Ok(ReachSend::Stored(Box::new(old)));
     }
     if crate::account_reach::sync_pending(db, &account.principal_commitment)? {
         return Err(crate::account_reach::sync_refusal());
@@ -51,7 +59,7 @@ pub(super) fn prepare_set(
         },
     )?;
     db.persist_actor_state(&key, &policy)?;
-    Ok(w::NativeUsernameAction::ReachSet { policy: Box::new(policy) })
+    Ok(ReachSend::Fresh(w::NativeUsernameAction::ReachSet { policy: Box::new(policy) }))
 }
 
 pub(super) fn settle(
@@ -66,7 +74,10 @@ pub(super) fn settle(
     if let Some(intent) = db.load_actor_state::<ReachPolicy>(&key)?
         && (state.conflict
             || state.policy.as_ref().is_some_and(|policy| {
-                policy == &intent || policy.body.revision > intent.body.revision
+                // The same operation may have committed as bytes re-signed on newer heads.
+                policy == &intent
+                    || policy.body.operation_id == intent.body.operation_id
+                    || policy.body.revision > intent.body.revision
             }))
     {
         db.remove_actor_state(&key)?;
