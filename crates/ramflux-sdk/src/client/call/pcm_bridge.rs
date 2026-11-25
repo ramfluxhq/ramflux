@@ -9,9 +9,11 @@
 //! registry lookup, no logging, no I/O, no waiting. Publish, bind and drain run on the
 //! account writer under `CONTROL`, never from a callback.
 //!
-//! Decision (checkpoint 2): a full render ring drops the newest decoded frame instead of the
-//! oldest. A lock-free single-producer, single-consumer ring cannot evict its head without
-//! racing the host read; the ring bound (200 ms) keeps latency bounded either way.
+//! Stale-frame policy (controller decision, overrules checkpoint 2; C0:35-48): the render
+//! callback is the only consumer. When more than `RENDER_TARGET_DEPTH` frames are queued, it
+//! discards the oldest ones (consumer side, lock-free) until the newest remain, then renders
+//! one. The producer never evicts. A full ring (last resort, host not reading) makes the
+//! producer drop the new frame and count it in `render_drops`.
 
 use crate::client::call::media_contract::PCM_FRAME_SAMPLES;
 use ramflux_media::codec::Frame;
@@ -23,6 +25,9 @@ use std::time::{Duration, Instant};
 const FRAME: usize = PCM_FRAME_SAMPLES;
 const CAPTURE_FRAMES: usize = 5;
 const RENDER_FRAMES: usize = 10;
+/// Frames the render callback keeps queued after discarding the stale backlog.
+#[cfg(feature = "c-abi")]
+const RENDER_TARGET_DEPTH: usize = 2;
 /// Recent closed tokens remembered per process; older tokens read as unknown.
 const RECEIPT_CAP: usize = 128;
 
@@ -95,6 +100,23 @@ impl<const F: usize> Ring<F> {
         Some(tag)
     }
 
+    /// Frames currently queued. Exact for the consumer; the producer can only add to it.
+    #[cfg(feature = "c-abi")]
+    fn len(&self) -> usize {
+        self.tail.load(Ordering::Acquire).wrapping_sub(self.head.load(Ordering::Relaxed))
+    }
+
+    /// Consumer only. Discards the oldest frame without copying it.
+    #[cfg(feature = "c-abi")]
+    fn skip(&self) -> bool {
+        let head = self.head.load(Ordering::Relaxed);
+        if head == self.tail.load(Ordering::Acquire) {
+            return false;
+        }
+        self.head.store(head.wrapping_add(1), Ordering::Release);
+        true
+    }
+
     /// Empty the ring and zero its storage. Only after both endpoints have stopped.
     fn reset(&self, storage: Storage<'_>) {
         self.head.store(0, Ordering::SeqCst);
@@ -123,7 +145,11 @@ struct Slot {
     captured: AtomicU64,
     capture_drops: AtomicU64,
     render_underruns: AtomicU64,
+    /// Producer-side last-resort drops of a decoded frame (ring full).
     render_drops: AtomicU64,
+    /// Consumer-side discards of stale queued frames (render callback policy).
+    #[cfg(feature = "c-abi")]
+    render_discards: AtomicU64,
     capture: Ring<CAPTURE_FRAMES>,
     render: Ring<RENDER_FRAMES>,
     capture_samples: [AtomicI16; CAPTURE_FRAMES * FRAME],
@@ -145,6 +171,8 @@ static SLOT: Slot = Slot {
     capture_drops: AtomicU64::new(0),
     render_underruns: AtomicU64::new(0),
     render_drops: AtomicU64::new(0),
+    #[cfg(feature = "c-abi")]
+    render_discards: AtomicU64::new(0),
     capture: Ring::new(),
     render: Ring::new(),
     capture_samples: [const { AtomicI16::new(0) }; CAPTURE_FRAMES * FRAME],
@@ -249,7 +277,14 @@ pub(crate) fn render_frame(
         }
     };
     let epoch = SLOT.epoch.load(Ordering::SeqCst);
-    // Frames queued before the last generation fence are stale: discard them, bounded.
+    // Stale backlog (C0:35-48): keep the newest RENDER_TARGET_DEPTH frames, discard older ones.
+    for _ in 0..RENDER_FRAMES {
+        if SLOT.render.len() <= RENDER_TARGET_DEPTH || !SLOT.render.skip() {
+            break;
+        }
+        SLOT.render_discards.fetch_add(1, Ordering::Relaxed);
+    }
+    // Frames queued before the last generation fence are stale too: skip them, bounded.
     for _ in 0..=RENDER_FRAMES {
         match SLOT.render.pop(render_storage(), out) {
             Some(tag) if tag == epoch => return Ok(()),
