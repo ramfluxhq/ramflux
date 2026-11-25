@@ -17,7 +17,7 @@ use ramflux_protocol::{
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-pub(super) fn read_seed(path: &Path) -> Result<Zeroizing<[u8; 32]>, RfError> {
+pub(crate) fn read_seed(path: &Path) -> Result<Zeroizing<[u8; 32]>, RfError> {
     let bytes = private_fs::read_input(path, 128, true)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| invalid("node seed must be base64url"))?;
     let decoded = Zeroizing::new(

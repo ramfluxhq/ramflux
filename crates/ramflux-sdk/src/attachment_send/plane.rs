@@ -84,8 +84,24 @@ pub(crate) fn read_bounded(call: &ReadCall<'_>) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Immutable identity of one segment whose durable relay checkpoint is requested.
+pub(crate) struct UploadQuery {
+    pub upload_id: [u8; 32],
+    pub object_id: [u8; 32],
+    pub manifest_hash: [u8; 32],
+    pub payload_generation: u64,
+    pub index: u32,
+}
+
 /// Speaks Reserve, registration, and ranged read. A missing plane is `authority_unavailable`.
 pub(crate) trait Plane: Send + Sync {
+    /// # Errors
+    /// Returns a stable refusal when the listener rejects the operation.
+    fn upload_status(
+        &self,
+        query: &UploadQuery,
+    ) -> Result<ramflux_protocol::attachment_wire::AttachmentUploadStatus, Refusal>;
+
     /// # Errors
     /// Returns a stable refusal when the listener rejects the operation.
     fn owner(&self, call: &OwnerCall<'_>) -> Result<Vec<u8>, Refusal>;

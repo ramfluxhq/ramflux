@@ -6,6 +6,7 @@ mod client;
 mod dns;
 mod home;
 mod home_profile;
+mod home_reach;
 mod home_status;
 mod ipc;
 mod primary;
@@ -29,6 +30,16 @@ fn error(message: &'static str) -> Error {
 }
 fn refuse<T>(message: &'static str) -> Result<T> {
     Err(error(message))
+}
+/// One WARN line for a connection the directory drops. Carries only the hop, the peer address,
+/// the stage and the error text (static messages or io/TLS errors): never payload, names or keys.
+fn warn_drop(
+    hop: &'static str,
+    peer: impl std::fmt::Display,
+    stage: &'static str,
+    error: &dyn std::fmt::Display,
+) {
+    tracing::warn!(hop, %peer, stage, %error, "username connection dropped");
 }
 
 pub(crate) fn start(

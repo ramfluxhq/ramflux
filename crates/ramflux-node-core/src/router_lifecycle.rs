@@ -332,6 +332,9 @@ impl RouterCore {
             AccountLifecycleState::DeletePending => Err(NodeCoreError::ItestHttp(
                 "federated delete_pending tombstone is not accepted".to_owned(),
             )),
+            AccountLifecycleState::Suspended => Err(NodeCoreError::ItestHttp(
+                "federated suspended tombstone is not accepted".to_owned(),
+            )),
         }
     }
 

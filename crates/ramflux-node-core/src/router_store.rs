@@ -2266,7 +2266,7 @@ fn record_target_lifecycle_marker_in_txn(
         crate::AccountLifecycleState::Active => {
             put_bool(write_txn, ROUTER_DEACTIVATED_TARGET_TABLE, target_delivery_id, false)?;
         }
-        crate::AccountLifecycleState::DeletePending => {}
+        crate::AccountLifecycleState::DeletePending | crate::AccountLifecycleState::Suspended => {}
     }
     Ok(())
 }

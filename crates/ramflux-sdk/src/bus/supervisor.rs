@@ -10,6 +10,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
+#[path = "supervisor_app_lifecycle.rs"]
+mod app_lifecycle;
 #[path = "supervisor_app_lock.rs"]
 mod app_lock;
 #[path = "supervisor_device_unlock.rs"]
@@ -27,7 +29,9 @@ pub(super) struct Supervisor {
     pub(crate) app_fences: Arc<super::app_lock_fence::Fences>,
     pub(super) controls: RefCell<BTreeMap<u64, super::outbound::LocalBusOutbound>>,
     pub(super) control_accounts: RefCell<BTreeMap<u64, BTreeSet<String>>>,
-    app_control: tokio::sync::Mutex<()>,
+    pub(super) app_control: tokio::sync::Mutex<()>,
+    app_timer: RefCell<Option<tokio::task::JoinHandle<()>>>,
+    app_timer_wake: Arc<tokio::sync::Notify>,
     pub(super) root_lease: RefCell<Option<Arc<super::data_root_lock::DataRootLock>>>,
     owner: RefCell<std::rc::Weak<Supervisor>>,
     pub(super) index: AccountIndex,
@@ -95,6 +99,8 @@ impl Supervisor {
             controls: RefCell::new(BTreeMap::new()),
             control_accounts: RefCell::new(BTreeMap::new()),
             app_control: tokio::sync::Mutex::new(()),
+            app_timer: RefCell::new(None),
+            app_timer_wake: Arc::new(tokio::sync::Notify::new()),
             index,
             stop_requested,
             stop_response,
@@ -227,6 +233,7 @@ impl Supervisor {
         tasks: &mut tokio::task::JoinSet<()>,
     ) -> Result<(), SdkError> {
         self.reconcile_app_lock_wraps();
+        self.start_app_timer();
         for (path, account_id) in self.hydrate_paths()? {
             if crate::custody::account_exists(&self.config.data_root, &account_id)? {
                 if let Err(error) = self.hydrate_native(account_id, tasks) {
@@ -381,6 +388,8 @@ impl Supervisor {
             && let Some(call) = &credential_call
         {
             let _app_control = self.app_control_guard(&request.method).await;
+            self.ensure_request_allowed(&request)?;
+            self.expire_app_deadlines().await?;
             return self.private_unlock(&request, call, connection.credential_prompts).await;
         }
         // Authentication and lock effects must run again; a receipt from a previous
@@ -612,8 +621,11 @@ impl Supervisor {
         self.ensure_request_allowed(&request)?;
         // Serialize effects in their execution owner, never lifecycle receipt waiters.
         // Retries must reach conflict detection and shutdown must close admission promptly.
-        let _app_control = self.app_control_guard(&request.method).await;
+        let app_control = self.app_control_guard(&request.method).await;
         self.ensure_request_allowed(&request)?;
+        if app_control.is_some() {
+            self.expire_app_deadlines().await?;
+        }
         self.admit_app_access(&request)?;
         if let Some(body) = super::custody_setup::guard_account(&self.config.data_root, &request)? {
             return Ok(reply(body));
@@ -667,6 +679,9 @@ impl Supervisor {
             }
             "account.app_lock.state" => {
                 return self.app_lock_state(&request, connection).await;
+            }
+            "account.app_lock.lifecycle" => {
+                return self.app_lifecycle(&request, connection).await;
             }
             _ => {}
         }
@@ -1176,6 +1191,9 @@ impl Supervisor {
     }
 
     pub(super) async fn shutdown(&self) -> Result<(), SdkError> {
+        if let Some(timer) = self.app_timer.borrow_mut().take() {
+            timer.abort();
+        }
         self.close_lifecycle_admission();
         // Admission is closed before moving the set; no new task can escape this drain.
         let mut tasks = std::mem::take(&mut *self.lifecycle_tasks.borrow_mut());
@@ -1382,6 +1400,9 @@ impl Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
+        if let Some(timer) = self.app_timer.get_mut().take() {
+            timer.abort();
+        }
         if let Some(task) = self.agent_repairs.get_mut().take() {
             task.abort();
         }

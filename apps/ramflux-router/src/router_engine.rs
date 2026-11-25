@@ -603,7 +603,7 @@ pub(crate) async fn submit_envelope_mesh_async_with_source(
 
 fn record_decoded(envelope: &ramflux_protocol::Envelope) {
     ramflux_node_core::record_router_submit_started();
-    tracing::info!(
+    tracing::debug!(
         envelope_id = %envelope.envelope_id,
         target_delivery_id = %envelope.target_delivery_id,
         source_device_id = %envelope.source_device_id,
@@ -628,7 +628,8 @@ fn committed_preparation(
             timeout.as_secs().max(1),
         )
         .unwrap_or_else(|error| {
-            tracing::warn!(%error, %target_delivery_id, "committed forward preparation refused");
+            tracing::warn!(%error, "committed forward preparation refused");
+            tracing::debug!(%target_delivery_id, "committed forward preparation refused ids");
             ramflux_node_core::RouterForwardPreparation::Complete(Box::new(
                 committed_forward_error_outcome(&error, target_delivery_id),
             ))
@@ -1275,10 +1276,13 @@ fn submission_response(
     let response_started = Instant::now();
     let response = submit_response_from_outcome(state, outcome);
     tracing::info!(
-        target_delivery_id = %response.target_delivery_id,
         outcome = %response.outcome,
         inbox_seq = ?response.inbox_seq,
         "router mvp0 envelope outcome"
+    );
+    tracing::debug!(
+        target_delivery_id = %response.target_delivery_id,
+        "router mvp0 envelope outcome ids"
     );
     ramflux_node_core::record_router_submit_response_us(elapsed_us(response_started));
     ramflux_node_core::record_router_submit_total_us(elapsed_us(total_started));

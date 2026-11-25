@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Ramflux C1 protocol types, canonical JSON, and fixture helpers.
+pub mod account_reach;
 pub mod agent_profile;
 pub mod attachment_wire;
 

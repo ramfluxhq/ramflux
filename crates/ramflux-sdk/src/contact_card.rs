@@ -105,6 +105,7 @@ pub struct ContactCardBody {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContactCardAuthority {
+    pub reach: Option<ramflux_protocol::account_reach::ReachRecord>,
     pub head_hash: String,
     pub epoch: u64,
     pub master_certificate_hash: String,

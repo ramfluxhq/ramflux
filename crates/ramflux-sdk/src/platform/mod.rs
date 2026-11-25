@@ -16,7 +16,11 @@ pub(crate) mod pipe;
 #[cfg(windows)]
 pub(crate) use pipe::listener;
 
+#[cfg(windows)]
+pub(crate) mod clock_windows;
+
 #[cfg(any(windows, test))]
 pub(crate) mod server_token;
 
+pub(crate) mod app_lock_clock;
 pub(crate) mod network;

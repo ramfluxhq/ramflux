@@ -324,6 +324,7 @@ impl BackupDatabase {
             let refused_items = self.merge_original_header_agreement()?;
             let self_sync_floors = self.merge_message_register_floors()?;
             self.merge_username_restrictions()?;
+            self.merge_account_reach()?;
             self.preserve_imported_archives(key)?;
             #[cfg(test)]
             super::backup_selector_admission::preservation::checkpoint(&self.db)?;
@@ -772,7 +773,7 @@ fn merge_filter(table: &str, native_data_only: bool) -> String {
         "({}){} AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='{}' AND e.row_id=r.rowid)",
         base_merge_filter(table, native_data_only),
         if table == "runtime_actor_state" {
-            " AND r.state_kind NOT LIKE 'self-sync/%' AND r.state_kind NOT LIKE 'message-identity/%' AND r.state_kind NOT LIKE 'username/%'"
+            " AND r.state_kind NOT LIKE 'self-sync/%' AND r.state_kind NOT LIKE 'message-identity/%' AND r.state_kind NOT LIKE 'username/%' AND r.state_kind NOT LIKE 'reach/%'"
         } else {
             ""
         },

@@ -531,6 +531,7 @@ fn actor_state_may_reference_message(key: &str) -> bool {
             "routed/",
             "self-sync/",
             "directory/message/",
+            "reach/outbox/",
             "directory/object/",
             "message/origin/",
             "delivery-receipt/",

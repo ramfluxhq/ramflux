@@ -41,12 +41,11 @@ pub(crate) async fn handle(
             ramflux_node_core::GatewayServerFrame::Nack { reason: error.source.to_string() }
         }
         Err(error) => {
-            tracing::warn!(
-                %error,
-                failure_reason = ?error.reason,
+            tracing::warn!(%error, failure_reason = ?error.reason, "voice lease rejected");
+            tracing::debug!(
                 principal_id = %runtime.principal_id,
                 device_id = %runtime.device_id,
-                "voice lease rejected"
+                "voice lease rejected ids"
             );
             ramflux_node_core::GatewayServerFrame::VoiceLease {
                 response: Box::new(VoiceLeaseResponse::Refused { reason: error.reason }),

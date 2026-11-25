@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Ordered writer preparation and application; only owned public input crosses network waits.
+mod open_messages;
+mod reach;
 mod recovery;
 mod retry;
 mod submission;
@@ -35,7 +37,9 @@ pub(super) struct Prepared {
     purpose: Purpose,
 }
 enum Purpose {
-    Resolve { name: String, nonce: String, add: bool },
+    Reply { input: open_messages::Reply },
+    Reach { set: bool },
+    Resolve { name: String, nonce: String, add: bool, start: Option<open_messages::Start> },
     Status { requested: Option<String> },
     Draft { change: UsernameChange },
     Submit,
@@ -44,7 +48,11 @@ enum Purpose {
 pub(super) fn handles(method: &str) -> bool {
     matches!(
         method,
-        "username.resolve"
+        "account.reach.get"
+            | "account.reach.set"
+            | "conversation.start"
+            | "contact.requests.reply"
+            | "username.resolve"
             | "username.contact.add"
             | "username.status"
             | "username.mutate"
@@ -67,13 +75,46 @@ pub(super) fn prepare(
     let gateway = account.sealing_config()?;
     let root = account.principal_commitment.clone();
     let (action, purpose) = match request.method.as_str() {
+        "contact.requests.reply" => {
+            let (action, input) = open_messages::prepare_reply(account, request)?;
+            (action, Purpose::Reply { input })
+        }
+        "conversation.start" => {
+            let mut input: open_messages::Start = serde_json::from_value(request.body.clone())?;
+            open_messages::validate(&input.text, &input.operation_id)?;
+            input.name = directory::normalize_name(&input.name)?;
+            let nonce = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+            (
+                w::NativeUsernameAction::Resolve { name: input.name.clone(), nonce: nonce.clone() },
+                Purpose::Resolve {
+                    name: input.name.clone(),
+                    nonce,
+                    add: false,
+                    start: Some(input),
+                },
+            )
+        }
+        "account.reach.get" => {
+            if request.body != serde_json::json!({}) {
+                return Err(w::DirectoryCode::InvalidProfile.into());
+            }
+            (w::NativeUsernameAction::ReachGet, Purpose::Reach { set: false })
+        }
+        "account.reach.set" => {
+            (reach::prepare_set(account, &request.body)?, Purpose::Reach { set: true })
+        }
         "username.resolve" | "username.contact.add" => {
             let body: Resolve = serde_json::from_value(request.body.clone())?;
             let name = directory::normalize_name(&body.name)?;
             let nonce = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
             (
                 w::NativeUsernameAction::Resolve { name: name.clone(), nonce: nonce.clone() },
-                Purpose::Resolve { name, nonce, add: request.method == "username.contact.add" },
+                Purpose::Resolve {
+                    name,
+                    nonce,
+                    add: request.method == "username.contact.add",
+                    start: None,
+                },
             )
         }
         "username.status" => {
@@ -109,6 +150,16 @@ impl Prepared {
         &self,
         deadline: tokio::time::Instant,
     ) -> Result<directory::UsernameNetworkReply, SdkError> {
+        if let Purpose::Reach { set: false } = &self.purpose {
+            return crate::account_reach::exchange(
+                &self.gateway,
+                &self.transport,
+                self.pin.clone(),
+                None,
+                deadline,
+            )
+            .await;
+        }
         self.exchange_with_recovery(deadline).await
     }
 }
@@ -126,10 +177,22 @@ pub(super) async fn apply(
     let db = account.client.account_db()?;
     let now = crate::custody::network_now()?;
     match prepared.purpose {
-        Purpose::Resolve { name, nonce, add } => {
+        Purpose::Reach { .. } => {
+            let outcome = crate::account_reach::apply(db, &result);
+            if outcome.is_ok()
+                || matches!(&outcome, Err(SdkError::LocalBusRefused { code, .. }) if code == "reach_revision_conflict")
+            {
+                reach::settle(account, &result)?;
+            }
+            outcome.map(local_bus_ok)
+        }
+        Purpose::Reply { input } => open_messages::reply(account, input, result),
+        Purpose::Resolve { name, nonce, add, start } => {
             let resolved =
                 directory::observe_resolution(db, result, &prepared.pin, &name, &nonce, now)?;
-            if add {
+            if let Some(input) = start {
+                open_messages::start(account, &resolved, input)
+            } else if add {
                 super::dispatch::contact_resolution::add_username(state, id, &resolved).await
             } else {
                 Ok(local_bus_ok(serde_json::to_value(resolved)?))

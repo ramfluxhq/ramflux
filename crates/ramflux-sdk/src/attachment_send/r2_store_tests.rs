@@ -34,6 +34,12 @@ struct LostRegisterReply<'a> {
 }
 
 impl Plane for LostRegisterReply<'_> {
+    fn upload_status(
+        &self,
+        query: &super::plane::UploadQuery,
+    ) -> Result<ramflux_protocol::attachment_wire::AttachmentUploadStatus, Refusal> {
+        self.inner.upload_status(query)
+    }
     fn owner(&self, call: &OwnerCall<'_>) -> Result<Vec<u8>, Refusal> {
         self.inner.owner(call)
     }

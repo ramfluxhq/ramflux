@@ -15,6 +15,7 @@ use std::{
 pub struct UsernameHomeCall {
     pub request: wire::NativeUsernameRequest,
     pub history: home::ResolveResult,
+    pub authority: ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>,
 }
 
 pub const USERNAME_LOCAL_PATH: &str = "/internal/username-directory";
@@ -106,8 +107,20 @@ impl NativeUsernameService {
         }
         let _lease = store.acquire_home_operation(source.root_commitment())?;
         let history = self.history(router, store, source.root_commitment(), now)?;
+        let authority = router
+            .custody_record(source.root_commitment(), now)?
+            .ok_or_else(|| NodeCoreError::Unauthorized("reach authority unavailable".into()))?;
+        if let wire::NativeUsernameAction::ReachSet { policy } = &request.action {
+            if source.device_id()
+                != authority.record.body.master_certificate.body.primary_device_ref.device_id
+            {
+                return Err(NodeCoreError::Unauthorized("reach requires primary".into()));
+            }
+            ramflux_crypto::account_reach::verify_reach_policy(policy, &authority.record)
+                .map_err(|error| NodeCoreError::Unauthorized(error.to_string()))?;
+        }
         self.backend.execute(
-            UsernameHomeCall { request, history },
+            UsernameHomeCall { request, history, authority: authority.record },
             Instant::now() + Duration::from_secs(10),
         )
     }

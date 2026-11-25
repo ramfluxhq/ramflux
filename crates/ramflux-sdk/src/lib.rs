@@ -61,6 +61,7 @@ mod offline_retention;
 pub use offline_retention::{
     AccountConfig, DEFAULT_OFFLINE_RETENTION_SECS, MIN_OFFLINE_RETENTION_SECS,
 };
+mod account_reach;
 mod contact_card;
 mod contact_card_native;
 mod contact_identity;

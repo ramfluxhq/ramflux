@@ -27,6 +27,7 @@ mod itest_http;
 mod key_migration;
 mod mesh;
 mod mesh_auth;
+mod node_report;
 mod pairing_full;
 mod pairing_http;
 mod pairing_scratch;
@@ -112,6 +113,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         let router = Arc::new(router_mesh_client(&config)?);
         let mesh_observability = Arc::new(FederationMeshObservability::default());
         let discovery = federation_discovery_surface(&config, node_signing_seed);
+        node_report::start(&config, &discovery, node_signing_seed);
         #[cfg(unix)]
         username_directory::start_home(&config, Arc::clone(&router), &discovery).map_err(
             |error| {
@@ -250,7 +252,9 @@ fn load_mounted_identity(
 
 fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
     let (writer, guard) = tracing_appender::non_blocking(std::io::stdout());
-    tracing_subscriber::fmt().with_target(false).with_writer(writer).init();
+    let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).with_writer(writer).init();
     guard
 }
 

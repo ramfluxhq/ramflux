@@ -76,6 +76,7 @@ fn public_http_card(
     let signed = born.sign_contact_card(
         vault,
         ramflux_protocol::custody::ContactCardV3 {
+            reach: None,
             version: 3,
             principal_id: record.body.principal_id.clone(),
             account_anchor: record.body.account_anchor.clone(),

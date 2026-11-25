@@ -21,6 +21,7 @@ pub enum AuthorityResponse {
         resolve: Box<w::DirectoryResolve>,
         binding: Box<w::UsernameBinding>,
         master_public_key: String,
+        reach: Option<Box<ramflux_protocol::account_reach::ReachRecord>>,
         service: Box<super::SignedHomeServiceAddress>,
     },
     Revalidated {
@@ -336,6 +337,7 @@ impl DirectoryAuthority {
             resolve: Box::new(resolve),
             binding: Box::new(binding),
             master_public_key: home.master_public_key,
+            reach: home.reach.map(Box::new),
             service: Box::new(service),
         })
     }

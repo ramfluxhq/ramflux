@@ -37,6 +37,16 @@ an old combined endpoint to work.
 | Admin | POST `/admin/federation/discover` | Private discovery/pinning tooling; token required |
 | Admin | POST `/internal/home-node-migration/forward` | Router local home-node migration forwarding; token required |
 | Admin | POST `/s8/federation/mesh-observability` | Private operator / production peering fixture transport diagnostics; token required |
+| Admin | POST `/admin/federation/node-block` | Operator node block (local bad-node advisory); token required |
+| Admin | POST `/internal/username-directory` | Local username-directory RPC from the node's own services (Unix builds only); no admin token, the payload carries its own authority |
+| Admin | POST `/internal/home-migration/peer` | Local home-migration peer RPC from the node's own services; no admin token, payload-authenticated |
+| Admin | POST `/internal/attachment-renewal/peer` | Local attachment-renewal peer RPC from the node's own services; no admin token, payload-authenticated |
+
+Reserved for the operator console (not implemented in beta): identity `ramflux-admin`,
+path prefix `/admin/v1/`, loopback port 18090 (`RAMFLUX_ADMIN_LOOPBACK_PORT`). See
+[deploy/README.md](../deploy/README.md#reserved-names-for-the-operator-console).
+`POST /mvp6/registration/policy` is a mesh route admitted only for identity `ramflux-admin`
+(router per-route caller policy); no service holds that identity in beta.
 
 All other HTTP routes/methods return 404. Existing mesh mTLS/QUIC routes, including
 peer envelope delivery and retention GC, retain their separate authenticated mesh

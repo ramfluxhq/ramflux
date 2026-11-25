@@ -56,6 +56,12 @@ fn pin() -> ([u8; 32], u64) {
 struct Tamper<'a>(&'a Listener);
 
 impl Plane for Tamper<'_> {
+    fn upload_status(
+        &self,
+        query: &super::plane::UploadQuery,
+    ) -> Result<ramflux_protocol::attachment_wire::AttachmentUploadStatus, Refusal> {
+        self.0.upload_status(query)
+    }
     fn owner(&self, call: &OwnerCall<'_>) -> Result<Vec<u8>, Refusal> {
         self.0.owner(call)
     }
