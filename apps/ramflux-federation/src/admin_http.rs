@@ -423,6 +423,10 @@ pub(crate) fn handle_admin_peer(
         rotation: None,
     };
     let discovered = handle_s12_discovery_resolve(discovery_request, state, store)?;
+    crate::node_directory::sanction::operator_pin(
+        &discovered.node_id,
+        &discovered.node_public_key,
+    )?;
     let node_public_key_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::FEDERATION_HANDSHAKE,
         discovered.node_public_key.as_bytes(),

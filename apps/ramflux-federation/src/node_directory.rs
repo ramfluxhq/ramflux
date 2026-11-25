@@ -665,6 +665,13 @@ fn persist(
         file.sync_all().map_err(|error| format!("sync directory state: {error}"))?;
     }
     std::fs::rename(&tmp, path).map_err(|error| format!("store directory state: {error}"))?;
+    sync_parent_dir(path)
+}
+
+/// Makes the rename durable. Directories can be synced only on Unix; elsewhere the file sync
+/// above is the durability point.
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> Result<(), String> {
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -672,6 +679,22 @@ fn persist(
     std::fs::File::open(parent)
         .and_then(|dir| dir.sync_all())
         .map_err(|error| format!("sync directory state dir: {error}"))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// Whether `key` (canonical base64url) is revoked in the sticky state.
+pub(crate) fn key_revoked(key: &str) -> bool {
+    let Some(lock) = RUNTIME.get() else { return false };
+    let Ok(runtime) = lock.read() else { return false };
+    ramflux_protocol::decode_base64url(key)
+        .map(|bytes| ramflux_protocol::encode_base64url(&bytes))
+        .is_ok_and(|canon| {
+            runtime.sticky.keys.get(&canon).is_some_and(|known| known.state == State::Revoked)
+        })
 }
 
 fn fingerprint(verify: &[(String, String)]) -> String {

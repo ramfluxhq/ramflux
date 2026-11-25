@@ -12,6 +12,18 @@ use super::{decide, sanction_mode};
 
 const LOG_TARGET: &str = "ramflux_federation_directory";
 
+/// Operator pin (admin path). A revoked key is refused; any other sanction is logged and the pin
+/// proceeds, as does every pin while the directory is off. An unavailable directory state refuses.
+pub(crate) fn operator_pin(domain: &str, key: &str) -> Result<(), NodeCoreError> {
+    let Err(reason) = decide(domain, Some(key)) else { return Ok(()) };
+    if reason == "unavailable" || super::key_revoked(key) {
+        tracing::warn!(target: LOG_TARGET, %domain, reason, "operator pin refused by directory");
+        return Err(NodeCoreError::Unauthorized("peer_revoked".to_owned()));
+    }
+    tracing::warn!(target: LOG_TARGET, %domain, reason, "operator pinned a sanctioned peer");
+    Ok(())
+}
+
 /// `Err` when the peer must be refused. `key` is the node key when it is known.
 pub(crate) fn check_peer(
     domain: &str,
