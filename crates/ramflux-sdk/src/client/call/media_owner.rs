@@ -5,6 +5,7 @@
 
 use super::handoff::InProcessMediaReceipt;
 use super::media_contract::{HostAudio, issue_media_token};
+use super::pcm_bridge::{self, DRAIN_DEADLINE};
 use crate::{SdkError, client::RamfluxClient};
 use ramflux_media::authorization::{GateReason, GateSnapshot};
 use ramflux_media::{Capture, Engine, EngineStats, MediaSession, Playback};
@@ -121,9 +122,19 @@ impl OwnedMedia {
         Ok(())
     }
 
-    /// Copy of the host-reported state; the engine lock is not held by the caller.
+    /// Opaque public handle of this session.
+    pub(crate) fn token(&self) -> u64 {
+        self.token
+    }
+
+    /// Copy of the host-reported state with the live PCM counters filled in.
     pub(crate) fn host_state(&self) -> HostAudio {
-        self.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner).host
+        let mut host = self.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner).host;
+        let (captured, capture_drops, render_underruns) = pcm_bridge::counters();
+        host.captured_frames = captured;
+        host.capture_drops = capture_drops;
+        host.render_underruns = render_underruns;
+        host
     }
 
     fn start(
@@ -141,6 +152,8 @@ impl OwnedMedia {
         );
         let mut running = self.running.lock().map_err(|_| unavailable())?;
         if let Ok(engine) = result {
+            let generation = engine.gate().generation;
+            pcm_bridge::publish(self.token, generation).map_err(|_| unavailable())?;
             running.engine = Some(engine);
             Ok(())
         } else {
@@ -153,6 +166,8 @@ impl OwnedMedia {
 
     fn stop(&self, reason: GateReason) {
         self.session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        // Unpublish first so no new callback passes; then join the engine workers; then drain.
+        pcm_bridge::retire(self.token);
         let mut running = self.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(engine) = running.engine.take() {
             let mut gate = engine.fence(reason);
@@ -166,7 +181,16 @@ impl OwnedMedia {
         }
         running.last.gate.reason = Some(reason);
         running.last.gate.retired = true;
-        running.last.drained = true;
+        running.last.drained = pcm_bridge::drain(self.token, DRAIN_DEADLINE);
+    }
+
+    /// Open the callbacks only while the engine's authority and OS audio gate both allow audio.
+    fn sync_pcm(&self, running: &Running) {
+        let open = running.engine.as_ref().is_some_and(|engine| {
+            let gate = engine.gate();
+            gate.reason.is_none() && gate.audio_active
+        });
+        pcm_bridge::set_open(self.token, open);
     }
 
     fn snapshot(&self) -> InProcessMediaStatus {
@@ -258,6 +282,7 @@ impl RamfluxClient {
             if !engine.audio_active(active) {
                 return Err(SdkError::LocalBusPermissionDenied);
             }
+            owned.sync_pcm(&running);
         }
         Ok(owned.snapshot())
     }
@@ -384,6 +409,7 @@ impl RamfluxClient {
         if let Some(generation) = &call.gateway_generation {
             running.last.receipt.resolution_generation.clone_from(generation);
         }
+        owned.sync_pcm(&running);
     }
 }
 

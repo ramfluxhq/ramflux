@@ -24,6 +24,7 @@ mod exports;
 mod host_key;
 mod input;
 mod input_config;
+mod media;
 mod method_policy;
 mod native_error;
 mod projection;

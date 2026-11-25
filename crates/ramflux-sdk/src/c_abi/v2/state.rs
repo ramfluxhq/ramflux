@@ -44,6 +44,8 @@ pub(super) struct OperationState {
     pub slot: ResultSlot,
     pub result: Option<Zeroizing<Vec<u8>>>,
     pub access: Option<crate::bus::app_lock_fence::Token>,
+    /// Client handle of a `call.media.open`; binds the PCM callbacks to it once.
+    pub media_client: Option<u64>,
 }
 
 pub(super) struct Event {
@@ -109,6 +111,9 @@ impl Shared {
                 {
                     *subscription = None;
                     self.deactivate_generation();
+                }
+                if let Some(handle) = state.media_client.take() {
+                    super::media::bind_open(handle, &encoded);
                 }
                 state.result = Some(encoded);
                 state.detached

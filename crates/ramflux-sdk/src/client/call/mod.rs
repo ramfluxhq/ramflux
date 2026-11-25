@@ -8,6 +8,7 @@ pub(crate) mod intent;
 mod lease;
 pub(crate) mod media_contract;
 pub(crate) mod media_owner;
+pub(crate) mod pcm_bridge;
 pub(crate) mod state;
 
 pub use handoff::InProcessMediaReceipt;

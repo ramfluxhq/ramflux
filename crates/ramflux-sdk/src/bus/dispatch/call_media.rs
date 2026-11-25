@@ -10,6 +10,7 @@ use crate::client::call::media_contract::{
     ActiveBody, MutedBody, OpenBody, RouteBody, TokenBody, media_view,
 };
 use crate::client::call::media_owner::OwnedMedia;
+use crate::client::call::pcm_bridge::{PcmCapture, PcmPlayback};
 use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 use serde::de::DeserializeOwned;
@@ -47,9 +48,18 @@ pub(super) fn dispatch(
     Ok(local_bus_ok(value))
 }
 
-/// Admission precheck for open. Checkpoint 2 hands the PCM bridge's capture and playback
-/// adapters to the writer here; until then the call is refused after its sequence check.
+/// Open the one in-process session. Re-reading an already admitted open for this call returns
+/// its current view without a second take or engine; otherwise the sequence is checked first.
 fn open(account: &mut LocalBusAccountState, body: &OpenBody) -> Result<Value, SdkError> {
+    if let Some(owned) = account
+        .client
+        .in_process_media
+        .as_deref()
+        .filter(|owned| owned.receipt.call_id == body.call_id)
+    {
+        let token = owned.token();
+        return view(account, token, &body.call_id);
+    }
     let call =
         account.client.voice_calls.get(&body.call_id).ok_or_else(|| invalid("call not live"))?;
     if call.row.seq != body.expected_seq {
@@ -59,7 +69,29 @@ fn open(account: &mut LocalBusAccountState, body: &OpenBody) -> Result<Value, Sd
             received: call.row.seq,
         });
     }
-    Err(invalid("media bridge not yet enabled"))
+    apply(
+        account,
+        MediaCommand::Open {
+            call_id: body.call_id.clone(),
+            expected_seq: body.expected_seq,
+            capture: Box::new(PcmCapture),
+            playback: Box::new(PcmPlayback),
+        },
+    )?;
+    let token = owned_by_call(account, &body.call_id)?.token();
+    view(account, token, &body.call_id)
+}
+
+fn owned_by_call<'a>(
+    account: &'a LocalBusAccountState,
+    call_id: &str,
+) -> Result<&'a OwnedMedia, SdkError> {
+    account
+        .client
+        .in_process_media
+        .as_deref()
+        .filter(|owned| owned.receipt.call_id == call_id)
+        .ok_or_else(|| invalid("media session unavailable"))
 }
 
 /// Resolve a token to its owned session, if this writer still holds it.

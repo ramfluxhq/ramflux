@@ -493,6 +493,9 @@ pub extern "C" fn ramflux_v2_execute(
             zeroize::Zeroizing::new(bytes.map_err(|error| super::super::map_sdk_error(&error))?);
         let operation = Arc::new(Operation::default());
         operation.state.lock().map_err(|_| internal())?.access = access;
+        if attended_method == "call.media.open" {
+            operation.state.lock().map_err(|_| internal())?.media_client = Some(handle);
+        }
         operation.state.lock().map_err(|_| internal())?.kind = if subscription {
             OperationKind::Subscription
         } else if frame_method_close {
