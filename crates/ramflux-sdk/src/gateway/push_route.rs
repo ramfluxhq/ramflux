@@ -265,6 +265,9 @@ impl GatewaySessionEngine {
     /// Returns signing or transport write errors.
     pub async fn register_push_route(&mut self) -> Result<Option<String>, SdkError> {
         let now = now_unix_timestamp().unsigned_abs();
+        if let Some((device_class, muted)) = self.config.device_policy {
+            self.write_frame(&GatewayClientFrame::DevicePolicy { device_class, muted }).await?;
+        }
         let routes: Vec<GatewayPushRouteRegistration> = self
             .config
             .push_routes

@@ -137,6 +137,8 @@ pub struct GatewaySessionConfig {
     pub push_route_retries: BTreeMap<super::GatewayPushProvider, super::PushRouteRetry>,
     /// Last push route control sequence (milliseconds, strictly increasing).
     pub push_route_last_seq: u64,
+    /// This device's node-local push policy, re-sent on every (re)connect.
+    pub device_policy: Option<(GatewayDeviceClass, bool)>,
     /// Advertise the session-push capability in the signed scope. Production sets this
     /// from the receive-activation discriminator (Activated iff advertised). Test
     /// constructors may set it directly for negotiation unit tests without a DB.
@@ -308,6 +310,7 @@ impl GatewaySessionConfig {
             push_route_retry: super::PushRouteRetry::default(),
             push_route_retries: BTreeMap::new(),
             push_route_last_seq: 0,
+            device_policy: None,
             session_push_advertise: false,
             connection_race: ConnectionRace::default(),
             native_grant_expires_at: None,
@@ -643,6 +646,25 @@ pub enum GatewayClientFrame {
     },
     /// Ask the gateway to re-admit the live native custody grant. A heartbeat does not.
     GrantRenew,
+    /// Node-local push policy of this device: class and mute (CENTRAL K9).
+    DevicePolicy {
+        device_class: GatewayDeviceClass,
+        muted: bool,
+    },
+    /// "User active now" (K10).
+    Activity {},
+    /// Notification state is empty on this device (K12).
+    NotificationsCleared {},
+}
+
+/// Device class as the node stores it (closed set, node-local; never sent to the centre).
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayDeviceClass {
+    Phone,
+    Tablet,
+    Desktop,
+    Terminal,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
@@ -714,6 +736,8 @@ pub enum GatewayServerFrame {
     Heartbeat {
         now: u64,
     },
+    /// Another device of this account read its notifications (K12 in-band clear).
+    NotificationsCleared {},
     Drain {
         session_id: String,
         reason: String,

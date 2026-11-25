@@ -4,6 +4,7 @@
 //! Session capabilities shared by direct SDK engines and daemon-managed clients.
 
 use crate::prelude::*;
+use crate::gateway::protocol::GatewayDeviceClass;
 use std::{future::Future, pin::Pin};
 
 /// One bounded session exchange, whose storage effects remain owned by its caller.
@@ -172,6 +173,19 @@ pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
         route: Option<GatewayPushRouteRegistration>,
     ) -> GatewayCallFuture<'_, Option<u64>>;
     /// # Errors
+    /// Returns an error if the frame cannot be written.
+    fn send_device_policy(
+        &mut self,
+        device_class: GatewayDeviceClass,
+        muted: bool,
+    ) -> GatewayCallFuture<'_, ()>;
+    /// # Errors
+    /// Returns an error if the frame cannot be written.
+    fn send_activity(&mut self) -> GatewayCallFuture<'_, ()>;
+    /// # Errors
+    /// Returns an error if the frame cannot be written.
+    fn send_notifications_cleared(&mut self) -> GatewayCallFuture<'_, ()>;
+    /// # Errors
     /// Returns an error if the session exchange is refused, cancelled, or expires.
     fn register_push_route(&mut self) -> GatewayCallFuture<'_, Option<String>>;
     /// # Errors
@@ -298,6 +312,19 @@ impl GatewaySessionAccess for GatewaySessionEngine {
         route: Option<GatewayPushRouteRegistration>,
     ) -> GatewayCallFuture<'_, Option<u64>> {
         Box::pin(GatewaySessionEngine::set_push_route(self, route))
+    }
+    fn send_device_policy(
+        &mut self,
+        device_class: GatewayDeviceClass,
+        muted: bool,
+    ) -> GatewayCallFuture<'_, ()> {
+        Box::pin(GatewaySessionEngine::send_device_policy(self, device_class, muted))
+    }
+    fn send_activity(&mut self) -> GatewayCallFuture<'_, ()> {
+        Box::pin(GatewaySessionEngine::send_activity(self))
+    }
+    fn send_notifications_cleared(&mut self) -> GatewayCallFuture<'_, ()> {
+        Box::pin(GatewaySessionEngine::send_notifications_cleared(self))
     }
     fn register_push_route(&mut self) -> GatewayCallFuture<'_, Option<String>> {
         Box::pin(GatewaySessionEngine::register_push_route(self))
@@ -484,6 +511,19 @@ impl GatewaySessionAccess for CountingGateway {
         _route: Option<GatewayPushRouteRegistration>,
     ) -> GatewayCallFuture<'_, Option<u64>> {
         unused("set_push_route")
+    }
+    fn send_device_policy(
+        &mut self,
+        _device_class: GatewayDeviceClass,
+        _muted: bool,
+    ) -> GatewayCallFuture<'_, ()> {
+        unused("send_device_policy")
+    }
+    fn send_activity(&mut self) -> GatewayCallFuture<'_, ()> {
+        unused("send_activity")
+    }
+    fn send_notifications_cleared(&mut self) -> GatewayCallFuture<'_, ()> {
+        unused("send_notifications_cleared")
     }
     fn register_push_route(&mut self) -> GatewayCallFuture<'_, Option<String>> {
         unused("register_push_route")

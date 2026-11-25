@@ -820,7 +820,7 @@ fn handle_itest_request(
                 keep_alive,
             )?;
         }
-        ("POST", "/s13/notify/device-policy" | "/s13/notify/activity" | "/s13/notify/clear") => {
+        ("POST", "/s13/notify/device-policy" | "/s13/notify/activity" | "/s13/notify/clear" | "/s13/notify/clear-plan") => {
             handle_s13_policy(
                 stream,
                 &ingress.store,
@@ -3519,6 +3519,12 @@ struct S13DevicePolicyRequest {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct S13ClearPlanRequest {
+    device_delivery_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct S13ActivityRequest {
     device_delivery_id: String,
     at_ms: u64,
@@ -3566,6 +3572,22 @@ fn handle_s13_policy(
                 "device policy recorded"
             );
             serde_json::json!({"ok": true})
+        }
+        "/s13/notify/clear-plan" => {
+            let request: S13ClearPlanRequest = serde_json::from_slice(body).map_err(parse_error)?;
+            match store.policy_group_peers(&request.device_delivery_id)? {
+                Some((account_group, peers)) => serde_json::json!({
+                    "account_group": account_group,
+                    "peers": peers
+                        .into_iter()
+                        .map(|(device_delivery_id, muted)| serde_json::json!({
+                            "device_delivery_id": device_delivery_id,
+                            "muted": muted,
+                        }))
+                        .collect::<Vec<_>>(),
+                }),
+                None => serde_json::Value::Null,
+            }
         }
         "/s13/notify/activity" => {
             let request: S13ActivityRequest = serde_json::from_slice(body).map_err(parse_error)?;

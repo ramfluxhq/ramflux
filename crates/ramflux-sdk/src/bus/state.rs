@@ -108,6 +108,8 @@ pub(crate) struct LocalBusAccountState {
     /// (unlock, pairing, role refresh) and regains them only when a session is installed. Anything
     /// that seals or signs an envelope outside a live session uses [`Self::sealing_config`].
     pub(crate) gateway_config: GatewaySessionConfig,
+    /// Last `device.activity.report` send (ms); the SDK sends at most one per 60 s.
+    pub(crate) last_activity_ms: Option<u64>,
     pub(crate) principal_commitment: String,
     pub(crate) target_delivery_id: String,
     pub(crate) pending_deliveries: Vec<GatewayInboxEntry>,
@@ -183,6 +185,7 @@ impl LocalBusAccountState {
             #[cfg(test)]
             test_task_deliveries_applied: None,
             relay_quic_pool: None,
+            last_activity_ms: None,
             gateway_config,
             principal_commitment,
             target_delivery_id,
@@ -246,6 +249,7 @@ impl LocalBusAccountState {
             #[cfg(test)]
             test_task_deliveries_applied: None,
             relay_quic_pool: None,
+            last_activity_ms: None,
             gateway_config,
             principal_commitment,
             target_delivery_id,
