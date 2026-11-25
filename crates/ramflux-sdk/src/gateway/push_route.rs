@@ -51,6 +51,17 @@ pub struct GatewayPushRouteRegistration {
     pub webpush_p256dh: Option<String>,
     #[serde(default)]
     pub webpush_auth: Option<String>,
+    /// Application identifier the token is sealed with. Host input only: never sent to the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    /// The token field is a sealed route (central mode). Absent on direct registrations.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sealed: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// APNs host the node will use. FCM and Web Push are production only.
@@ -110,6 +121,8 @@ pub enum GatewayPushRouteRefusal {
     Superseded,
     /// Verifiably not the routes' bound owner: retrying cannot succeed.
     RejectedOwner,
+    /// Local refusal: central mode has no usable key set or pin, so nothing was sent.
+    PushKeysetUnavailable,
     /// A code from a newer node; retried like `unavailable` so it never breaks the session.
     #[serde(other)]
     Unknown,
@@ -124,6 +137,7 @@ impl GatewayPushRouteRefusal {
             Self::ProviderUnavailable => "provider_unavailable",
             Self::Rejected => "rejected",
             Self::RejectedOwner => "rejected_owner",
+            Self::PushKeysetUnavailable => "push_keyset_unavailable",
             Self::Superseded => "superseded",
             Self::Unavailable | Self::Unknown => "unavailable",
         }
@@ -197,7 +211,8 @@ impl PushRouteRetry {
             }
             GatewayPushRouteRefusal::ProviderUnavailable
             | GatewayPushRouteRefusal::Rejected
-            | GatewayPushRouteRefusal::RejectedOwner => {
+            | GatewayPushRouteRefusal::RejectedOwner
+            | GatewayPushRouteRefusal::PushKeysetUnavailable => {
                 self.failures = 0;
                 self.not_before = sent_at.saturating_add(PUSH_ROUTE_PERMANENT_RETRY_SECONDS);
             }
@@ -336,6 +351,18 @@ impl GatewaySessionEngine {
         body: GatewayPushRouteRegistration,
     ) -> Result<Option<String>, SdkError> {
         let provider = body.provider;
+        let mut body = body;
+        let app = body.app.take();
+        let body = if self.config.push_mode.as_deref() == Some("central") {
+            crate::push_keyset::seal_registration(
+                &self.config,
+                body,
+                app,
+                crate::push_keyset::unix_millis_now(),
+            )?
+        } else {
+            body
+        };
         let signed_request = self.session_bound_request(GATEWAY_PUSH_ROUTE_PATH, &body)?;
         let request_id = signed_request.request_id.clone();
         self.write_push_route_frame(GatewayClientFrame::PushRouteRegister {
@@ -781,6 +808,8 @@ mod tests {
             endpoint: Some("https://push.example/sub".into()),
             webpush_p256dh: Some("p256dh".into()),
             webpush_auth: Some("auth".into()),
+            app: None,
+            sealed: false,
         }
     }
 
@@ -975,6 +1004,8 @@ mod tests {
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
+            app: None,
+            sealed: false,
         }
     }
 
@@ -988,6 +1019,8 @@ mod tests {
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
+            app: None,
+            sealed: false,
         }
     }
 
@@ -1012,6 +1045,8 @@ mod tests {
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
+            app: None,
+            sealed: false,
         };
         let value = serde_json::to_value(&body).expect("json");
         assert_eq!(value["provider"], "webpush");

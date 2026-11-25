@@ -137,6 +137,12 @@ pub struct GatewaySessionConfig {
     pub push_route_retries: BTreeMap<super::GatewayPushProvider, super::PushRouteRetry>,
     /// Last push route control sequence (milliseconds, strictly increasing).
     pub push_route_last_seq: u64,
+    /// Push mode the gateway echoed at establishment (`direct` or `central`).
+    pub(crate) push_mode: Option<String>,
+    /// The held, verified central key set (document and sequence fence).
+    pub(crate) push_keyset: Option<Box<crate::push_keyset::PushKeysetRecord>>,
+    /// The pinned home node identity key (unpadded base64url) that sealed tokens carry as `nk`.
+    pub(crate) push_node_public_key: Option<String>,
     /// Advertise the session-push capability in the signed scope. Production sets this
     /// from the receive-activation discriminator (Activated iff advertised). Test
     /// constructors may set it directly for negotiation unit tests without a DB.
@@ -308,6 +314,9 @@ impl GatewaySessionConfig {
             push_route_retry: super::PushRouteRetry::default(),
             push_route_retries: BTreeMap::new(),
             push_route_last_seq: 0,
+            push_mode: None,
+            push_keyset: None,
+            push_node_public_key: None,
             session_push_advertise: false,
             connection_race: ConnectionRace::default(),
             native_grant_expires_at: None,
