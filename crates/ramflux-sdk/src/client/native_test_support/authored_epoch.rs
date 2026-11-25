@@ -102,21 +102,35 @@ fn certify_target_epoch(source: &mut Fixture, target: &mut Fixture, epoch: u64) 
     body.previous_record_hash =
         Some(ramflux_protocol::custody::object_hash(&native.publication.record)?);
     body.device_set_epoch += 1;
+    let mut certificate = body
+        .devices
+        .iter()
+        .find(|entry| entry.device_id == target.config.device_id)
+        .ok_or("target device")?
+        .branch_certificate
+        .as_ref()
+        .ok_or("certificate")?
+        .body
+        .clone();
+    certificate.device_epoch = epoch;
+    certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+    // The declaration names the device epoch, so the re-epoched device signs a new one.
+    let message_layer = ramflux_crypto::custody::sign_enrollment_layer(&branch, &certificate)?;
     let entry = body
         .devices
         .iter_mut()
         .find(|entry| entry.device_id == target.config.device_id)
         .ok_or("target device")?;
-    let mut certificate = entry.branch_certificate.as_ref().ok_or("certificate")?.body.clone();
-    certificate.device_epoch = epoch;
-    certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
     entry.device_epoch = epoch;
+    let endorsed = Some(message_layer.clone());
+    entry.message_layer = endorsed.clone();
     entry.branch_certificate = Some(primary.certify_branch(certificate)?);
     native.publication.record = primary.sign_record(body)?;
     for entry in &mut native.devices {
         if entry.device_ref.device_id == target.config.device_id {
             entry.device_ref.device_epoch = epoch;
             entry.prekey_bundle = serde_json::to_value(&private.bundle)?;
+            entry.message_layer = endorsed.clone();
         }
     }
     let full = SdkDeviceManifestResponse::from_native((*native).clone())?;
