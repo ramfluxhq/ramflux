@@ -18,7 +18,6 @@ pub(in crate::bus) mod conversation_send;
 pub mod daemon;
 pub(crate) mod deferred_attachment;
 pub mod device;
-pub(crate) mod diag_export;
 pub mod grant_mcp;
 pub mod group;
 #[cfg(all(

@@ -663,6 +663,13 @@ impl Supervisor {
                 self.set_active(&id).await?;
                 return Ok(reply(serde_json::json!({"active_account_id": id})));
             }
+            "diag.export" => {
+                let since_ms = request.body.get("since_ms").and_then(serde_json::Value::as_u64);
+                return Ok(reply(crate::diag::export::export(&self.config.data_root, since_ms)));
+            }
+            "diag.snapshot" => {
+                return Ok(reply(crate::diag::export::snapshot(&self.config.data_root)));
+            }
             "daemon.status" => {
                 return Ok(reply(
                     serde_json::json!({"accounts": self.accounts.borrow().values().filter(|actor| actor.is_open()).count(), "socket_path": self.config.socket_path, "born_v3_creation":true, "schema_generation": ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION}),

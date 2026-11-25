@@ -412,9 +412,6 @@ async fn dispatch_local_bus_remainder(
             dispatch_grant_bus_request(request, state, connection)
         }
         method if method.starts_with("daemon.") => dispatch_daemon_bus_request(request, state),
-        "diag.export" | "diag.snapshot" => {
-            crate::bus::dispatch::diag_export::dispatch_diag_export(request, state)
-        }
         method if method.starts_with("diag.") => {
             crate::bus::dispatch::residue::dispatch_residue(request, state)
         }
