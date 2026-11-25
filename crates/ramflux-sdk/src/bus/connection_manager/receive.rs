@@ -851,7 +851,7 @@ async fn apply_ack_results_flush(
     }
 }
 
-fn map_batch_results(
+pub(crate) fn map_batch_results(
     sequences: &[u64],
     batch: Result<BatchReply, SdkError>,
 ) -> Vec<ReceiveAckResult> {
