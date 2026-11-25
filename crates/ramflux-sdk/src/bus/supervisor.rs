@@ -621,16 +621,13 @@ impl Supervisor {
         // send holds the account actor. It needs only the unlocked account.
         if matches!(
             request.method.as_str(),
-            "attachment.transfer.list" | "attachment.transfer.pause" | "attachment.transfer.resume"
+            "attachment.transfer.pause" | "attachment.transfer.resume"
         ) {
             let id = request_account_id(&request)?.to_owned();
             if !self.accounts.borrow().contains_key(&id) {
                 return Err(self.account_unavailable(&id));
             }
-            return Ok(reply(crate::attachment_send::transfer_body(
-                &request,
-                &self.config.data_root,
-            )?));
+            return Ok(reply(crate::attachment_send::transfer_body(&request)?));
         }
         self.start_event_router();
         self.ensure_request_allowed(&request)?;

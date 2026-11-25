@@ -112,11 +112,12 @@ pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bo
         .checked_mul(16)
         .and_then(|tags| tags.checked_add(layout.plaintext_length))
         .ok_or(Refusal::new(CODE_SEAL_FAILED))?;
-    let _running = super::transfer::enter(input.store.account_id(), &row.prepare_id, total)?;
     // The journal, never meta.json, is the only source of ACKs; a fresh upload id finds none.
     let upload = row.upload_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?;
     row.upload_acks =
         decode_acks(input.journal.load(&journal_key(&row.prepare_id, upload))?, count)?;
+    let _running = super::transfer::enter(input.store.account_id(), &row.prepare_id, total)?;
+    super::transfer::set_unique(input.store.account_id(), &row.prepare_id, ack_unique(row)?);
     let mut committed = None;
     for segment in 0..count {
         let index = u32::try_from(segment).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
@@ -148,10 +149,8 @@ pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bo
         let ack = row.upload_acks.get_mut(segment).ok_or(Refusal::new(CODE_SEAL_FAILED))?;
         // Never silently trust a local checkpoint if the relay no longer confirms it.
         *ack = if is_committed { status.received_bitmap } else { *ack & status.received_bitmap };
-        let confirmed = acked_bytes(length, *ack);
         checkpoint(input, row)?;
-        progress(input, row, &layout, total)?;
-        super::transfer::credit(input.store.account_id(), &row.prepare_id, confirmed);
+        super::transfer::set_unique(input.store.account_id(), &row.prepare_id, ack_unique(row)?);
         if !is_committed {
             put_slices(input, row, segment, &cipher)?;
         }
@@ -159,14 +158,13 @@ pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bo
     Ok(committed == Some(true))
 }
 
-/// Writes the non-secret progress record that `attachment.transfer.list` reads after a restart.
-/// It holds only the prepare id and the two byte counts, derived from the journaled ACKs.
-fn progress(
-    input: &PublishInput<'_>,
-    row: &Row,
-    layout: &SegmentLayout,
-    total: u64,
-) -> Result<(), Refusal> {
+/// Unique ciphertext bytes confirmed by the ACK bitmap of `row`. It is derived from the
+/// journal, so it is the same before and after a restart and never double-counts a retry.
+pub(crate) fn ack_unique(row: &Row) -> Result<u64, Refusal> {
+    let layout = SegmentLayout {
+        plaintext_length: row.plaintext_length.ok_or(Refusal::new(CODE_SEAL_FAILED))?,
+        network_chunk_bytes: u32::try_from(CHUNK).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?,
+    };
     let mut unique = 0_u64;
     for (segment, ack) in row.upload_acks.iter().enumerate() {
         let index = u64::try_from(segment).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
@@ -175,13 +173,7 @@ fn progress(
                 + 16;
         unique = unique.saturating_add(acked_bytes(length, *ack));
     }
-    let record = super::transfer::ProgressRecord {
-        prepare_id: row.prepare_id.clone(),
-        total_bytes: total,
-        unique_bytes: unique,
-    };
-    let bytes = serde_json::to_vec(&record).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-    input.store.write_named(&row.prepare_id, super::transfer::PROGRESS_FILE, &bytes)
+    Ok(unique)
 }
 
 /// Ciphertext bytes of the slices whose ACK bit is set, for a segment of `length` bytes.
@@ -266,8 +258,7 @@ fn put_slices(
             body,
         })
         .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-        let reply =
-            owner_wire::submit(input.plane, &op, body, input.owner, input.owner_key, input.now)?;
+        let reply = owner_wire::submit(input.plane, &op, body, input.owner, input.owner_key)?;
         if owner_wire::reply_object(&reply)?
             != row.object_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?
         {
@@ -275,11 +266,7 @@ fn put_slices(
         }
         *row.upload_acks.get_mut(segment).ok_or(Refusal::new(CODE_SEAL_FAILED))? |= bit;
         checkpoint(input, row)?;
-        super::transfer::credit(
-            input.store.account_id(),
-            &row.prepare_id,
-            u64::try_from(body.len()).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?,
-        );
+        super::transfer::set_unique(input.store.account_id(), &row.prepare_id, ack_unique(row)?);
     }
     Ok(())
 }

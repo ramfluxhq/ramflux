@@ -13,12 +13,14 @@ use crate::bus::io::request_account_id;
 use crate::bus::protocol::LocalBusFrame;
 
 use super::codes::{
-    CODE_AUTHORITY_UNAVAILABLE, CODE_DISABLED, CODE_DUPLICATE, CODE_LAYOUT_INVALID, Refusal,
+    CODE_AUTHORITY_UNAVAILABLE, CODE_DISABLED, CODE_DUPLICATE, CODE_LAYOUT_INVALID,
+    CODE_SEAL_FAILED, Refusal,
 };
 use super::handles;
 use super::meta::{CHUNK, Intent, Phase, Recipient, Row};
 use super::owner_wire::decode_hex;
 use super::store::Store;
+use super::upload::{self, AckRecord, journal_key};
 use super::{CONFIG_DIRECTORY, CONFIG_ID, enabled_value};
 
 /// # Errors
@@ -447,32 +449,59 @@ struct MessageBody {
     message_id: String,
 }
 
+/// `attachment.transfer.list` as a reader: running uploads in this process, merged with the
+/// pending sends that the durable rows and the encrypted account-DB ACK journal still hold.
+/// Readers run beside the account actor, so the list answers while an upload is in flight.
+/// # Errors
+/// Returns a local-bus error when the request is malformed or the account store cannot open.
+pub(crate) fn transfer_list(
+    client: &crate::RamfluxClient,
+    request: &LocalBusFrame,
+) -> Result<Value, SdkError> {
+    let account = request_account_id(request)?;
+    let root = account_dir(client)?;
+    let secret = client.vault_secret_source()?.vault_secret(account)?;
+    let store = Store::open(&root, account, secret)?;
+    let db = client.account_db()?;
+    let mut durable = Vec::new();
+    for mut row in store.pending_rows()? {
+        let Some(upload) = row.upload_id else { continue };
+        let acks = db
+            .load_actor_state::<AckRecord>(&journal_key(&row.prepare_id, upload))
+            .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+        row.upload_acks = acks.map_or_else(Vec::new, |record| record.acks);
+        let total = row.plaintext_length.unwrap_or(0).saturating_add(
+            16_u64.saturating_mul(u64::try_from(row.segment_digests.len()).unwrap_or(u64::MAX)),
+        );
+        durable.push(super::transfer::Snapshot {
+            prepare_id: row.prepare_id.clone(),
+            paused: false,
+            total_bytes: total,
+            unique_bytes: upload::ack_unique(&row)?,
+        });
+    }
+    let transfers: Vec<Value> = super::transfer::listed(account, durable)
+        .into_iter()
+        .map(|row| {
+            json!({
+                "prepare_id": row.prepare_id,
+                "paused": row.paused,
+                "total_bytes": row.total_bytes,
+                "unique_bytes": row.unique_bytes,
+            })
+        })
+        .collect();
+    Ok(json!({ "transfers": transfers }))
+}
+
 /// Transfer control of this process's running uploads. Served beside the account actor, so it
 /// answers while an upload holds that actor; it never waits on the upload itself.
 /// # Errors
 /// Returns a local-bus error for a missing or oversized `prepare_id`, and `not_ready` when the
 /// prepare has no running upload.
-pub(crate) fn transfer_body(
-    request: &LocalBusFrame,
-    data_root: &std::path::Path,
-) -> Result<Value, SdkError> {
+pub(crate) fn transfer_body(request: &LocalBusFrame) -> Result<Value, SdkError> {
     let account = request_account_id(request)?;
     match request.method.as_str() {
-        "attachment.transfer.list" => {
-            let prepares = data_root.join("accounts").join(account).join("attachment-prepares");
-            let transfers: Vec<Value> = super::transfer::listed(account, &prepares)
-                .into_iter()
-                .map(|row| {
-                    json!({
-                        "prepare_id": row.prepare_id,
-                        "paused": row.paused,
-                        "total_bytes": row.total_bytes,
-                        "unique_bytes": row.unique_bytes,
-                    })
-                })
-                .collect();
-            Ok(json!({ "transfers": transfers }))
-        }
         "attachment.transfer.pause" | "attachment.transfer.resume" => {
             let prepare = request
                 .body

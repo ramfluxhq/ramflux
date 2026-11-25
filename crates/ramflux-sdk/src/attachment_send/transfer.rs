@@ -2,11 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 //! In-process control of a running upload: the pause gate checked before each slice, and the
-//! unique byte count that `attachment.transfer.list` reports. The durable record stays the
-//! ACK journal; nothing here is persisted, and a process restart simply finds no running entry.
+//! unique byte count that `attachment.transfer.list` reports. Nothing here is persisted. The
+//! durable record is the encrypted account-DB ACK journal, from which the list derives the
+//! unique count of a pending send after a restart.
 
 use std::collections::BTreeMap;
-use std::io::Read as _;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -97,13 +97,13 @@ pub(crate) fn gate(account: &str, prepare_id: &str) -> Result<(), Refusal> {
     }
 }
 
-/// Adds confirmed bytes to the unique count. The caller credits a slice once, when its ACK is
-/// first set in this run; a replayed ACK is never credited twice.
-pub(crate) fn credit(account: &str, prepare_id: &str, bytes: u64) {
+/// Sets the unique count to the bytes the journaled ACK bitmap confirms. It is recomputed from
+/// the bitmap, not accumulated, so a replayed or lost confirmation can never double-count.
+pub(crate) fn set_unique(account: &str, prepare_id: &str, bytes: u64) {
     if let Ok(mut running) = REGISTRY.running.lock()
         && let Some(control) = running.get_mut(&key(account, prepare_id))
     {
-        control.unique_bytes = control.unique_bytes.saturating_add(bytes);
+        control.unique_bytes = bytes;
     }
 }
 
@@ -134,54 +134,11 @@ pub(crate) fn snapshot(account: &str) -> Vec<Snapshot> {
         .collect()
 }
 
-/// Name of the durable progress record kept beside each prepare's segments.
-pub(crate) const PROGRESS_FILE: &str = "progress.json";
-/// Bounds the scan of one account's prepares and the size of each record read.
-const PROGRESS_SCAN_CAP: usize = 256;
-const PROGRESS_BYTES_CAP: u64 = 4096;
-
-/// The non-secret counts written at each ACK checkpoint. Keys and paths never appear here.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct ProgressRecord {
-    pub prepare_id: String,
-    pub total_bytes: u64,
-    pub unique_bytes: u64,
-}
-
-/// Uploads that were in progress when this process last wrote their record. Read-only and
-/// bounded; a record whose name does not match its directory is ignored.
-pub(crate) fn durable(prepares_root: &std::path::Path) -> Vec<Snapshot> {
-    let Ok(entries) = std::fs::read_dir(prepares_root) else { return Vec::new() };
-    let mut rows = Vec::new();
-    for entry in entries.take(PROGRESS_SCAN_CAP).flatten() {
-        let dir = entry.path();
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
-        let Ok(file) = std::fs::File::open(dir.join(PROGRESS_FILE)) else { continue };
-        let mut bytes = Vec::new();
-        if std::io::Read::take(file, PROGRESS_BYTES_CAP + 1).read_to_end(&mut bytes).is_err()
-            || u64::try_from(bytes.len()).is_ok_and(|len| len > PROGRESS_BYTES_CAP)
-        {
-            continue;
-        }
-        let Ok(record) = serde_json::from_slice::<ProgressRecord>(&bytes) else { continue };
-        if record.prepare_id != name {
-            continue;
-        }
-        rows.push(Snapshot {
-            prepare_id: record.prepare_id,
-            paused: false,
-            total_bytes: record.total_bytes,
-            unique_bytes: record.unique_bytes,
-        });
-    }
-    rows.sort_by(|left, right| left.prepare_id.cmp(&right.prepare_id));
-    rows
-}
-
-/// Running uploads first; a durable record of a prepare that is not running here is listed too.
-pub(crate) fn listed(account: &str, prepares_root: &std::path::Path) -> Vec<Snapshot> {
+/// Running uploads first, then the durable pending sends that are not running in this process.
+/// `durable` comes from the account-DB journal, so it is the restart-safe view.
+pub(crate) fn listed(account: &str, durable: Vec<Snapshot>) -> Vec<Snapshot> {
     let mut rows = snapshot(account);
-    for row in durable(prepares_root) {
+    for row in durable {
         if !rows.iter().any(|running| running.prepare_id == row.prepare_id) {
             rows.push(row);
         }

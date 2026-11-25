@@ -46,7 +46,8 @@ pub(crate) mod transfer;
 pub(crate) mod upload;
 
 pub(crate) use bus::{
-    AuthorityPin, authority, dispatch, open_store, plane_for, transfer_body, unix_now,
+    AuthorityPin, authority, dispatch, open_store, plane_for, transfer_body, transfer_list,
+    unix_now,
 };
 pub(crate) use codes::{
     CODE_AUTHORITY_UNAVAILABLE, CODE_CANCELLED, CODE_DUPLICATE, CODE_LAYOUT_INVALID,

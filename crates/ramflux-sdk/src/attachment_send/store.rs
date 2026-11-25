@@ -401,8 +401,6 @@ impl Store {
                 row.phase = Phase::Admitted;
                 self.save(&row)?;
                 self.remove_admitted_plaintext(&row)?;
-                // Admitted sends leave the pending list; the progress record is no longer needed.
-                let _ = fs::remove_file(self.dir(id).join(super::transfer::PROGRESS_FILE));
             }
         }
         Ok(())
@@ -412,6 +410,30 @@ impl Store {
         row.phase = phase;
         self.save(&row)?;
         Ok(row)
+    }
+
+    /// Prepares whose send is still pending (uploading, uploaded, or granted but not admitted),
+    /// read from the durable rows. Bounded by the index; a row that does not load is skipped.
+    /// # Errors
+    /// Returns `seal_failed` when the index cannot be read.
+    pub(crate) fn pending_rows(&self) -> Result<Vec<Row>, Refusal> {
+        Ok(self
+            .index()?
+            .iter()
+            .filter_map(|entry| self.load(&entry.prepare_id).ok())
+            .filter(|row| {
+                row.upload_id.is_some()
+                    && matches!(
+                        row.phase,
+                        Phase::Reserved
+                            | Phase::Sealing
+                            | Phase::Bound
+                            | Phase::Uploading
+                            | Phase::Committed
+                            | Phase::Granted
+                    )
+            })
+            .collect())
     }
 
     pub(crate) fn load(&self, prepare_id: &str) -> Result<Row, Refusal> {
