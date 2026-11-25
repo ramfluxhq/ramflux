@@ -257,7 +257,7 @@ pub(crate) fn parse_reply(bytes: &[u8]) -> Reply {
     if u32::from_be_bytes(*len_bytes) as usize != json_bytes.len() {
         return retry;
     }
-    let Ok(value) = serde_json::from_slice::<Value>(json_bytes) else {
+    let Ok(value) = ramflux_protocol::parse_i_json::<Value>(json_bytes) else {
         return retry;
     };
     match value.get("status").and_then(Value::as_str) {
