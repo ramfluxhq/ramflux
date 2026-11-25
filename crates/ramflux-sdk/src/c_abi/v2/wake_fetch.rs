@@ -41,11 +41,15 @@ impl Decode for Config {
 /// and cannot exceed 5s or the remaining deadline. Invoke off the UI thread.
 /// The root must already exist with owner-only permissions (0700 on Unix).
 /// Supply the same ABI-v1 custody provider as the app; callbacks must return promptly.
-/// On status 0, JSON has outcome fetched/busy/locked/deadline; fetched items contain only
-/// `envelope_id` and decimal-string `inbox_seq`. Empty items means no pending page.
+/// On status 0, JSON has exactly `outcome` (fetched/busy/locked/deadline), `show` (boolean or
+/// null), `unread_total` (decimal string or null), `clears` (`[]` or `["messages"]`), `calls`
+/// (always `[]`) and `receipts_sent` (always `"0"`). Fetched means the whole page is durably
+/// applied and the notification candidates were consumed exactly once in this call; show is
+/// true only for a newly applied visible incoming message that is still unread and unmuted.
+/// Busy, locked and deadline return show and unread_total null and clears empty. A deadline
+/// or error may follow partial durable progress; the caller must invoke again.
 /// Entries use ordinary fenced receive policy: terminal application/refusal or durable hold.
 /// Only committed terminal intents are acknowledged; uncertain ACKs remain durable for replay.
-/// Deadline/error may follow partial durable progress. Fetched is not a notification result.
 /// No couriers, subscriptions, media, card runtime or downloads are started. No account code
 /// is checked and an explicitly locked account stays locked. Network/auth failures retain
 /// ordinary nonzero SDK statuses and leave output null. Free with `ramflux_v2_buffer_free`.

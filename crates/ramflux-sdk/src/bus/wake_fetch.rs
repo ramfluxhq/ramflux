@@ -13,22 +13,43 @@ use tokio::time::Instant;
 
 const PAGE_LIMIT: usize = 32;
 
+mod notification;
 mod receive;
 
+/// Host result. Every field is always present; unknown fields are null on non-fetched outcomes.
 #[derive(Serialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub(crate) enum Outcome {
-    Fetched { items: Vec<FetchedItem> },
-    Busy,
-    Locked,
-    Deadline,
+pub(crate) struct Wire {
+    outcome: &'static str,
+    show: Option<bool>,
+    unread_total: Option<String>,
+    clears: Vec<&'static str>,
+    calls: Vec<serde_json::Value>,
+    receipts_sent: &'static str,
 }
 
-/// Identifies fetched entries; ordinary receive policy determines projection or durable hold.
-#[derive(Serialize)]
-pub(crate) struct FetchedItem {
-    envelope_id: String,
-    inbox_seq: String,
+impl Wire {
+    /// Unknown on busy, locked and deadline: no decision was consumed.
+    fn unknown(outcome: &'static str) -> Self {
+        Self {
+            outcome,
+            show: None,
+            unread_total: None,
+            clears: Vec::new(),
+            calls: Vec::new(),
+            receipts_sent: "0",
+        }
+    }
+
+    fn fetched(decision: notification::Decision) -> Self {
+        Self {
+            outcome: "fetched",
+            show: Some(decision.show),
+            unread_total: Some(decision.unread_total.to_string()),
+            clears: if decision.clears { vec!["messages"] } else { Vec::new() },
+            calls: Vec::new(),
+            receipts_sent: "0",
+        }
+    }
 }
 
 pub(crate) fn run(
@@ -37,9 +58,9 @@ pub(crate) fn run(
     vault: Arc<dyn PrimaryVault + Send + Sync>,
     deadline: std::time::Instant,
     lease_wait: Duration,
-) -> Result<Outcome, SdkError> {
+) -> Result<Wire, SdkError> {
     if std::time::Instant::now() >= deadline {
-        return Ok(Outcome::Deadline);
+        return Ok(Wire::unknown("deadline"));
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -60,7 +81,7 @@ pub(crate) fn run(
         .await
     });
     let lease = match acquired {
-        Err(_) => return Ok(Outcome::Deadline),
+        Err(_) => return Ok(Wire::unknown("deadline")),
         Ok(Err(error)) => return classify(error),
         Ok(Ok(lease)) => lease,
     };
@@ -71,9 +92,9 @@ pub(crate) fn run(
         )
         .await
         {
-            Err(_) => Ok(Outcome::Deadline),
+            Err(_) => Ok(Wire::unknown("deadline")),
             Ok(Err(error)) => classify(error),
-            Ok(Ok(items)) => Ok(Outcome::Fetched { items }),
+            Ok(Ok(decision)) => Ok(Wire::fetched(decision)),
         }
     });
     // Join custody's blocking jobs before releasing ownership, including on timeout.
@@ -83,16 +104,20 @@ pub(crate) fn run(
     result
 }
 
-fn classify(error: SdkError) -> Result<Outcome, SdkError> {
+fn classify(error: SdkError) -> Result<Wire, SdkError> {
     match &error {
-        SdkError::DataRootInUse => Ok(Outcome::Busy),
-        SdkError::Storage(cause) if cause.is_writer_busy() => Ok(Outcome::Busy),
-        SdkError::CustodyVault(crate::custody::CustodyVaultReason::Locked) => Ok(Outcome::Locked),
-        SdkError::LocalBusRefused { code, .. } if code == "SessionLeaseBusy" => Ok(Outcome::Busy),
+        SdkError::DataRootInUse => Ok(Wire::unknown("busy")),
+        SdkError::Storage(cause) if cause.is_writer_busy() => Ok(Wire::unknown("busy")),
+        SdkError::CustodyVault(crate::custody::CustodyVaultReason::Locked) => {
+            Ok(Wire::unknown("locked"))
+        }
+        SdkError::LocalBusRefused { code, .. } if code == "SessionLeaseBusy" => {
+            Ok(Wire::unknown("busy"))
+        }
         SdkError::LocalBusRefused { code, .. }
             if matches!(code.as_str(), "AccountCodeRequired" | "DeviceUnlockUnavailable") =>
         {
-            Ok(Outcome::Locked)
+            Ok(Wire::unknown("locked"))
         }
         _ => Err(error),
     }
@@ -102,7 +127,7 @@ async fn fetch(
     config: &LocalBusConfig,
     account_id: &str,
     vault: Arc<dyn PrimaryVault + Send + Sync>,
-) -> Result<Vec<FetchedItem>, SdkError> {
+) -> Result<notification::Decision, SdkError> {
     vault.preflight()?;
     let mut client = RamfluxClient::new();
     client.open_account_index(&config.data_root)?;
@@ -140,14 +165,9 @@ async fn fetch(
     if let Some(engine) = account.engine.take() {
         engine.shutdown_transport().await;
     }
-    let page = page?;
-    Ok(page
-        .into_iter()
-        .map(|entry| FetchedItem {
-            envelope_id: entry.envelope.envelope_id,
-            inbox_seq: entry.inbox_seq.to_string(),
-        })
-        .collect())
+    // Decide only after the whole page is durably applied; a failed page consumes nothing.
+    page?;
+    notification::decide(&account.client)
 }
 
 async fn connection_config(

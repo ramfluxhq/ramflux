@@ -911,6 +911,7 @@ impl RamfluxClient {
             self.hold_contact_routed_message(&opened.routing, entry, body, metadata, references)?;
             None
         } else {
+            let existed = self.account_db()?.direct_message_by_id(&opened.routing.message_id)?.is_some();
             for (index, (reference, prepared)) in references.into_iter().enumerate() {
                 let registration = self.persist_sender_attachment_reference(
                     reference,
@@ -928,7 +929,9 @@ impl RamfluxClient {
                     Err(error) => return Err(error),
                 }
             }
-            self.project_routed(opened, entry, body, metadata)?
+            let projected = self.project_routed(opened, entry, body, metadata)?;
+            self.record_wake_candidate(opened, entry, existed)?;
+            projected
         };
         // Generated control origin/identity/route authority precedes its native effect.
         if let Some(shared) = deferred_group {
@@ -957,6 +960,31 @@ impl RamfluxClient {
             commit_fault::take(commit_fault::projection(&opened.routing.kind))?;
         }
         Ok((plaintext, admitted, pending))
+    }
+
+    /// Records a first-projected incoming visible message for the wake notification decision.
+    /// Runs inside the projection transaction; receipts, own copies and repeats record nothing.
+    fn record_wake_candidate(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        existed: bool,
+    ) -> Result<(), SdkError> {
+        if existed || !matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
+            return Ok(());
+        }
+        if self.own_copy_ack_binding(entry)?.is_some() {
+            return Ok(());
+        }
+        let db = self.account_db()?;
+        let Some(row) = db.direct_message_by_id(&opened.routing.message_id)? else {
+            return Ok(());
+        };
+        if row.deleted || row.is_own {
+            return Ok(());
+        }
+        db.record_notification_candidate(&row.conversation_id, &row.message_id, row.created_at)?;
+        Ok(())
     }
 
     fn apply_authorized_prepared_shared_group(
