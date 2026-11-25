@@ -3,8 +3,8 @@
 
 //! Durable, ordered consent decisions, including explicit lifts of old denials.
 use super::AccountDb;
-use crate::{ContactLinkDecision, StorageError};
 use super::block_sync::next_block_counter;
+use crate::{ContactLinkDecision, StorageError};
 use rusqlite::{OptionalExtension, params};
 impl AccountDb {
     /// Reads the durable logical stamp of the latest consent decision for a link.

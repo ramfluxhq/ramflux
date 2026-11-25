@@ -26,7 +26,6 @@ pub(crate) mod recipient_home;
 pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};
 pub(crate) mod agent_activity;
 pub(crate) mod agent_custody;
-pub(crate) mod block_sync;
 pub(crate) mod agent_custody_calls;
 pub(crate) mod agent_rebind;
 pub(crate) mod agent_record_sync;
@@ -35,6 +34,7 @@ mod authored_delete;
 mod authored_send;
 #[cfg(test)]
 mod authored_send_owner_tests;
+pub(crate) mod block_sync;
 pub(crate) mod delivery_receipts;
 pub mod dm;
 pub mod dm_session;

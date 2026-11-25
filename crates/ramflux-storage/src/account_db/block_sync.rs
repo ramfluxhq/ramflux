@@ -138,10 +138,10 @@ impl AccountDb {
                     )
                     .optional()?
                 };
-                if let Some((state, counter, device)) = existing.as_ref() {
-                    if !block_decision_supersedes(&record, (*counter, device, state)) {
-                        return Ok(false);
-                    }
+                if existing.as_ref().is_some_and(|(state, counter, device)| {
+                    !block_decision_supersedes(&record, (*counter, device, state))
+                }) {
+                    return Ok(false);
                 }
                 if record.kind == KIND_CONTACT_REQUEST {
                     apply_request_decision(db, &record)?;

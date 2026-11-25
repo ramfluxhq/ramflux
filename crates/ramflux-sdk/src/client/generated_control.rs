@@ -125,7 +125,11 @@ fn validate_block_sync(body: &g::BlockDecisionSync) -> Result<(), SdkError> {
     if body.decisions.len() > super::block_sync::MAX_BLOCK_DECISIONS {
         return Err(refused("block set too large"));
     }
-    if body.decisions.iter().any(|decision| !matches!(decision.kind.as_str(), "contact_request" | "friend_link")) {
+    if body
+        .decisions
+        .iter()
+        .any(|decision| !matches!(decision.kind.as_str(), "contact_request" | "friend_link"))
+    {
         return Err(refused("block decision kind"));
     }
     Ok(())

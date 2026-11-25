@@ -23,7 +23,14 @@ pub(super) fn consent_supersedes(new: &str, old: &str) -> String {
     )
 }
 
-fn supersedes(new_counter: &str, new_device: &str, new_state: &str, old_counter: &str, old_device: &str, old_state: &str) -> String {
+fn supersedes(
+    new_counter: &str,
+    new_device: &str,
+    new_state: &str,
+    old_counter: &str,
+    old_device: &str,
+    old_state: &str,
+) -> String {
     format!(
         "({new_counter},{new_device},{})>({old_counter},{old_device},{})",
         consent_rank(new_state),

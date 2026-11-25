@@ -39,8 +39,8 @@ mod backup_self_sync;
 #[cfg(test)]
 mod backup_self_sync_tests;
 mod backup_shared_groups;
-pub mod bot;
 pub mod block_sync;
+pub mod bot;
 mod contact_consent;
 mod contact_request_retention;
 mod contact_requests;

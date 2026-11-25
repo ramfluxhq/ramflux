@@ -5,7 +5,7 @@
 //!
 //! After a local block or unblock, the full block set (every `blocked` and `lifted` decision
 //! with its Lamport counter) is staged to the other devices of this root as one
-//! `BlockDecisionSync` control, through the same authenticated own-device fan-out as AgentSync.
+//! `BlockDecisionSync` control, through the same authenticated own-device fan-out as `AgentSync`.
 //! A receiver authorizes the sender (own root, current device epoch) and applies each decision by
 //! the storage ordering `(counter, device_id, state rank)`. No new key and no clear text reach
 //! the home.
@@ -143,7 +143,8 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         let own_root = self.own_account_anchor()?;
-        let declared = packet.source.as_ref().ok_or_else(|| refused("block sync source missing"))?;
+        let declared =
+            packet.source.as_ref().ok_or_else(|| refused("block sync source missing"))?;
         if packet.owner_anchor != own_root
             || source.root_commitment() != own_root
             || declared.account_anchor != source.root_commitment()
