@@ -317,19 +317,7 @@ impl AccountRuntime {
             let _ = reply.send(Err(refusal));
             return Ok(false);
         }
-        if command.request.method == "attachment.prepare.cancel"
-            && let Some(prepare) =
-                command.request.body.get("prepare_id").and_then(serde_json::Value::as_str)
-        {
-            // A parked upload stops before the cancel runs; its waiter resolves as cancelled.
-            let account = self.state.accounts.get(&self.id);
-            self.attachment_sends
-                .drain(&self.id, account, Some(prepare), || {
-                    crate::attachment_send::Refusal::new(crate::attachment_send::CODE_CANCELLED)
-                        .into()
-                })
-                .await;
-        }
+        self.stop_cancelled_upload(&command).await;
         if super::super::username_directory::handles(&command.request.method) {
             // Boxed: the username handler's future would otherwise enlarge every account command future on the stack.
             Box::pin(self.start_username(command, reply)).await;
@@ -457,6 +445,24 @@ impl AccountRuntime {
 
     /// A prepared send is parked or resumed off the actor. Returns the refusal for a live twin
     /// or an exhausted parking bound, and otherwise arms the send path for this admission.
+    /// A parked upload stops before its cancel runs; its waiter resolves as cancelled.
+    async fn stop_cancelled_upload(&mut self, command: &AccountCommand) {
+        if command.request.method != "attachment.prepare.cancel" {
+            return;
+        }
+        let Some(prepare) =
+            command.request.body.get("prepare_id").and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
+        let account = self.state.accounts.get(&self.id);
+        self.attachment_sends
+            .drain(&self.id, account, Some(prepare), || {
+                crate::attachment_send::Refusal::new(crate::attachment_send::CODE_CANCELLED).into()
+            })
+            .await;
+    }
+
     fn admit_attachment_send(&mut self, command: &AccountCommand) -> Option<SdkError> {
         let parking = super::super::publication_wait::carries_prepares(&command.request);
         let account = self.state.accounts.get_mut(&self.id);

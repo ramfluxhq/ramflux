@@ -52,6 +52,66 @@ pub(super) async fn send(
     Box::pin(send_account(request, account)).await
 }
 
+/// The message content of a send. A send with prepared attachments admits them first; its
+/// upload may be parked on the account actor, in which case the stage stays Uploading.
+/// The identity of one send, as its attachments and delivery see it.
+struct Sending<'a> {
+    operation: &'a str,
+    message_id: &'a str,
+    thread: &'a Value,
+    principal: &'a str,
+    account_id: &'a str,
+}
+
+async fn send_content(
+    account: &mut LocalBusAccountState,
+    intent: &Intent,
+    sending: &Sending<'_>,
+) -> Result<ramflux_protocol::message::Content, SdkError> {
+    let (operation, message_id, thread, principal, account_id) = (
+        sending.operation,
+        sending.message_id,
+        sending.thread,
+        sending.principal,
+        sending.account_id,
+    );
+    if intent.prepares.is_empty() {
+        return RamfluxClient::attachment_message_content(&intent.text, &intent.media);
+    }
+    let ids: Vec<String> = intent.prepares.iter().map(|item| item.prepare_id.clone()).collect();
+    record_phase(&account.client, operation, send_journal::SendPhase::Preparing)?;
+    if take_paused(&account.client, operation)? {
+        // A drain paused this upload before a restart: it stays paused until the owner resumes.
+        for prepare in &ids {
+            crate::attachment_send::transfer::set_paused(account_id, prepare, true)?;
+        }
+    }
+    let outcome = super::attachment_prepare::publish_prepares(
+        account,
+        super::attachment_prepare::PrepareSend {
+            prepares: &ids,
+            caption: &intent.text,
+            message_id,
+            operation,
+            thread,
+            principal,
+            account_id,
+            conversation_id: &intent.conversation_id,
+        },
+    )
+    .await;
+    match outcome {
+        Ok(content) => Ok(content),
+        Err(error) => {
+            // The first admission handed its upload to the worker: the stage is Uploading.
+            if account.attachment_send.upload.is_some() {
+                record_phase(&account.client, operation, send_journal::SendPhase::Uploading)?;
+            }
+            Err(error)
+        }
+    }
+}
+
 pub(in crate::bus) async fn send_account(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
@@ -83,42 +143,14 @@ pub(in crate::bus) async fn send_account(
     let principal = local.principal_id.clone();
     let sender = local.device_id.clone();
     reserve_intent(&account.client, operation, &request.body)?;
-    let content = if intent.prepares.is_empty() {
-        RamfluxClient::attachment_message_content(&intent.text, &intent.media)?
-    } else {
-        let ids: Vec<String> = intent.prepares.iter().map(|item| item.prepare_id.clone()).collect();
-        record_phase(&account.client, operation, send_journal::SendPhase::Preparing)?;
-        if take_paused(&account.client, operation)? {
-            // A drain paused this upload before a restart: it stays paused until the owner resumes.
-            for prepare in &ids {
-                crate::attachment_send::transfer::set_paused(account_id, prepare, true)?;
-            }
-        }
-        let outcome = super::attachment_prepare::publish_prepares(
-            account,
-            super::attachment_prepare::PrepareSend {
-                prepares: &ids,
-                caption: &intent.text,
-                message_id: &message_id,
-                operation,
-                thread: &thread,
-                principal: &principal,
-                account_id,
-                conversation_id: &intent.conversation_id,
-            },
-        )
-        .await;
-        match outcome {
-            Ok(content) => content,
-            Err(error) => {
-                // The first admission handed its upload to the worker: the stage is Uploading.
-                if account.attachment_send.upload.is_some() {
-                    record_phase(&account.client, operation, send_journal::SendPhase::Uploading)?;
-                }
-                return Err(error);
-            }
-        }
+    let sending = Sending {
+        operation,
+        message_id: &message_id,
+        thread: &thread,
+        principal: &principal,
+        account_id,
     };
+    let content = send_content(account, &intent, &sending).await?;
     if !intent.prepares.is_empty() {
         let pin = crate::attachment_send::authority(&account.client)?;
         account.client.attachment_binding =

@@ -34,7 +34,7 @@ const IMMEDIATE_RETRIES: u8 = 2;
 /// A send that carries prepared attachments is a durable upload, not an ordinary command: the
 /// relay calls, the owner's pause and the same-operation resume can outlast the command deadline.
 /// It is ended by its own completion, its cancel path or the account lifecycle, never by this.
-pub(crate) const ATTACHMENT_SEND_BUDGET: Duration = Duration::from_secs(24 * 60 * 60);
+pub(crate) const ATTACHMENT_SEND_BUDGET: Duration = Duration::from_hours(24);
 
 /// Whether a `conversation.send` request names at least one prepared attachment.
 pub(crate) fn carries_prepares(request: &super::protocol::LocalBusFrame) -> bool {

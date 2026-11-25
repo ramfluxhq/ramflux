@@ -73,6 +73,40 @@ impl Job {
 /// # Errors
 /// Returns a stable refusal before Reserve when the roster or the Inner does not fit,
 /// and `authority_unavailable` when the source pin is absent.
+/// First admission: the upload worker runs off the actor and the send resumes later.
+fn park_upload(
+    account: &mut LocalBusAccountState,
+    job: &Arc<Job>,
+    targets: Vec<crate::attachment_send::MediaDevice>,
+    rows: Vec<Row>,
+    calls: tokio::sync::mpsc::Receiver<JournalCall>,
+) -> SdkError {
+    let worker = tokio::task::spawn_blocking({
+        let job = Arc::clone(job);
+        move || {
+            let _ = upload_all(&job.input(&targets), &rows);
+        }
+    });
+    account.attachment_send.upload =
+        Some(crate::bus::account_runtime::attachment_sends::ParkedUpload { calls, worker });
+    Refusal::new(crate::bus::account_runtime::attachment_sends::PARKED).into()
+}
+
+/// This device as the owner of the upload.
+fn local_owner(
+    account: &LocalBusAccountState,
+    pin: &AuthorityPin,
+) -> Result<QualifiedOwner, SdkError> {
+    let branch = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    Ok(QualifiedOwner {
+        account_anchor: account.client.own_account_anchor()?,
+        device_id: branch.device_id.clone(),
+        device_epoch: branch.device_epoch,
+        signing_public_key: branch.signing_key.verifying_key().to_bytes(),
+        home_node_id: pin.home.clone(),
+    })
+}
+
 pub(in crate::bus) async fn publish_prepares(
     account: &mut LocalBusAccountState,
     request: PrepareSend<'_>,
@@ -100,15 +134,14 @@ pub(in crate::bus) async fn publish_prepares(
         return RamfluxClient::attachment_message_content(caption, &media);
     }
     let plane = crate::attachment_send::plane_for(account)?;
-    let branch = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let owner = QualifiedOwner {
-        account_anchor: account.client.own_account_anchor()?,
-        device_id: branch.device_id.clone(),
-        device_epoch: branch.device_epoch,
-        signing_public_key: branch.signing_key.verifying_key().to_bytes(),
-        home_node_id: pin.home.clone(),
-    };
-    let key = branch.signing_key.clone();
+    let owner = local_owner(account, &pin)?;
+    let key = account
+        .client
+        .device_branch
+        .as_ref()
+        .ok_or(SdkError::IdentityRootMissing)?
+        .signing_key
+        .clone();
     let (journal, mut calls) = JournalSink::channel();
     let job = Arc::new(Job { store, plane, owner, key, pin, caption: caption.to_owned(), journal });
     let scope = Scope::of(account, thread, principal, &job.pin)?;
@@ -116,18 +149,7 @@ pub(in crate::bus) async fn publish_prepares(
     let planned = scope.plan(account, &job.pin).await?;
     remember_roster(&account.client, message_id, &planned)?;
     if account.attachment_send.parking {
-        // First admission: the upload worker runs off the actor and the send resumes later.
-        let worker = tokio::task::spawn_blocking({
-            let job = Arc::clone(&job);
-            let targets = planned.targets.clone();
-            let rows = rows.clone();
-            move || {
-                let _ = upload_all(&job.input(&targets), &rows);
-            }
-        });
-        account.attachment_send.upload =
-            Some(crate::bus::account_runtime::attachment_sends::ParkedUpload { calls, worker });
-        return Err(Refusal::new(crate::bus::account_runtime::attachment_sends::PARKED).into());
+        return Err(park_upload(account, &job, planned.targets.clone(), rows, calls));
     }
     // The worker blocks on relay I/O; the account task serves its journal calls meanwhile.
     let mut upload = tokio::task::spawn_blocking({
@@ -178,9 +200,21 @@ pub(in crate::bus) async fn publish_prepares(
         return Err(Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into());
     }
 
+    finish_content(account, caption, message_id, prepares, &media)
+}
+
+/// Checks that the authored Inner fits, records each attachment object against its message and
+/// returns the content body.
+fn finish_content(
+    account: &LocalBusAccountState,
+    caption: &str,
+    message_id: &str,
+    prepares: &[String],
+    media: &[ramflux_protocol::message::MediaRef],
+) -> Result<ramflux_protocol::message::Content, SdkError> {
     let inner = ramflux_protocol::message::Message {
         text: caption.to_owned(),
-        media: media.clone(),
+        media: media.to_vec(),
         ..Default::default()
     }
     .encode_to_vec();
@@ -197,7 +231,7 @@ pub(in crate::bus) async fn publish_prepares(
             &json!({ "message_id": message_id, "prepare_id": prepare }),
         )?;
     }
-    RamfluxClient::attachment_message_content(caption, &media)
+    RamfluxClient::attachment_message_content(caption, media)
 }
 
 /// Answers journal calls until the upload worker finishes. Calls are served in order on the
@@ -228,8 +262,7 @@ pub(in crate::bus) fn answer(account: &LocalBusAccountState, call: JournalCall) 
         (JournalCall::Load { reply, .. }, Err(refusal)) => {
             let _ = reply.send(Err(refusal));
         }
-        (JournalCall::Save { reply, .. }, Err(refusal))
-        | (JournalCall::Emit { reply, .. }, Err(refusal)) => {
+        (JournalCall::Save { reply, .. } | JournalCall::Emit { reply, .. }, Err(refusal)) => {
             let _ = reply.send(Err(refusal));
         }
         (JournalCall::Emit { source, body, reply }, Ok(db)) => {

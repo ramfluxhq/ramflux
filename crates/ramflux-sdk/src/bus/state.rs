@@ -209,7 +209,7 @@ impl LocalBusAccountState {
             object_put_spools: BTreeMap::new(),
             object_get_spools: BTreeMap::new(),
             receive_active_cache: None,
-            attachment_send: Default::default(),
+            attachment_send: super::account_runtime::attachment_sends::Slot::default(),
         }
     }
 
@@ -272,7 +272,7 @@ impl LocalBusAccountState {
             object_put_spools: BTreeMap::new(),
             object_get_spools: BTreeMap::new(),
             receive_active_cache: None,
-            attachment_send: Default::default(),
+            attachment_send: super::account_runtime::attachment_sends::Slot::default(),
         }
     }
 

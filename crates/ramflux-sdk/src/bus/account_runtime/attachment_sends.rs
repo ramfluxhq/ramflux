@@ -121,7 +121,7 @@ impl AttachmentSends {
                 if let Poll::Ready(Some(call)) = parked.upload.calls.poll_recv(cx) {
                     return Poll::Ready(Event::Call(call));
                 }
-                if let Poll::Ready(_) = std::pin::Pin::new(&mut parked.upload.worker).poll(cx) {
+                if std::pin::Pin::new(&mut parked.upload.worker).poll(cx).is_ready() {
                     return Poll::Ready(Event::Finished(operation.clone()));
                 }
             }
