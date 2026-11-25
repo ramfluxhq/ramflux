@@ -53,6 +53,7 @@ pub use signed_device_set::{
 };
 mod kdf;
 mod key_verification;
+pub mod node_enrolment;
 mod prekey;
 mod recovery;
 mod sframe;

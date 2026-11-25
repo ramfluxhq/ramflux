@@ -11,11 +11,15 @@ use crate::NodeCoreError;
 
 /// Upper bound of the centre identifier bytes (the frame carries it with a u16 length).
 const MAX_CENTRE_ID_BYTES: usize = 128;
+/// Largest integer a report body may carry (JSON integers are 0..2^53-1).
+const MAX_KEY_GEN: u64 = (1 << 53) - 1;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NodeReportConfig {
     pub centre: NodeReportCentreConfig,
+    /// Key generation the centre registered for this node key (`key_gen`, 1 until rotation).
+    pub key_gen: u64,
     /// Operator-declared region. Absent: the hello carries no region (never inferred from an address).
     #[serde(default)]
     pub region: Option<NodeReportRegionConfig>,
@@ -94,6 +98,9 @@ pub fn validate(config: NodeReportConfig) -> Result<NodeReportConfig, NodeCoreEr
         .map_err(|_| invalid("node_report.centre.addr must be an IP socket address".into()))?;
     if centre.server_name.is_empty() || centre.ca_cert.is_empty() {
         return Err(invalid("node_report.centre.server_name and ca_cert are required".into()));
+    }
+    if config.key_gen == 0 || config.key_gen > MAX_KEY_GEN {
+        return Err(invalid("node_report.key_gen must be 1 or more, below 2^53".into()));
     }
     if let Some(region) = &config.region {
         validate_region(region)?;

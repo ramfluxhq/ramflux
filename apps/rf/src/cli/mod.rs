@@ -14,6 +14,7 @@ mod admin;
 mod agent;
 mod attachment;
 mod call_bot;
+mod centre;
 mod contact;
 mod username;
 pub(crate) use username::*;
@@ -34,6 +35,7 @@ mod node;
 mod object;
 mod surface;
 mod task;
+pub(crate) use centre::*;
 pub(crate) use node::*;
 pub(crate) use surface::*;
 pub(crate) use task::*;
@@ -84,6 +86,8 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     Daemon(DaemonCommand),
     Node(NodeCommand),
+    /// Central beta enrolment helpers: node key, fingerprint and signed enrolment requests (offline).
+    Centre(CentreCommand),
     Account(AccountCommand),
     Contact(ContactCommand),
     Username(UsernameCommand),

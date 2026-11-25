@@ -80,6 +80,7 @@ async fn run() -> Result<(), RfError> {
     match cli.command {
         Command::Vault(command) => handlers::vault::handle(command).await,
         Command::Node(command) => handlers::node::handle_node(socket, command).await,
+        Command::Centre(command) => handlers::centre::handle(&command),
         Command::Daemon(command) => handlers::daemon::handle_daemon(socket, command).await,
         Command::Account(command) => handlers::account::handle_account(socket, command).await,
         Command::Contact(command) => handlers::contact::handle_contact(socket, command).await,
