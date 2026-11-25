@@ -44,4 +44,5 @@ turn_tcp_addr = "0.0.0.0:3478"
 # [push_central]
 # enabled = true
 # state_file = "/var/lib/ramflux/push_central.json"
+# The state file is mode 0600: federation, gateway and notify must run as the same uid.
 # handoff_socket = "/var/lib/ramflux/push/handoff.sock"

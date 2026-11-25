@@ -73,8 +73,7 @@ pub(crate) fn start(discovery: &FederationDiscoverySurface, seed: [u8; 32]) -> R
                 node_key,
                 key_gen,
                 push.state_file.clone(),
-                endpoint,
-                (centre, server_name),
+                (endpoint, centre, server_name),
             ) {
                 Ok(shared) => Arc::new(shared),
                 Err(error) => {
@@ -82,13 +81,18 @@ pub(crate) fn start(discovery: &FederationDiscoverySurface, seed: [u8; 32]) -> R
                     return;
                 }
             };
-            let handoff =
-                tokio::spawn(handoff::serve(push.handoff_socket.clone(), Arc::clone(&shared)));
+            let handoff_shared = Arc::clone(&shared);
+            let handoff_socket = push.handoff_socket.clone();
+            let handoff = tokio::spawn(async move {
+                if let Err(error) = handoff::serve(handoff_socket, handoff_shared).await {
+                    tracing::error!(%error, "push handoff socket not served");
+                }
+            });
             let sync_shared = Arc::clone(&shared);
             let sync = tokio::spawn(async move {
                 loop {
                     let wait = session::sync_once(&sync_shared).await;
-                    tokio::time::sleep(wait).await;
+                    session::pause(&sync_shared, wait).await;
                 }
             });
             shutdown.cancelled().await;
