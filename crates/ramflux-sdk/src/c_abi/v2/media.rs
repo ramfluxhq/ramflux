@@ -31,7 +31,7 @@ pub(super) fn bind_open(handle: u64, completion: &[u8]) {
         return;
     }
     let token = value
-        .pointer("/response/media_token")
+        .pointer("/response/body/media_token")
         .and_then(serde_json::Value::as_str)
         .and_then(|text| text.parse::<u64>().ok());
     if let Some(token) = token {
