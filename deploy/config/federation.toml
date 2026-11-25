@@ -38,3 +38,10 @@ public_listen_addr = "0.0.0.0:443"
 [signaling]
 turn_udp_addr = "0.0.0.0:3478"
 turn_tcp_addr = "0.0.0.0:3478"
+
+# Central push (rfc-push-1), disabled by default. Uncomment on a node that uses the central service.
+# Requires [node_report] (centre id, edge address, CA). Paths must be absolute.
+# [push_central]
+# enabled = true
+# state_file = "/var/lib/ramflux/push_central.json"
+# handoff_socket = "/var/lib/ramflux/push/handoff.sock"

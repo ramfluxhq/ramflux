@@ -42,6 +42,7 @@ mod registration_forward_tests;
 mod retention;
 mod send_authority;
 mod serve;
+mod push_central;
 mod session;
 mod session_fence;
 mod session_grant;
