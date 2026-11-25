@@ -245,6 +245,26 @@ impl RamfluxClient {
         self.open_unlocked_account(local_account_id, &key, born)
     }
 
+    /// Opens native account data with a key the platform presence provider released. The SDK
+    /// checks the key opens this account (the account database verifies it) and that the policy
+    /// still allows presence: on, with a wrap, and not hard-locked.
+    ///
+    /// # Errors
+    /// `AccountCodeRequired` when presence is not allowed; storage or open failures otherwise.
+    pub(crate) fn unlock_account_with_presence(
+        &mut self,
+        local_account_id: &str,
+        key: &ramflux_storage::AccountDbKey,
+    ) -> Result<(), SdkError> {
+        let born = self.born_account_for_unlock(local_account_id)?;
+        let _writer = self.account_index()?.acquire_account_writer(local_account_id)?;
+        let policy = self.account_index()?.app_lock_policy(local_account_id)?;
+        if !policy.enabled || !policy.presence_wrapped || policy.hard_locked {
+            return Err(device_unlock::account_code_required());
+        }
+        self.open_unlocked_account(local_account_id, key, born)
+    }
+
     fn born_account_for_unlock(
         &self,
         local_account_id: &str,

@@ -294,7 +294,9 @@ fn allowed(method: &str, action: &str) -> bool {
     match method {
         "device.pair.join" | "device.transfer.join" => matches!(action, "setup" | "unlock"),
         "device.transfer.prepare" => action == "phrase",
-        "device.transfer.status" | "account.unlock" => action == "unlock",
+        "device.transfer.status" | "account.unlock" | "account.app_lock.configure" => {
+            action == "unlock"
+        }
         _ => false,
     }
 }

@@ -37,6 +37,8 @@ pub(crate) fn unlock_from_provider(
 pub(crate) enum NativeUnlockSecret {
     Code(Zeroizing<String>),
     Device,
+    /// Account key released by the platform presence provider after a fresh presence proof.
+    Presence(ramflux_storage::AccountDbKey),
 }
 
 pub(super) fn unlock(
@@ -66,6 +68,7 @@ pub(super) fn unlock(
     match &secret {
         NativeUnlockSecret::Code(passphrase) => client.unlock_account(id, passphrase.as_bytes())?,
         NativeUnlockSecret::Device => client.unlock_account_with_device(id)?,
+        NativeUnlockSecret::Presence(key) => client.unlock_account_with_presence(id, key)?,
     }
     if let Some(node_id) = home_node_id {
         client.account_db()?.persist_actor_state("account/node-id", &node_id)?;

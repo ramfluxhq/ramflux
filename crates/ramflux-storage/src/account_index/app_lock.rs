@@ -137,23 +137,21 @@ impl AccountIndex {
         expected_generation: u64,
         change: AppLockChange,
     ) -> Result<AppLockPolicy, StorageError> {
-        let (enabled, timeout_ms, presence, silent) = match change {
+        let timeout_ms = match &change {
             AppLockChange::Enable { timeout_ms, presence } => {
-                (true, checked_timeout(timeout_ms)?, presence, None)
+                if let Some(wrap) = presence {
+                    checked_presence(wrap)?;
+                }
+                *timeout_ms
             }
-            AppLockChange::Disable { timeout_ms, silent } => {
-                (false, checked_timeout(timeout_ms)?, None, Some(silent))
-            }
+            AppLockChange::Disable { timeout_ms, .. } => *timeout_ms,
         };
-        if let Some(wrap) = &presence {
-            checked_presence(wrap)?;
-        }
+        checked_timeout(timeout_ms)?;
         let id = local_account_id.to_owned();
         let expected = i64::try_from(expected_generation)
             .map_err(|_| StorageError::Integrity("app lock generation overflow"))?;
-        self.connection.call_immediate_result(move |tx| {
-            write_app_lock(tx, &id, expected, enabled, timeout_ms, presence, silent)
-        })?
+        self.connection
+            .call_immediate_result(move |tx| write_app_lock(tx, &id, expected, change))?
     }
 
     /// Records the durable hard-lock override. Set before an explicit `account.lock` is
@@ -242,11 +240,16 @@ fn write_app_lock(
     tx: &rusqlite::Transaction<'_>,
     local_account_id: &str,
     expected: i64,
-    enabled: bool,
-    timeout_ms: i64,
-    presence: Option<AppLockPresenceWrap>,
-    silent: Option<WrappedAccountDbKey>,
+    change: AppLockChange,
 ) -> Result<AppLockPolicy, StorageError> {
+    let (enabled, timeout_ms, presence, silent) = match change {
+        AppLockChange::Enable { timeout_ms, presence } => {
+            (true, checked_timeout(timeout_ms)?, presence, None)
+        }
+        AppLockChange::Disable { timeout_ms, silent } => {
+            (false, checked_timeout(timeout_ms)?, None, Some(silent))
+        }
+    };
     require_account(tx, local_account_id)?;
     let generation = next_generation(tx, local_account_id, expected)?;
     let enabled_flag = i64::from(enabled);

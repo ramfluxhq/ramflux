@@ -113,7 +113,9 @@ pub(super) fn call(
             status.validate().map_err(|_| SdkError::PairingField("resume_scope"))?;
             PrivateCredentialCallKind::Resume { operation_id: status.operation_id }
         }
-        "account.unlock" if request.body.get("passphrase").is_none() => {
+        "account.unlock" | "account.app_lock.configure"
+            if request.body.get("passphrase").is_none() =>
+        {
             PrivateCredentialCallKind::Unlock
         }
         _ => return Ok(None),

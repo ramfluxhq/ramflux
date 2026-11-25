@@ -384,6 +384,14 @@ impl Supervisor {
                 request_account_id(&request)?,
             )?;
         }
+        if request.method == "account.app_lock.configure"
+            && let Some(call) = &credential_call
+        {
+            let _app_control = self.app_control_guard(&request.method).await;
+            self.ensure_request_allowed(&request)?;
+            self.expire_app_deadlines().await?;
+            return self.configure_app_lock(&request, connection, call).await;
+        }
         if request.method == "account.unlock"
             && let Some(call) = &credential_call
         {
@@ -550,6 +558,7 @@ impl Supervisor {
         self.set_unlocked(id, true).await?;
         self.advance_after_unlock(id).await;
         self.app_unlocked(id)?;
+        self.index.set_app_lock_hard_lock(id, false)?;
         Ok(reply(serde_json::to_value(result)?))
     }
 
@@ -672,7 +681,11 @@ impl Supervisor {
                 return self.remove_local(request).await;
             }
             "account.app_lock.configure" => {
-                return self.configure_app_lock(&request, connection).await;
+                return Err(crate::client::device_unlock::account_code_required());
+            }
+            "account.app_lock.unlock" => {
+                let _app_control = self.app_control_guard(&request.method).await;
+                return self.unlock_app_presence(&request, connection).await;
             }
             "account.app_lock.lock" => {
                 return self.lock_app_access(&request, connection).await;
@@ -740,6 +753,10 @@ impl Supervisor {
             return Err(self.account_unavailable(&id));
         };
         let locking = matches!(request.method.as_str(), "account.lock" | "account.sign_out");
+        if locking {
+            // Durable before the acknowledgement: presence unlock stays refused until a correct code.
+            self.index.set_app_lock_hard_lock(&id, true)?;
+        }
         if locking && self.index.app_lock_policy(&id)?.enabled {
             self.app_fences.transition(&id, true, true, "manual")?;
             self.close_app_subscriptions(&id);
@@ -779,6 +796,7 @@ impl Supervisor {
         if unlocking && response.is_ok() {
             self.advance_after_unlock(&id).await;
             self.app_unlocked(&id)?;
+            self.index.set_app_lock_hard_lock(&id, false)?;
         }
         if locking && response.is_ok() {
             actor.stop().await?;

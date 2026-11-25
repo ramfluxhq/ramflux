@@ -9,7 +9,9 @@ use super::RamfluxClient;
 use crate::SdkError;
 use ramflux_storage::WrappedAccountDbKey;
 
+pub(crate) mod code;
 pub(crate) mod policy;
+pub(crate) mod presence;
 
 impl RamfluxClient {
     /// Wraps the open account key for a silent restart. Does not write the index.

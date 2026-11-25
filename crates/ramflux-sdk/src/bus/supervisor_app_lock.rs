@@ -6,9 +6,11 @@
 use super::super::lifecycle;
 use super::Supervisor;
 use crate::bus::io::request_account_id;
+use crate::client::app_lock::presence;
 use crate::prelude::*;
 use ramflux_storage::{AppLockChange, AppLockPolicy, StorageError, WrappedAccountDbKey};
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 impl Supervisor {
     pub(super) async fn app_control_guard(
@@ -18,6 +20,7 @@ impl Supervisor {
         if matches!(
             method,
             "account.app_lock.configure"
+                | "account.app_lock.unlock"
                 | "account.app_lock.lifecycle"
                 | "account.app_lock.state"
                 | "account.app_lock.lock"
@@ -198,24 +201,28 @@ impl Supervisor {
         }
     }
 
+    /// Configure with fresh authentication on every change. The account code arrives through the
+    /// private credential call, is checked, and only then is the policy committed.
     pub(super) async fn configure_app_lock(
         &self,
         request: &LocalBusFrame,
         connection: &LocalBusConnectionState,
+        call: &crate::custody::pairing::private_credential::PrivateCredentialCall,
     ) -> Result<super::ActorResponse, SdkError> {
         let account_id = self.authorize_app_lock_change(request, connection)?;
-        self.attach_app_control(connection.connection_id, &account_id);
-        let armed = self.app_fences.epoch(&account_id)?.deadline;
         let enabled = required_bool(&request.body)?;
         let timeout_ms = required_timeout(&request.body)?;
-        let policy = if enabled {
-            self.write_app_lock(account_id.clone(), true, timeout_ms, None).await?
-        } else {
-            let actor =
-                self.accounts.borrow().get(&account_id).cloned().ok_or_else(unauthorized)?;
-            let wrap = actor.silent_device_wrap().await?;
-            self.write_app_lock(account_id.clone(), false, timeout_ms, Some(wrap)).await?
-        };
+        refuse_unstaged_presence(&request.body)?;
+        let code = super::super::credentials::unlock_secret(
+            self.config.data_root.clone(),
+            account_id.clone(),
+        )
+        .await?;
+        call.require_live()?;
+        self.verify_change_code(&account_id, code.as_bytes())?;
+        self.attach_app_control(connection.connection_id, &account_id);
+        let armed = self.app_fences.epoch(&account_id)?.deadline;
+        let policy = self.write_app_lock(account_id.clone(), enabled, timeout_ms).await?;
         self.app_fences.transition(&account_id, policy.enabled, false, "configured")?;
         if policy.enabled
             && let Some(armed) = armed
@@ -226,6 +233,83 @@ impl Supervisor {
         }
         self.emit_app_lock_change(request, &account_id)?;
         Ok(super::reply(self.app_lock_body(&policy, &account_id)?))
+    }
+
+    /// Checks the account code for one app-lock change. A correct code also clears the durable
+    /// hard-lock override.
+    fn verify_change_code(&self, account_id: &str, code: &[u8]) -> Result<(), SdkError> {
+        let vault = super::super::custody_setup::primary_provider(&self.config);
+        let source = crate::client::device_unlock::DeviceBoundVaultSecret::bind(
+            &self.config.data_root,
+            vault.as_ref(),
+            account_id,
+            crate::client::device_unlock::DeviceSecret::Load,
+        )?;
+        let vault_secret =
+            Zeroizing::new(ramflux_storage::VaultSecretSource::vault_secret(&source, account_id)?);
+        crate::client::app_lock::code::verify_account_code(
+            &self.index,
+            account_id,
+            &vault_secret,
+            code,
+        )?;
+        self.index.set_app_lock_hard_lock(account_id, false)?;
+        Ok(())
+    }
+
+    /// Unlocks an account with a key the platform presence provider released. The provider's
+    /// result is admitted only if the access epoch did not move while it was pending; the account
+    /// then opens through the ordinary native unlock path before the epoch changes.
+    pub(super) async fn unlock_app_presence(
+        &self,
+        request: &LocalBusFrame,
+        connection: &LocalBusConnectionState,
+    ) -> Result<super::ActorResponse, SdkError> {
+        let id = request_account_id(request)?.to_owned();
+        refuse_attended(connection, &id)?;
+        self.refuse_unusable_agent(&id)?;
+        self.require_restore_ready(&id, true)?;
+        let policy = self.index.app_lock_policy(&id)?;
+        if policy.hard_locked {
+            return Err(crate::client::device_unlock::account_code_required());
+        }
+        let wrap = self.index.app_lock_presence_wrap(&id)?;
+        let (true, Some(wrap)) = (policy.presence_wrapped, wrap) else {
+            return Err(presence::unavailable());
+        };
+        let provider = presence::installed_provider().ok_or_else(presence::unavailable)?;
+        let binding = presence::binding(&id, &wrap.device_id, policy.generation)?;
+        let pending_generation = self.app_fences.epoch(&id)?.generation;
+        let key = presence::unwrap_key(provider, binding, wrap.wrapped).await?;
+        if self.app_fences.epoch(&id)?.generation != pending_generation {
+            return Err(presence::unavailable());
+        }
+        let actor = self.actor_for(&id)?;
+        let key = ramflux_storage::AccountDbKey::from_bytes(*key);
+        let result = actor
+            .unlock_native(super::super::native_account::NativeUnlockSecret::Presence(key), None)
+            .await?;
+        self.restore_states.borrow_mut().remove(&id);
+        self.set_active(&id).await?;
+        self.set_unlocked(&id, true).await?;
+        self.advance_after_unlock(&id).await;
+        self.app_unlocked(&id)?;
+        Ok(super::reply(serde_json::to_value(result)?))
+    }
+
+    fn actor_for(&self, id: &str) -> Result<super::AccountActor, SdkError> {
+        if let Some(actor) = self.accounts.borrow().get(id).cloned() {
+            return Ok(actor);
+        }
+        let actor = super::AccountActor::start(
+            id.into(),
+            self.config.clone(),
+            self.nodes.borrow().clone(),
+            self.index.clone(),
+            self.events.clone(),
+        )?;
+        self.accounts.borrow_mut().insert(id.into(), actor.clone());
+        Ok(actor)
     }
     pub(in crate::bus) fn attach_app_control(&self, connection: u64, id: &str) {
         if !self.accounts.borrow().contains_key(id) && self.index.account(id).is_err() {
@@ -291,10 +375,16 @@ impl Supervisor {
         account_id: String,
         enabled: bool,
         timeout_ms: u64,
-        wrap: Option<WrappedAccountDbKey>,
     ) -> Result<AppLockPolicy, SdkError> {
+        let silent = if enabled {
+            None
+        } else {
+            let actor =
+                self.accounts.borrow().get(&account_id).cloned().ok_or_else(unauthorized)?;
+            Some(actor.silent_device_wrap().await?)
+        };
         let index = self.index.clone();
-        lifecycle::spawn_blocking(move || commit(&index, &account_id, enabled, timeout_ms, wrap))
+        lifecycle::spawn_blocking(move || commit(&index, &account_id, enabled, timeout_ms, silent))
             .await
             .map_err(|error| SdkError::LocalBus(format!("index writer failed: {error}")))?
     }
@@ -310,14 +400,14 @@ fn commit(
     account_id: &str,
     enabled: bool,
     timeout_ms: u64,
-    wrap: Option<WrappedAccountDbKey>,
+    silent: Option<WrappedAccountDbKey>,
 ) -> Result<AppLockPolicy, SdkError> {
     let expected = index.app_lock_policy(account_id)?.generation;
     let change = if enabled {
         AppLockChange::Enable { timeout_ms, presence: None }
     } else {
         let silent =
-            wrap.ok_or(StorageError::Integrity("app lock disable requires a device wrap"))?;
+            silent.ok_or(StorageError::Integrity("app lock disable requires a device wrap"))?;
         AppLockChange::Disable { timeout_ms, silent }
     };
     crate::client::app_lock::policy::commit_policy(index, account_id, expected, change, |_| {})
@@ -416,5 +506,15 @@ fn invalid_argument() -> SdkError {
         code: "invalid_argument".to_owned(),
         message: "app lock timeout must be from 0 through 86400000 milliseconds".to_owned(),
         body: Box::new(serde_json::json!({"reason_code": "invalid_argument"})),
+    }
+}
+
+/// Presence-bound configure needs the account key staged on the platform before the commit; that
+/// staging is wired with the public provider. Until then presence is refused, never silently used.
+fn refuse_unstaged_presence(body: &serde_json::Value) -> Result<(), SdkError> {
+    match body.get("via").and_then(serde_json::Value::as_str) {
+        None | Some("account_code") => Ok(()),
+        Some("presence") => Err(presence::unavailable()),
+        Some(_) => Err(invalid_argument()),
     }
 }
