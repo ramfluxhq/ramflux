@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use ramflux_node_core::NotifyQueueEntry;
 
+use super::central_handoff::CentralDue;
 use super::{ConcurrentProviderPushWorkerPool, note_provider_send};
 
 enum AfterClaim {
@@ -153,12 +154,28 @@ fn deliver_claimed(
     let mut earliest: Option<u64> = None;
     for entry in entries {
         let queue_id = entry.queue_id.clone();
-        match deliver_entry(store, provider_workers, &entry) {
-            Ok(true) => retry_now = true,
-            Ok(false) => earliest = earlier_due(store, &entry, earliest, &mut retry_now),
-            Err(error) => {
-                tracing::warn!(queue_id = queue_id, %error, "notify async delivery failed");
-                retry_now = true;
+        if let Some(central) = super::central_handoff::active() {
+            // Central mode: the path says when to look again (H3); no direct due time applies.
+            match central.deliver(store, &entry) {
+                Ok(CentralDue::Changed) => retry_now = true,
+                Ok(CentralDue::Retry(at)) => {
+                    earliest = Some(earliest.map_or(at, |current| current.min(at)));
+                }
+                Ok(CentralDue::Idle) => {}
+                Err(error) => {
+                    tracing::warn!(queue_id = queue_id, %error, "central delivery failed");
+                    let at = ramflux_node_core::now_unix_seconds().saturating_add(2);
+                    earliest = Some(earliest.map_or(at, |current| current.min(at)));
+                }
+            }
+        } else {
+            match deliver_entry(store, provider_workers, &entry) {
+                Ok(true) => retry_now = true,
+                Ok(false) => earliest = earlier_due(store, &entry, earliest, &mut retry_now),
+                Err(error) => {
+                    tracing::warn!(queue_id = queue_id, %error, "notify async delivery failed");
+                    retry_now = true;
+                }
             }
         }
         release_entry(in_flight, &queue_id);
@@ -196,9 +213,6 @@ fn deliver_entry(
     provider_workers: &ConcurrentProviderPushWorkerPool,
     entry: &NotifyQueueEntry,
 ) -> Result<bool, ramflux_node_core::NodeCoreError> {
-    if let Some(central) = super::central_handoff::active() {
-        return central.deliver(store, entry);
-    }
     let pushes = store.prepare_provider_pushes_for_entry(entry)?;
     if pushes.is_empty() {
         tracing::debug!("notify async delivery found no provider pushes for pending entry");

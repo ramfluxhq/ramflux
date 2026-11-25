@@ -13,15 +13,19 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// One persisted first-send time, keyed by the queue entry it belongs to.
+/// One persisted first-send record, keyed by the queue entry it belongs to. It lives until the
+/// entry expires (H4), so a restart or a long deferral never extends the deadline.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CentralFirstSend {
     pub queue_id: String,
     pub first_send_ms: u64,
-    /// The centre rejected this wake for this route: it is never resent (plan: `rejected` drops
-    /// the batch).
+    /// The queue entry's internal expiry, Unix seconds. The record is pruned after it.
     #[serde(default)]
-    pub dropped: bool,
+    pub expires_s: u64,
+    /// The entry is settled for this route: accepted, duplicate, refused, invalid, paused,
+    /// resealed, rejected, or its deadline passed. It is never sent to this route again.
+    #[serde(default)]
+    pub settled: bool,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]

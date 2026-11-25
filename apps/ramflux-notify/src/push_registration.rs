@@ -82,13 +82,31 @@ pub(crate) fn register(
         serde_json::from_value(value).map_err(|_| rejected())?;
     let now = ramflux_node_core::now_unix_seconds();
     control.verify(&ingress.wake_auth.key, now)?;
-    let configured = credentials()?;
-    let route = match ramflux_node_core::admit_push_registration(
-        &configured,
-        &control.body.authority,
-        &control.body.registration,
-        now,
-    ) {
+    let admitted = if let Some(central) = super::central_handoff::active() {
+        // Central mode (A2.4, N14): only sealed registrations; no local credential is read.
+        let registration = &control.body.registration;
+        if !registration.sealed {
+            return Ok(Answer::Refused { code: PushRouteRefusal::Rejected });
+        }
+        // `dir.served` false for this provider: do not register it now (A6.4, R7).
+        if central.served_for(&registration.provider)? == Some(false) {
+            return Ok(Answer::Refused { code: PushRouteRefusal::ProviderUnavailable });
+        }
+        ramflux_node_core::admit_sealed_push_registration(
+            &control.body.authority,
+            registration,
+            now,
+        )
+    } else {
+        let configured = credentials()?;
+        ramflux_node_core::admit_push_registration(
+            &configured,
+            &control.body.authority,
+            &control.body.registration,
+            now,
+        )
+    };
+    let route = match admitted {
         Ok(route) => route,
         Err(code) => return Ok(Answer::Refused { code }),
     };

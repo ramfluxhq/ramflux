@@ -58,7 +58,7 @@ pub(super) fn select_wake_routes(
 pub(super) fn select_central_routes(
     routes: Vec<super::DevicePushRoute>,
     class: crate::push_handoff::CentralClass,
-    served: &crate::push_handoff::Served,
+    served: crate::push_handoff::Served,
     now_ms: u64,
 ) -> Vec<super::DevicePushRoute> {
     use crate::push_handoff::CentralClass;
