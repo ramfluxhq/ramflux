@@ -29,13 +29,13 @@ use super::codes::{
     CODE_STALE_GENERATION, CODE_STREAM_OFFSET, Refusal,
 };
 use super::import_job::{self, Importer, Opened, SourcePin};
+use super::import_journal::{self, Binding, ImportPhase, ImportRecord};
 use super::meta::CHUNK;
 use super::plane::Plane;
 use super::scheduler;
 use super::store::Store;
 
 pub(crate) const TOMBSTONE: &str = "attachment-tombstone";
-const BINDING: &str = "attachment-import";
 pub(crate) const RETIREMENT: &str = "attachment-retirement";
 const SENT: &str = "attachment-send";
 /// Open handles one account may hold, and the whole process.
@@ -45,7 +45,6 @@ const HANDLES_PROCESS: usize = 64;
 struct Job {
     account: String,
     message_id: String,
-    index: u64,
     generation: u64,
     length: u64,
     expires_at: u64,
@@ -105,20 +104,42 @@ pub(crate) fn begin(
     super::retire::barrier(&account.client, &body.message_id)?;
     let now = bus::unix_now()?;
     reap(now);
-    if let Some(existing) = bound(&account.client, &body.operation_id)?
-        && let Ok(view) = resume_existing(&id, &existing, &body)
-    {
-        return Ok(view);
-    }
+    let fingerprint = import_journal::fingerprint(&body.message_id, body.index);
+    let (resumed, import_id) =
+        match import_journal::load_binding(account.client.account_db()?, &body.operation_id)? {
+            Some(binding) => {
+                if binding.fingerprint != fingerprint {
+                    return Err(Refusal::new(CODE_DUPLICATE).into());
+                }
+                if let Some(job) = live_job(&binding.import_id, now) {
+                    if job.account != id {
+                        return Err(Refusal::new(CODE_NOT_OWNER).into());
+                    }
+                    return Ok(local_bus_ok(job_view(&binding.import_id, &job)));
+                }
+                let record =
+                    import_journal::load_record(account.client.account_db()?, &binding.import_id)?
+                        .ok_or(Refusal::new(CODE_NOT_READY))?;
+                import_journal::admissible(&record, now)?;
+                (Some(record), binding.import_id)
+            }
+            None => (None, fresh_id()?),
+        };
     let source = Source::find(&account.client, &id, &body)?;
+    let length = source.length();
+    let (generation, expires_at, revision) = match &resumed {
+        Some(record) if record.plaintext_length != length => {
+            return Err(Refusal::new(CODE_LAYOUT_INVALID).into());
+        }
+        Some(record) => (record.generation, record.expires_at, record.revision),
+        None => (1, now.saturating_add(super::meta::LEASE), 0),
+    };
     let plane = if matches!(&source, Source::Remote { .. }) {
         Some(bus::plane_for(account)?)
     } else {
         None
     };
-    let length = source.length();
     let scheduler_large = length >= scheduler::LARGE_BYTES;
-    let import_id = fresh_id()?;
     let root = bus::account_dir(&account.client)?;
     let dir = root.join("attachment-imports").join(&import_id);
     let reserve = budget::import_bytes(length)?;
@@ -127,10 +148,9 @@ pub(crate) fn begin(
     let job = Arc::new(Job {
         account: id.clone(),
         message_id: body.message_id.clone(),
-        index: body.index,
-        generation: 1,
+        generation,
         length,
-        expires_at: now.saturating_add(super::meta::LEASE),
+        expires_at,
         path: dir.join("body.bin"),
         dir,
         reserved: AtomicU64::new(reserve),
@@ -141,6 +161,21 @@ pub(crate) fn begin(
         meter: budget::Meter::default(),
         privacy: Mutex::new(None),
     });
+    let record = ImportRecord {
+        import_id: import_id.clone(),
+        generation,
+        message_id: body.message_id.clone(),
+        index: body.index,
+        plaintext_length: length,
+        expires_at,
+        phase: ImportPhase::Pending,
+        revision: revision.saturating_add(1),
+    };
+    let fresh = resumed.is_none().then_some((body.operation_id.as_str(), fingerprint.as_str()));
+    if let Err(error) = admit_record(&account.client, &record, fresh) {
+        job.invalidate();
+        return Err(error);
+    }
     if let Err(error) = register_recovery_privacy(&account.client, &import_id, &job, &source) {
         job.invalidate();
         return Err(error);
@@ -154,11 +189,26 @@ pub(crate) fn begin(
         remove(&import_id, &job);
         return Err(refusal.into());
     }
-    if let Err(error) = save_binding(&account.client, &body.operation_id, &import_id, &body) {
-        job.invalidate();
-        return Err(error);
+    Ok(local_bus_ok(view(&import_id, generation, "pending", 0, length, expires_at)))
+}
+
+/// Writes the durable record, and the operation binding on first admission, before a worker
+/// is scheduled.
+fn admit_record(
+    client: &crate::RamfluxClient,
+    record: &ImportRecord,
+    fresh: Option<(&str, &str)>,
+) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    import_journal::save_record(db, record)?;
+    if let Some((operation_id, fingerprint)) = fresh {
+        import_journal::save_binding(
+            db,
+            operation_id,
+            &Binding { import_id: record.import_id.clone(), fingerprint: fingerprint.to_owned() },
+        )?;
     }
-    Ok(local_bus_ok(view(&import_id, 1, "pending", 0, length, job.expires_at)))
+    Ok(())
 }
 
 fn register_recovery_privacy(
@@ -380,26 +430,28 @@ pub(crate) fn status(
 /// # Errors
 /// Returns `not_owner` when the handle belongs to another account.
 pub(crate) fn finish(
-    _account: &mut crate::bus::state::LocalBusAccountState,
+    account: &mut crate::bus::state::LocalBusAccountState,
     request: &LocalBusFrame,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: IdBody = serde_json::from_value(request.body.clone())?;
     let job = lookup(&body.import_id, request_account_id(request)?)?;
     job.finished.store(true, Ordering::Release);
     remove(&body.import_id, &job);
+    import_journal::set_phase(account.client.account_db()?, &body.import_id, ImportPhase::Finished)?;
     Ok(local_bus_ok(json!({"import_id": body.import_id, "state": "finished"})))
 }
 
 /// # Errors
 /// Returns `not_owner` when the handle belongs to another account.
 pub(crate) fn cancel(
-    _account: &mut crate::bus::state::LocalBusAccountState,
+    account: &mut crate::bus::state::LocalBusAccountState,
     request: &LocalBusFrame,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: IdBody = serde_json::from_value(request.body.clone())?;
     let job = lookup(&body.import_id, request_account_id(request)?)?;
     job.cancelled.store(true, Ordering::Release);
     remove(&body.import_id, &job);
+    import_journal::set_phase(account.client.account_db()?, &body.import_id, ImportPhase::Cancelled)?;
     Ok(local_bus_ok(json!({"import_id": body.import_id, "state": "cancelled"})))
 }
 
@@ -430,6 +482,24 @@ fn reap(now: u64) {
     }
 }
 
+/// The live handle for an import, if it has not died.
+fn live_job(import_id: &str, now: u64) -> Option<Arc<Job>> {
+    let table = jobs().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    table.get(import_id).filter(|job| !job.dead(now)).cloned()
+}
+
+fn job_view(import_id: &str, job: &Job) -> Value {
+    let ready = job.ready.load(Ordering::Acquire);
+    view(
+        import_id,
+        job.generation,
+        if ready { "ready" } else { "pending" },
+        if ready { job.length } else { 0 },
+        job.length,
+        job.expires_at,
+    )
+}
+
 fn count_ok(account: &str) -> Result<(), Refusal> {
     let table = jobs().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mine = table.values().filter(|job| job.account == account).count();
@@ -437,26 +507,6 @@ fn count_ok(account: &str) -> Result<(), Refusal> {
         return Err(Refusal::new(CODE_DISK_FULL));
     }
     Ok(())
-}
-
-fn resume_existing(
-    account_id: &str,
-    import_id: &str,
-    body: &BeginBody,
-) -> Result<LocalBusDispatchResult, SdkError> {
-    let job = lookup(import_id, account_id)?;
-    if job.message_id != body.message_id || job.index != body.index {
-        return Err(Refusal::new(CODE_DUPLICATE).into());
-    }
-    let ready = job.ready.load(Ordering::Acquire);
-    Ok(local_bus_ok(view(
-        import_id,
-        job.generation,
-        if ready { "ready" } else { "pending" },
-        if ready { job.length } else { 0 },
-        job.length,
-        job.expires_at,
-    )))
 }
 
 fn fail(job: &Job, code: &'static str) {
@@ -597,22 +647,6 @@ fn view(
     })
 }
 
-fn bound(client: &crate::RamfluxClient, operation_id: &str) -> Result<Option<String>, SdkError> {
-    let row = client.account_db()?.client_record(BINDING, operation_id)?;
-    Ok(row.and_then(|value| value.get("import_id").and_then(Value::as_str).map(str::to_owned)))
-}
-
-fn save_binding(
-    client: &crate::RamfluxClient,
-    operation_id: &str,
-    import_id: &str,
-    body: &BeginBody,
-) -> Result<(), SdkError> {
-    let row = json!({"import_id": import_id, "message_id": body.message_id, "index": body.index});
-    client.account_db()?.persist_client_record(BINDING, operation_id, &row)?;
-    Ok(())
-}
-
 fn read_at(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, Refusal> {
     let mut file = File::open(path).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     file.seek(SeekFrom::Start(offset)).map_err(|_| Refusal::new(CODE_STREAM_OFFSET))?;
@@ -654,7 +688,6 @@ pub(crate) fn test_register_job(import_id: &str, account: &str, message_id: &str
     let job = Arc::new(Job {
         account: account.to_owned(),
         message_id: message_id.to_owned(),
-        index: 0,
         generation: 1,
         length: 0,
         expires_at: u64::MAX,

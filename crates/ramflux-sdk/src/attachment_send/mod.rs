@@ -17,6 +17,7 @@ mod grant_wrap;
 mod handles;
 pub(crate) mod hooks;
 mod import_job;
+mod import_journal;
 #[cfg(test)]
 mod listener;
 mod meta;
