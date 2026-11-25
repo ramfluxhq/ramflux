@@ -15,7 +15,7 @@ Creates on first run (refused if they exist; rotation is deliberate):
 Every run writes public outputs derived from the node signing seed:
   DIR/username-pin.json  the `username` member of the rfc-centre-pin-1 bundle (section 0)
   DIR/witness.env, DIR/center.env  the RAMFLUX_USERNAME_* inputs per role (no secret material)
-  DIR/home.env           RAMFLUX_USERNAME_CENTER_* for a home node
+  DIR/home.env           RAMFLUX_USERNAME_CENTER_* for a home node (+ DIR/home-ca.pem, its CA file)
 
 Container paths are used inside federation.toml and the env files. The cluster format and the
 pin location are pending centre confirmation (plan section 1).
@@ -146,7 +146,13 @@ def main() -> None:
                   RAMFLUX_USERNAME_PRIMARY_DB=f"{ROOT}/center/primary.redb")
     for name, values in (("witness.env", witness), ("center.env", center)):
         (a.dir / name).write_text("".join(f"{k}={v}\n" for k, v in values.items()))
-    home = [f"{k}={v}" for k, v in common.items() if k.startswith("RAMFLUX_USERNAME_CENTER_")]
+    # A home takes only the pin (CENTER_UID is a centre-host key the home role refuses). Its CA file
+    # is the pin's ca_pem, written next to home.env; a home operator may move it and edit the path.
+    home_ca = a.dir / "home-ca.pem"
+    home_ca.write_text(pin["ca_pem"])
+    home = [f"{k}={v}" for k, v in common.items()
+            if k.startswith("RAMFLUX_USERNAME_CENTER_") and k != "RAMFLUX_USERNAME_CENTER_UID"]
+    home.append(f"RAMFLUX_USERNAME_CENTER_CA_FILE={home_ca.resolve()}")
     home.append(f"RAMFLUX_USERNAME_TRUST_GENERATION={a.generation}")
     (a.dir / "home.env").write_text("\n".join(home) + "\n")
     print(json.dumps({"username_pin": str(a.dir / "username-pin.json"),
