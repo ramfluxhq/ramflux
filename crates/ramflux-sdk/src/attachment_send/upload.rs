@@ -125,6 +125,10 @@ fn checkpoint(input: &PublishInput<'_>, row: &Row) -> Result<(), Refusal> {
 /// slice. A relay-only ACK is uncertain locally and is replayed byte for byte. Returns true
 /// when all segments were already committed, including recovery of a lost Commit reply.
 pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bool, Refusal> {
+    // The registry entry lives until the terminal snapshot is published: dropping it earlier made
+    // `claim_emit` refuse the forced final snapshot, so the last progress snapshot stayed short.
+    let total = ciphertext_total(row)?;
+    let _running = super::transfer::enter(input.store.account_id(), &row.prepare_id, total)?;
     let outcome = put_segments_inner(input, row);
     match &outcome {
         // Every slice is acknowledged: the final snapshot is forced so it carries the full unique
@@ -153,16 +157,10 @@ fn put_segments_inner(input: &PublishInput<'_>, row: &mut Row) -> Result<bool, R
         return Err(Refusal::new(CODE_SEAL_FAILED));
     }
     // Ciphertext bytes of the whole upload: each segment carries a 16-byte AEAD tag.
-    let total = u64::try_from(count)
-        .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?
-        .checked_mul(16)
-        .and_then(|tags| tags.checked_add(layout.plaintext_length))
-        .ok_or(Refusal::new(CODE_SEAL_FAILED))?;
     // The journal, never meta.json, is the only source of ACKs; a fresh upload id finds none.
     let upload = row.upload_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?;
     row.upload_acks =
         decode_acks(input.journal.load(&journal_key(&row.prepare_id, upload))?, count)?;
-    let _running = super::transfer::enter(input.store.account_id(), &row.prepare_id, total)?;
     super::transfer::set_unique(input.store.account_id(), &row.prepare_id, ack_unique(row)?);
     publish_transfer(input, row, "uploading", None, false, true)?;
     let mut committed = None;
