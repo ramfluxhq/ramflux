@@ -104,7 +104,7 @@ impl Plane for GatewayPlane {
             payload_generation: query.payload_generation,
             index: query.index,
         })?;
-        serde_json::from_slice(&bytes)
+        ramflux_protocol::parse_i_json(&bytes)
             .map_err(|_| Refusal::new(crate::attachment_send::CODE_LAYOUT_INVALID))
     }
 

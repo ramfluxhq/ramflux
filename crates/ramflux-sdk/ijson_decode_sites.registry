@@ -411,3 +411,4 @@ crates/ramflux-sdk/src/prekey.rs | quic_gateway_exchange | 1 | A | strict=parse_
 crates/ramflux-sdk/src/prx_host/runtime.rs | read_runtime | 1 | E | excluded=bounded private PRX runtime locator DTO; no signed envelope admission
 crates/ramflux-sdk/src/client/surface/card_session/approval.rs | component_hints | 1 | E | excluded=task binding hint from an already admitted card snapshot; not signed Envelope/Ack/Nack ingress
 crates/ramflux-sdk/src/c_abi/v2/input_config.rs | read_diag | 1 | E | excluded=host-supplied native open configuration (diagnostic logging options); not peer input or a signed envelope
+crates/ramflux-sdk/src/bus/attachment_plane.rs | upload_status | 1 | A | strict=parse_i_json; admission=A ingress boundary: attachment upload-status reply from the home relay (untrusted peer bytes)

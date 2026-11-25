@@ -26,3 +26,4 @@ apps/ramflux-federation/src/admin_http.rs | handle_admin_node_block | 1 | E | ex
 apps/ramflux-federation/src/mesh.rs | handle_home_submit_forward | 1 | A | strict=parse_i_json; admission=same-node router envelope ingress after verified identity
 apps/ramflux-federation/src/mesh.rs | serve_retention_sweep | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-federation/src/username_directory/wire.rs | decode | 1 | B | strict=parse_i_json; admission=bounded canonical documents on peer-UID or pinned-TLS channels before closed identity and account admission
+apps/ramflux-federation/src/node_report.rs | parse_reply | 1 | A | strict=parse_i_json; admission=A ingress boundary: central node-report reply frame (untrusted peer bytes)
