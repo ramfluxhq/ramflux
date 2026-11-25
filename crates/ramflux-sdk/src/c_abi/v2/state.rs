@@ -37,6 +37,8 @@ pub(super) enum ResultSlot {
 
 #[derive(Default)]
 pub(super) struct OperationState {
+    /// Echoed in the completion as `trace_id` (C-8).
+    pub trace_id: Option<String>,
     pub admitted: bool,
     pub kind: OperationKind,
     pub cancelled: bool,
@@ -85,9 +87,20 @@ pub(super) struct HostKeyFn {
 }
 
 impl Shared {
+    fn trace_of(&self, id: u64) -> Option<String> {
+        let operations = self.operations.lock().ok()?;
+        let operation = operations.get(&id)?;
+        let state = operation.state.lock().ok()?;
+        state.trace_id.clone()
+    }
     pub fn complete(&self, id: u64, mut value: serde_json::Value) {
         super::native_error::completion(&mut value);
         crate::diag::logging::refusal(&value);
+        if let Some(trace) = self.trace_of(id)
+            && let Some(map) = value.as_object_mut()
+        {
+            map.insert("trace_id".into(), serde_json::json!(trace));
+        }
         let success = value.get("code").and_then(serde_json::Value::as_i64) == Some(0);
         let encoded = Zeroizing::new(
             serde_json::to_vec(&value)
@@ -154,18 +167,20 @@ impl Shared {
     pub fn push_event(&self, bytes: Vec<u8>, generation: u64) {
         let bytes = Zeroizing::new(bytes);
         let Ok(mut events) = self.events.lock() else { return };
-        if !events.active || generation == 0 || generation != events.generation || events.resync {
+        if !events.active || generation == 0 || events.resync {
+            return;
+        }
+        if generation != events.generation {
+            crate::diag::events::abi_event("abi.event.drop", generation, "stale_generation");
             return;
         }
         if events.queue.len() >= MAX_EVENTS
             || bytes.len() > MAX_EVENT_BYTES.saturating_sub(events.bytes)
         {
-            if generation != events.generation {
-                return;
-            }
             events.queue.clear();
             events.bytes = 0;
             events.resync = true;
+            crate::diag::events::abi_event("abi.event.resync", generation, "credit_exhausted");
             return;
         }
         events.bytes += bytes.len();

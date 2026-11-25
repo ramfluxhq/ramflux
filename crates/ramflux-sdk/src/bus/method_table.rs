@@ -54,7 +54,7 @@ methods! {
     LocalRead(Always) => Reader: ["attachment.transfer.list"];
     LocalMutation(Always) => Supervisor: ["attachment.transfer.pause", "attachment.transfer.resume"];
     LocalMutation(Always) => Actor: ["search.index.rebuild"];
-    LocalRead(Always) => Actor: ["account.config.get", "diag.residue"];
+    LocalRead(Always) => Actor: ["account.config.get", "diag.residue", "diag.export", "diag.snapshot"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     NeedsNetwork(AuthorityFromNode) => Actor: ["attachment.enable"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin", "username.mutate", "profile.update", "account.reach.set"];

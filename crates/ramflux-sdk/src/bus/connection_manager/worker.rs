@@ -400,6 +400,7 @@ fn disconnected(
         snapshot.retry_after_ms = None;
         snapshot.next_retry_at_ms = None;
     });
+    crate::diag::events::conn_disconnect(&format!("{reason:?}"), generation);
     let _ = handle.shared.events.send(ConnectionEvent::Disconnected { reason, generation });
 }
 
@@ -438,6 +439,7 @@ fn backoff(handle: &ConnectionHandle, retry: &AdmissionRetry, error: &SdkError) 
         u64::try_from(until.saturating_duration_since(Instant::now()).as_millis())
             .unwrap_or(u64::MAX)
     });
+    crate::diag::events::conn_backoff(error, delay.unwrap_or(0));
     update(handle, |snapshot| {
         snapshot.phase = ConnectionPhase::Backoff;
         snapshot.gateway_writer_busy = error.gateway_writer_busy();
@@ -591,6 +593,7 @@ fn announce_live(
         snapshot.session_id = Some(resident.session().session_id.clone());
     });
     let session = resident.session().clone();
+    crate::diag::events::conn_connect(resumed, generation);
     let _ = handle.shared.events.send(ConnectionEvent::Connected {
         session_id: session.session_id.clone(),
         resumed,

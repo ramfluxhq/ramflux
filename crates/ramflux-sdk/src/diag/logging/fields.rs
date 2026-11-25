@@ -5,6 +5,125 @@
 use serde_json::{Map, Value, json};
 use tracing::field::{Field, Visit};
 
+/// Field registry (DIAGNOSTIC-LOGGING-01 6.3). Shipped as `ramflux_diag_fields.json`.
+/// Types: `count` (unsigned or signed integer), `bool`, `token` (`[a-z0-9_.]{1,48}`),
+/// `hash:<class>` (keyed hash made by the SDK, never by a host).
+pub(crate) const REGISTRY: &[(&str, &str)] = &[
+    ("active", "bool"),
+    ("applied", "count"),
+    ("attempt", "count"),
+    ("build_class", "token"),
+    ("bytes", "count"),
+    ("check", "token"),
+    ("code", "count"),
+    ("count", "count"),
+    ("cursor", "count"),
+    ("cursor_after", "count"),
+    ("cursor_before", "count"),
+    ("dead_lettered", "count"),
+    ("deferred", "count"),
+    ("delay_ms", "count"),
+    ("device_class", "token"),
+    ("duration_ms", "count"),
+    ("effect", "token"),
+    ("error_code", "token"),
+    ("fetched", "count"),
+    ("floor", "count"),
+    ("generation", "count"),
+    ("head", "count"),
+    ("held", "count"),
+    ("inbox_seq", "count"),
+    ("kind", "token"),
+    ("known_contact", "bool"),
+    ("level", "token"),
+    ("method", "token"),
+    ("name", "token"),
+    ("object_kind", "token"),
+    ("objects_failed", "count"),
+    ("objects_total", "count"),
+    ("objects_verified", "count"),
+    ("outcome", "token"),
+    ("paused", "bool"),
+    ("passes", "count"),
+    ("phase", "token"),
+    ("process", "token"),
+    ("reason", "token"),
+    ("reason_code", "token"),
+    ("request_counter", "count"),
+    ("resumed", "bool"),
+    ("result", "token"),
+    ("retry_after_ms", "count"),
+    ("retryable", "bool"),
+    ("stage", "token"),
+    ("state", "token"),
+    ("stale", "bool"),
+    ("stop_reason", "token"),
+    ("targets", "count"),
+    ("thread", "token"),
+    ("transport", "token"),
+    ("variant", "token"),
+    ("account_id", "hash:account"),
+    ("conversation_id", "hash:conversation"),
+    ("contact_id", "hash:contact"),
+    ("device_id", "hash:device"),
+    ("envelope_id", "hash:envelope"),
+    ("group_id", "hash:group"),
+    ("message_id", "hash:message"),
+    ("node_address", "hash:node"),
+    ("node_id", "hash:node"),
+    ("object_hash", "hash:object"),
+    ("object_id", "hash:object"),
+    ("operation_id", "hash:operation"),
+    ("principal_id", "hash:principal"),
+    ("session_id", "hash:session"),
+    ("source_device_id", "hash:device"),
+    ("source_principal_id", "hash:principal"),
+    ("target_delivery_id", "hash:delivery"),
+    ("username", "hash:username"),
+];
+
+/// The registered type of `key`, if the key may appear in a record.
+pub(crate) fn registered(key: &str) -> Option<&'static str> {
+    REGISTRY.iter().find(|(name, _)| *name == key).map(|(_, kind)| *kind)
+}
+
+/// Token rule shared by the event names, the component names and the host record fields.
+#[cfg(feature = "c-abi")]
+pub(crate) fn token(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 48
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.'))
+}
+
+/// Keeps only registered keys of an SDK-built object. Unknown keys are dropped, never written.
+pub(crate) fn sanitize(fields: Value) -> Value {
+    let Value::Object(map) = fields else { return json!({}) };
+    Value::Object(map.into_iter().filter(|(key, _)| registered(key).is_some()).collect())
+}
+
+/// Checks a host record's `f` object: registered keys with count, bool or token values only.
+/// Hashes are never accepted from a host; the SDK hashes identifiers itself.
+#[cfg(feature = "c-abi")]
+pub(crate) fn host_fields(value: &Value) -> Option<Map<String, Value>> {
+    let object = value.as_object()?;
+    let mut out = Map::new();
+    for (key, item) in object {
+        let accepted = match (registered(key)?, item) {
+            ("count", Value::Number(number)) => number.is_u64() || number.is_i64(),
+            ("bool", Value::Bool(_)) => true,
+            ("token", Value::String(text)) => token(text),
+            _ => false,
+        };
+        if !accepted {
+            return None;
+        }
+        out.insert(key.clone(), item.clone());
+    }
+    Some(out)
+}
+
 pub(super) struct Visitor<'a> {
     key: &'a [u8; 32],
     pub(super) fields: Map<String, Value>,

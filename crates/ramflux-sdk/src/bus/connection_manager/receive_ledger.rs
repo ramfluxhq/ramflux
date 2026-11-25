@@ -38,6 +38,7 @@ pub(super) struct CatchUp<'a> {
     pub progress: Option<&'a Progress>,
 }
 
+#[allow(clippy::too_many_lines, reason = "one ledger pass; the summary event sits at its end")]
 pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, SdkError> {
     let CatchUp {
         handle,
@@ -52,6 +53,10 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
         limit,
         progress,
     } = job;
+    let pass_cid = crate::diag::events::new_cid();
+    let cursor_before = cursor;
+    let mut fetched = 0_usize;
+    let mut head = cursor_before;
     flush_acks(handle, work, generation, trigger == ReceiveTrigger::Connected, call_timeout)
         .await?;
     let mut retries: std::collections::BTreeMap<_, _> =
@@ -70,6 +75,8 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
     } else {
         loop {
             let page = resume_one(handle, cursor, limit, call_timeout).await?;
+            fetched = fetched.saturating_add(page.entries.len());
+            head = page.issued_inbox_seq;
             pages = pages.saturating_add(1);
             if catch_up_yields(pages) {
                 handle.note_catch_up_yield();
@@ -124,6 +131,18 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
     // does not wait on the 1s age rule (courier ACK hold, first-page catch-up).
     flush_acks(handle, work, generation, trigger != ReceiveTrigger::Tick || active, call_timeout)
         .await?;
+    crate::diag::events::recv_progress(cursor_before, turn.cursor, head);
+    crate::diag::events::recv_pass_end(
+        &pass_cid,
+        serde_json::json!({
+            "cursor_before": cursor_before,
+            "cursor_after": turn.cursor,
+            "fetched": fetched,
+            "applied": applied,
+            "paused": paused,
+            "active": active,
+        }),
+    );
     Ok(LedgerCatchUp { active, paused, backpressure })
 }
 
@@ -348,14 +367,22 @@ fn step_outcome(
             Ok(Step::Covered)
         }
         ApplyOutcome::Paused { cursor } => {
+            crate::diag::events::recv_item("held", cursor);
             turn.cursor = cursor;
             Ok(Step::Paused)
         }
-        ApplyOutcome::NeedStage { sequence, cursor } => Ok(Step::NeedStage { sequence, cursor }),
+        ApplyOutcome::NeedStage { sequence, cursor } => {
+            crate::diag::events::recv_item("deferred", sequence);
+            Ok(Step::NeedStage { sequence, cursor })
+        }
         ApplyOutcome::NeedFetch { after } => {
+            crate::diag::events::recv_item("need_fetch", after);
             Ok(Step::NeedPoint { seq: after.saturating_add(1), cursor: after })
         }
-        ApplyOutcome::NeedPoint { seq, cursor } => Ok(Step::NeedPoint { seq, cursor }),
+        ApplyOutcome::NeedPoint { seq, cursor } => {
+            crate::diag::events::recv_item("need_point", seq);
+            Ok(Step::NeedPoint { seq, cursor })
+        }
     }
 }
 

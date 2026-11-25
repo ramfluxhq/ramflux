@@ -305,6 +305,26 @@ pub(crate) async fn dispatch_local_bus_request(
     state: &mut LocalBusDaemonState,
     connection: &mut LocalBusConnectionState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    if request.method != "message.submit" {
+        return dispatch_routed_request(request, state, connection).await;
+    }
+    // Diagnostics: one correlation id per send (the caller's trace id, or a fresh one).
+    let cid = request
+        .trace_id
+        .clone()
+        .filter(|id| crate::diag::events::valid_trace_id(id))
+        .unwrap_or_else(crate::diag::events::new_cid);
+    crate::diag::events::send_submit(&cid);
+    let result = dispatch_routed_request(request, state, connection).await;
+    crate::diag::events::send_finish(&cid, &request.method, result.as_ref().err());
+    result
+}
+
+async fn dispatch_routed_request(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+    connection: &mut LocalBusConnectionState,
+) -> Result<LocalBusDispatchResult, SdkError> {
     if request.kind != LocalBusFrameKind::Request {
         return Err(SdkError::LocalBus("expected request frame".to_owned()));
     }
@@ -392,6 +412,9 @@ async fn dispatch_local_bus_remainder(
             dispatch_grant_bus_request(request, state, connection)
         }
         method if method.starts_with("daemon.") => dispatch_daemon_bus_request(request, state),
+        "diag.export" | "diag.snapshot" => {
+            crate::bus::dispatch::diag_export::dispatch_diag_export(request, state)
+        }
         method if method.starts_with("diag.") => {
             crate::bus::dispatch::residue::dispatch_residue(request, state)
         }

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded process-owned diagnostic sink, independent of stderr filtering.
-mod fields;
+pub(crate) mod fields;
 mod files;
 mod key;
 use crate::SdkError;
@@ -93,6 +93,9 @@ pub(crate) enum Command {
 pub(crate) struct Session {
     config: DiagnosticConfig,
     key: zeroize::Zeroizing<[u8; 32]>,
+    epoch: u64,
+    /// Host-requested verbose window (`set_level`): level and its end in Unix milliseconds.
+    level_override: Mutex<Option<(tracing::Level, u64)>>,
     dropped: AtomicU64,
     sender: mpsc::SyncSender<Command>,
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -129,6 +132,8 @@ pub(crate) fn start(root: &Path, config: DiagnosticConfig) -> Result<Arc<Session
     let session = Arc::new(Session {
         config,
         key,
+        epoch,
+        level_override: Mutex::new(None),
         dropped: AtomicU64::new(0),
         sender,
         writer: Mutex::new(Some(writer)),
@@ -141,16 +146,65 @@ pub(crate) fn start(root: &Path, config: DiagnosticConfig) -> Result<Arc<Session
     session.record("I", "sdk.diag", "proc.start", json!({"build_class":session.config.build_class,"level":session.config.level,"key_epoch":epoch}), None);
     Ok(session)
 }
+
+/// The live process sink, if one is open. Never blocks: a sink being opened is skipped.
+pub(crate) fn active() -> Option<Arc<Session>> {
+    ACTIVE.try_lock().ok().and_then(|active| active.upgrade())
+}
+
+fn severity_of(level: &str) -> tracing::Level {
+    match level {
+        "E" => tracing::Level::ERROR,
+        "W" => tracing::Level::WARN,
+        "D" => tracing::Level::DEBUG,
+        "T" => tracing::Level::TRACE,
+        _ => tracing::Level::INFO,
+    }
+}
+
+fn maximum_of(level: &str) -> tracing::Level {
+    match level {
+        "error" => tracing::Level::ERROR,
+        "warn" => tracing::Level::WARN,
+        "debug" => tracing::Level::DEBUG,
+        "trace" => tracing::Level::TRACE,
+        _ => tracing::Level::INFO,
+    }
+}
+
 impl Session {
     pub(crate) fn accepts(&self, level: tracing::Level) -> bool {
-        let maximum = match self.config.level.as_str() {
-            "error" => tracing::Level::ERROR,
-            "warn" => tracing::Level::WARN,
-            "debug" => tracing::Level::DEBUG,
-            "trace" => tracing::Level::TRACE,
-            _ => tracing::Level::INFO,
+        let configured = maximum_of(&self.config.level);
+        let maximum = match self.level_override.lock() {
+            Ok(guard) => match *guard {
+                Some((verbose, until)) if now_ms() < until => verbose,
+                _ => configured,
+            },
+            Err(_) => configured,
         };
         level <= maximum
+    }
+    /// Opens the verbose window requested by the host. The caller checks the bounds.
+    #[cfg(feature = "c-abi")]
+    pub(crate) fn set_level_override(&self, level: tracing::Level, until: Option<u64>) {
+        if let Ok(mut guard) = self.level_override.lock() {
+            *guard = until.map(|until| (level, until));
+        }
+    }
+    pub(crate) fn key(&self) -> &[u8; 32] {
+        &self.key
+    }
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub(crate) fn process(&self) -> &str {
+        &self.config.process
+    }
+    pub(crate) fn level(&self) -> &str {
+        &self.config.level
+    }
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
     pub(crate) fn record(
         &self,
@@ -160,18 +214,28 @@ impl Session {
         fields: Value,
         error: Option<Value>,
     ) {
-        let severity = match level {
-            "E" => tracing::Level::ERROR,
-            "W" => tracing::Level::WARN,
-            "D" => tracing::Level::DEBUG,
-            "T" => tracing::Level::TRACE,
-            _ => tracing::Level::INFO,
-        };
-        if !self.accepts(severity) {
+        self.write("sdk", level, component, event, None, fields, error);
+    }
+    /// Writes one `ramflux.diag.v1` record. `layer` is `sdk`, `ui` or `bridge`.
+    #[allow(clippy::too_many_arguments, reason = "one record maps onto the schema fields")]
+    pub(crate) fn write(
+        &self,
+        layer: &str,
+        level: &str,
+        component: &str,
+        event: &str,
+        cid: Option<&str>,
+        fields: Value,
+        error: Option<Value>,
+    ) {
+        if !self.accepts(severity_of(level)) {
             return;
         }
         self.report_dropped();
-        let mut record = self.envelope(level, component, event);
+        let mut record = self.envelope(layer, level, component, event);
+        if let Some(cid) = cid {
+            record["cid"] = json!(cid);
+        }
         record["f"] = fields;
         if let Some(error) = error {
             record["err"] = error;
@@ -187,15 +251,15 @@ impl Session {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
-    fn envelope(&self, level: &str, component: &str, event: &str) -> Value {
-        json!({"schema":"ramflux.diag.v1","t":now_ms(),"m":elapsed_ms(),"lv":level,"p":self.config.process,"ly":"sdk","c":component,"e":event})
+    fn envelope(&self, layer: &str, level: &str, component: &str, event: &str) -> Value {
+        json!({"schema":"ramflux.diag.v1","t":now_ms(),"m":elapsed_ms(),"lv":level,"p":self.config.process,"ly":layer,"c":component,"e":event})
     }
     fn report_dropped(&self) {
         let count = self.dropped.swap(0, Ordering::Relaxed);
         if count == 0 {
             return;
         }
-        let mut record = self.envelope("W", "sdk.diag", "diag.dropped");
+        let mut record = self.envelope("sdk", "W", "sdk.diag", "diag.dropped");
         record["f"] = json!({"count":count});
         if self.sender.try_send(Command::Record(record, true)).is_err() {
             self.dropped.fetch_add(count, Ordering::Relaxed);
@@ -225,8 +289,7 @@ impl Drop for Session {
 pub struct DiagnosticLayer;
 impl<S: tracing::Subscriber> Layer<S> for DiagnosticLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
-        let session = ACTIVE.try_lock().ok().and_then(|active| active.upgrade());
-        let Some(session) = session else { return };
+        let Some(session) = active() else { return };
         if !event.metadata().target().starts_with("ramflux_sdk")
             && event.metadata().target() != "rf_diag"
         {
@@ -235,7 +298,7 @@ impl<S: tracing::Subscriber> Layer<S> for DiagnosticLayer {
         if !session.accepts(*event.metadata().level()) {
             return;
         }
-        let mut visitor = fields::Visitor::new(&session.key);
+        let mut visitor = fields::Visitor::new(session.key());
         event.record(&mut visitor);
         visitor.fields.insert("source".into(), json!(event.metadata().target()));
         let level = match *event.metadata().level() {
@@ -254,10 +317,10 @@ impl<S: tracing::Subscriber> Layer<S> for DiagnosticLayer {
         );
     }
 }
+/// Records a refused admission (status without an operation). Typed failures use `events`.
 #[cfg(feature = "c-abi")]
 pub(crate) fn refusal(value: &Value) {
-    let session = ACTIVE.try_lock().ok().and_then(|active| active.upgrade());
-    let Some(session) = session else { return };
+    let Some(session) = active() else { return };
     let code = value.get("code").and_then(Value::as_i64).unwrap_or(0);
     if code == 0 {
         return;
@@ -273,7 +336,7 @@ pub(crate) fn refusal(value: &Value) {
     let mut fields = json!({"method":method});
     if let Some(account) = value.pointer("/response/account_id").and_then(Value::as_str)
         && let Ok(hash) =
-            ramflux_crypto::diagnostic_short_hash(&session.key, "account", account.as_bytes())
+            ramflux_crypto::diagnostic_short_hash(session.key(), "account", account.as_bytes())
     {
         fields["account_id"] = json!(hash);
     }

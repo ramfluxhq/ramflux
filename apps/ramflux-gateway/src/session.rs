@@ -974,6 +974,12 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
             }
             match frame {
                 ramflux_node_core::GatewayClientFrame::Submit { submit } => {
+                    // Diagnostics (C-9): the request id is the join key with the client log.
+                    tracing::debug!(
+                        target: "ramflux_gateway_diag",
+                        request_id = %submit.signed_request.request_id,
+                        "gateway submit received"
+                    );
                     handle_gateway_submit(&send, &context, &runtime, &submit).await?;
                 }
                 ramflux_node_core::GatewayClientFrame::OwnDeviceFanout { fanout } => {

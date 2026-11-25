@@ -8,7 +8,25 @@ use zeroize::Zeroize;
 pub(crate) async fn handle(socket: PathBuf, command: DiagCommand) -> Result<(), RfError> {
     match command.action {
         DiagAction::Residue(residue) => scan_residue(socket, residue).await,
+        DiagAction::Export(args) => export_bundle(socket, args).await,
+        DiagAction::Snapshot => snapshot(socket).await,
     }
+}
+
+async fn export_bundle(socket: PathBuf, args: ExportArgs) -> Result<(), RfError> {
+    let mut bus = LocalBusClient::connect(&socket).await?;
+    let body = match args.since_ms {
+        Some(since_ms) => serde_json::json!({ "since_ms": since_ms }),
+        None => serde_json::json!({}),
+    };
+    let response = bus.request(None, "diag", "diag.export", body).await;
+    print_json(&response?)
+}
+
+async fn snapshot(socket: PathBuf) -> Result<(), RfError> {
+    let mut bus = LocalBusClient::connect(&socket).await?;
+    let response = bus.request(None, "diag", "diag.snapshot", serde_json::json!({})).await;
+    print_json(&response?)
 }
 
 async fn scan_residue(socket: PathBuf, residue: ResidueArgs) -> Result<(), RfError> {

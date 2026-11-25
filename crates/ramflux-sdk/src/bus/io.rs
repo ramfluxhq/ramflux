@@ -47,6 +47,7 @@ pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> Loca
     if let SdkError::LifecycleShared(source) = error {
         return local_bus_error(request, source);
     }
+    crate::diag::events::bus_failure(&request.method, request.trace_id.as_deref(), error);
     LocalBusFrame {
         bus_protocol: "ramflux.local_bus.v1".to_owned(),
         frame_id: format!("frame_err_{}", request.request_id),
