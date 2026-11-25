@@ -172,7 +172,8 @@ fn runtime_with_pending(
     let (_commands, receiver) = mpsc::channel(1);
     (
         AccountRuntime {
-            attachment_sends: Default::default(),
+            attachment_sends:
+                crate::bus::account_runtime::attachment_sends::AttachmentSends::default(),
             timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
             lifecycle,
             preempt,
