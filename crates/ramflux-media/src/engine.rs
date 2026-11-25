@@ -143,6 +143,8 @@ pub struct EngineStats {
     /// The highest keyframe revision the peer asked of this side's video
     /// (increasing; the host answers it with an IDR and [`Engine::keyframe_applied`]).
     pub keyframe_request_revision: u32,
+    /// Complete video access units reassembled (drained by the itest synthetic source only).
+    pub video_access_units: u64,
     /// Video datagrams sent.
     pub video_sent: u64,
     /// Video access units dropped before sending (queue full, or waiting for a keyframe).
@@ -535,10 +537,12 @@ fn spawn_synthetic_video(engine: &mut Engine) -> std::io::Result<()> {
     };
     let authorization = engine.authorization.clone();
     let control = engine.control.clone();
+    let video = engine.video.clone();
     let shared = engine.shared.clone();
     let stop = engine.stop.clone();
     engine.threads.push(spawn("ramflux-call-synthetic-video", move || {
-        synthetic_feeder(&authorization, &control, &out, &shared, &stop);
+        let feed = Feed { authorization: &authorization, control: &control, video: &video };
+        synthetic_feeder(&feed, &out, &shared, &stop);
     })?);
     Ok(())
 }
@@ -548,31 +552,55 @@ fn spawn_synthetic_video(_engine: &mut Engine) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The shared state the itest synthetic source runs against.
+#[cfg(feature = "itest-synthetic-video")]
+struct Feed<'a> {
+    authorization: &'a Authorization,
+    control: &'a Mutex<VideoControl>,
+    video: &'a Mutex<Reassembler>,
+}
+
 /// One synthetic access unit per frame interval while the video gate admits. An IDR every
 /// `IDR_EVERY` frames, and an IDR answering each new peer keyframe request (then acknowledged).
+/// It also drains complete received units (counted) and asks the peer for a keyframe whenever
+/// the bounded reassembly drops a unit (loss).
 #[cfg(feature = "itest-synthetic-video")]
 fn synthetic_feeder(
-    authorization: &Authorization,
-    control: &Mutex<VideoControl>,
+    feed: &Feed<'_>,
     out: &Mutex<VideoSender>,
     shared: &Mutex<Shared>,
     stop: &AtomicBool,
 ) {
     use crate::video::synthetic::{FRAME_INTERVAL, IDR_EVERY, access_unit};
     let mut index = 0_u64;
-    let mut applied = lock_control(control).peer_request();
+    let mut applied = lock_control(feed.control).peer_request();
+    let mut seen_drops = 0_u64;
     while !stop.load(Ordering::SeqCst) {
-        if authorization.lock().retired {
+        if feed.authorization.lock().retired {
             break;
         }
-        if authorization.lock().admitted_video() {
-            let request = lock_control(control).peer_request();
+        let now = Instant::now();
+        let mut complete = 0_u64;
+        while lock_video(feed.video).pop_ready(now).is_some() {
+            complete += 1;
+        }
+        let drops = lock_video(feed.video).dropped();
+        {
+            let mut stats = lock(shared);
+            stats.stats.video_access_units += complete;
+        }
+        if drops > seen_drops {
+            seen_drops = drops;
+            let _ = lock_control(feed.control).request_keyframe();
+        }
+        if feed.authorization.lock().admitted_video() {
+            let request = lock_control(feed.control).peer_request();
             let answer = request != applied;
             let idr = answer || index % IDR_EVERY == 0;
             let au = access_unit(index, idr);
-            let _ = submit_video_on(authorization, control, out, shared, &au);
+            let _ = submit_video_on(feed.authorization, feed.control, out, shared, &au);
             if answer {
-                lock_control(control).apply_keyframe(request);
+                lock_control(feed.control).apply_keyframe(request);
                 applied = request;
             }
             index = index.saturating_add(1);
