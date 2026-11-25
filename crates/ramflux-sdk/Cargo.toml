@@ -23,6 +23,9 @@ itest-identity-proof = []
 # SECONDARY-LAYER-01 integration only: a declaration lives 180 s and is renewed 60 s before
 # expiry, so expiry rows run in minutes. Default builds keep the 24 h validity.
 itest-short-layer-lease = []
+# CALLS-VIDEO V2.2b real run only: the media engine sends a fixed synthetic video source (no
+# camera, no encoder). Never in production or release builds.
+itest-synthetic-video = ["ramflux-media/itest-synthetic-video"]
 c-abi = ["dep:ramflux-client-model"]
 # Bundle the independently versioned renderer into this same Rust library.
 card-runtime = ["c-abi", "dep:ramflux-card", "ramflux-card/c-abi"]

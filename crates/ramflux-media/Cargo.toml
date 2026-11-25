@@ -25,3 +25,8 @@ ramflux-protocol = { workspace = true }
 
 [lints]
 workspace = true
+
+[features]
+# CALLS-VIDEO V2.2b real run only: a fixed synthetic video source feeds the send loop. Enabled by
+# the SDK feature of the same name, which refuses production and release builds.
+itest-synthetic-video = []

@@ -307,6 +307,7 @@ impl Engine {
         engine.threads.push(spawn("ramflux-call-send", move || sender.run())?);
         engine.threads.push(spawn("ramflux-call-receive", move || receiver.run())?);
         engine.threads.push(spawn("ramflux-call-playout", move || player.run())?);
+        spawn_synthetic_video(&mut engine)?;
         Ok(engine)
     }
 
@@ -372,25 +373,7 @@ impl Engine {
     /// [`PipelineError::Video`] for a malformed access unit.
     pub fn submit_video(&self, au: &AccessUnit) -> Result<Submitted, PipelineError> {
         let out = self.video_out.as_ref().ok_or(PipelineError::VideoNotNegotiated)?;
-        let outcome = if self.authorization.lock().admitted_video() {
-            let paused = {
-                let mut control = lock_control(&self.control);
-                control.note_outbound_revision(au.track_revision);
-                control.paused()
-            };
-            if paused {
-                Submitted { queued: false, dropped: 1 }
-            } else {
-                lock_sender(out).submit(au, Instant::now())?
-            }
-        } else {
-            Submitted { queued: false, dropped: 1 }
-        };
-        if outcome.dropped > 0 {
-            let dropped = u64::try_from(outcome.dropped).unwrap_or(u64::MAX);
-            lock(&self.shared).stats.video_send_dropped += dropped;
-        }
-        Ok(outcome)
+        submit_video_on(&self.authorization, &self.control, out, &self.shared, au)
     }
 
     fn flush_video(&self) {
@@ -513,6 +496,89 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> std::io::Result<JoinH
 
 fn lock(shared: &Mutex<Shared>) -> std::sync::MutexGuard<'_, Shared> {
     shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The submit path shared by [`Engine::submit_video`] and the itest synthetic source.
+fn submit_video_on(
+    authorization: &Authorization,
+    control: &Mutex<VideoControl>,
+    out: &Mutex<VideoSender>,
+    shared: &Mutex<Shared>,
+    au: &AccessUnit,
+) -> Result<Submitted, PipelineError> {
+    let outcome = if authorization.lock().admitted_video() {
+        let paused = {
+            let mut control = lock_control(control);
+            control.note_outbound_revision(au.track_revision);
+            control.paused()
+        };
+        if paused {
+            Submitted { queued: false, dropped: 1 }
+        } else {
+            lock_sender(out).submit(au, Instant::now())?
+        }
+    } else {
+        Submitted { queued: false, dropped: 1 }
+    };
+    if outcome.dropped > 0 {
+        let dropped = u64::try_from(outcome.dropped).unwrap_or(u64::MAX);
+        lock(shared).stats.video_send_dropped += dropped;
+    }
+    Ok(outcome)
+}
+
+/// Starts the synthetic video source on a call with a video track (itest builds only).
+#[cfg(feature = "itest-synthetic-video")]
+fn spawn_synthetic_video(engine: &mut Engine) -> std::io::Result<()> {
+    let Some(out) = engine.video_out.clone() else {
+        return Ok(());
+    };
+    let authorization = engine.authorization.clone();
+    let control = engine.control.clone();
+    let shared = engine.shared.clone();
+    let stop = engine.stop.clone();
+    engine.threads.push(spawn("ramflux-call-synthetic-video", move || {
+        synthetic_feeder(&authorization, &control, &out, &shared, &stop);
+    })?);
+    Ok(())
+}
+
+#[cfg(not(feature = "itest-synthetic-video"))]
+fn spawn_synthetic_video(_engine: &mut Engine) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// One synthetic access unit per frame interval while the video gate admits. An IDR every
+/// `IDR_EVERY` frames, and an IDR answering each new peer keyframe request (then acknowledged).
+#[cfg(feature = "itest-synthetic-video")]
+fn synthetic_feeder(
+    authorization: &Authorization,
+    control: &Mutex<VideoControl>,
+    out: &Mutex<VideoSender>,
+    shared: &Mutex<Shared>,
+    stop: &AtomicBool,
+) {
+    use crate::video::synthetic::{FRAME_INTERVAL, IDR_EVERY, access_unit};
+    let mut index = 0_u64;
+    let mut applied = lock_control(control).peer_request();
+    while !stop.load(Ordering::SeqCst) {
+        if authorization.lock().retired {
+            break;
+        }
+        if authorization.lock().admitted_video() {
+            let request = lock_control(control).peer_request();
+            let answer = request != applied;
+            let idr = answer || index % IDR_EVERY == 0;
+            let au = access_unit(index, idr);
+            let _ = submit_video_on(authorization, control, out, shared, &au);
+            if answer {
+                lock_control(control).apply_keyframe(request);
+                applied = request;
+            }
+            index = index.saturating_add(1);
+        }
+        std::thread::sleep(FRAME_INTERVAL);
+    }
 }
 
 fn lock_video(video: &Mutex<Reassembler>) -> std::sync::MutexGuard<'_, Reassembler> {

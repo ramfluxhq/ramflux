@@ -28,6 +28,14 @@ compile_error!(
 );
 #[cfg(all(feature = "itest-short-layer-lease", ramflux_production))]
 compile_error!("production builds must not enable itest-short-layer-lease");
+#[cfg(all(feature = "itest-synthetic-video", not(any(test, ramflux_itest))))]
+compile_error!(
+    "itest-synthetic-video requires cfg(test) or an explicit RAMFLUX_ITEST_BUILD=1 fixture build"
+);
+#[cfg(all(feature = "itest-synthetic-video", ramflux_production))]
+compile_error!("production builds must not enable itest-synthetic-video");
+#[cfg(all(feature = "itest-synthetic-video", ramflux_release_profile))]
+compile_error!("release profiles must not enable itest-synthetic-video");
 #[cfg(all(feature = "itest-short-layer-lease", ramflux_release_profile))]
 compile_error!("release profiles must not enable itest-short-layer-lease");
 

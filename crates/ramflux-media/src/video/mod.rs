@@ -12,3 +12,5 @@ pub mod packet;
 pub mod rate;
 pub mod reassembly;
 pub mod send;
+#[cfg(feature = "itest-synthetic-video")]
+pub mod synthetic;
