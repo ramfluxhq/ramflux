@@ -202,7 +202,12 @@ impl WitnessState {
                                         }
                                     }
                                     Err(error) => {
-                                        warn_drop("witness_public", address.ip(), "tls/request", &error);
+                                        warn_drop(
+                                            "witness_public",
+                                            address.ip(),
+                                            "tls/request",
+                                            &error,
+                                        );
                                     }
                                 }
                             },
