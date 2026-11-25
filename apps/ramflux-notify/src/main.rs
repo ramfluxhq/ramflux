@@ -6,6 +6,7 @@
 mod provider_issuance;
 mod provider_outcome;
 use provider_issuance::SendBoundary;
+mod central_handoff;
 mod delivery_loop;
 mod provider_payload;
 mod push_registration;
@@ -91,6 +92,9 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         }
         let async_accept = notify_async_accept_enabled();
         if async_accept {
+            central_handoff::configure(ramflux_node_core::load_node_push_config(
+                std::env::args().skip(1),
+            )?)?;
             delivery_loop::start(&store)?;
         }
         let store_gate = Arc::new(Mutex::new(()));
