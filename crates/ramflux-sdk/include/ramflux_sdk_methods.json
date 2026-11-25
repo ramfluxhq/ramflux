@@ -1133,7 +1133,7 @@
       "key_export": false,
       "message_descriptor_blake3": "4592908138d7d8c4663410190eb494c646b94994b579388f4bff8b4a41bc1546",
       "name": "contact.verify",
-      "product_pin": "eb75349091390d333272e627c059eee0d308be8d",
+      "product_pin": "6d012ea2768c9a511eb5e5eba6c0b800fc831890",
       "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
       "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,
