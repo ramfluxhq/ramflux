@@ -102,6 +102,13 @@ pub enum ErrorDetails {
     Pairing {
         pairing: String,
     },
+    /// The current authenticated home policy accompanying a stale reach revision.
+    ReachRevisionConflict {
+        reason: String,
+        mode: ramflux_protocol::account_reach::ReachMode,
+        revision: u64,
+        policy: Box<ramflux_protocol::account_reach::ReachPolicy>,
+    },
     /// Static non-secret token naming which argument or state was rejected.
     Reason {
         reason: String,
@@ -144,7 +151,9 @@ impl<'de> Deserialize<'de> for AdapterError {
             | (GeneratedErrorCode::EditConflict, ErrorDetails::EditConflict { .. })
             | (
                 GeneratedErrorCode::InvalidArgument,
-                ErrorDetails::Empty {} | ErrorDetails::Reason { .. },
+                ErrorDetails::Empty {}
+                | ErrorDetails::Reason { .. }
+                | ErrorDetails::ReachRevisionConflict { .. },
             ) => true,
             (_, ErrorDetails::Empty {}) => !requires_details,
             _ => false,
@@ -153,6 +162,18 @@ impl<'de> Deserialize<'de> for AdapterError {
             && !reason_token(reason)
         {
             return Err(D::Error::custom("generated error reason is not a token"));
+        }
+        if let ErrorDetails::ReachRevisionConflict { reason, mode, revision, policy } =
+            &wire.details
+            && (reason != "reach_revision_conflict"
+                || *mode != policy.body.mode
+                || *revision != policy.body.revision
+                || *revision == 0
+                || *revision > ramflux_protocol::MAX_SAFE_JSON_INTEGER
+                || policy.body.version != 1
+                || policy.body.expected_revision.checked_add(1) != Some(*revision))
+        {
+            return Err(D::Error::custom("invalid reach conflict context"));
         }
         if wire.name != code.name() || !details_ok {
             return Err(D::Error::custom("generated error code/name/details mismatch"));

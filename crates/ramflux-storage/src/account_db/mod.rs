@@ -63,6 +63,7 @@ pub mod history;
 #[cfg(any(test, feature = "test-instrumentation"))]
 mod test_busy;
 pub use attachment_retirement::{NativeGrantAssociation, PendingAttachmentRetirement};
+mod backup_account_reach;
 mod backup_username_candidates;
 mod backup_username_directory;
 mod directory_facts;
@@ -83,6 +84,7 @@ pub(crate) mod pairing;
 pub mod raw_inner;
 pub mod read_model;
 pub use directory_facts::{ConversationReadPosition, DirectoryTotals};
+mod account_reach;
 pub(crate) mod receive;
 pub mod recovery;
 mod replay_markers;

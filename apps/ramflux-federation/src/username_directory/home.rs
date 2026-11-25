@@ -67,6 +67,7 @@ pub(crate) fn start(
     let client = Arc::new(CenterClient {
         node: Arc::new(node.clone()),
         pin: config.center,
+        directory: Arc::clone(&home),
         service,
         router,
         discovery: discovery.clone(),
@@ -160,6 +161,11 @@ impl HomeService {
         }
         self.directory.enrol(root)?;
         match call.request.action {
+            action @ (w::NativeUsernameAction::ReplyAuthorize { .. }
+            | w::NativeUsernameAction::ReachGet
+            | w::NativeUsernameAction::ReachSet { .. }) => {
+                self.execute_reach(root, &call.authority, &call.history, action)
+            }
             w::NativeUsernameAction::Recover { operation, profile } => {
                 let native = &call.history.home.authority.record.body;
                 if profile.body.principal_id != native.principal_id

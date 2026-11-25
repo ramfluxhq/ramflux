@@ -18,19 +18,31 @@ use std::{
 
 const PROFILE_PATH: &str = "/v1/usernames/profile";
 
+fn trace_rpc_failure(hop: &'static str, peer: &str) {
+    tracing::debug!(hop, peer_address = peer, "username resolve RPC failed");
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FetchRequest {
     resolve: w::DirectoryResolve,
     binding: w::UsernameBinding,
     nonce: String,
+    reach: Option<Box<ramflux_protocol::account_reach::ReachRecord>>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum FetchReply {
-    Profile { view: Box<directory::HomeProfileView>, history: Box<ResolveResult>, nonce: String },
-    Refused { failure: w::DirectoryFailure },
+    Profile {
+        reach: Option<Box<ramflux_protocol::account_reach::ReachRecord>>,
+        view: Box<directory::HomeProfileView>,
+        history: Box<ResolveResult>,
+        nonce: String,
+    },
+    Refused {
+        failure: w::DirectoryFailure,
+    },
 }
 
 #[derive(Default)]
@@ -95,6 +107,19 @@ fn check_resolution(
     Ok(())
 }
 
+fn check_native_profile(
+    native: &ramflux_protocol::custody::DeviceSet,
+    profile: &w::SignedIdentityProfileV2,
+) -> Result<()> {
+    if profile.body.principal_id != native.principal_id
+        || profile.body.display_name != native.profile.display_name
+        || profile.body.kind != w::ProfileKind::from_principal_kind(native.principal_kind)
+    {
+        return refuse("username native profile classification mismatch");
+    }
+    Ok(())
+}
+
 impl HomeService {
     pub(super) fn resolve(
         &self,
@@ -102,12 +127,20 @@ impl HomeService {
         name: &str,
         nonce: &str,
     ) -> Result<w::NativeUsernameReply> {
-        let response = self.client.exchange_blocking(
-            reporter,
-            &directory::DirectoryRequest::Resolve { name: name.into(), nonce: nonce.into() },
-        )?;
-        let directory::AuthorityResponse::Resolved { resolve, binding, master_public_key, service } =
-            response
+        let response = self
+            .client
+            .exchange_blocking(
+                reporter,
+                &directory::DirectoryRequest::Resolve { name: name.into(), nonce: nonce.into() },
+            )
+            .inspect_err(|_| trace_rpc_failure("centre_exchange", &self.client.pin.url))?;
+        let directory::AuthorityResponse::Resolved {
+            resolve,
+            binding,
+            master_public_key,
+            service,
+            reach,
+        } = response
         else {
             return match response {
                 directory::AuthorityResponse::Refused { failure } => {
@@ -124,16 +157,19 @@ impl HomeService {
             resolve: *resolve.clone(),
             binding: *binding.clone(),
             nonce: nonce.into(),
+            reach: reach.clone(),
         };
         let fetched: FetchReply =
-            rpc::home(&self.client.node, &service, &self.private, PROFILE_PATH, &request)?;
-        let FetchReply::Profile { view, history, nonce: echoed } = fetched else {
+            rpc::home(&self.client.node, &service, &self.private, PROFILE_PATH, &request)
+                .inspect_err(|_| trace_rpc_failure("home_profile_fetch", &service.body.origin))?;
+        let FetchReply::Profile { view, history, nonce: echoed, reach: fetched_reach } = fetched
+        else {
             let FetchReply::Refused { failure } = fetched else {
                 return refuse("username profile response");
             };
             return Ok(w::NativeUsernameReply::Refused { failure });
         };
-        if echoed != nonce {
+        if echoed != nonce || fetched_reach != reach {
             return refuse("username profile nonce mismatch");
         }
         let first = history.predecessors.first().unwrap_or(&history.home);
@@ -155,13 +191,7 @@ impl HomeService {
         let master = ramflux_crypto::verifying_key_from_base64url(&master_public_key)?;
         crypto::verify_profile(&master, &view.profile)?;
         crypto::verify_operation(&master, &view.operation)?;
-        let native = &history.home.authority.record.body;
-        if view.profile.body.principal_id != native.principal_id
-            || view.profile.body.display_name != native.profile.display_name
-            || view.profile.body.kind != w::ProfileKind::from_principal_kind(native.principal_kind)
-        {
-            return refuse("username native profile classification mismatch");
-        }
+        check_native_profile(&history.home.authority.record.body, &view.profile)?;
         let center = ramflux_crypto::verifying_key_from_base64url(&self.client.pin.public_key)?;
         crypto::verify_receipt(&center, &self.client.pin.id, &view.receipt)?;
         let now = crate::now_unix_seconds()?;
@@ -194,6 +224,7 @@ impl HomeService {
             receipt: Box::new(view.receipt),
             history,
             nonce: echoed,
+            reach: fetched_reach,
         })
     }
 
@@ -216,6 +247,9 @@ impl HomeService {
         if request.resolve.body.node != self.client.discovery.node_id {
             return refuse("profile is not on this home");
         }
+        if self.directory.reach_commit(root)?.map(Box::new) != request.reach {
+            return refuse("username reach changed; resolve again");
+        }
         let master = ramflux_crypto::verifying_key_from_base64url(master_public)?;
         // The pinned resolve and current native history establish this home's root.
         // Even a lost home store must retain the live floor before refusing missing bytes.
@@ -231,7 +265,7 @@ impl HomeService {
                 || view.profile.body.kind != w::ProfileKind::from_principal_kind(native.principal_kind) {
                 return Err(directory::CheckpointError::Directory(w::DirectoryCode::InvalidProfile));
             }
-            let reply = FetchReply::Profile { view: Box::new(view.clone()), history: Box::new(history), nonce: request.nonce };
+            let reply = FetchReply::Profile { reach: request.reach, view: Box::new(view.clone()), history: Box::new(history), nonce: request.nonce };
             let body = ramflux_protocol::canonical_json_bytes(&reply).map_err(|_| directory::CheckpointError::Refused("home_response_encoding"))?;
             let mut bytes = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n", body.len()).into_bytes();
             bytes.extend(body); Ok(bytes)

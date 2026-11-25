@@ -18,6 +18,12 @@ use ramflux_protocol::{
 pub fn verify_contact_card_v3(card: &Envelope<ContactCardV3>, now: u64) -> Result<(), CryptoError> {
     let body = &card.body;
     let certificate = &body.master_certificate;
+    if let Some(reach) = &body.reach {
+        crate::account_reach::verify_reach_policy(&reach.policy, &reach.authority)?;
+        if reach.policy.body.account_anchor != body.account_anchor {
+            return Err(validate::reject("contact card reach root mismatch"));
+        }
+    }
     validate::master_body(&certificate.body)?;
     validate::signature(
         &validate::key(&certificate.body.master_public_key)?,

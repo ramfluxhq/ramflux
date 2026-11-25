@@ -120,6 +120,42 @@
     },
     {
       "bridge_allowed": true,
+      "capability": "conversation",
+      "key_export": false,
+      "name": "conversation.start",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "contact",
+      "key_export": false,
+      "name": "contact.requests.reply",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "account.reach.get",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "account.reach.set",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
       "capability": "account",
       "key_export": false,
       "name": "account.config.get",
@@ -1016,7 +1052,7 @@
       "key_export": false,
       "message_descriptor_blake3": "424943ce9bcc6b1b629366deed741bd9dbd2c9bd154643346cd8ced5051ee78d",
       "name": "contact.verify",
-      "product_pin": "4ac17e2eebee3cdcafe5b7e5748da00a08c8cb1c",
+      "product_pin": "dd18e6794fb5477f687e4818c1c2d081ce684ffa",
       "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
       "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,

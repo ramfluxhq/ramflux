@@ -12,6 +12,7 @@ pub const MAX_CONTACT_CARD_V3_BYTES: usize = 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct ContactCardV3 {
     pub version: u32,
+    pub reach: Option<crate::account_reach::ReachRecord>,
     pub principal_id: String,
     pub account_anchor: String,
     pub master_public_key: String,

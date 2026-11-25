@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub struct CenterClient {
     pub node: Arc<ramflux_node_core::NodeServiceConfig>,
     pub pin: directory::CenterPin,
+    pub directory: Arc<directory::HomeDirectory>,
     pub service: directory::HomeServiceConfig,
     pub router: Arc<RouterMeshClient>,
     pub discovery: FederationDiscoverySurface,
@@ -77,6 +78,7 @@ impl CenterClient {
             expires_at: now.checked_add(86400).ok_or_else(|| error("username clock"))?,
         })?;
         let evidence = directory::ReportingEvidence {
+            reach: self.directory.reach_commit(root)?,
             discovery: self.discovery.well_known_record()?,
             history,
             service,

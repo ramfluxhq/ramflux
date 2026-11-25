@@ -11,6 +11,7 @@ fn card(fixture: &Fixture) -> Result<String, SdkError> {
     let signed = account.sign_contact_card(
         vault.as_ref(),
         ramflux_protocol::custody::ContactCardV3 {
+            reach: None,
             version: 3,
             principal_id: record.body.principal_id.clone(),
             account_anchor: record.body.account_anchor.clone(),

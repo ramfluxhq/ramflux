@@ -57,6 +57,9 @@ impl super::ProfileKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeUsernameAction {
+    ReachGet,
+    ReplyAuthorize { peer_root: String, conversation_id: String, operation_id: String },
+    ReachSet { policy: Box<crate::account_reach::ReachPolicy> },
     Mutate { operation: Box<UsernameOperation>, profile: Box<SignedIdentityProfileV2> },
     Recover { operation: Box<UsernameOperation>, profile: Box<SignedIdentityProfileV2> },
     Status { operation_id: Option<String> },
@@ -162,6 +165,12 @@ pub struct NativeUsernameStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeUsernameReply {
+    ReplyAuthorized {
+        permission: crate::account_reach::ReplyPermission,
+    },
+    Reach {
+        state: Box<crate::account_reach::ReachState>,
+    },
     Status {
         status: Box<NativeUsernameStatus>,
     },
@@ -173,6 +182,7 @@ pub enum NativeUsernameReply {
         receipt: Box<DirectoryReceipt>,
         history: Box<crate::home_migration::ResolveResult>,
         nonce: String,
+        reach: Option<Box<crate::account_reach::ReachRecord>>,
     },
     Refused {
         failure: DirectoryFailure,
@@ -194,6 +204,18 @@ impl NativeUsernameRequest {
             .map_err(|_| super::CodecError::Field("home_declaration"))?;
         }
         match &self.action {
+            NativeUsernameAction::ReachGet => Ok(()),
+            NativeUsernameAction::ReplyAuthorize { peer_root, conversation_id, operation_id } => {
+                super::codec::fixed(peer_root, 32, "reply_peer")?;
+                need(
+                    !conversation_id.is_empty() && conversation_id.len() <= 256,
+                    "reply_conversation",
+                )?;
+                need(!operation_id.is_empty() && operation_id.len() <= 256, "reply_operation")
+            }
+            NativeUsernameAction::ReachSet { policy } => {
+                need(crate::canonical_json_bytes(policy)?.len() <= 2048, "reach_policy_size")
+            }
             NativeUsernameAction::Mutate { operation, profile }
             | NativeUsernameAction::Recover { operation, profile } => {
                 operation.validate()?;

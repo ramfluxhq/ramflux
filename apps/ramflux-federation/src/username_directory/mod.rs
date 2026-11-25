@@ -6,6 +6,7 @@ mod client;
 mod dns;
 mod home;
 mod home_profile;
+mod home_reach;
 mod home_status;
 mod ipc;
 mod primary;

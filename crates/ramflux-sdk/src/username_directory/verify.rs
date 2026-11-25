@@ -18,6 +18,7 @@ pub struct ResolvedUsername {
     pub profile: w::SignedIdentityProfileV2,
     pub receipt: w::DirectoryReceipt,
     pub home_epoch: u64,
+    pub reach: Option<ramflux_protocol::account_reach::ReachRecord>,
     #[serde(skip)]
     pub(crate) floor: UsernameFloor,
 }
@@ -170,6 +171,7 @@ pub(crate) fn observe_resolution(
         receipt,
         history,
         nonce: echoed,
+        reach,
     } = result.reply
     else {
         return Err(w::DirectoryCode::DirectoryUnavailable.into());
@@ -205,6 +207,17 @@ pub(crate) fn observe_resolution(
     {
         return Err(w::DirectoryCode::ProfileEquivocation.into());
     }
+    if let Some(reach) = &reach {
+        crate::account_reach::observe(db, reach, &native.account_anchor)?;
+    } else if db
+        .load_actor_state::<ramflux_protocol::account_reach::ReachRecord>(&format!(
+            "reach/floor/{}",
+            native.account_anchor
+        ))?
+        .is_some()
+    {
+        return Err(w::DirectoryCode::ProfileDowngrade.into());
+    }
     let floor = verify_current(
         pin,
         native,
@@ -231,6 +244,7 @@ pub(crate) fn observe_resolution(
         profile: *profile,
         receipt: *receipt,
         home_epoch: home.epoch(),
+        reach: reach.map(|record| *record),
         floor,
     })
 }

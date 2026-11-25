@@ -42,6 +42,10 @@ policies! {
     "account.backup.export" => ("account", true, true, false, true),
     "account.backup.import" => ("account", true, true, false, false),
     "account.backup.jobs" => ("account", true, false, false, false),
+    "conversation.start" => ("conversation", true, true, false, false),
+    "contact.requests.reply" => ("contact", true, true, false, false),
+    "account.reach.get" => ("account", false, true, false, false),
+    "account.reach.set" => ("account", true, true, false, false),
     "account.config.get" => ("account", false, true, false, false),
     "account.config.set" => ("account", true, true, false, false),
     "account.create" => ("account", true, true, false, false),
@@ -317,7 +321,7 @@ pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
 pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
     "424943ce9bcc6b1b629366deed741bd9dbd2c9bd154643346cd8ced5051ee78d";
 /// Immutable product commit whose tree contains this CAS policy and descriptor.
-pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "4ac17e2eebee3cdcafe5b7e5748da00a08c8cb1c";
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "dd18e6794fb5477f687e4818c1c2d081ce684ffa";
 
 pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
     let mut rows = METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify");
@@ -333,7 +337,7 @@ pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
         && CONTACT_VERIFY_CAS_CONTRACT == "CONTACT-VERIFY-CAS-01"
         && CONTACT_VERIFY_CAS_REQUEST_TYPE == "ramflux.message.v1.ContactSafetyVerifyRequest"
         && CONTACT_VERIFY_CAS_RESPONSE_TYPE == "ramflux.message.v1.ContactSafetyVerifyResult"
-        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "4ac17e2eebee3cdcafe5b7e5748da00a08c8cb1c"
+        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "dd18e6794fb5477f687e4818c1c2d081ce684ffa"
 }
 
 #[cfg(test)]

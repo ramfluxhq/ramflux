@@ -165,3 +165,5 @@ crates/ramflux-node-core/src/username_directory/home.rs | update | 2 | E | exclu
 crates/ramflux-node-core/src/router_store/agent_publish/owner_continuity.rs | account_owner | 1 | D | admitted-before-persist; custody authority row from router account table
 crates/ramflux-node-core/src/router_store/agent_publish/owner_continuity.rs | host_owner | 1 | D | admitted-before-persist; validated agent-host binding from router host table
 crates/ramflux-node-core/src/notify/route_authority.rs | registered_owner | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+crates/ramflux-node-core/src/username_directory/home/reach.rs | authorize_reply | 1 | E | excluded=account reach policy or local message intent metadata; no message Envelope/Ack/Nack admission
+crates/ramflux-node-core/src/username_directory/home/reach.rs | decode | 1 | E | excluded=account reach policy or local message intent metadata; no message Envelope/Ack/Nack admission
