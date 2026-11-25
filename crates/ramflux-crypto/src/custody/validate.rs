@@ -279,7 +279,7 @@ fn roster(body: &DeviceSet) -> Result<(), CryptoError> {
     Ok(())
 }
 
-fn message_layer_declaration(
+pub(crate) fn message_layer_declaration(
     signed: &SignedLayerDeclaration,
     expected_device: &DeviceRef,
     branch_certificate: &BranchCertificate,

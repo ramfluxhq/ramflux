@@ -30,6 +30,7 @@ pub use agent_master::{
     sign_register_decision, sign_register_decision_request, verify_register_decision,
 };
 pub use keys::{MasterKey, SelfSigningKey};
+pub use management::verify_enrollment_layer;
 pub use phrase::RecoveryPhrase;
 pub(crate) use verify::verify_group_native_authority;
 pub use verify::{

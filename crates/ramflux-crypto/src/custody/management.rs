@@ -2,15 +2,39 @@
 // Copyright (c) 2026 Span Brain
 
 //! Typed primary operations preserve space and give revocation priority over enrollment.
-use super::{SelfSigningKey, VerifiedRecord, validate::reject};
+use super::{SelfSigningKey, VerifiedRecord, validate::{message_layer_declaration, reject}};
 use crate::CryptoError;
 use ramflux_protocol::{
     DeviceSetStatus,
     custody::{
-        BranchCertificate, Device, DeviceSet, Envelope, MAX_ENROLLMENT_ROSTER, MigrationState,
-        decode_epoch, encode_epoch, object_hash,
+        BranchCertificate, Device, DeviceRef, DeviceSet, Envelope, MAX_ENROLLMENT_ROSTER,
+        MigrationState, SignedLayerDeclaration, decode_epoch, encode_epoch, object_hash,
     },
 };
+
+/// Verify a recipient's enrollment declaration against the exact certificate it will join with.
+/// The primary runs this before journaling, so an invalid or out-of-lease statement never reaches
+/// the authority signature.
+/// # Errors
+/// Rejects a declaration that is not bound to the certificate's exact device, is out of lease,
+/// newer than `now`, outside the layer bounds, or has a bad branch signature.
+pub fn verify_enrollment_layer(
+    certificate: &Envelope<BranchCertificate>,
+    declaration: &SignedLayerDeclaration,
+    now: u64,
+) -> Result<(), CryptoError> {
+    let branch = &certificate.body;
+    message_layer_declaration(
+        declaration,
+        &DeviceRef {
+            account_anchor: branch.account_anchor.clone(),
+            device_id: branch.device_id.clone(),
+            device_epoch: branch.device_epoch,
+        },
+        branch,
+        now,
+    )
+}
 
 impl SelfSigningKey {
     /// Revoke in place, including the primary branch, without allocating a roster slot or
@@ -40,12 +64,15 @@ impl SelfSigningKey {
         self.sign_record(body)
     }
     /// Enroll an explicitly certified new id, preserving 64 roster slots for safety headroom.
+    /// The recipient's branch-signed layer declaration is endorsed by this same authority signature.
     /// # Errors
-    /// Rejects exhausted capacity, reused/revoked ids, unrelated certificates or invalid authority.
+    /// Rejects exhausted capacity, reused/revoked ids, unrelated certificates, an invalid or
+    /// out-of-lease declaration, or invalid authority.
     pub fn enroll_device(
         &self,
         current: &VerifiedRecord,
         certificate: Envelope<BranchCertificate>,
+        message_layer: SignedLayerDeclaration,
         now: u64,
     ) -> Result<Envelope<DeviceSet>, CryptoError> {
         let mut body = Self::next_body(current, now)?;
@@ -56,6 +83,16 @@ impl SelfSigningKey {
         {
             return Err(reject("custody enrollment capacity or reused device id"));
         }
+        message_layer_declaration(
+            &message_layer,
+            &DeviceRef {
+                account_anchor: branch.account_anchor.clone(),
+                device_id: branch.device_id.clone(),
+                device_epoch: branch.device_epoch,
+            },
+            branch,
+            now,
+        )?;
         let (signing, agreement) = crate::device_key_commitments(
             &branch.branch_signing_public_key,
             &branch.agreement_identity_public_key,
@@ -68,7 +105,7 @@ impl SelfSigningKey {
             status: DeviceSetStatus::Active,
             revoked_at: None,
             branch_certificate: Some(certificate),
-            message_layer: None,
+            message_layer: Some(message_layer),
             migration_state: MigrationState::Native,
         });
         body.devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));

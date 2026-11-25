@@ -317,6 +317,7 @@ fn layer_write(
         recipient_ref: None,
         revoked_id: None,
         certificate: None,
+        message_layer: None,
         display_name: None,
         now: validity.issued_at,
         branch_vault_ref: born.branch_vault_ref().into(),

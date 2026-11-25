@@ -44,6 +44,8 @@ pub struct HeadWrite {
     pub recipient_ref: Option<DeviceRef>,
     pub revoked_id: Option<String>,
     pub certificate: Option<Envelope<BranchCertificate>>,
+    /// The enrolling recipient's branch-signed layer declaration (SECONDARY-LAYER-01, enroll only).
+    pub message_layer: Option<ramflux_protocol::custody::SignedLayerDeclaration>,
     pub display_name: Option<String>,
     pub now: u64,
     pub branch_vault_ref: String,
@@ -307,6 +309,7 @@ fn prepare_candidate_leased(
                 HeadKind::Enroll => primary.enroll_device(
                     account.verified(),
                     write.certificate.clone().ok_or(SdkError::PairingField("certificate"))?,
+                    write.message_layer.clone().ok_or(SdkError::PairingField("message_layer"))?,
                     write.now,
                 )?,
                 HeadKind::Profile => {

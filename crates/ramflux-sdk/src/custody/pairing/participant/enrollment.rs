@@ -125,6 +125,8 @@ impl LocalPairingParticipant {
             cert_id: ramflux_protocol::encode_base64url(*crate::custody::random()?),
         })?;
         drop(primary); // The public certificate goes to a separate head signing owner.
+        let message_layer = p.message_layer.clone();
+        ramflux_crypto::custody::verify_enrollment_layer(&certificate, &message_layer, custody::network_now()?)?;
         let live = db
             .pairing_live_rows()?
             .into_iter()
@@ -143,6 +145,7 @@ impl LocalPairingParticipant {
             recipient_ref: Some(p.recipient_ref.clone()),
             revoked_id: None,
             certificate: Some(certificate),
+            message_layer: Some(message_layer),
             display_name: None,
             now: custody::network_now()?,
             branch_vault_ref: account.branch_vault_ref().into(),
