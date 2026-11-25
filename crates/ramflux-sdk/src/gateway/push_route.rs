@@ -358,7 +358,8 @@ impl GatewaySessionEngine {
         let provider = body.provider;
         let mut body = body;
         let app = body.app.take();
-        let body = if self.config.push.mode.as_deref() == Some("central") {
+        let body = if self.config.push.is_central() {
+            self.config.push.retry_save();
             crate::push_keyset::seal_registration(
                 &self.config,
                 body,
@@ -632,6 +633,7 @@ impl GatewaySessionEngine {
     }
 
     pub(crate) async fn refresh_push_route_at(&mut self, now: u64) {
+        self.config.push.retry_save();
         self.expire_stale_push_controls(now);
         if self.config.push_route_clear_pending {
             self.refresh_delete_all(now).await;

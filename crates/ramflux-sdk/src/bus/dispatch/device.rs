@@ -144,7 +144,7 @@ async fn dispatch_push_route_set(
     let outcome = engine.set_push_route(body.registration).await;
     account.apply_session_metadata(engine);
     account.persist_push_route_seq();
-    crate::push_keyset::save_keysets(&account.client, &mut account.gateway_config.push);
+    account.gateway_config.push.retry_save();
     let expires_at = outcome?;
     if cleared {
         account.client.set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, EMPTY_PUSH_ROUTE_BOOK)?;
@@ -163,13 +163,12 @@ fn dispatch_push_keyset_get(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
     let account = local_bus_account(state, account_id)?;
-    let config = &account.gateway_config;
     let now = crate::push_keyset::unix_millis_now();
-    let mode = config.push.mode.clone().unwrap_or_else(|| "unknown".to_owned());
     let pin = crate::push_keyset::configured_push_centre();
-    let held = pin.as_ref().and_then(|pin| {
-        config.push.keysets.iter().find(|record| record.centre_id == pin.centre_id)
-    });
+    let snapshot =
+        account.gateway_config.push.snapshot(pin.as_ref().map(|pin| pin.centre_id.as_str()));
+    let mode = snapshot.mode.clone().unwrap_or_else(|| "unknown".to_owned());
+    let held = snapshot.held.as_ref();
     let (status, record) = match (&pin, held, now) {
         (None, _, _) => ("no_pin", None),
         (Some(_), None, _) => ("missing", None),
@@ -190,6 +189,8 @@ fn dispatch_push_keyset_get(
         "seq": record.map(|record| record.seq),
         "active_kid": record.map(|record| record.active_kid.clone()),
         "expires_at": record.map(|record| record.expires_at),
+        "saved": !snapshot.save_pending,
+        "last_refusal": snapshot.last_refusal,
     })))
 }
 

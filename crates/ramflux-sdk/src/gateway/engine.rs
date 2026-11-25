@@ -346,7 +346,7 @@ impl GatewaySessionEngine {
             }
         };
         crate::push_keyset::adopt_establishment(
-            &mut config,
+            &config,
             push_mode.as_deref(),
             push_keyset.as_ref(),
             crate::push_keyset::unix_millis_now(),
@@ -775,7 +775,7 @@ impl GatewaySessionEngine {
                 GatewayServerFrame::PushKeyset { key_id, body, sig } => {
                     let doc = crate::push_keyset::PushKeysetDoc { key_id, body, sig };
                     crate::push_keyset::adopt_mid_session(
-                        &mut self.config,
+                        &self.config,
                         &doc,
                         crate::push_keyset::unix_millis_now(),
                     );
@@ -858,7 +858,7 @@ impl GatewaySessionEngine {
                 GatewayServerFrame::PushKeyset { key_id, body, sig } => {
                     let doc = crate::push_keyset::PushKeysetDoc { key_id, body, sig };
                     crate::push_keyset::adopt_mid_session(
-                        &mut self.config,
+                        &self.config,
                         &doc,
                         crate::push_keyset::unix_millis_now(),
                     );
@@ -963,7 +963,7 @@ impl GatewaySessionEngine {
                 GatewayServerFrame::PushKeyset { key_id, body, sig } => {
                     let doc = crate::push_keyset::PushKeysetDoc { key_id, body, sig };
                     crate::push_keyset::adopt_mid_session(
-                        &mut self.config,
+                        &self.config,
                         &doc,
                         crate::push_keyset::unix_millis_now(),
                     );
