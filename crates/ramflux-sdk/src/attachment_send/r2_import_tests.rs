@@ -168,6 +168,7 @@ fn a_tampered_segment_is_refused_before_any_plaintext_is_written() {
         &mut sink,
         &|| false,
         &budget::Meter::default(),
+        None,
     )
     .unwrap_err();
     assert_eq!(error.code, CODE_SEAL_FAILED, "the segment digest does not match the manifest");
@@ -340,7 +341,7 @@ fn a_nine_megabyte_import_holds_two_segments_not_the_file() {
     .unwrap();
     let meter = budget::Meter::default();
     let mut sink = Vec::new();
-    import_job::stream_remote(&listener, &opened, &mut sink, &|| false, &meter).unwrap();
+    import_job::stream_remote(&listener, &opened, &mut sink, &|| false, &meter, None).unwrap();
     assert_eq!(sink.len(), body.len());
     assert_eq!(blake3::hash(&sink).as_bytes(), &digest, "the body is intact");
     let segment = u64::from(ramflux_protocol::large_attachment::SEGMENT_BYTES);

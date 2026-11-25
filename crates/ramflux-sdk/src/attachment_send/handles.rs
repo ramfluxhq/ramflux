@@ -5,6 +5,7 @@
 //! worker streams the body to a staging file. Nothing is readable until the worker has
 //! checked every segment digest and the plaintext digest.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -16,6 +17,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::SdkError;
+use crate::bus::account_runtime::attachment_sends::ParkedImport;
 use crate::bus::daemon::LocalBusDispatchResult;
 use crate::bus::dispatch::local_bus_ok;
 use crate::bus::io::request_account_id;
@@ -28,12 +30,14 @@ use super::codes::{
     CODE_LAYOUT_INVALID, CODE_NOT_GRANTEE, CODE_NOT_OWNER, CODE_NOT_READY, CODE_SEAL_FAILED,
     CODE_STALE_GENERATION, CODE_STREAM_OFFSET, Refusal,
 };
+use super::import_cache;
 use super::import_job::{self, Importer, Opened, SourcePin};
 use super::import_journal::{self, Binding, ImportPhase, ImportRecord};
 use super::meta::CHUNK;
 use super::plane::Plane;
 use super::scheduler;
 use super::store::Store;
+use super::upload::{AckJournal, JournalSink};
 
 pub(crate) const TOMBSTONE: &str = "attachment-tombstone";
 pub(crate) const RETIREMENT: &str = "attachment-retirement";
@@ -54,6 +58,8 @@ struct Job {
     ready: AtomicBool,
     failed: Mutex<Option<&'static str>>,
     cancelled: AtomicBool,
+    /// Set at shutdown: the worker stops, the cache and the Pending record are kept.
+    stop: Arc<AtomicBool>,
     finished: AtomicBool,
     meter: budget::Meter,
     privacy: Mutex<Option<ramflux_storage::PrivacyResourceRegistration>>,
@@ -160,7 +166,13 @@ pub(crate) fn begin(
         finished: AtomicBool::new(false),
         meter: budget::Meter::default(),
         privacy: Mutex::new(None),
+        stop: Arc::new(AtomicBool::new(false)),
     });
+    let count = import_cache::segment_count(length)?;
+    let verified = match &resumed {
+        Some(prior) if prior.verified.len() == count as usize => prior.verified.clone(),
+        _ => vec![false; count as usize],
+    };
     let record = ImportRecord {
         import_id: import_id.clone(),
         generation,
@@ -170,6 +182,7 @@ pub(crate) fn begin(
         expires_at,
         phase: ImportPhase::Pending,
         revision: revision.saturating_add(1),
+        verified,
     };
     let fresh = resumed.is_none().then_some((body.operation_id.as_str(), fingerprint.as_str()));
     if let Err(error) = admit_record(&account.client, &record, fresh) {
@@ -184,11 +197,24 @@ pub(crate) fn begin(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(import_id.clone(), Arc::clone(&job));
-    let task = Task { job: Arc::clone(&job), source, plane };
+    let (journal, calls) = JournalSink::channel();
+    let (done, done_rx) = tokio::sync::oneshot::channel::<()>();
+    let stop = Arc::clone(&job.stop);
+    let task = Task {
+        job: Arc::clone(&job),
+        source,
+        plane,
+        journal,
+        record: RefCell::new(record.clone()),
+        done,
+    };
     if let Err(refusal) = scheduler::submit(&id, scheduler_large, move || task.run()) {
         remove(&import_id, &job);
         return Err(refusal.into());
     }
+    // The worker runs off the actor; the actor serves its journal calls until it stops.
+    account.attachment_send.import =
+        Some(ParkedImport { import_id: import_id.clone(), calls, done: done_rx, stop });
     Ok(local_bus_ok(view(&import_id, generation, "pending", 0, length, expires_at)))
 }
 
@@ -312,12 +338,16 @@ struct Task {
     job: Arc<Job>,
     source: Source,
     plane: Option<Arc<dyn Plane>>,
+    journal: JournalSink,
+    record: RefCell<ImportRecord>,
+    done: tokio::sync::oneshot::Sender<()>,
 }
 
 impl Task {
     fn run(self) {
-        let Self { job, source, plane } = self;
-        let result = stream(&job, &source, plane.as_deref());
+        let Self { job, source, plane, journal, record, done } = self;
+        let result = stream(&job, &source, plane.as_deref(), &journal, &record);
+        drop(done);
         match result {
             Ok(()) => job.ready.store(true, Ordering::Release),
             Err(refusal) => {
@@ -330,20 +360,34 @@ impl Task {
     }
 }
 
-fn stream(job: &Job, source: &Source, plane: Option<&dyn Plane>) -> Result<(), Refusal> {
+fn stream(
+    job: &Job,
+    source: &Source,
+    plane: Option<&dyn Plane>,
+    journal: &JournalSink,
+    record: &RefCell<ImportRecord>,
+) -> Result<(), Refusal> {
     fs::create_dir_all(&job.dir).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     let part = job.dir.join("body.part");
     let file = File::create(&part).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     let mut sink = BufWriter::with_capacity(256 * 1024, file);
-    let fenced = || job.cancelled.load(Ordering::Acquire);
+    let fenced = || job.cancelled.load(Ordering::Acquire) || job.stop.load(Ordering::Acquire);
     match source {
         Source::Remote { opened, .. } => {
+            let verified = record.borrow().verified.clone();
+            let checkpoint = |bits: &[bool]| checkpoint_record(journal, record, bits);
+            let mut cache = import_job::SegmentCache {
+                dir: job.dir.as_path(),
+                verified,
+                checkpoint: &checkpoint,
+            };
             import_job::stream_remote(
                 plane.ok_or(Refusal::new(CODE_NOT_GRANTEE))?,
                 opened,
                 &mut sink,
                 &fenced,
                 &job.meter,
+                Some(&mut cache),
             )?;
         }
         Source::Owned { store, row, .. } => {
@@ -362,6 +406,20 @@ fn stream(job: &Job, source: &Source, plane: Option<&dyn Plane>) -> Result<(), R
     }
     fs::rename(&part, &job.path).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     Ok(())
+}
+
+/// Writes the bitmap with its record through the account actor. The worker writes a segment
+/// durably before it reaches here, so a set bit never names missing bytes.
+fn checkpoint_record(
+    journal: &JournalSink,
+    record: &RefCell<ImportRecord>,
+    bits: &[bool],
+) -> Result<(), Refusal> {
+    let mut current = record.borrow_mut();
+    current.verified = bits.to_vec();
+    current.revision = current.revision.saturating_add(1);
+    let acks = import_journal::encode(&current).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+    journal.save(&import_journal::record_key(&current.import_id), &acks)
 }
 
 /// # Errors
@@ -437,7 +495,11 @@ pub(crate) fn finish(
     let job = lookup(&body.import_id, request_account_id(request)?)?;
     job.finished.store(true, Ordering::Release);
     remove(&body.import_id, &job);
-    import_journal::set_phase(account.client.account_db()?, &body.import_id, ImportPhase::Finished)?;
+    import_journal::set_phase(
+        account.client.account_db()?,
+        &body.import_id,
+        ImportPhase::Finished,
+    )?;
     Ok(local_bus_ok(json!({"import_id": body.import_id, "state": "finished"})))
 }
 
@@ -448,10 +510,27 @@ pub(crate) fn cancel(
     request: &LocalBusFrame,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: IdBody = serde_json::from_value(request.body.clone())?;
-    let job = lookup(&body.import_id, request_account_id(request)?)?;
-    job.cancelled.store(true, Ordering::Release);
-    remove(&body.import_id, &job);
-    import_journal::set_phase(account.client.account_db()?, &body.import_id, ImportPhase::Cancelled)?;
+    match lookup(&body.import_id, request_account_id(request)?) {
+        Ok(job) => {
+            job.cancelled.store(true, Ordering::Release);
+            remove(&body.import_id, &job);
+        }
+        Err(refusal) if refusal.code == CODE_NOT_GRANTEE => {
+            // No live handle after a restart: the durable record decides, and the cache goes.
+            let db = account.client.account_db()?;
+            if import_journal::load_record(db, &body.import_id)?.is_none() {
+                return Err(refusal.into());
+            }
+            let root = bus::account_dir(&account.client)?;
+            let _ = fs::remove_dir_all(root.join("attachment-imports").join(&body.import_id));
+        }
+        Err(refusal) => return Err(refusal.into()),
+    }
+    import_journal::set_phase(
+        account.client.account_db()?,
+        &body.import_id,
+        ImportPhase::Cancelled,
+    )?;
     Ok(local_bus_ok(json!({"import_id": body.import_id, "state": "cancelled"})))
 }
 
@@ -700,6 +779,7 @@ pub(crate) fn test_register_job(import_id: &str, account: &str, message_id: &str
         finished: AtomicBool::new(false),
         meter: budget::Meter::default(),
         privacy: Mutex::new(None),
+        stop: Arc::new(AtomicBool::new(false)),
     });
     jobs()
         .lock()

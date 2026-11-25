@@ -36,7 +36,14 @@ pub(super) fn import_all(
 ) -> Result<Vec<u8>, Refusal> {
     let opened = import_job::open_entry(media, importer, pin)?;
     let mut sink = Vec::new();
-    import_job::stream_remote(plane, &opened, &mut sink, &|| false, &budget::Meter::default())?;
+    import_job::stream_remote(
+        plane,
+        &opened,
+        &mut sink,
+        &|| false,
+        &budget::Meter::default(),
+        None,
+    )?;
     Ok(sink)
 }
 

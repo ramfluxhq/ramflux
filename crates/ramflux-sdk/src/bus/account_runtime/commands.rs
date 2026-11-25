@@ -336,6 +336,15 @@ impl AccountRuntime {
                 receive_gate_hook,
             )
             .await;
+        if let Some(import) = self
+            .state
+            .accounts
+            .get_mut(&self.id)
+            .and_then(|account| account.attachment_send.import.take())
+        {
+            // A download worker runs off the actor; the reply below still goes out now.
+            self.attachment_sends.park_import(import);
+        }
         if let Some(upload) = self
             .state
             .accounts
@@ -505,6 +514,10 @@ impl AccountRuntime {
                 if let Some(account) = self.state.accounts.get(&self.id) {
                     super::super::dispatch::attachment_prepare::answer(account, call);
                 }
+                Ok(false)
+            }
+            super::attachment_sends::Event::ImportDone(import_id) => {
+                self.attachment_sends.finish_import(&import_id);
                 Ok(false)
             }
             super::attachment_sends::Event::Finished(operation) => {

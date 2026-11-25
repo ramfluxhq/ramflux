@@ -1,21 +1,23 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Durable admission record of one attachment download (import).
+//! Durable record of one attachment download (import).
 //!
-//! `begin` writes the record and the operation binding before any worker is scheduled, so a
-//! restarted account resumes the same import (same `import_id`, same generation) instead of
-//! allocating a new one. The binding carries a fingerprint of the message and entry: an
-//! operation id reused for a different body is refused.
+//! The record lives in actor state under `attachment-import/<hash of import id>`, encoded as the
+//! same bounded byte record the SEND journal uses (`AckRecord`). The download worker writes it
+//! through the account actor's journal channel, so a bitmap bit is set only after the ciphertext
+//! segment it names is durable. `begin` writes the record and an operation binding before any
+//! worker is scheduled; a restarted account resumes the same import (same `import_id`, same
+//! generation). The binding carries a fingerprint of the message and entry: an operation id
+//! reused for a different body is refused.
 
 use serde::{Deserialize, Serialize};
 
 use super::codes::{CODE_CANCELLED, CODE_DUPLICATE, CODE_EXPIRED, Refusal};
+use super::upload::AckRecord;
 use crate::SdkError;
 
-/// Client-record directory for the import journal, keyed by import id.
-pub(crate) const JOURNAL: &str = "attachment-import-journal";
-/// Client-record directory for operation bindings, keyed by operation id.
+/// Client-record directory for operation bindings, keyed by operation id (begin path only).
 pub(crate) const BINDING: &str = "attachment-import";
 
 /// Where the import stands. Only `Pending` admits work; the rest are terminal for the record.
@@ -27,8 +29,7 @@ pub(crate) enum ImportPhase {
     Finished,
 }
 
-/// The durable record. Counts and bitmaps are added by the cache step; the record never holds
-/// a file key, a grant or a path.
+/// The durable record. It never holds a file key, a grant or a path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ImportRecord {
     pub(crate) import_id: String,
@@ -39,6 +40,9 @@ pub(crate) struct ImportRecord {
     pub(crate) expires_at: u64,
     pub(crate) phase: ImportPhase,
     pub(crate) revision: u64,
+    /// One bit per encrypted segment: set only after that ciphertext is durable on disk.
+    #[serde(default)]
+    pub(crate) verified: Vec<bool>,
 }
 
 /// The operation-to-import binding.
@@ -56,13 +60,38 @@ pub(crate) fn fingerprint(message_id: &str, index: u64) -> String {
     )
 }
 
+/// Actor-state key of the record for one import.
+pub(crate) fn record_key(import_id: &str) -> String {
+    format!(
+        "attachment-import/{}",
+        ramflux_crypto::blake3_256_base64url(
+            "ramflux.attachment.import.record.v1",
+            import_id.as_bytes()
+        )
+    )
+}
+
+/// Encodes a record as the journal's byte payload.
+/// # Errors
+/// Returns a serialization error only if the record cannot be encoded.
+pub(crate) fn encode(record: &ImportRecord) -> Result<Vec<u8>, SdkError> {
+    Ok(serde_json::to_vec(record)?)
+}
+
+/// # Errors
+/// Returns a decode error when the stored bytes are not a record.
+pub(crate) fn decode(bytes: &[u8]) -> Result<ImportRecord, SdkError> {
+    Ok(serde_json::from_slice(bytes)?)
+}
+
 /// # Errors
 /// Returns a storage error when the record cannot be written.
 pub(crate) fn save_record(
     db: &ramflux_storage::AccountDb,
     record: &ImportRecord,
 ) -> Result<(), SdkError> {
-    db.persist_client_record(JOURNAL, &record.import_id, &serde_json::to_value(record)?)?;
+    let acks = encode(record)?;
+    db.persist_actor_state(&record_key(&record.import_id), &AckRecord { acks })?;
     Ok(())
 }
 
@@ -72,7 +101,9 @@ pub(crate) fn load_record(
     db: &ramflux_storage::AccountDb,
     import_id: &str,
 ) -> Result<Option<ImportRecord>, SdkError> {
-    db.client_record(JOURNAL, import_id)?.map(serde_json::from_value).transpose().map_err(Into::into)
+    db.load_actor_state::<AckRecord>(&record_key(import_id))?
+        .map(|stored| decode(&stored.acks))
+        .transpose()
 }
 
 /// # Errors
@@ -92,7 +123,10 @@ pub(crate) fn load_binding(
     db: &ramflux_storage::AccountDb,
     operation_id: &str,
 ) -> Result<Option<Binding>, SdkError> {
-    db.client_record(BINDING, operation_id)?.map(serde_json::from_value).transpose().map_err(Into::into)
+    db.client_record(BINDING, operation_id)?
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(Into::into)
 }
 
 /// Moves the record to a terminal phase. Returns `Ok(false)` when no record exists.

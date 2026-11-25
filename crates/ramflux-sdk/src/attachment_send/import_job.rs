@@ -25,7 +25,7 @@ use super::plane::{Plane, ReadCall};
 use super::seal_job::segment_name_of;
 use super::store::Store;
 
-const NETWORK_CHUNK: u32 = 524_288;
+pub(crate) const NETWORK_CHUNK: u32 = 524_288;
 const READER_RIGHTS: u32 = 15;
 
 /// The calling device. `secret` is its X25519 agreement secret.
@@ -187,9 +187,18 @@ pub(crate) fn open_entry(
     })
 }
 
-/// Streams the ciphertext from the relay in network-chunk ranges, checks each segment against
-/// the manifest, and writes the plaintext to `sink`. Memory stays at one segment of ciphertext
-/// plus one of plaintext.
+/// The durable cache of one remote download: `verified[i]` says segment `i` is on disk and
+/// digest-checked. `checkpoint` receives the bitmap after every newly written segment.
+pub(crate) struct SegmentCache<'a> {
+    pub(crate) dir: &'a std::path::Path,
+    pub(crate) verified: Vec<bool>,
+    pub(crate) checkpoint: &'a dyn Fn(&[bool]) -> Result<(), Refusal>,
+}
+
+/// Streams the ciphertext from the relay in network-chunk ranges. Verified cached segments are
+/// read from the cache (refetched if they no longer match); every other segment is fetched,
+/// checked, persisted, and only then marked in the bitmap. Memory stays at one segment of
+/// ciphertext plus one of plaintext.
 /// # Errors
 /// Returns `seal_failed` for any digest, length or open failure, and `cancelled` when
 /// `fenced` reports the handle was fenced.
@@ -199,9 +208,13 @@ pub(crate) fn stream_remote(
     sink: &mut dyn Write,
     fenced: &dyn Fn() -> bool,
     meter: &budget::Meter,
+    mut cache: Option<&mut SegmentCache<'_>>,
 ) -> Result<(), Refusal> {
     let (count, _) = opened.layout.dimensions().map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
     if opened.manifest.segment_digests.len() != count as usize {
+        return Err(Refusal::new(CODE_LAYOUT_INVALID));
+    }
+    if cache.as_ref().is_some_and(|cache| cache.verified.len() != count as usize) {
         return Err(Refusal::new(CODE_LAYOUT_INVALID));
     }
     let mut plain_digest = blake3::Hasher::new();
@@ -211,11 +224,28 @@ pub(crate) fn stream_remote(
             return Err(Refusal::new(CODE_CANCELLED));
         }
         let _held = budget::memory_metered(2 * u64::from(SEGMENT_BYTES), meter)?;
-        let cipher = fetch_segment(plane, opened, index)?;
         let expected = opened.manifest.segment_digests[index as usize];
-        if segment_digest(&cipher).map_err(|_| Refusal::new(CODE_SEAL_FAILED))? != expected {
-            return Err(Refusal::new(CODE_SEAL_FAILED));
-        }
+        let cached = match cache.as_ref() {
+            Some(cache) if cache.verified[index as usize] => {
+                super::import_cache::read(cache.dir, index, expected)
+            }
+            _ => None,
+        };
+        let cipher = match cached {
+            Some(bytes) => bytes,
+            None => {
+                let fresh = fetch_segment(plane, opened, index)?;
+                if segment_digest(&fresh).map_err(|_| Refusal::new(CODE_SEAL_FAILED))? != expected {
+                    return Err(Refusal::new(CODE_SEAL_FAILED));
+                }
+                if let Some(cache) = cache.as_mut() {
+                    super::import_cache::write(cache.dir, index, &fresh)?;
+                    cache.verified[index as usize] = true;
+                    (cache.checkpoint)(&cache.verified)?;
+                }
+                fresh
+            }
+        };
         let plain =
             open_segment(&opened.key, &opened.object_id, opened.layout, u64::from(index), &cipher)
                 .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
