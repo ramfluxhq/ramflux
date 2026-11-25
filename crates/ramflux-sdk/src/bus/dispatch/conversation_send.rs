@@ -588,7 +588,7 @@ mod retention_tests {
                 expires_at: now - 1,
                 completed: false,
                 completed_at: None,
-                phase: Default::default(),
+                phase: send_journal::SendPhase::default(),
                 paused: false,
             },
         )?;
@@ -606,7 +606,7 @@ mod retention_tests {
                         expires_at: now + 3600,
                         completed: false,
                         completed_at: None,
-                        phase: Default::default(),
+                        phase: send_journal::SendPhase::default(),
                         paused: false,
                     },
                 )?;
@@ -635,7 +635,7 @@ mod retention_tests {
                     expires_at: now + 3600,
                     completed: true,
                     completed_at: Some(completed_at),
-                    phase: Default::default(),
+                    phase: send_journal::SendPhase::default(),
                     paused: false,
                 },
             )?;
