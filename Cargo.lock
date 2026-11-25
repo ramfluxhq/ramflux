@@ -716,6 +716,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
+ "cipher 0.5.2",
  "cpufeatures 0.3.0",
  "rand_core 0.10.1",
 ]
@@ -729,8 +730,20 @@ dependencies = [
  "aead 0.5.2",
  "chacha20 0.9.1",
  "cipher 0.4.4",
- "poly1305",
+ "poly1305 0.8.0",
  "zeroize",
+]
+
+[[package]]
+name = "chacha20poly1305"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb"
+dependencies = [
+ "aead 0.6.1",
+ "chacha20 0.10.2",
+ "cipher 0.5.2",
+ "poly1305 0.9.1",
 ]
 
 [[package]]
@@ -2056,6 +2069,7 @@ checksum = "a5324110b02044183df000f0bd7d2d7e61f1000631508627e77f63983b6fdffb"
 dependencies = [
  "aead 0.6.1",
  "aes-gcm 0.11.1",
+ "chacha20poly1305 0.11.0",
  "hkdf 0.13.0",
  "hybrid-array",
  "rand_core 0.10.1",
@@ -3382,6 +3396,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "poly1305"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
+dependencies = [
+ "cpufeatures 0.3.0",
+ "universal-hash 0.6.1",
+]
+
+[[package]]
 name = "polyval"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3742,7 +3766,7 @@ dependencies = [
  "bip39",
  "blake3",
  "chacha20 0.9.1",
- "chacha20poly1305",
+ "chacha20poly1305 0.10.1",
  "curve25519-dalek",
  "ed25519-dalek",
  "getrandom 0.3.4",
@@ -3750,7 +3774,7 @@ dependencies = [
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "hpke",
- "poly1305",
+ "poly1305 0.8.0",
  "prost",
  "ramflux-core",
  "ramflux-protocol",
@@ -3816,6 +3840,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -4083,7 +4108,7 @@ dependencies = [
  "bytes",
  "cbindgen",
  "chacha20 0.9.1",
- "chacha20poly1305",
+ "chacha20poly1305 0.10.1",
  "core-foundation",
  "dbus-secret-service",
  "ed25519-dalek",
@@ -4091,7 +4116,7 @@ dependencies = [
  "getrandom 0.3.4",
  "keyring",
  "mime",
- "poly1305",
+ "poly1305 0.8.0",
  "prost",
  "prost-reflect",
  "quinn",
@@ -4151,7 +4176,7 @@ version = "0.2.9"
 dependencies = [
  "blake3",
  "caseless",
- "chacha20poly1305",
+ "chacha20poly1305 0.10.1",
  "ed25519-dalek",
  "fs2",
  "hkdf 0.13.0",
@@ -4179,7 +4204,7 @@ dependencies = [
 name = "ramflux-sync"
 version = "0.2.9"
 dependencies = [
- "chacha20poly1305",
+ "chacha20poly1305 0.10.1",
  "ramflux-core",
  "ramflux-crypto",
  "ramflux-protocol",
