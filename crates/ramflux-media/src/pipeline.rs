@@ -19,6 +19,9 @@ use crate::relay;
 use crate::rtp::{self, OPUS_PAYLOAD_TYPE, RtpHeader};
 use crate::session::MediaSession;
 use crate::sframe::{self, SframeError};
+use crate::video::packet::{
+    self as video_packet, FragmentHeader, METADATA_LEN, SequenceTracker, VIDEO_PAYLOAD_TYPE,
+};
 
 /// Why a frame or packet could not pass.
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +39,12 @@ pub enum PipelineError {
     /// starts once, at counter zero.
     #[error("the session's sending key is in use; a fresh call brings fresh keys")]
     SendKeyUsed,
+    /// A video packet arrived on a call that did not negotiate video keys.
+    #[error("video is not negotiated on this call")]
+    VideoNotNegotiated,
+    /// A video packet failed its video framing (after authentication).
+    #[error(transparent)]
+    Video(#[from] video_packet::Error),
 }
 
 /// The sending half of a call.
@@ -158,10 +167,34 @@ pub struct Received {
     pub opus: Vec<u8>,
 }
 
-/// The receiving half of a call.
+/// One authenticated video fragment, before reassembly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoReceived {
+    /// Its RTP header.
+    pub header: RtpHeader,
+    /// Its video header (authenticated metadata).
+    pub fragment: FragmentHeader,
+    /// The RTP sequence extended to 64 bits, `None` before the stream origin.
+    pub extended_sequence: Option<u64>,
+    /// The decrypted fragment bytes.
+    pub payload: Vec<u8>,
+}
+
+/// What one datagram carried after demultiplexing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Demuxed {
+    /// An audio packet (PT111), exactly as [`Inbound::open`] returns it.
+    Audio(Received),
+    /// A video fragment (PT112).
+    Video(VideoReceived),
+}
+
+/// The receiving half of a call: audio and, when negotiated, video.
 #[derive(Debug)]
 pub struct Inbound {
     sframe: sframe::Receiver,
+    video: Option<sframe::Receiver>,
+    video_sequence: SequenceTracker,
 }
 
 impl Inbound {
@@ -175,7 +208,59 @@ impl Inbound {
         let key = session.receive_key();
         let mut receiver = sframe::Receiver::new();
         receiver.add_key(suite, key.kid(), key.base_key().bytes())?;
-        Ok(Self { sframe: receiver })
+        let video = match session.video_receive_key() {
+            Some(video_key) => {
+                let mut video_receiver = sframe::Receiver::new();
+                video_receiver.add_key(suite, video_key.kid(), video_key.base_key().bytes())?;
+                Some(video_receiver)
+            }
+            None => None,
+        };
+        Ok(Self { sframe: receiver, video, video_sequence: SequenceTracker::default() })
+    }
+
+    /// Whether `packet` is a video RTP packet (PT112), for the gate choice
+    /// before any decryption.
+    #[must_use]
+    pub fn is_video(packet: &[u8]) -> bool {
+        RtpHeader::decode(packet).is_some_and(|header| header.payload_type == VIDEO_PAYLOAD_TYPE)
+    }
+
+    /// Demultiplexes one datagram: PT111 audio through [`Self::open`], PT112
+    /// video through [`Self::open_video`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`] or [`Self::open_video`].
+    pub fn demux(&mut self, packet: &[u8]) -> Result<Demuxed, PipelineError> {
+        if Self::is_video(packet) {
+            self.open_video(packet).map(Demuxed::Video)
+        } else {
+            self.open(packet).map(Demuxed::Audio)
+        }
+    }
+
+    /// Opens one video packet: authenticates the RTP and video headers with
+    /// the video key, then reads the fragment. Authentication precedes any
+    /// parsing of the video header beyond the packet shape.
+    ///
+    /// # Errors
+    ///
+    /// [`PipelineError::NotRtp`] for a packet that is not PT112,
+    /// [`PipelineError::VideoNotNegotiated`] without a video key,
+    /// [`PipelineError::Sframe`] when authentication or replay refuses it, or
+    /// [`PipelineError::Video`] for a malformed video header or fragment.
+    pub fn open_video(&mut self, packet: &[u8]) -> Result<VideoReceived, PipelineError> {
+        let header = RtpHeader::decode(packet).ok_or(PipelineError::NotRtp)?;
+        if header.payload_type != VIDEO_PAYLOAD_TYPE || packet.len() < METADATA_LEN {
+            return Err(PipelineError::NotRtp);
+        }
+        let video = self.video.as_mut().ok_or(PipelineError::VideoNotNegotiated)?;
+        let payload = video.decrypt(&packet[..METADATA_LEN], &packet[METADATA_LEN..])?;
+        let fragment =
+            video_packet::decode_fragment(&packet[rtp::HEADER_LEN..METADATA_LEN], &payload)?;
+        let extended_sequence = self.video_sequence.extend(header.sequence);
+        Ok(VideoReceived { header, fragment, extended_sequence, payload })
     }
 
     /// Opens one packet (as the relay delivers it: no framing).

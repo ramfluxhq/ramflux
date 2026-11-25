@@ -67,6 +67,8 @@ pub struct MediaSession {
     send: Option<DirectionKey>,
     send_kid: u64,
     receive: DirectionKey,
+    video_send: Option<DirectionKey>,
+    video_receive: Option<DirectionKey>,
 }
 
 impl MediaSession {
@@ -89,7 +91,31 @@ impl MediaSession {
             send_kid: send.kid,
             send: Some(send),
             receive,
+            video_send: None,
+            video_receive: None,
         }
+    }
+
+    /// The same session with the video keys of both directions (V2.1, KIDs
+    /// 2 and 3 by the card). Video shares the audio suite and socket, never
+    /// the audio keys or counters.
+    #[must_use]
+    pub fn with_video(mut self, send: DirectionKey, receive: DirectionKey) -> Self {
+        self.video_send = Some(send);
+        self.video_receive = Some(receive);
+        self
+    }
+
+    /// Takes this side's video sending key, once (no video sender exists
+    /// before V2.2). `None` without video keys or once taken.
+    pub fn take_video_send_key(&mut self) -> Option<DirectionKey> {
+        self.video_send.take()
+    }
+
+    /// The peer's video sending key, when the session negotiated video.
+    #[must_use]
+    pub fn video_receive_key(&self) -> Option<&DirectionKey> {
+        self.video_receive.as_ref()
     }
 
     /// The same session, able to answer the relay's rebinding challenges

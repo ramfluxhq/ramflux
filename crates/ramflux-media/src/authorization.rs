@@ -31,12 +31,15 @@ pub(crate) struct State {
     reason: Option<GateReason>,
     pub generation: u64,
     audio_active: bool,
+    /// Video authority: independent of `audio_active`, cleared when the gate closes for a new reason.
+    video_active: bool,
     deadline: Option<Instant>,
     pub retired: bool,
 }
 
 impl State {
-    pub fn admitted(&mut self) -> bool {
+    /// Lease and retirement check shared by both tracks.
+    fn live(&mut self) -> bool {
         if self.retired {
             return false;
         }
@@ -44,7 +47,16 @@ impl State {
             self.close(Some(GateReason::LeaseUnavailable));
             self.retired = true;
         }
-        !self.retired && self.reason.is_none() && self.audio_active
+        !self.retired && self.reason.is_none()
+    }
+
+    pub fn admitted(&mut self) -> bool {
+        self.live() && self.audio_active
+    }
+
+    /// Video admission: its own activation, same lease and reason fence.
+    pub fn admitted_video(&mut self) -> bool {
+        self.live() && self.video_active
     }
 
     fn close(&mut self, reason: Option<GateReason>) {
@@ -55,6 +67,9 @@ impl State {
                 self.retired = true;
             }
             self.audio_active = false;
+        }
+        if self.reason != reason {
+            self.video_active = false;
         }
         self.reason = reason;
     }
@@ -68,6 +83,7 @@ impl Authorization {
             reason: None,
             generation: 1,
             audio_active: lease.is_none(),
+            video_active: false,
             deadline: lease.and_then(|lease| Instant::now().checked_add(lease)),
             retired: false,
         }))
@@ -112,6 +128,18 @@ impl Authorization {
             let reason = state.reason;
             state.close(reason);
         }
+        true
+    }
+
+    /// Sets video authority. Refused once the gate is closed or retired. A
+    /// video change never bumps the generation or touches audio.
+    pub fn activate_video(&self, active: bool) -> bool {
+        let mut state = self.lock();
+        let _ = state.live();
+        if active && (state.retired || state.reason.is_some()) {
+            return false;
+        }
+        state.video_active = active;
         true
     }
 

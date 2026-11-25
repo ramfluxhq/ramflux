@@ -35,6 +35,8 @@ use crate::jitter::{JitterBuffer, JitterStats, Playout};
 use crate::pipeline::{Inbound, Outbound, PipelineError, Rebinder};
 use crate::relay::MAX_DATAGRAM;
 use crate::session::MediaSession;
+use crate::video::packet::AccessUnit;
+use crate::video::reassembly::Reassembler;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Where captured audio comes from.
@@ -125,6 +127,12 @@ pub struct EngineStats {
     pub send_errors: u64,
     /// Rebinding challenges from the relay answered.
     pub rebinds_answered: u64,
+    /// Video fragments authenticated (before reassembly).
+    pub video_authenticated: u64,
+    /// Video packets refused (no gate, authentication, replay or framing).
+    pub video_rejected: u64,
+    /// Video fragments or access units dropped by the bounded reassembly.
+    pub video_dropped: u64,
 }
 
 #[derive(Debug, Default)]
@@ -142,6 +150,7 @@ pub struct Engine {
     stop: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
+    video: Arc<Mutex<Reassembler>>,
     threads: Vec<JoinHandle<()>>,
     local: SocketAddr,
 }
@@ -219,6 +228,7 @@ impl Engine {
         let muted = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(Mutex::new(Shared::default()));
         let jitter = Arc::new(Mutex::new(JitterBuffer::new()));
+        let video = Arc::new(Mutex::new(Reassembler::new()));
         let started = Instant::now();
         let send_socket = socket.try_clone()?;
 
@@ -238,6 +248,7 @@ impl Engine {
             inbound,
             rebinder,
             jitter: jitter.clone(),
+            video: video.clone(),
             authorization: authorization.clone(),
             stop: stop.clone(),
             shared: shared.clone(),
@@ -252,7 +263,7 @@ impl Engine {
             shared: shared.clone(),
         };
         let mut engine =
-            Self { authorization, jitter, stop, muted, shared, threads: Vec::new(), local };
+            Self { authorization, jitter, stop, muted, shared, video, threads: Vec::new(), local };
         engine.threads.push(spawn("ramflux-call-send", move || sender.run())?);
         engine.threads.push(spawn("ramflux-call-receive", move || receiver.run())?);
         engine.threads.push(spawn("ramflux-call-playout", move || player.run())?);
@@ -284,6 +295,24 @@ impl Engine {
         self.authorization.snapshot()
     }
 
+    /// Sets video authority, independent of audio. Turning it off drops the
+    /// pending video units. Refused once the gate is closed or retired.
+    #[must_use]
+    pub fn video_active(&self, active: bool) -> bool {
+        let accepted = self.authorization.activate_video(active);
+        if !active {
+            *lock_video(&self.video) = Reassembler::new();
+        }
+        accepted
+    }
+
+    /// The next complete video access unit, in presentation order (expired
+    /// partial units are dropped first).
+    #[must_use]
+    pub fn take_video_access_unit(&self) -> Option<AccessUnit> {
+        lock_video(&self.video).pop_ready(Instant::now())
+    }
+
     fn flush_playout(&self) {
         *self.jitter.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
             JitterBuffer::new();
@@ -294,6 +323,7 @@ impl Engine {
     pub fn fence(&self, reason: GateReason) -> GateSnapshot {
         self.authorization.retire(reason);
         self.flush_playout();
+        *lock_video(&self.video) = Reassembler::new();
         self.authorization.snapshot()
     }
 
@@ -382,6 +412,10 @@ fn lock(shared: &Mutex<Shared>) -> std::sync::MutexGuard<'_, Shared> {
     shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn lock_video(video: &Mutex<Reassembler>) -> std::sync::MutexGuard<'_, Reassembler> {
+    video.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 struct SendLoop {
     socket: UdpSocket,
     endpoint: SocketAddr,
@@ -467,6 +501,7 @@ struct ReceiveLoop {
     inbound: Inbound,
     rebinder: Rebinder,
     jitter: Arc<Mutex<JitterBuffer>>,
+    video: Arc<Mutex<Reassembler>>,
     authorization: Arc<Authorization>,
     stop: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
@@ -489,11 +524,19 @@ impl ReceiveLoop {
             let Some(datagram) = buffer.get(..len).filter(|bytes| !bytes.is_empty()) else {
                 continue;
             };
+            // Audio (PT111) and video (PT112) share this socket; each track
+            // has its own gate, so video authority never depends on audio_active.
+            let video = Inbound::is_video(datagram);
             let mut gate = self.authorization.lock();
-            if !gate.admitted() {
+            let admitted = if video { gate.admitted_video() } else { gate.admitted() };
+            if !admitted {
                 if gate.retired {
                     break;
                 }
+                continue;
+            }
+            if video {
+                receive_video(&mut self.inbound, &self.video, &self.shared, datagram);
                 continue;
             }
             if Rebinder::is_challenge(datagram) {
@@ -527,6 +570,28 @@ impl ReceiveLoop {
                 Err(_) => lock(&self.shared).stats.rejected += 1,
             }
         }
+    }
+}
+
+/// Authenticates one video fragment and feeds the bounded reassembly. Runs
+/// under the video gate the caller holds.
+fn receive_video(
+    inbound: &mut Inbound,
+    video: &Mutex<Reassembler>,
+    shared: &Mutex<Shared>,
+    datagram: &[u8],
+) {
+    match inbound.open_video(datagram) {
+        Ok(received) => {
+            let outcome =
+                lock_video(video).push(&received.fragment, &received.payload, Instant::now());
+            let mut shared = lock(shared);
+            match outcome {
+                Ok(_) => shared.stats.video_authenticated += 1,
+                Err(_) => shared.stats.video_dropped += 1,
+            }
+        }
+        Err(_) => lock(shared).stats.video_rejected += 1,
     }
 }
 
