@@ -27,6 +27,10 @@
 
 use std::time::{Duration, Instant};
 
+/// RTP payload type of feedback (PT113), on the video SFrame key.
+pub const FEEDBACK_PAYLOAD_TYPE: u8 = 113;
+/// Largest feedback datagram (RTP header, SFrame header, report, tag).
+pub const MAX_FEEDBACK_DATAGRAM: usize = 160;
 /// Exact length of a feedback report.
 pub const FEEDBACK_LEN: usize = 64;
 /// The only feedback version defined.
@@ -157,6 +161,12 @@ impl FeedbackState {
     #[must_use]
     pub fn last(&self) -> Option<&Feedback> {
         self.last.as_ref()
+    }
+
+    /// The track revision this state accepts reports for.
+    #[must_use]
+    pub fn track_revision(&self) -> u32 {
+        self.track_revision
     }
 
     /// Accepts `report` if it belongs to this track revision, is newer than

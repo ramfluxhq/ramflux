@@ -36,6 +36,8 @@ use crate::pipeline::{Inbound, Outbound, PipelineError, Rebinder};
 use crate::relay::MAX_DATAGRAM;
 use crate::session::MediaSession;
 use crate::video::packet::AccessUnit;
+use crate::video::control::VideoControl;
+use crate::video::feedback::Error as FeedbackError;
 use crate::video::reassembly::Reassembler;
 use crate::video::send::{MAX_DATAGRAMS_PER_TURN, Submitted, VideoSender};
 use zeroize::{Zeroize, Zeroizing};
@@ -134,6 +136,8 @@ pub struct EngineStats {
     pub video_rejected: u64,
     /// Video fragments or access units dropped by the bounded reassembly.
     pub video_dropped: u64,
+    /// Video feedback reports accepted (PT113).
+    pub video_feedback: u64,
     /// Video datagrams sent.
     pub video_sent: u64,
     /// Video access units dropped before sending (queue full, or waiting for a keyframe).
@@ -163,6 +167,7 @@ pub struct Engine {
     shared: Arc<Mutex<Shared>>,
     video: Arc<Mutex<Reassembler>>,
     video_out: Option<Arc<Mutex<VideoSender>>>,
+    control: Arc<Mutex<VideoControl>>,
     threads: Vec<JoinHandle<()>>,
     local: SocketAddr,
 }
@@ -244,6 +249,7 @@ impl Engine {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let jitter = Arc::new(Mutex::new(JitterBuffer::new()));
         let video = Arc::new(Mutex::new(Reassembler::new()));
+        let control = Arc::new(Mutex::new(VideoControl::new()));
         let started = Instant::now();
         let send_socket = socket.try_clone()?;
 
@@ -257,6 +263,7 @@ impl Engine {
             muted: muted.clone(),
             shared: shared.clone(),
             video: video_out.clone(),
+            control: control.clone(),
         };
         let receiver = ReceiveLoop {
             socket,
@@ -265,6 +272,7 @@ impl Engine {
             rebinder,
             jitter: jitter.clone(),
             video: video.clone(),
+            control: control.clone(),
             authorization: authorization.clone(),
             stop: stop.clone(),
             shared: shared.clone(),
@@ -286,6 +294,7 @@ impl Engine {
             shared,
             video,
             video_out,
+            control,
             threads: Vec::new(),
             local,
         };
@@ -327,9 +336,24 @@ impl Engine {
         let accepted = self.authorization.activate_video(active);
         if !active {
             *lock_video(&self.video) = Reassembler::new();
-            self.flush_video_out();
+            self.flush_video();
         }
         accepted
+    }
+
+    /// Asks the peer for a keyframe (PT113 request revision, repeated until acknowledged).
+    ///
+    /// # Errors
+    ///
+    /// [`FeedbackError::Wrap`] when the revision would wrap.
+    pub fn request_keyframe(&self) -> Result<u32, FeedbackError> {
+        lock_control(&self.control).request_keyframe()
+    }
+
+    /// The host calls this after it produced the IDR for the peer's request
+    /// `revision` (the peer then sees the acknowledgement).
+    pub fn keyframe_applied(&self, revision: u32) {
+        lock_control(&self.control).apply_keyframe(revision);
     }
 
     /// Queues one encoded access unit on the video track. Refused (counted
@@ -343,6 +367,7 @@ impl Engine {
     pub fn submit_video(&self, au: &AccessUnit) -> Result<Submitted, PipelineError> {
         let out = self.video_out.as_ref().ok_or(PipelineError::VideoNotNegotiated)?;
         let outcome = if self.authorization.lock().admitted_video() {
+            lock_control(&self.control).note_outbound_revision(au.track_revision);
             lock_sender(out).submit(au, Instant::now())?
         } else {
             Submitted { queued: false, dropped: 1 }
@@ -354,10 +379,11 @@ impl Engine {
         Ok(outcome)
     }
 
-    fn flush_video_out(&self) {
+    fn flush_video(&self) {
         if let Some(out) = self.video_out.as_ref() {
             lock_sender(out).flush();
         }
+        *lock_control(&self.control) = VideoControl::new();
     }
 
     /// The next complete video access unit, in presentation order (expired
@@ -378,7 +404,7 @@ impl Engine {
         self.authorization.retire(reason);
         self.flush_playout();
         *lock_video(&self.video) = Reassembler::new();
-        self.flush_video_out();
+        self.flush_video();
         self.authorization.snapshot()
     }
 
@@ -475,6 +501,10 @@ fn lock_sender(video: &Mutex<VideoSender>) -> std::sync::MutexGuard<'_, VideoSen
     video.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn lock_control(control: &Mutex<VideoControl>) -> std::sync::MutexGuard<'_, VideoControl> {
+    control.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 struct SendLoop {
     socket: UdpSocket,
     endpoint: SocketAddr,
@@ -485,6 +515,7 @@ struct SendLoop {
     muted: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
     video: Option<Arc<Mutex<VideoSender>>>,
+    control: Arc<Mutex<VideoControl>>,
 }
 
 impl SendLoop {
@@ -571,7 +602,11 @@ impl SendLoop {
         if !gate.admitted_video() {
             return;
         }
+        let report = lock_control(&self.control).report_due(Instant::now());
         let mut sender = lock_sender(video);
+        if let Some(report) = report {
+            sender.queue_feedback(&report);
+        }
         for _ in 0..MAX_DATAGRAMS_PER_TURN {
             match sender.next_datagram(Instant::now()) {
                 Ok(Some(datagram)) => {
@@ -600,6 +635,7 @@ struct ReceiveLoop {
     rebinder: Rebinder,
     jitter: Arc<Mutex<JitterBuffer>>,
     video: Arc<Mutex<Reassembler>>,
+    control: Arc<Mutex<VideoControl>>,
     authorization: Arc<Authorization>,
     stop: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
@@ -625,8 +661,9 @@ impl ReceiveLoop {
             // Audio (PT111) and video (PT112) share this socket; each track
             // has its own gate, so video authority never depends on audio_active.
             let video = Inbound::is_video(datagram);
+            let feedback = !video && Inbound::is_feedback(datagram);
             let mut gate = self.authorization.lock();
-            let admitted = if video { gate.admitted_video() } else { gate.admitted() };
+            let admitted = if video || feedback { gate.admitted_video() } else { gate.admitted() };
             if !admitted {
                 if gate.retired {
                     break;
@@ -634,7 +671,11 @@ impl ReceiveLoop {
                 continue;
             }
             if video {
-                receive_video(&mut self.inbound, &self.video, &self.shared, datagram);
+                receive_video(&mut self.inbound, &self.video, &self.control, &self.shared, datagram);
+                continue;
+            }
+            if feedback {
+                receive_feedback(&mut self.inbound, &self.control, &self.shared, datagram);
                 continue;
             }
             if Rebinder::is_challenge(datagram) {
@@ -682,26 +723,56 @@ impl ReceiveLoop {
 fn receive_video(
     inbound: &mut Inbound,
     video: &Mutex<Reassembler>,
+    control: &Mutex<VideoControl>,
     shared: &Mutex<Shared>,
     datagram: &[u8],
 ) {
     match inbound.open_video(datagram) {
         Ok(received) => {
-            let outcome =
-                lock_video(video).push(&received.fragment, &received.payload, Instant::now());
-            let mut shared = lock(shared);
+            let now = Instant::now();
+            lock_control(control).on_fragment(
+                &received.fragment,
+                received.extended_sequence,
+                datagram.len(),
+                now,
+            );
+            let outcome = lock_video(video).push(&received.fragment, &received.payload, now);
+            let mut stats = lock(shared);
             match outcome {
-                Ok(_) => shared.stats.video_authenticated += 1,
-                Err(_) => shared.stats.video_dropped += 1,
+                Ok(_) => stats.stats.video_authenticated += 1,
+                Err(_) => stats.stats.video_dropped += 1,
             }
         }
-        Err(error) => {
-            let mut shared = lock(shared);
-            shared.stats.video_rejected += 1;
-            if matches!(error, PipelineError::KidMismatch) {
-                shared.stats.kid_mismatch += 1;
+        Err(error) => count_video_refusal(shared, &error),
+    }
+}
+
+/// Authenticates one feedback report (PT113) and feeds the control state.
+/// Runs under the video gate the caller holds.
+fn receive_feedback(
+    inbound: &mut Inbound,
+    control: &Mutex<VideoControl>,
+    shared: &Mutex<Shared>,
+    datagram: &[u8],
+) {
+    match inbound.open_feedback(datagram) {
+        Ok(report) => {
+            let outcome = lock_control(control).on_feedback(report);
+            let mut stats = lock(shared);
+            match outcome {
+                Ok(()) => stats.stats.video_feedback += 1,
+                Err(_) => stats.stats.video_rejected += 1,
             }
         }
+        Err(error) => count_video_refusal(shared, &error),
+    }
+}
+
+fn count_video_refusal(shared: &Mutex<Shared>, error: &PipelineError) {
+    let mut stats = lock(shared);
+    stats.stats.video_rejected += 1;
+    if matches!(error, PipelineError::KidMismatch) {
+        stats.stats.kid_mismatch += 1;
     }
 }
 

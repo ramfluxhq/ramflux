@@ -6,6 +6,7 @@
 //! Video shares the one socket and demux of the call engine (PT111 audio,
 //! PT112 video) but has its own gate, crypto context and queues.
 
+pub mod control;
 pub mod feedback;
 pub mod packet;
 pub mod rate;

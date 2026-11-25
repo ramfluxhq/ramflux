@@ -19,6 +19,7 @@ use crate::relay;
 use crate::rtp::{self, OPUS_PAYLOAD_TYPE, RtpHeader};
 use crate::session::MediaSession;
 use crate::sframe::{self, SframeError};
+use crate::video::feedback::{self as video_feedback, FEEDBACK_PAYLOAD_TYPE, Feedback};
 use crate::video::packet::{
     self as video_packet, FragmentHeader, METADATA_LEN, SequenceTracker, VIDEO_PAYLOAD_TYPE,
 };
@@ -45,6 +46,9 @@ pub enum PipelineError {
     /// A video packet failed its video framing (after authentication).
     #[error(transparent)]
     Video(#[from] video_packet::Error),
+    /// A video feedback report is malformed or too large.
+    #[error(transparent)]
+    Feedback(#[from] video_feedback::Error),
     /// The `SFrame` KID does not belong to the packet's track: audio KIDs
     /// (0 and 1) ride PT111 only; video KIDs (2 and 3) ride PT112 and PT113
     /// only. Refused before any decryption and counted by the engine.
@@ -214,6 +218,8 @@ pub enum Demuxed {
     Audio(Received),
     /// A video fragment (PT112).
     Video(VideoReceived),
+    /// A video feedback report (PT113).
+    Feedback(Feedback),
 }
 
 /// The receiving half of a call: audio and, when negotiated, video.
@@ -272,6 +278,39 @@ impl Inbound {
         RtpHeader::decode(packet).is_some_and(|header| header.payload_type == VIDEO_PAYLOAD_TYPE)
     }
 
+    /// Whether `packet` is a video feedback RTP packet (PT113).
+    #[must_use]
+    pub fn is_feedback(packet: &[u8]) -> bool {
+        RtpHeader::decode(packet)
+            .is_some_and(|header| header.payload_type == FEEDBACK_PAYLOAD_TYPE)
+    }
+
+    /// Opens one feedback packet: authenticates its RTP header with the video
+    /// key (the same counter stream as video), then reads the 64-byte report.
+    ///
+    /// # Errors
+    ///
+    /// [`PipelineError::Feedback`] for an oversized or malformed report,
+    /// [`PipelineError::KidMismatch`] for a foreign KID,
+    /// [`PipelineError::VideoNotNegotiated`] without a video key, or
+    /// [`PipelineError::Sframe`] when authentication or replay refuses it.
+    pub fn open_feedback(&mut self, packet: &[u8]) -> Result<Feedback, PipelineError> {
+        if packet.len() > video_feedback::MAX_FEEDBACK_DATAGRAM {
+            return Err(video_feedback::Error::Length.into());
+        }
+        let header = RtpHeader::decode(packet).ok_or(PipelineError::NotRtp)?;
+        if header.payload_type != FEEDBACK_PAYLOAD_TYPE {
+            return Err(PipelineError::NotRtp);
+        }
+        let track = self.video.as_mut().ok_or(PipelineError::VideoNotNegotiated)?;
+        let body = packet.get(rtp::HEADER_LEN..).ok_or(PipelineError::NotRtp)?;
+        if header_kid(body)? != track.kid {
+            return Err(PipelineError::KidMismatch);
+        }
+        let payload = track.receiver.decrypt(&packet[..rtp::HEADER_LEN], body)?;
+        Ok(Feedback::decode(&payload)?)
+    }
+
     /// Demultiplexes one datagram: PT111 audio through [`Self::open`], PT112
     /// video through [`Self::open_video`].
     ///
@@ -279,6 +318,9 @@ impl Inbound {
     ///
     /// As [`Self::open`] or [`Self::open_video`].
     pub fn demux(&mut self, packet: &[u8]) -> Result<Demuxed, PipelineError> {
+        if Self::is_feedback(packet) {
+            return self.open_feedback(packet).map(Demuxed::Feedback);
+        }
         if Self::is_video(packet) {
             self.open_video(packet).map(Demuxed::Video)
         } else {

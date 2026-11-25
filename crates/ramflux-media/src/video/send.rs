@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
+use super::feedback::{FEEDBACK_PAYLOAD_TYPE, Feedback};
 use super::packet::{AccessUnit, METADATA_LEN, Packetizer, validate_avcc};
+use crate::rtp::RtpHeader;
 use crate::pipeline::{PipelineError, video_kid_ok};
 use crate::relay;
 use crate::session::MediaSession;
@@ -126,6 +128,10 @@ pub struct VideoSender {
     queue: VecDeque<Queued>,
     idr_needed: bool,
     pacer: Pacer,
+    ssrc: u32,
+    feedback_sequence: u16,
+    /// The newest report waiting to be sent (a newer one replaces it).
+    feedback: Option<Pending>,
 }
 
 impl VideoSender {
@@ -155,6 +161,9 @@ impl VideoSender {
             queue: VecDeque::with_capacity(QUEUED_ACCESS_UNITS),
             idr_needed: false,
             pacer: Pacer::new(),
+            ssrc,
+            feedback_sequence: 0,
+            feedback: None,
         }))
     }
 
@@ -187,7 +196,25 @@ impl VideoSender {
     /// Drops everything queued and waits for a keyframe (video off, fence).
     pub fn flush(&mut self) {
         self.queue.clear();
+        self.feedback = None;
         self.idr_needed = true;
+    }
+
+    /// Queues a feedback report (PT113) to send ahead of video. It replaces
+    /// a report not yet sent: reports are cumulative, the newest one wins.
+    pub fn queue_feedback(&mut self, report: &Feedback) {
+        let rtp = RtpHeader {
+            marker: false,
+            payload_type: FEEDBACK_PAYLOAD_TYPE,
+            sequence: self.feedback_sequence,
+            timestamp: 0,
+            ssrc: self.ssrc,
+        };
+        self.feedback_sequence = self.feedback_sequence.wrapping_add(1);
+        self.feedback = Some(Pending {
+            metadata: rtp.encode().to_vec(),
+            body: report.encode().to_vec(),
+        });
     }
 
     /// Whether the stream waits for a keyframe before it sends again.
@@ -236,6 +263,9 @@ impl VideoSender {
             relay::LENGTH_PREFIX + self.token.len()
         };
         let overhead = relay_overhead + self.sframe_overhead;
+        if let Some(report) = self.feedback.as_ref() {
+            return Some(overhead + report.metadata.len() + report.body.len());
+        }
         self.front_packet().map(|packet| overhead + packet.metadata.len() + packet.body.len())
     }
 
@@ -249,6 +279,9 @@ impl VideoSender {
     }
 
     fn pop_front_packet(&mut self) -> Option<Pending> {
+        if let Some(report) = self.feedback.take() {
+            return Some(report);
+        }
         self.front_packet()?;
         self.queue.front_mut()?.packets.pop_front()
     }
