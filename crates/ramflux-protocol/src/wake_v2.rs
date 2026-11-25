@@ -27,6 +27,8 @@ pub const CLOCK_UNCERTAINTY_SECONDS: u64 = 5;
 pub const MESSAGE_MAX_LIFETIME_SECONDS: u64 = 86_400;
 /// Maximum signed lifetime of a call wake or call intent, in seconds.
 pub const CALL_MAX_LIFETIME_SECONDS: u64 = 30;
+/// Lifetime cap of a push test wake (central class `t`, 300 s).
+pub const TEST_MAX_LIFETIME_SECONDS: u64 = 300;
 /// Maximum UTF-8 length of an identifier on this contract.
 pub const MAX_NOTIFICATION_ID_BYTES: usize = 512;
 
@@ -60,6 +62,8 @@ pub enum WakeClass {
     Message,
     /// One-to-one call wake authorized by a [`CallIntentV1`] start.
     CallWake,
+    /// Push test wake for the calling device's own non-VoIP routes. Never an envelope grant.
+    Test,
 }
 
 /// Call-intent action.
@@ -297,6 +301,7 @@ impl WakeV2 {
         let max_span = match self.class {
             WakeClass::Message => MESSAGE_MAX_LIFETIME_SECONDS,
             WakeClass::CallWake => CALL_MAX_LIFETIME_SECONDS,
+            WakeClass::Test => TEST_MAX_LIFETIME_SECONDS,
         };
         validate_lifetime(self.created_at, self.expires_at, max_span)?;
         self.validate_class_rules()
@@ -313,6 +318,10 @@ impl WakeV2 {
                 validate_fixed("call_intent_digest", digest, DIGEST_BYTES)
             }
             (WakeClass::CallWake, _, None) => Err(contract("call_intent_digest")),
+            (WakeClass::Test, WakeAction::Enqueue, None) => Ok(()),
+            (WakeClass::Test, WakeAction::Cancel, _) | (WakeClass::Test, WakeAction::Enqueue, Some(_)) => {
+                Err(contract("test_forbids_cancel_and_digest"))
+            }
         }
     }
 
@@ -512,6 +521,7 @@ pub const fn effective_expiry(signed_expires_at: u64, admission_now: u64, class:
     let cap = match class {
         WakeClass::Message => MESSAGE_MAX_LIFETIME_SECONDS,
         WakeClass::CallWake => CALL_MAX_LIFETIME_SECONDS,
+        WakeClass::Test => TEST_MAX_LIFETIME_SECONDS,
     };
     let capped = admission_now.saturating_add(cap);
     if signed_expires_at < capped { signed_expires_at } else { capped }

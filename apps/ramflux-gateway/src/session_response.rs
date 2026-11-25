@@ -31,6 +31,7 @@ pub(crate) fn request_kind(frame: &ramflux_node_core::GatewayClientFrame) -> &'s
     match frame {
         Frame::PushRouteRegister { .. } => "push_route_register",
         Frame::PushRouteDeregister { .. } => "push_route_deregister",
+        Frame::PushRouteTest { .. } => "push_route_test",
         Frame::VoiceLease { .. } => "voice_lease",
         Frame::Attachment { .. } => "attachment",
         Frame::Open { .. } => "open",

@@ -279,6 +279,9 @@ pub enum GatewayClientFrame {
     PushRouteDeregister {
         request: Box<crate::PushRouteDeregistrationFrame>,
     },
+    PushRouteTest {
+        request: Box<crate::PushRouteTestFrame>,
+    },
     VoiceLease {
         request: Box<ramflux_protocol::VoiceLeaseFrame>,
     },
@@ -362,6 +365,15 @@ pub enum GatewayServerFrame {
     PushRouteDeregistered {
         request_id: String,
         removed: u64,
+    },
+    /// Answer of `device.push_route.test`; `queued` is accepted into the wake queue, not delivered.
+    PushRouteTested {
+        request_id: String,
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_ms: Option<u64>,
     },
     VoiceLease {
         response: Box<ramflux_protocol::VoiceLeaseResponse>,

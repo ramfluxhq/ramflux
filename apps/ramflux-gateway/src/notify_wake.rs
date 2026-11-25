@@ -242,3 +242,70 @@ fn mint_wake_id() -> Option<String> {
     let prefix = bytes.get(..16)?;
     Some(ramflux_protocol::encode_base64url(prefix))
 }
+
+/// Sign and commit one push test wake for the caller's own device (class `t`, 300 s cap).
+///
+/// The wake takes the same commit path as an offline wake: a fresh source event id, the wake
+/// dedup table, then the notify queue. `None` means nothing may be sent.
+///
+/// # Errors
+/// Returns an error when the store commit fails.
+pub(crate) fn signed_test_wake(
+    store: &GatewayRedbStore,
+    signer: &NodeServiceSigningKey,
+    source_identity: &str,
+    target_delivery_id: &str,
+    target_owner_epoch: u64,
+    now: u64,
+) -> anyhow::Result<Option<ramflux_protocol::SignedWakeV2>> {
+    let source_event_id = format!("push-test-{}", mint_wake_id().unwrap_or_default());
+    if source_event_id.len() <= "push-test-".len() {
+        return Ok(None);
+    }
+    let expires_at = now.saturating_add(ramflux_protocol::TEST_MAX_LIFETIME_SECONDS);
+    let Some(wake_id) = mint_wake_id() else {
+        return Ok(None);
+    };
+    let body = WakeV2 {
+        version: 2,
+        signing_key_id: signer.signing_key_id().to_owned(),
+        signature_alg: WakeSignatureAlg::Ed25519,
+        audience: NOTIFY_WAKE_AUDIENCE.to_owned(),
+        action: WakeAction::Enqueue,
+        wake_id,
+        target_delivery_id: target_delivery_id.to_owned(),
+        target_owner_epoch,
+        source_event_id: source_event_id.clone(),
+        class: WakeClass::Test,
+        created_at: now,
+        expires_at,
+        call_intent_digest: None,
+    };
+    if body.validate_shape().is_err() || body.validate_times(now).is_err() {
+        return Ok(None);
+    }
+    let Ok(signed_wake) = signer.sign_wake_v2(&body) else {
+        return Ok(None);
+    };
+    let Ok(digest) = wake_request_digest(&signed_wake) else {
+        return Ok(None);
+    };
+    let request = WakeAdmitRequest {
+        source_identity: source_identity.to_owned(),
+        source_envelope_id: source_event_id,
+        target_owner_epoch,
+        target_delivery_id: target_delivery_id.to_owned(),
+        deadline: expires_at,
+        request_digest: digest,
+    };
+    match store.commit_signed_wake(&request, &signed_wake.body.wake_id) {
+        Ok(WakeAdmitOutcome::Created(_)) => Ok(Some(signed_wake)),
+        Ok(WakeAdmitOutcome::Existing(_)) => Ok(None),
+        Err(ramflux_node_core::NodeCoreError::InvalidConfiguration(reason))
+            if reason == "wake dedup conflict" =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}

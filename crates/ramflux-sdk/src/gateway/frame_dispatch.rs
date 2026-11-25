@@ -10,6 +10,7 @@ pub(crate) enum FrameKind {
     PushRouteRegistered,
     PushRouteRefused,
     PushRouteDeregistered,
+    PushRouteTested,
     VoiceLease,
     Attachment,
     SessionEstablished,
@@ -55,6 +56,7 @@ impl FrameKind {
             GatewayServerFrame::PushRouteRegistered { .. } => Self::PushRouteRegistered,
             GatewayServerFrame::PushRouteRefused { .. } => Self::PushRouteRefused,
             GatewayServerFrame::PushRouteDeregistered { .. } => Self::PushRouteDeregistered,
+            GatewayServerFrame::PushRouteTested { .. } => Self::PushRouteTested,
             GatewayServerFrame::VoiceLease { .. } => Self::VoiceLease,
             GatewayServerFrame::Attachment { .. } => Self::Attachment,
             GatewayServerFrame::SessionEstablished { .. } => Self::SessionEstablished,
@@ -96,9 +98,10 @@ impl FrameKind {
 
     pub(crate) const fn class(self) -> FrameClass {
         match self {
-            Self::PushRouteRegistered | Self::PushRouteRefused | Self::PushRouteDeregistered => {
-                FrameClass::PushRoute
-            }
+            Self::PushRouteRegistered
+            | Self::PushRouteRefused
+            | Self::PushRouteDeregistered
+            | Self::PushRouteTested => FrameClass::PushRoute,
             Self::Deliver
             | Self::InBandWake
             | Self::NotificationsCleared
@@ -179,6 +182,7 @@ impl ExpectedReply {
                 FrameKind::PushRouteRegistered
                     | FrameKind::PushRouteRefused
                     | FrameKind::PushRouteDeregistered
+                    | FrameKind::PushRouteTested
             ),
             Self::GrantRenew => matches!(kind, FrameKind::GrantRenewed),
         }

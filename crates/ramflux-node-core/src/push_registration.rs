@@ -293,3 +293,50 @@ pub enum PushRouteRegisterAnswer {
     Registered { expires_at: u64 },
     Refused { code: PushRouteRefusal },
 }
+
+/// Gateway path the signed push test request is bound to (client session frame).
+pub const PUSH_ROUTE_TEST_SIGNED_PATH: &str = "/notify/v1/push-route/test";
+/// Notify mesh path of the authenticated push test. The gateway posts its signed test wake here.
+pub const PUSH_ROUTE_TEST_PATH: &str = "/s13/notify/push-test";
+
+/// Client request body of `device.push_route.test`. Only the calling device is ever targeted.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushRouteTestRequest {
+    /// `alert` (default) or `voip`. `voip` is refused until a PushKit test payload exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+}
+
+/// Signed session frame of the push test; its signature domain is the route-control one.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushRouteTestFrame {
+    pub signed_request: ramflux_protocol::SignedRequest,
+    pub body: PushRouteTestRequest,
+}
+
+/// Answer of the push test. `queued` means accepted into the wake queue, not delivered.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushRouteTestAnswer {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+}
+
+impl PushRouteTestAnswer {
+    /// Accepted into the wake queue.
+    #[must_use]
+    pub fn queued() -> Self {
+        Self { status: "queued".to_owned(), reason: None, retry_after_ms: None }
+    }
+
+    /// Refused with a closed reason and an optional retry hint.
+    #[must_use]
+    pub fn refused(reason: &str, retry_after_ms: Option<u64>) -> Self {
+        Self { status: "refused".to_owned(), reason: Some(reason.to_owned()), retry_after_ms }
+    }
+}
