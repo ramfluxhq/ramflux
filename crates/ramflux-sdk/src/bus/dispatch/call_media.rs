@@ -120,6 +120,23 @@ fn view(account: &LocalBusAccountState, token: u64, call_id: &str) -> Result<Val
     Ok(media_view(&status, token, seq, owned.host_state()))
 }
 
+/// Bump the public revision after a control and journal the whole `M` row as `call.media.changed`.
+/// Controls and terminal changes are immediate; revisions only ever increase.
+fn finish(account: &LocalBusAccountState, token: u64, call_id: &str) -> Result<Value, SdkError> {
+    let owned = owned_by_token(account, token)?;
+    owned.update_host(|_| {});
+    let value = view(account, token, call_id)?;
+    let revision = value["status_revision"].as_str().unwrap_or("0").to_owned();
+    account.client.account_db()?.append_journal(
+        &format!("media:{token}:{revision}"),
+        "call.media.changed",
+        &value,
+        crate::time::now_unix_timestamp(),
+        None,
+    )?;
+    Ok(value)
+}
+
 fn status(account: &mut LocalBusAccountState, token: u64) -> Result<Value, SdkError> {
     let call_id = owned_by_token(account, token)?.receipt.call_id.clone();
     apply(account, MediaCommand::Status { call_id: call_id.clone() })?;
@@ -131,7 +148,7 @@ fn set_muted(account: &mut LocalBusAccountState, body: &MutedBody) -> Result<Val
     let owned = owned_by_token(account, body.media_token)?;
     owned.set_engine_muted(body.muted)?;
     owned.update_host(|host| host.muted = body.muted);
-    view(account, body.media_token, &call_id)
+    finish(account, body.media_token, &call_id)
 }
 
 fn audio_active(account: &mut LocalBusAccountState, body: &ActiveBody) -> Result<Value, SdkError> {
@@ -146,7 +163,7 @@ fn audio_active(account: &mut LocalBusAccountState, body: &ActiveBody) -> Result
         }
     }
     apply(account, MediaCommand::AudioActive { call_id: call_id.clone(), active: body.active })?;
-    view(account, body.media_token, &call_id)
+    finish(account, body.media_token, &call_id)
 }
 
 /// Records the applied OS route. An accepted change rotates the I/O generation: audio closes,
@@ -164,12 +181,13 @@ fn audio_route(account: &mut LocalBusAccountState, body: &RouteBody) -> Result<V
         host.permission = body.microphone_permission;
     });
     owned.rotate_io();
-    view(account, body.media_token, &call_id)
+    finish(account, body.media_token, &call_id)
 }
 
 fn close(account: &mut LocalBusAccountState, token: u64) -> Result<Value, SdkError> {
     let call_id = owned_by_token(account, token)?.receipt.call_id.clone();
-    let status = apply(account, MediaCommand::Close { call_id })?;
+    let status = apply(account, MediaCommand::Close { call_id: call_id.clone() })?;
+    finish(account, token, &call_id)?;
     if !status.drained {
         return Err(invalid("media drain pending"));
     }

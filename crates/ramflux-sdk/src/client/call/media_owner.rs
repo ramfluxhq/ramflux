@@ -72,6 +72,14 @@ fn remaining(expires: u64) -> Duration {
         .unwrap_or(Duration::ZERO)
 }
 
+/// Dropping the owner (account close, lock, revoke or client release) stops it: admission
+/// closes, workers join and callbacks drain before the storage is released.
+impl Drop for OwnedMedia {
+    fn drop(&mut self) {
+        self.stop(GateReason::Terminal);
+    }
+}
+
 impl OwnedMedia {
     pub(crate) fn new(
         session: MediaSession,
