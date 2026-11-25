@@ -10,9 +10,9 @@ use crate::{SdkError, client::RamfluxClient};
 use ramflux_media::authorization::{GateReason, GateSnapshot};
 use ramflux_media::{Capture, Engine, EngineStats, MediaSession, Playback};
 use std::cell::RefCell;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static AUDIO_RESERVED: AtomicBool = AtomicBool::new(false);
 
@@ -39,6 +39,8 @@ pub(crate) struct OwnedMedia {
     pub session: Mutex<Option<MediaSession>>,
     binding: Binding,
     running: Mutex<Running>,
+    /// Control part of the last journaled `M` row and when it was journaled (stats coalescing).
+    journal: Mutex<Option<(Instant, serde_json::Value)>>,
 }
 
 struct Binding {
@@ -110,6 +112,7 @@ impl OwnedMedia {
                 },
                 host: HostAudio::default(),
             }),
+            journal: Mutex::new(None),
             receipt,
             session: Mutex::new(Some(session)),
         })
@@ -133,6 +136,19 @@ impl OwnedMedia {
     /// Opaque public handle of this session.
     pub(crate) fn token(&self) -> u64 {
         self.token
+    }
+
+    /// Whether a row with this control part may be journaled now. A control change is always
+    /// due; a stats-only change is due at most once per `interval`.
+    pub(crate) fn journal_due(&self, control: &serde_json::Value, interval: Duration) -> bool {
+        let journal = self.journal.lock().unwrap_or_else(PoisonError::into_inner);
+        journal.as_ref().is_none_or(|(at, last)| last != control || at.elapsed() >= interval)
+    }
+
+    /// Remember the control part of the row just journaled.
+    pub(crate) fn record_journal(&self, control: serde_json::Value) {
+        let mut journal = self.journal.lock().unwrap_or_else(PoisonError::into_inner);
+        *journal = Some((Instant::now(), control));
     }
 
     /// Copy of the host-reported state with the live PCM counters filled in.
