@@ -253,7 +253,14 @@ impl NativeCallAccount {
                 },
                 target_delivery_id: identity.storage_key().into(),
                 prekey_bundle: serde_json::to_value(bundle)?,
-                message_layer: None,
+                // Project the declaration the signed roster endorses for this device, as the
+                // production manifest does; verify_native_material rejects any mismatch.
+                message_layer: record
+                    .body
+                    .devices
+                    .iter()
+                    .find(|row| row.device_id == names.device && row.device_epoch == 1)
+                    .and_then(|row| row.message_layer.clone()),
             }],
         })?;
         client.persist_observed_identity_directory_now(&manifest)?;

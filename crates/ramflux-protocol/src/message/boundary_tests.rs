@@ -32,10 +32,10 @@ fn every_interleaved_oneof_has_a_field_order_encoder() -> TestResult {
     let pool = descriptors()?;
     assert_eq!(
         pool.all_messages().filter(|message| !message.is_map_entry()).count(),
-        252,
-        "v3 descriptor message inventory"
+        253,
+        "v3 descriptor message inventory (OwnLayerRenewal, RFCORE-139, adds one)"
     );
-    assert_eq!(pool.all_messages().count(), 253, "v3 descriptor inventory includes the map entry");
+    assert_eq!(pool.all_messages().count(), 254, "v3 descriptor inventory includes the map entry");
     let mut interleaved = Vec::new();
     for message in pool.all_messages() {
         for choice in message.oneofs().filter(|choice| !choice.is_synthetic()) {

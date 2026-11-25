@@ -47,6 +47,10 @@ pub(super) struct Listener {
 
 impl Listener {
     pub(super) fn open(dir: &Path, requester: QualifiedOwner) -> Result<Self, String> {
+        // owner_wire::submit signs each operation with the live clock (30 s proof window, #621).
+        // Pin this thread's clock to the ledger clock so the fixture's owner proofs verify.
+        #[cfg(test)]
+        crate::time::FixedClock::advance_to(i64::try_from(NOW).unwrap_or(i64::MAX));
         Self::open_at(dir, requester, NOW)
     }
 

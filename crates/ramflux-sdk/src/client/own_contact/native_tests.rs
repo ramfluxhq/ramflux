@@ -3,6 +3,7 @@
 
 //! Native own-contact queues follow the signed roster without loading a branch credential.
 use crate::client::native_test_support::{Fixture, TestResult};
+use crate::custody::layer_declaration::endorsed_for;
 
 #[tokio::test]
 async fn native_contacts_backfill_once_after_enrollment_without_private_branch_loaded() -> TestResult
@@ -79,10 +80,10 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
     let qualified =
         ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(&verified, "sibling")?;
     native.devices.push(ramflux_protocol::custody::CustodyManifestDevice {
+        message_layer: endorsed_for(&native.publication.record, &sibling),
         device_ref: sibling,
         target_delivery_id: qualified.storage_key().into(),
         prekey_bundle: serde_json::to_value(credentials.prekey_bundle()?)?,
-        message_layer: None,
     });
     let fetched = crate::prekey::SdkDeviceManifestResponse::from_native((*native).clone())?;
     own.client.persist_observed_identity_directory_now(&fetched)?;
