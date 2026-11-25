@@ -239,7 +239,7 @@ fn channel_cases(transcript_value: &Value, common_value: &Value) -> TestResult {
     let digest_value = hash();
     let transcript = decode_value::<Transcript>(transcript_value)?;
     let proposal = signed(
-        json!({"schema":"ramflux.identity.pairing.enrollment.v1","version":1,"invitation_id":common_value["invitation_id"],"transcript_hash":digest_value,"base_record_hash":common_value["record_hash"],"base_epoch":common_value["device_set_epoch"],"recipient_ref":transcript_value["responder"]["device_ref"],"branch_signing_key":transcript_value["responder"]["branch_key"],"agreement_key":transcript_value["responder"]["agreement_key"],"requested_role":"secondary","capabilities":common_value["capabilities"],"lease_expires_at":common_value["lease_expires_at"],"display_name":transcript_value["responder"]["display_name"]}),
+        json!({"schema":"ramflux.identity.pairing.enrollment.v1","version":1,"invitation_id":common_value["invitation_id"],"transcript_hash":digest_value,"base_record_hash":common_value["record_hash"],"base_epoch":common_value["device_set_epoch"],"recipient_ref":transcript_value["responder"]["device_ref"],"branch_signing_key":transcript_value["responder"]["branch_key"],"agreement_key":transcript_value["responder"]["agreement_key"],"requested_role":"secondary","capabilities":common_value["capabilities"],"lease_expires_at":common_value["lease_expires_at"],"display_name":transcript_value["responder"]["display_name"],"message_layer":{"declaration":{"device":transcript_value["responder"]["device_ref"],"max_layer":1,"declaration_sequence":1,"issued_at":1,"expires_at":2},"branch_signature":encode_base64url([7u8; 64])}}),
     );
     let make = |p| {
         obj(

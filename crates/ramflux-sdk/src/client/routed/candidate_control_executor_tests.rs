@@ -252,10 +252,10 @@ async fn known_control_payload_mismatch_is_refused_before_unsupported_retention(
     );
     // Refusal rolls back the receive ratchet; use an independent established pair for the future operation.
     let (a, mut b) = pair(169, 171).await?;
-    // Operation 17 is the agent sync control of this branch (AGENT-IDENTITY-01 D8), so the first
-    // operation above the known range is 18.
+    // Operation 17 is the agent sync control (AGENT-IDENTITY-01 D8) and 18 is own layer renewal
+    // (RFCORE-139), so the first operation above the known range is 19.
     let future = g::Control {
-        operation: 18,
+        operation: 19,
         payload: Some(g::control::Payload::Reset(g::PairReset { rejected_bootstrap_floor: 0 })),
     };
     let entry = control_entry(&a, &b, "future-control-operation", &future, false)?;
