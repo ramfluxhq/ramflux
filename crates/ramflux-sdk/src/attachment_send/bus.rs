@@ -460,8 +460,8 @@ pub(crate) fn transfer_list(
 ) -> Result<Value, SdkError> {
     let account = request_account_id(request)?;
     let root = account_dir(client)?;
-    let secret = client.vault_secret_source()?.vault_secret(account)?;
-    let store = Store::open(&root, account, secret)?;
+    // The reader thread has no vault secret; the listing never unseals, so it reads without one.
+    let store = Store::open_reader(&root, account)?;
     let db = client.account_db()?;
     let mut durable = Vec::new();
     for mut row in store.pending_rows()? {

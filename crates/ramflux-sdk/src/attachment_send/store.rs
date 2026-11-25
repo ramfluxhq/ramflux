@@ -45,6 +45,12 @@ impl Store {
         Ok(Self { root, account: account.to_owned(), account_secret })
     }
 
+    /// Read-only view for `attachment.transfer.list`, which runs on an account reader thread that
+    /// holds no vault secret. It reads row files and ACK bitmaps only; no sealing path runs on it.
+    pub(crate) fn open_reader(root: &Path, account: &str) -> Result<Self, Refusal> {
+        Self::open(root, account, [0_u8; 32])
+    }
+
     /// # Errors
     /// Returns a stable code when the intent, flag, path, or budget is refused.
     pub(crate) fn begin(
