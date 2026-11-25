@@ -725,6 +725,12 @@ pub enum GatewayServerFrame {
         target_delivery_id: String,
         delivery_class: ramflux_protocol::DeliveryClass,
     },
+    /// Key set the node relays mid-session (central mode); the SDK verifies it before use.
+    PushKeyset {
+        key_id: String,
+        body: String,
+        sig: String,
+    },
     Ephemeral {
         envelope: ramflux_protocol::Envelope,
         expires_at_ms: u64,

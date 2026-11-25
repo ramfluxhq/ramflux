@@ -545,6 +545,7 @@ impl LocalBusAccountState {
         self.gateway_config.last_seen_inbox_seq =
             self.gateway_config.last_seen_inbox_seq.max(config.last_seen_inbox_seq);
         self.gateway_config.push = config.push;
+        crate::push_keyset::save_keysets(&self.client, &mut self.gateway_config.push);
     }
 
     pub(crate) fn retire_session(&mut self, client: &SessionClient) -> Result<(), SdkError> {

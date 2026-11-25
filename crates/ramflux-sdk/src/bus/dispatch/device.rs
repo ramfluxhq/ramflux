@@ -144,7 +144,7 @@ async fn dispatch_push_route_set(
     let outcome = engine.set_push_route(body.registration).await;
     account.apply_session_metadata(engine);
     account.persist_push_route_seq();
-    crate::push_keyset::persist_keyset(&account.client, &account.gateway_config)?;
+    crate::push_keyset::save_keysets(&account.client, &mut account.gateway_config.push);
     let expires_at = outcome?;
     if cleared {
         account.client.set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, EMPTY_PUSH_ROUTE_BOOK)?;
@@ -166,19 +166,23 @@ fn dispatch_push_keyset_get(
     let config = &account.gateway_config;
     let now = crate::push_keyset::unix_millis_now();
     let mode = config.push.mode.clone().unwrap_or_else(|| "unknown".to_owned());
-    let (status, record) =
-        match (crate::push_keyset::configured_push_centre(), config.push.keyset.as_ref()) {
-            (None, _) => ("no_pin", None),
-            (Some(_), None) => ("missing", None),
-            (Some(_), Some(record)) if record.expires_at <= now => ("expired", Some(record)),
-            (Some(pin), Some(record)) => {
-                if crate::push_keyset::offer(&pin, &record.doc, None, now).is_ok() {
-                    ("ok", Some(record))
-                } else {
-                    ("invalid", Some(record))
-                }
+    let pin = crate::push_keyset::configured_push_centre();
+    let held = pin.as_ref().and_then(|pin| {
+        config.push.keysets.iter().find(|record| record.centre_id == pin.centre_id)
+    });
+    let (status, record) = match (&pin, held, now) {
+        (None, _, _) => ("no_pin", None),
+        (Some(_), None, _) => ("missing", None),
+        (Some(_), Some(record), None) => ("no_clock", Some(record)),
+        (Some(_), Some(record), Some(now)) if record.expires_at <= now => ("expired", Some(record)),
+        (Some(pin), Some(record), Some(now)) => {
+            if crate::push_keyset::offer(pin, &record.doc, None, now).is_ok() {
+                ("ok", Some(record))
+            } else {
+                ("invalid", Some(record))
             }
-        };
+        }
+    };
     Ok(local_bus_ok(serde_json::json!({
         "mode": mode,
         "status": status,

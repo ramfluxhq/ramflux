@@ -207,10 +207,14 @@ impl PushRouteRetry {
             }
             GatewayPushRouteRefusal::ProviderUnavailable
             | GatewayPushRouteRefusal::Rejected
-            | GatewayPushRouteRefusal::RejectedOwner
-            | GatewayPushRouteRefusal::PushKeysetUnavailable => {
+            | GatewayPushRouteRefusal::RejectedOwner => {
                 self.failures = 0;
                 self.not_before = sent_at.saturating_add(PUSH_ROUTE_PERMANENT_RETRY_SECONDS);
+            }
+            GatewayPushRouteRefusal::PushKeysetUnavailable => {
+                // Contract retry (A1.5): the next connect, with no long wait.
+                self.failures = 0;
+                self.not_before = sent_at;
             }
             GatewayPushRouteRefusal::Unavailable | GatewayPushRouteRefusal::Unknown => {
                 self.failures = self.failures.saturating_add(1);
@@ -288,7 +292,12 @@ impl GatewaySessionEngine {
             .collect();
         let mut last = None;
         for registration in routes {
-            last = self.send_provider_registration(now, registration).await?;
+            match self.send_provider_registration(now, registration).await {
+                Ok(answer) => last = answer,
+                // A local refusal (no usable key set) skips this route; the others still go.
+                Err(SdkError::PushRouteRefused(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(last)
     }

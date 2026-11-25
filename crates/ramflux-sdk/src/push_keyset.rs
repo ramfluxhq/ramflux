@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Central push key set on the device side: the pinned centre, the verified key set held with its
-//! sequence fence, and the sealing of a push route registration to the active key.
+//! Central push key set on the device side: the pinned centre, the verified key sets held with
+//! their sequence fence per centre, and the sealing of a push route registration to the active key.
 //!
-//! The pin is explicit provisioning (`RAMFLUX_PUSH_CENTRE_ID`, `RAMFLUX_PUSH_KEYSET_VERIFY_KEYS`),
-//! with no compiled-in default. A registration in central mode is never sent unsealed: when no
-//! usable key set exists the registration is refused locally as `push_keyset_unavailable`.
+//! The pin is explicit provisioning (`RAMFLUX_PUSH_CENTRE_ID`, `RAMFLUX_PUSH_KEYSET_VERIFY_KEYS`,
+//! or a `rfc-centre-pin-1` bundle), with no compiled-in default. A registration in central mode is
+//! never sent unsealed: when no usable key set exists, or the held key set is not saved yet, the
+//! registration is refused locally as `push_keyset_unavailable`.
 
 use crate::gateway::{
     GatewayPushProvider, GatewayPushRouteEnvironment, GatewayPushRouteRefusal,
@@ -25,7 +26,7 @@ pub const PUSH_CENTRE_ID_ENV: &str = "RAMFLUX_PUSH_CENTRE_ID";
 pub const PUSH_KEYSET_VERIFY_KEYS_ENV: &str = "RAMFLUX_PUSH_KEYSET_VERIFY_KEYS";
 /// Largest serialised key set document.
 pub const MAX_KEYSET_DOC_BYTES: usize = 6144;
-/// Checkpoint holding the held key set record (document, fence and expiry).
+/// Checkpoint holding the held key set records (one per centre: document, fence and expiry).
 pub(crate) const PUSH_KEYSET_CHECKPOINT: &str = "gateway.push.keyset.v1";
 
 /// The pinned centre: its identifier and one or two verify keys by `kid`.
@@ -44,7 +45,8 @@ pub struct PushKeysetDoc {
     pub sig: String,
 }
 
-/// The key set this device holds: the verified document plus what the fence and sealing need.
+/// A key set this device holds: the verified document and what the fence and sealing need.
+/// Every field except `doc` is derived from `doc` and is re-derived on restore.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct PushKeysetRecord {
     pub(crate) centre_id: String,
@@ -63,15 +65,17 @@ pub(crate) struct PushKeysetRecord {
 pub const CENTRE_PIN_FILE_ENV: &str = "RAMFLUX_CENTRE_PIN_FILE";
 
 /// Central push state kept behind one pointer in the session config, so the connection futures
-/// stay small: the echoed mode, the held verified key set, and the pinned node key that seals `nk`.
+/// stay small: the echoed mode, the held verified key sets, and the pinned node key that seals `nk`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PushSessionState {
     /// Push mode the gateway echoed at establishment (`direct` or `central`).
     pub(crate) mode: Option<String>,
-    /// The held, verified key set (document and sequence fence).
-    pub(crate) keyset: Option<PushKeysetRecord>,
+    /// The held, verified key sets: at most one per `centre_id`, each with its own fence.
+    pub(crate) keysets: Vec<PushKeysetRecord>,
     /// The pinned home node identity key (unpadded base64url) that sealed tokens carry as `nk`.
     pub(crate) node_public_key: Option<String>,
+    /// True while a changed key set is not saved yet; no seal is made until it is saved.
+    pub(crate) keyset_unsaved: bool,
 }
 
 /// Reads the pin from the bundle file when named, else from the environment. `None` when the
@@ -84,6 +88,28 @@ pub(crate) fn configured_push_centre() -> Option<PushCentrePin> {
     pin_from_env()
 }
 
+/// A key id is `^[a-z0-9-]{1,32}$`.
+#[must_use]
+pub(crate) fn valid_key_id(kid: &str) -> bool {
+    (1..=32).contains(&kid.len())
+        && kid
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Builds a pin from parsed entries: one or two keys, each with a valid and unique `kid`.
+fn build_pin(centre_id: String, entries: Vec<(String, [u8; 32])>) -> Option<PushCentrePin> {
+    if centre_id.is_empty() || entries.is_empty() || entries.len() > 2 {
+        return None;
+    }
+    for (index, (kid, _)) in entries.iter().enumerate() {
+        if !valid_key_id(kid) || entries[..index].iter().any(|(other, _)| other == kid) {
+            return None;
+        }
+    }
+    Some(PushCentrePin { centre_id, keys: entries })
+}
+
 /// Reads `push_keyset_verify` and `centre_id` from a `rfc-centre-pin-1` bundle.
 fn pin_from_bundle(bytes: &[u8]) -> Option<PushCentrePin> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
@@ -91,49 +117,40 @@ fn pin_from_bundle(bytes: &[u8]) -> Option<PushCentrePin> {
         return None;
     }
     let centre_id = value.get("centre_id")?.as_str()?.to_owned();
-    let entries = value.get("push_keyset_verify")?.as_array()?;
-    if entries.is_empty() || entries.len() > 2 {
-        return None;
-    }
-    let mut keys = Vec::new();
-    for entry in entries {
+    let mut entries = Vec::new();
+    for entry in value.get("push_keyset_verify")?.as_array()? {
         let kid = entry.get("key_id")?.as_str()?.to_owned();
         let raw = ramflux_protocol::decode_base64url(entry.get("public_key")?.as_str()?).ok()?;
-        keys.push((kid, <[u8; 32]>::try_from(raw.as_slice()).ok()?));
+        entries.push((kid, <[u8; 32]>::try_from(raw.as_slice()).ok()?));
     }
-    if centre_id.is_empty() {
-        return None;
-    }
-    Some(PushCentrePin { centre_id, keys })
+    build_pin(centre_id, entries)
 }
 
 fn pin_from_env() -> Option<PushCentrePin> {
     let centre_id = std::env::var(PUSH_CENTRE_ID_ENV).ok().filter(|value| !value.is_empty())?;
     let raw = std::env::var(PUSH_KEYSET_VERIFY_KEYS_ENV).ok()?;
-    let mut keys = Vec::new();
+    let mut entries = Vec::new();
     for part in raw.split(',') {
         let (kid, encoded) = part.split_once(':')?;
         let bytes = ramflux_protocol::decode_base64url(encoded).ok()?;
-        let key = <[u8; 32]>::try_from(bytes.as_slice()).ok()?;
-        keys.push((kid.to_owned(), key));
+        entries.push((kid.to_owned(), <[u8; 32]>::try_from(bytes.as_slice()).ok()?));
     }
-    if keys.is_empty() || keys.len() > 2 {
-        return None;
-    }
-    Some(PushCentrePin { centre_id, keys })
+    build_pin(centre_id, entries)
 }
 
-/// Verifies an offered document against the pin and the held record, and applies the sequence
-/// fence: a higher `seq` is adopted; the same `seq` with the same body keeps the held record;
-/// the same `seq` with other bytes, or a lower `seq`, is refused.
+/// The held record for one centre.
+fn held_for<'a>(keysets: &'a [PushKeysetRecord], centre_id: &str) -> Option<&'a PushKeysetRecord> {
+    keysets.iter().find(|record| record.centre_id == centre_id)
+}
+
+/// Verifies a document against the pin and derives its record. Checks everything except the
+/// clock and the fence: size, pinned key id, signature, body rules, centre, and an active key.
 ///
 /// # Errors
-/// Returns a short cause name for every refusal, which the caller keeps for diagnostics.
-pub(crate) fn offer(
+/// Returns a short cause name for every refusal.
+pub(crate) fn derive_record(
     pin: &PushCentrePin,
     doc: &PushKeysetDoc,
-    held: Option<&PushKeysetRecord>,
-    now_ms: u64,
 ) -> Result<PushKeysetRecord, &'static str> {
     let doc_len = serde_json::to_vec(doc).map_err(|_| "doc_encode")?.len();
     if doc_len > MAX_KEYSET_DOC_BYTES {
@@ -150,29 +167,62 @@ pub(crate) fn offer(
     let sig = <[u8; 64]>::try_from(sig_bytes.as_slice()).map_err(|_| "sig_length")?;
     let parsed =
         verify_keyset(&body, &sig, &pin.centre_id, &verify_key).map_err(|_| "keyset_rejected")?;
-    if parsed.expires_at <= now_ms {
-        return Err("expired");
-    }
     let active = parsed.active().ok_or("no_active")?;
-    let body_sha256_hex = hex_of(Sha256::digest(&body).as_slice());
-    let record = PushKeysetRecord {
+    Ok(PushKeysetRecord {
         centre_id: pin.centre_id.clone(),
         seq: parsed.seq,
-        body_sha256_hex: body_sha256_hex.clone(),
+        body_sha256_hex: hex_of(Sha256::digest(&body).as_slice()),
         expires_at: parsed.expires_at,
         active_kid: active.kid.clone(),
         active_pk: ramflux_protocol::encode_base64url(active.pk),
         doc: doc.clone(),
-    };
-    let Some(held) = held else {
+    })
+}
+
+/// Verifies an offered document and applies the expiry and the sequence fence for its centre: a
+/// higher `seq` is adopted; the same `seq` with the same body keeps the held record; the same `seq`
+/// with other bytes, or a lower `seq`, is refused. A missing or zero clock refuses.
+///
+/// # Errors
+/// Returns a short cause name for every refusal, which the caller keeps for diagnostics.
+pub(crate) fn offer(
+    pin: &PushCentrePin,
+    doc: &PushKeysetDoc,
+    held: Option<&PushKeysetRecord>,
+    now_ms: u64,
+) -> Result<PushKeysetRecord, &'static str> {
+    if now_ms == 0 {
+        return Err("no_clock");
+    }
+    let record = derive_record(pin, doc)?;
+    if record.expires_at <= now_ms {
+        return Err("expired");
+    }
+    let Some(held) = held.filter(|held| held.centre_id == pin.centre_id) else {
         return Ok(record);
     };
-    match parsed.seq.cmp(&held.seq) {
+    match record.seq.cmp(&held.seq) {
         std::cmp::Ordering::Greater => Ok(record),
-        std::cmp::Ordering::Equal if held.body_sha256_hex == body_sha256_hex => Ok(held.clone()),
+        std::cmp::Ordering::Equal if held.body_sha256_hex == record.body_sha256_hex => {
+            Ok(held.clone())
+        }
         std::cmp::Ordering::Equal => Err("conflict"),
         std::cmp::Ordering::Less => Err("rollback"),
     }
+}
+
+/// Applies one offered document to the held state: adopts it (replacing this centre's record)
+/// or refuses it (keeping the held record). Any change marks the state unsaved.
+fn adopt_doc(push: &mut PushSessionState, pin: &PushCentrePin, doc: &PushKeysetDoc, now_ms: u64) {
+    let Ok(record) = offer(pin, doc, held_for(&push.keysets, &pin.centre_id), now_ms) else {
+        return;
+    };
+    if held_for(&push.keysets, &pin.centre_id) == Some(&record) {
+        return;
+    }
+    push.keysets.retain(|held| held.centre_id != pin.centre_id);
+    push.keysets.push(record);
+    push.keyset_unsaved = true;
 }
 
 /// Registers the key set relayed at establishment (central mode only). A refused document keeps
@@ -181,45 +231,62 @@ pub(crate) fn adopt_establishment(
     config: &mut GatewaySessionConfig,
     mode: Option<&str>,
     doc: Option<&PushKeysetDoc>,
-    now_ms: u64,
+    now_ms: Option<u64>,
 ) {
     config.push.mode = mode.map(str::to_owned);
     if mode != Some("central") {
         return;
     }
-    let (Some(pin), Some(doc)) = (configured_push_centre(), doc) else {
+    let (Some(pin), Some(doc), Some(now_ms)) = (configured_push_centre(), doc, now_ms) else {
         return;
     };
-    if let Ok(record) = offer(&pin, doc, config.push.keyset.as_ref(), now_ms) {
-        config.push.keyset = Some(record);
-    }
+    adopt_doc(&mut config.push, &pin, doc, now_ms);
 }
 
-/// Re-verifies the held record and seals a registration to its active key. The registration
-/// leaves with `sealed: true`, the sealed token as `token`, and no `app` (it is sealed only).
+/// Adopts a key set the node relays mid-session (`push_keyset` frame) under the same rules.
+pub(crate) fn adopt_mid_session(
+    config: &mut GatewaySessionConfig,
+    doc: &PushKeysetDoc,
+    now_ms: Option<u64>,
+) {
+    if config.push.mode.as_deref() != Some("central") {
+        return;
+    }
+    let (Some(pin), Some(now_ms)) = (configured_push_centre(), now_ms) else {
+        return;
+    };
+    adopt_doc(&mut config.push, &pin, doc, now_ms);
+}
+
+/// Re-verifies the held record and seals a registration to the active key of that verified
+/// document. The registration leaves with `sealed: true`, the sealed token as `token`, and no
+/// `app` (it is sealed only).
 ///
 /// # Errors
-/// Returns [`SdkError::PushRouteRefused`] with `push_keyset_unavailable` when no usable key set
-/// or pin exists, and `rejected` for a registration that cannot be sealed as given.
+/// Returns [`SdkError::PushRouteRefused`] with `push_keyset_unavailable` when no usable key set,
+/// pin or clock exists, or the held state is not saved yet; `rejected` for a registration that
+/// cannot be sealed as given.
 pub(crate) fn seal_registration(
     config: &GatewaySessionConfig,
     registration: GatewayPushRouteRegistration,
     app: Option<String>,
-    now_ms: u64,
+    now_ms: Option<u64>,
 ) -> Result<GatewayPushRouteRegistration, SdkError> {
     let unavailable = || SdkError::PushRouteRefused(GatewayPushRouteRefusal::PushKeysetUnavailable);
     let rejected = || SdkError::PushRouteRefused(GatewayPushRouteRefusal::Rejected);
-    let pin = configured_push_centre().ok_or_else(unavailable)?;
-    let record = config.push.keyset.as_ref().ok_or_else(unavailable)?;
-    if record.centre_id != pin.centre_id {
+    if config.push.keyset_unsaved {
         return Err(unavailable());
     }
-    offer(&pin, &record.doc, None, now_ms).map_err(|_| unavailable())?;
+    let pin = configured_push_centre().ok_or_else(unavailable)?;
+    let held = held_for(&config.push.keysets, &pin.centre_id).ok_or_else(unavailable)?;
+    let now_ms = now_ms.ok_or_else(unavailable)?;
+    // Every sealing input comes from this verified document, never from the stored fields.
+    let verified = offer(&pin, &held.doc, None, now_ms).map_err(|_| unavailable())?;
     let node_key = config.push.node_public_key.as_deref().ok_or_else(unavailable)?;
     let nk_bytes = ramflux_protocol::decode_base64url(node_key).map_err(|_| unavailable())?;
     <[u8; 32]>::try_from(nk_bytes.as_slice()).map_err(|_| unavailable())?;
     let recipient_bytes =
-        ramflux_protocol::decode_base64url(&record.active_pk).map_err(|_| unavailable())?;
+        ramflux_protocol::decode_base64url(&verified.active_pk).map_err(|_| unavailable())?;
     let recipient = <[u8; 32]>::try_from(recipient_bytes.as_slice()).map_err(|_| unavailable())?;
     let provider = match registration.provider {
         GatewayPushProvider::Apns => PushTokenProvider::Apns,
@@ -243,8 +310,8 @@ pub(crate) fn seal_registration(
         cap: None,
     };
     let sealed = seal_push_token(&SealInput {
-        centre_id: &pin.centre_id,
-        kid: &record.active_kid,
+        centre_id: &verified.centre_id,
+        kid: &verified.active_kid,
         recipient_pk: &recipient,
         plaintext: &plaintext,
     })
@@ -255,14 +322,15 @@ pub(crate) fn seal_registration(
     Ok(out)
 }
 
-/// Current wall clock in Unix milliseconds (zero before the epoch).
+/// Current wall clock in Unix milliseconds. `None` when the clock is before the epoch or the
+/// value does not fit; callers refuse rather than use a zero time.
 #[must_use]
-pub(crate) fn unix_millis_now() -> u64 {
+pub(crate) fn unix_millis_now() -> Option<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
-        .unwrap_or(0)
+        .filter(|now| *now > 0)
 }
 
 fn hex_of(bytes: &[u8]) -> String {
@@ -273,10 +341,12 @@ fn hex_of(bytes: &[u8]) -> String {
     })
 }
 
-/// Restores the held key set record from the account checkpoint (absent or empty is none).
+/// Restores the held key set records from the account checkpoint (absent or empty is none). Each
+/// record for the pinned centre is re-derived from its own document, so stored derived fields are
+/// not trusted; a record whose document no longer verifies is dropped.
 ///
 /// # Errors
-/// Returns an error when the checkpoint is present and is not a record.
+/// Returns an error when the checkpoint is present and is not a record list.
 pub(crate) fn restore_keyset(
     client: &RamfluxClient,
     config: &mut GatewaySessionConfig,
@@ -287,21 +357,28 @@ pub(crate) fn restore_keyset(
     if value.is_empty() {
         return Ok(());
     }
-    config.push.keyset = Some(serde_json::from_str(&value)?);
+    let stored: Vec<PushKeysetRecord> = serde_json::from_str(&value)?;
+    let pin = configured_push_centre();
+    config.push.keysets = stored
+        .into_iter()
+        .filter_map(|record| match &pin {
+            Some(pin) if pin.centre_id == record.centre_id => derive_record(pin, &record.doc).ok(),
+            _ => Some(record),
+        })
+        .collect();
     Ok(())
 }
 
-/// Persists the held key set record so the fence survives expiry and restarts.
-///
-/// # Errors
-/// Returns an error when the checkpoint cannot be written.
-pub(crate) fn persist_keyset(
-    client: &RamfluxClient,
-    config: &GatewaySessionConfig,
-) -> Result<(), SdkError> {
-    let Some(record) = &config.push.keyset else {
-        return Ok(());
+/// Saves the held key set records when they changed, so the fence survives expiry and restarts.
+/// A failed save leaves the state unsaved, which refuses every seal until a later save succeeds.
+pub(crate) fn save_keysets(client: &RamfluxClient, push: &mut PushSessionState) {
+    if !push.keyset_unsaved {
+        return;
+    }
+    let Ok(encoded) = serde_json::to_string(&push.keysets) else {
+        return;
     };
-    client.set_projection_checkpoint(PUSH_KEYSET_CHECKPOINT, &serde_json::to_string(record)?)?;
-    Ok(())
+    if client.set_projection_checkpoint(PUSH_KEYSET_CHECKPOINT, &encoded).is_ok() {
+        push.keyset_unsaved = false;
+    }
 }
