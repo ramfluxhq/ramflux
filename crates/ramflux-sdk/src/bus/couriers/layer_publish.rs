@@ -252,16 +252,25 @@ pub(crate) fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Box<P
     let Some(config) = account.gateway_config.custody.clone() else { return Ok(None) };
     let Some(born) = account.client.born_v3_account.as_deref() else { return Ok(None) };
     let local = born.local_device_id()?.to_owned();
-    if born.record().body.master_certificate.body.primary_device_ref.device_id != local {
-        return Ok(None);
-    }
+    let is_primary =
+        born.record().body.master_certificate.body.primary_device_ref.device_id == local;
     if account.layer_publish.backing_off() {
         return Ok(None);
     }
     let now = custody::network_now()?;
+    if !is_primary {
+        // Secondary send half: sign and stage the renewal; the own-device outbox delivers it.
+        account.client.stage_own_layer_renewal(now)?;
+        return Ok(None);
+    }
     if let Some(head) = account.client.account_db()?.pairing_head()? {
         if head.kind != "layer_update" {
             return Ok(None);
+        }
+        if let Some(target) =
+            secondary::target_for(account.client.account_db()?, &head.operation_id)?
+        {
+            return secondary::resume(account, &config, &head, target, now);
         }
         return resume(account, &config, &head, now);
     }
@@ -281,7 +290,7 @@ pub(crate) fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Box<P
     let certificate_expiry =
         device.branch_certificate.as_ref().ok_or(SdkError::NetworkingPending)?.body.expires_at;
     if !renewal_due(device.message_layer.as_ref(), now) {
-        return Ok(None);
+        return secondary::prepare_next(account, &config, now);
     }
     let issued_at = now.max(record.body.issued_at.saturating_add(1));
     let expires_at = issued_at.saturating_add(MAX_VALIDITY_SECONDS).min(certificate_expiry);
@@ -506,6 +515,15 @@ fn finish(
         )
     })?;
     observe_published(account, &config.account_root, &published)?;
+    if write.kind == HeadKind::SecondaryLayer
+        && let Some(device) = write.recipient_ref.as_ref()
+    {
+        let endorsed = write
+            .message_layer
+            .as_ref()
+            .map_or(0, |signed| signed.declaration.declaration_sequence);
+        secondary::complete(account.client.account_db()?, device, endorsed)?;
+    }
     let id = account.client.account_db()?.local_account_id.clone();
     account.client.born_v3_account = Some(Box::new(custody::load_account(
         account.client.account_index()?.root(),
@@ -520,5 +538,6 @@ fn finish(
     Ok(())
 }
 
+mod secondary;
 #[cfg(test)]
 mod tests;

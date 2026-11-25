@@ -28,6 +28,9 @@ pub enum HeadKind {
     Revoke,
     /// The primary's own message-layer declaration, endorsed by a new native head.
     Layer(crate::custody::DeclarationValidity),
+    /// Endorse a secondary's branch-signed renewal (`message_layer`) for the device named by
+    /// `recipient_ref`. Journal kind stays `layer_update`; recipient ref is not persisted.
+    SecondaryLayer,
 }
 
 /// Request for one fenced primary head write.
@@ -327,6 +330,22 @@ fn prepare_candidate_leased(
                     write.revoked_id.as_deref().ok_or(SdkError::PairingField("revoked_ref"))?,
                     write.now,
                 )?,
+                HeadKind::SecondaryLayer => {
+                    let declaration = write
+                        .message_layer
+                        .clone()
+                        .ok_or(SdkError::PairingField("message_layer"))?;
+                    let target = write
+                        .recipient_ref
+                        .as_ref()
+                        .ok_or(SdkError::PairingField("recipient_ref"))?;
+                    primary.endorse_device_layer(
+                        account.verified(),
+                        &target.device_id,
+                        declaration,
+                        write.now,
+                    )?
+                }
                 HeadKind::Layer(validity) => {
                     if validity.issued_at != write.now {
                         return Err(SdkError::PairingField("issued_at"));
@@ -630,7 +649,7 @@ fn kind_label(kind: HeadKind) -> &'static str {
         HeadKind::Enroll => "enroll",
         HeadKind::Profile => "head_update",
         HeadKind::Revoke => "revoke",
-        HeadKind::Layer(_) => "layer_update",
+        HeadKind::Layer(_) | HeadKind::SecondaryLayer => "layer_update",
     }
 }
 

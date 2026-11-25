@@ -148,6 +148,45 @@ impl SelfSigningKey {
         body.devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
         self.sign_record(body)
     }
+    /// Endorse an active secondary's own renewed message-layer declaration into a new roster head.
+    /// The declaration must be strictly newer than the endorsed one; the primary signs only the
+    /// roster, never the secondary's assertion.
+    /// # Errors
+    /// Rejects a missing or non-active target, an out-of-lease or mis-bound declaration, a
+    /// sequence that is not newer than the endorsed one, rollback time, or invalid authority.
+    pub fn endorse_device_layer(
+        &self,
+        current: &VerifiedRecord,
+        device_id: &str,
+        message_layer: SignedLayerDeclaration,
+        now: u64,
+    ) -> Result<Envelope<DeviceSet>, CryptoError> {
+        let mut body = Self::next_body(current, now)?;
+        let device = body
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id && d.status == DeviceSetStatus::Active)
+            .ok_or_else(|| reject("custody layer endorsement target unavailable"))?;
+        let certificate = device
+            .branch_certificate
+            .as_ref()
+            .ok_or_else(|| reject("custody layer endorsement target has no branch"))?;
+        let expected = DeviceRef {
+            account_anchor: certificate.body.account_anchor.clone(),
+            device_id: certificate.body.device_id.clone(),
+            device_epoch: certificate.body.device_epoch,
+        };
+        message_layer_declaration(&message_layer, &expected, &certificate.body, now)?;
+        if let Some(endorsed) = &device.message_layer
+            && message_layer.declaration.declaration_sequence
+                <= endorsed.declaration.declaration_sequence
+        {
+            return Err(reject("custody layer endorsement is not newer"));
+        }
+        device.message_layer = Some(message_layer);
+        self.sign_record(body)
+    }
+
     fn next_body(current: &VerifiedRecord, now: u64) -> Result<DeviceSet, CryptoError> {
         let mut body = current.envelope().body.clone();
         let (range, revision) = decode_epoch(body.device_set_epoch)?;
