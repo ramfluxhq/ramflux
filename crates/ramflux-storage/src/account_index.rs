@@ -13,7 +13,10 @@ mod files;
 pub use backup::{AccountGenerationSelection, BackupIndexInstall};
 mod app_lock;
 mod device_unlock;
-pub use app_lock::{APP_LOCK_MAX_TIMEOUT_MS, AppLockPolicy};
+pub use app_lock::{
+    APP_LOCK_MAX_TIMEOUT_MS, APP_LOCK_PRESENCE_WRAP_MAX_BYTES, AppLockChange, AppLockPolicy,
+    AppLockPresenceWrap,
+};
 pub use device_unlock::CodeAttempts;
 mod operations;
 mod search;

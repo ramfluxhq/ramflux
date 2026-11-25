@@ -2,6 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 //! Per-account app-lock policy. An absent row is off, with timeout 0 and generation 0.
+//!
+//! The row also keeps the durable hard-lock override (set by an explicit `account.lock`, cleared
+//! only by a correct account code) and the optional platform presence wrap of the account key.
+//! Every policy change is checked against the generation the caller read and commits the policy,
+//! the silent wrap and the presence wrap in one transaction.
 
 use super::AccountIndex;
 use crate::{StorageError, WrappedAccountDbKey};
@@ -9,6 +14,8 @@ use rusqlite::{OptionalExtension, params};
 
 /// Inclusive upper bound of `account.app_lock.configure` `timeout_ms`.
 pub const APP_LOCK_MAX_TIMEOUT_MS: u64 = 86_400_000;
+/// Largest opaque presence wrap the storage accepts from a platform provider.
+pub const APP_LOCK_PRESENCE_WRAP_MAX_BYTES: usize = 4_096;
 
 /// Durable app-lock policy of one account. Absent storage is off, timeout 0, generation 0.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -16,10 +23,32 @@ pub const APP_LOCK_MAX_TIMEOUT_MS: u64 = 86_400_000;
 pub struct AppLockPolicy {
     /// Whether a restart must stay locked until the user unlocks.
     pub enabled: bool,
-    /// Idle timeout in milliseconds. Unused until the lifecycle card.
+    /// Idle timeout in milliseconds.
     pub timeout_ms: u64,
     /// Increases by one on every committed policy change.
     pub generation: u64,
+    /// Set by an explicit `account.lock`; presence unlock is refused until a correct code clears it.
+    pub hard_locked: bool,
+    /// A presence wrap is stored for the account. Only ever true while the policy is on.
+    pub presence_wrapped: bool,
+}
+
+/// Opaque platform presence wrap of the account key plus the device it was bound to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppLockPresenceWrap {
+    /// Installed device identity the wrap is bound to.
+    pub device_id: String,
+    /// Opaque provider bytes, at most [`APP_LOCK_PRESENCE_WRAP_MAX_BYTES`].
+    pub wrapped: Vec<u8>,
+}
+
+/// One policy change. The generation read by the caller must still be current on commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AppLockChange {
+    /// Turn on. Clears the silent wrap; `presence` (when present) replaces any earlier one.
+    Enable { timeout_ms: u64, presence: Option<AppLockPresenceWrap> },
+    /// Turn off. Restores the silent wrap and clears the presence wrap.
+    Disable { timeout_ms: u64, silent: WrappedAccountDbKey },
 }
 
 impl AccountIndex {
@@ -29,7 +58,10 @@ impl AccountIndex {
                 local_account_id TEXT PRIMARY KEY,
                 enabled INTEGER NOT NULL,
                 timeout_ms INTEGER NOT NULL,
-                generation INTEGER NOT NULL
+                generation INTEGER NOT NULL,
+                hard_locked INTEGER NOT NULL DEFAULT 0,
+                presence_device_id TEXT,
+                presence_wrap BLOB
             );",
         )?;
         Ok(())
@@ -38,48 +70,130 @@ impl AccountIndex {
     /// Reads the policy. A missing row is off.
     ///
     /// # Errors
-    /// Returns an error when the row cannot be read or a stored value is not 0/1,
-    /// a timeout in range, or a non-negative generation.
+    /// Returns an error when the row cannot be read or a stored value is out of range.
     pub fn app_lock_policy(&self, local_account_id: &str) -> Result<AppLockPolicy, StorageError> {
         let row = self
             .connection
             .query_row(
-                "SELECT enabled, timeout_ms, generation FROM account_app_lock
-                  WHERE local_account_id = ?1",
+                "SELECT enabled, timeout_ms, generation, hard_locked,
+                        presence_wrap IS NOT NULL AND presence_device_id IS NOT NULL
+                   FROM account_app_lock WHERE local_account_id = ?1",
                 params![local_account_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, bool>(4)?,
+                    ))
+                },
             )
             .optional()?;
-        row.map_or(Ok(AppLockPolicy::default()), |(enabled, timeout_ms, generation)| {
-            decode_policy(enabled, timeout_ms, generation)
-        })
+        let Some((enabled, timeout_ms, generation, hard_locked, presence)) = row else {
+            return Ok(AppLockPolicy::default());
+        };
+        let mut policy = decode_policy(enabled, timeout_ms, generation)?;
+        policy.hard_locked = decode_flag(hard_locked)?;
+        policy.presence_wrapped = policy.enabled && presence;
+        Ok(policy)
     }
 
-    /// Turns app lock on and clears the silent device wrap in one commit.
+    /// Reads the presence wrap of the account, when one is stored.
     ///
     /// # Errors
-    /// Returns an error when the account is missing, the timeout is out of range,
-    /// or the index cannot commit.
-    pub fn enable_app_lock(
+    /// Returns an error when the row cannot be read or the stored wrap is oversized.
+    pub fn app_lock_presence_wrap(
         &self,
         local_account_id: &str,
-        timeout_ms: u64,
-    ) -> Result<AppLockPolicy, StorageError> {
-        self.commit_app_lock(local_account_id, true, timeout_ms, None)
+    ) -> Result<Option<AppLockPresenceWrap>, StorageError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT presence_device_id, presence_wrap FROM account_app_lock
+                  WHERE local_account_id = ?1",
+                params![local_account_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
+            )
+            .optional()?;
+        let Some((Some(device_id), Some(wrapped))) = row else {
+            return Ok(None);
+        };
+        if wrapped.is_empty() || wrapped.len() > APP_LOCK_PRESENCE_WRAP_MAX_BYTES {
+            return Err(StorageError::Integrity("app lock presence wrap is corrupt"));
+        }
+        Ok(Some(AppLockPresenceWrap { device_id, wrapped }))
     }
 
-    /// Restores the silent wrap and turns app lock off in one commit.
+    /// Commits one policy change if `expected_generation` is still current.
     ///
     /// # Errors
-    /// Returns an error when the account is missing, the timeout is out of range,
-    /// or the index cannot commit.
-    pub fn disable_app_lock(
+    /// Returns an error when the account is missing, the timeout or wrap is out of range, the
+    /// generation changed since it was read, or the index cannot commit. A failed commit leaves
+    /// the previous policy, silent wrap and presence wrap unchanged.
+    pub fn commit_app_lock(
         &self,
         local_account_id: &str,
-        timeout_ms: u64,
-        wrap: &WrappedAccountDbKey,
+        expected_generation: u64,
+        change: AppLockChange,
     ) -> Result<AppLockPolicy, StorageError> {
-        self.commit_app_lock(local_account_id, false, timeout_ms, Some(wrap.clone()))
+        let (enabled, timeout_ms, presence, silent) = match change {
+            AppLockChange::Enable { timeout_ms, presence } => {
+                (true, checked_timeout(timeout_ms)?, presence, None)
+            }
+            AppLockChange::Disable { timeout_ms, silent } => {
+                (false, checked_timeout(timeout_ms)?, None, Some(silent))
+            }
+        };
+        if let Some(wrap) = &presence {
+            checked_presence(wrap)?;
+        }
+        let id = local_account_id.to_owned();
+        let expected = i64::try_from(expected_generation)
+            .map_err(|_| StorageError::Integrity("app lock generation overflow"))?;
+        self.connection.call_immediate_result(move |tx| {
+            write_app_lock(tx, &id, expected, enabled, timeout_ms, presence, silent)
+        })?
+    }
+
+    /// Records the durable hard-lock override. Set before an explicit `account.lock` is
+    /// acknowledged; cleared only after a correct account code.
+    ///
+    /// # Errors
+    /// Returns an error when the account is missing or the index cannot commit.
+    pub fn set_app_lock_hard_lock(
+        &self,
+        local_account_id: &str,
+        locked: bool,
+    ) -> Result<(), StorageError> {
+        let id = local_account_id.to_owned();
+        self.connection.call_immediate_result(move |tx| {
+            require_account(tx, &id)?;
+            tx.execute(
+                "INSERT INTO account_app_lock (local_account_id, enabled, timeout_ms, generation, hard_locked)
+                 VALUES (?1, 0, 0, 0, ?2)
+                 ON CONFLICT(local_account_id) DO UPDATE SET hard_locked = excluded.hard_locked",
+                params![id, i64::from(locked)],
+            )?;
+            Ok(())
+        })?
+    }
+
+    /// Drops the presence wrap after the platform reports its key invalid. The policy stays on,
+    /// so the account can only be unlocked with its code.
+    ///
+    /// # Errors
+    /// Returns an error when the index cannot commit.
+    pub fn clear_app_lock_presence_wrap(&self, local_account_id: &str) -> Result<(), StorageError> {
+        let id = local_account_id.to_owned();
+        self.connection.call_immediate_result(move |tx| {
+            tx.execute(
+                "UPDATE account_app_lock SET presence_device_id = NULL, presence_wrap = NULL
+                  WHERE local_account_id = ?1",
+                params![id],
+            )?;
+            Ok::<(), StorageError>(())
+        })?
     }
 
     /// Drops silent wraps for every account whose stored policy is on.
@@ -96,31 +210,13 @@ impl AccountIndex {
         Ok(())
     }
 
-    /// Removes the policy row of an erased account.
+    /// Removes the policy row, the hard-lock override and any presence wrap of an erased account.
     pub(crate) fn erase_app_lock(&self, local_account_id: &str) -> Result<(), StorageError> {
         self.connection.execute(
             "DELETE FROM account_app_lock WHERE local_account_id = ?1",
             params![local_account_id],
         )?;
         Ok(())
-    }
-
-    fn commit_app_lock(
-        &self,
-        local_account_id: &str,
-        enabled: bool,
-        timeout_ms: u64,
-        wrap: Option<WrappedAccountDbKey>,
-    ) -> Result<AppLockPolicy, StorageError> {
-        if enabled == wrap.is_some() {
-            return Err(StorageError::Integrity("app lock wrap does not match the policy"));
-        }
-        let timeout_ms = checked_timeout(timeout_ms)?;
-        let id = local_account_id.to_owned();
-        let enabled_flag = i64::from(enabled);
-        self.connection.call_immediate_result(move |tx| {
-            write_app_lock(tx, &id, enabled_flag, timeout_ms, wrap.as_ref())
-        })?
     }
 }
 
@@ -132,30 +228,58 @@ fn checked_timeout(timeout_ms: u64) -> Result<i64, StorageError> {
         .map_err(|_| StorageError::Integrity("app lock timeout is out of range"))
 }
 
+fn checked_presence(wrap: &AppLockPresenceWrap) -> Result<(), StorageError> {
+    if wrap.device_id.is_empty()
+        || wrap.wrapped.is_empty()
+        || wrap.wrapped.len() > APP_LOCK_PRESENCE_WRAP_MAX_BYTES
+    {
+        return Err(StorageError::Integrity("app lock presence wrap is out of range"));
+    }
+    Ok(())
+}
+
 fn write_app_lock(
     tx: &rusqlite::Transaction<'_>,
     local_account_id: &str,
-    enabled: i64,
+    expected: i64,
+    enabled: bool,
     timeout_ms: i64,
-    wrap: Option<&WrappedAccountDbKey>,
+    presence: Option<AppLockPresenceWrap>,
+    silent: Option<WrappedAccountDbKey>,
 ) -> Result<AppLockPolicy, StorageError> {
     require_account(tx, local_account_id)?;
-    let generation = next_generation(tx, local_account_id)?;
+    let generation = next_generation(tx, local_account_id, expected)?;
+    let enabled_flag = i64::from(enabled);
+    let (device_id, wrap) = match presence {
+        Some(wrap) => (Some(wrap.device_id), Some(wrap.wrapped)),
+        None => (None, None),
+    };
     tx.execute(
-        "INSERT INTO account_app_lock (local_account_id, enabled, timeout_ms, generation)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO account_app_lock
+            (local_account_id, enabled, timeout_ms, generation, presence_device_id, presence_wrap)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(local_account_id) DO UPDATE SET
             enabled = excluded.enabled,
             timeout_ms = excluded.timeout_ms,
-            generation = excluded.generation",
-        params![local_account_id, enabled, timeout_ms, generation],
+            generation = excluded.generation,
+            presence_device_id = excluded.presence_device_id,
+            presence_wrap = excluded.presence_wrap",
+        params![local_account_id, enabled_flag, timeout_ms, generation, device_id, wrap],
     )?;
-    if let Some(wrap) = wrap {
-        store_wrap(tx, local_account_id, wrap)?;
-    } else {
-        clear_wrap(tx, local_account_id)?;
+    match silent {
+        Some(silent) => store_wrap(tx, local_account_id, &silent)?,
+        None => clear_wrap(tx, local_account_id)?,
     }
-    decode_policy(enabled, timeout_ms, generation)
+    let hard_locked = hard_lock_flag(tx, local_account_id)?;
+    Ok(AppLockPolicy {
+        enabled,
+        timeout_ms: u64::try_from(timeout_ms)
+            .map_err(|_| StorageError::Integrity("app lock policy is corrupt"))?,
+        generation: u64::try_from(generation)
+            .map_err(|_| StorageError::Integrity("app lock policy is corrupt"))?,
+        hard_locked,
+        presence_wrapped: enabled && device_id_present(tx, local_account_id)?,
+    })
 }
 
 fn require_account(
@@ -175,9 +299,11 @@ fn require_account(
     Ok(())
 }
 
+/// Checks the stored generation equals `expected` and returns the next one.
 fn next_generation(
     tx: &rusqlite::Transaction<'_>,
     local_account_id: &str,
+    expected: i64,
 ) -> Result<i64, StorageError> {
     let current = tx
         .query_row(
@@ -185,13 +311,45 @@ fn next_generation(
             params![local_account_id],
             |row| row.get::<_, i64>(0),
         )
-        .optional()?;
-    let current = match current {
-        Some(value) if value >= 0 => value,
-        Some(_) => return Err(StorageError::Integrity("app lock policy is corrupt")),
-        None => 0,
-    };
+        .optional()?
+        .unwrap_or(0);
+    if current < 0 {
+        return Err(StorageError::Integrity("app lock policy is corrupt"));
+    }
+    if current != expected {
+        return Err(StorageError::Integrity("app lock generation changed"));
+    }
     current.checked_add(1).ok_or(StorageError::Integrity("app lock generation overflow"))
+}
+
+fn hard_lock_flag(
+    tx: &rusqlite::Transaction<'_>,
+    local_account_id: &str,
+) -> Result<bool, StorageError> {
+    let flag = tx
+        .query_row(
+            "SELECT hard_locked FROM account_app_lock WHERE local_account_id = ?1",
+            params![local_account_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    decode_flag(flag)
+}
+
+fn device_id_present(
+    tx: &rusqlite::Transaction<'_>,
+    local_account_id: &str,
+) -> Result<bool, StorageError> {
+    let present = tx
+        .query_row(
+            "SELECT presence_wrap IS NOT NULL AND presence_device_id IS NOT NULL
+               FROM account_app_lock WHERE local_account_id = ?1",
+            params![local_account_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?;
+    Ok(present.unwrap_or(false))
 }
 
 fn store_wrap(
@@ -219,16 +377,20 @@ fn clear_wrap(tx: &rusqlite::Transaction<'_>, local_account_id: &str) -> Result<
     Ok(())
 }
 
+fn decode_flag(value: i64) -> Result<bool, StorageError> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(StorageError::Integrity("app lock policy is corrupt")),
+    }
+}
+
 fn decode_policy(
     enabled: i64,
     timeout_ms: i64,
     generation: i64,
 ) -> Result<AppLockPolicy, StorageError> {
-    let enabled = match enabled {
-        0 => false,
-        1 => true,
-        _ => return Err(StorageError::Integrity("app lock policy is corrupt")),
-    };
+    let enabled = decode_flag(enabled)?;
     if generation < 0 {
         return Err(StorageError::Integrity("app lock policy is corrupt"));
     }
@@ -242,5 +404,7 @@ fn decode_policy(
         timeout_ms,
         generation: u64::try_from(generation)
             .map_err(|_| StorageError::Integrity("app lock policy is corrupt"))?,
+        hard_locked: false,
+        presence_wrapped: false,
     })
 }

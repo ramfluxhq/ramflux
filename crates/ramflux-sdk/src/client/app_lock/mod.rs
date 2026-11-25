@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! In-memory device wrap of the open account key. The caller decides when it is stored.
+//! App-lock owners: the in-memory device wrap of the open account key (this file), the policy
+//! commit that stages a presence wrap before it is committed ([`policy`]), and the internal
+//! platform presence provider the unlock and configure arms call ([`presence`]).
 
 use super::RamfluxClient;
 use crate::SdkError;
 use ramflux_storage::WrappedAccountDbKey;
+
+pub(crate) mod policy;
 
 impl RamfluxClient {
     /// Wraps the open account key for a silent restart. Does not write the index.

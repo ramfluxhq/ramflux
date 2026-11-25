@@ -7,7 +7,7 @@ use super::super::lifecycle;
 use super::Supervisor;
 use crate::bus::io::request_account_id;
 use crate::prelude::*;
-use ramflux_storage::{AppLockPolicy, StorageError, WrappedAccountDbKey};
+use ramflux_storage::{AppLockChange, AppLockPolicy, StorageError, WrappedAccountDbKey};
 use std::sync::Arc;
 
 impl Supervisor {
@@ -312,13 +312,15 @@ fn commit(
     timeout_ms: u64,
     wrap: Option<WrappedAccountDbKey>,
 ) -> Result<AppLockPolicy, SdkError> {
-    if enabled {
-        Ok(index.enable_app_lock(account_id, timeout_ms)?)
+    let expected = index.app_lock_policy(account_id)?.generation;
+    let change = if enabled {
+        AppLockChange::Enable { timeout_ms, presence: None }
     } else {
-        let wrap =
+        let silent =
             wrap.ok_or(StorageError::Integrity("app lock disable requires a device wrap"))?;
-        Ok(index.disable_app_lock(account_id, timeout_ms, &wrap)?)
-    }
+        AppLockChange::Disable { timeout_ms, silent }
+    };
+    crate::client::app_lock::policy::commit_policy(index, account_id, expected, change, |_| {})
 }
 
 fn read_policy(

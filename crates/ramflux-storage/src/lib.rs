@@ -23,8 +23,8 @@ pub use account_writer::AccountWriterLease;
 #[cfg(test)]
 mod account_writer_tests;
 pub use account_index::{
-    APP_LOCK_MAX_TIMEOUT_MS, AccountGenerationSelection, AppLockPolicy, BackupIndexInstall,
-    CodeAttempts,
+    APP_LOCK_MAX_TIMEOUT_MS, APP_LOCK_PRESENCE_WRAP_MAX_BYTES, AccountGenerationSelection,
+    AppLockChange, AppLockPolicy, AppLockPresenceWrap, BackupIndexInstall, CodeAttempts,
 };
 mod clock;
 mod constants;
