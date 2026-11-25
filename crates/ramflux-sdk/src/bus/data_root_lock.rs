@@ -11,7 +11,7 @@ pub(crate) struct DataRootLock {
 
 // A restart may wait this long for the previous daemon's flock to leave the
 // kernel. A process that still holds the lock is excluded for the whole wait.
-const PREVIOUS_HOLDER_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+pub(crate) const PREVIOUS_HOLDER_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 const PREVIOUS_HOLDER_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
 impl DataRootLock {
@@ -28,10 +28,19 @@ impl DataRootLock {
     }
 
     pub(crate) fn acquire(root: &Path) -> Result<Arc<Self>, SdkError> {
+        Self::acquire_within(root, PREVIOUS_HOLDER_WAIT)
+    }
+
+    /// Like `acquire`, but waits up to `wait` for a holder to release the flock. The wait
+    /// never signals the holder to yield; it only polls the kernel lock.
+    pub(crate) fn acquire_within(
+        root: &Path,
+        wait: std::time::Duration,
+    ) -> Result<Arc<Self>, SdkError> {
         // Never unlink this file: all daemon instances must lock the same inode.
         let path = root.join("daemon.lock");
         let file = crate::platform::fs::open_owner_only_read_write(&path)?;
-        lock_until_previous_holder_exits(&file).map_err(|error| {
+        lock_until_previous_holder_exits(&file, wait).map_err(|error| {
             if error.kind() == std::io::ErrorKind::WouldBlock {
                 SdkError::DataRootInUse
             } else {
@@ -42,8 +51,11 @@ impl DataRootLock {
     }
 }
 
-fn lock_until_previous_holder_exits(file: &File) -> Result<(), std::io::Error> {
-    let deadline = std::time::Instant::now() + PREVIOUS_HOLDER_WAIT;
+fn lock_until_previous_holder_exits(
+    file: &File,
+    wait: std::time::Duration,
+) -> Result<(), std::io::Error> {
+    let deadline = std::time::Instant::now() + wait;
     loop {
         match crate::platform::fs::try_lock_exclusive(file) {
             Err(error)

@@ -157,6 +157,7 @@ fn refused_retry_after_ms(body: &serde_json::Value) -> Option<u64> {
 fn bus_reason_code(error: &SdkError) -> Option<String> {
     Some(match error {
         SdkError::AccountCommandBackpressure => "account_command_backpressure".into(),
+        SdkError::PushRouteRefused(_) => "push_route_refused".into(),
         SdkError::UsernameDirectoryRefused(code) => code.as_str().into(),
         SdkError::Storage(StorageError::AccountWriterBusy(_)) => "account_busy".into(),
         SdkError::ContactInput(reason) => reason.to_string(),
@@ -189,6 +190,9 @@ fn bus_error_details(error: &SdkError) -> Option<Box<serde_json::Value>> {
             Some(Box::new(serde_json::json!({"capacity": capacity})))
         }
         SdkError::CustodyVault(reason) => Some(Box::new(vault_reason_details(*reason))),
+        SdkError::PushRouteRefused(refusal) => {
+            Some(Box::new(serde_json::json!({"refusal": refusal.wire_token()})))
+        }
         SdkError::ContactConfirmationRequired(change) => Some(Box::new(serde_json::json!(change))),
         SdkError::EditConflict { target, expected, received } => Some(Box::new(
             serde_json::json!({"target": target, "expected": expected, "received": received}),
@@ -281,6 +285,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::RestoreSetupRequired => "restore_setup_required",
         SdkError::Storage(StorageError::AuthorizationRejected) => "authorization_rejected",
         SdkError::NoNodeSelected => "NoNodeSelected",
+        SdkError::PushRouteRefused(_) => "push_route_refused",
         SdkError::CustodyVault(reason) => reason.wire_code(),
         SdkError::AccountNotOpen(_) => "AccountNotOpen",
         SdkError::ReplayMismatch => "ReplayMismatch",

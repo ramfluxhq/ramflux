@@ -35,7 +35,7 @@ impl Decode for Config {
     }
 }
 
-/// Fetch one encrypted inbox page for one existing account without opening a full client.
+/// Fetch and durably apply one inbox page, then ACK, without opening a full client.
 /// Config: `{data_root,account_id,deadline_ms,lease_wait_ms?}`; `deadline_ms` is absolute Unix
 /// milliseconds as a decimal string. Budget is capped at 20s; lease wait defaults to 50ms
 /// and cannot exceed 5s or the remaining deadline. Invoke off the UI thread.
@@ -43,7 +43,9 @@ impl Decode for Config {
 /// Supply the same ABI-v1 custody provider as the app; callbacks must return promptly.
 /// On status 0, JSON has outcome fetched/busy/locked/deadline; fetched items contain only
 /// `envelope_id` and decimal-string `inbox_seq`. Empty items means no pending page.
-/// Fetched means transport receipt, not durable application, ACK or a notification result.
+/// Entries use ordinary fenced receive policy: terminal application/refusal or durable hold.
+/// Only committed terminal intents are acknowledged; uncertain ACKs remain durable for replay.
+/// Deadline/error may follow partial durable progress. Fetched is not a notification result.
 /// No couriers, subscriptions, media, card runtime or downloads are started. No account code
 /// is checked and an explicitly locked account stays locked. Network/auth failures retain
 /// ordinary nonzero SDK statuses and leave output null. Free with `ramflux_v2_buffer_free`.

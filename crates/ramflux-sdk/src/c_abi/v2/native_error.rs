@@ -15,7 +15,13 @@ enum Code {
 #[serde(untagged)]
 enum Details {
     Generated(ErrorDetails),
-    Retryable { retryable: bool },
+    Retryable {
+        retryable: bool,
+    },
+    /// Typed push route refusal token; retry hints are not carried (none exists today).
+    PushRouteRefused {
+        refusal: String,
+    },
 }
 #[derive(Serialize)]
 struct NativeError {
@@ -48,6 +54,11 @@ fn details(value: &Value, code: &Code) -> Details {
         && matches!(&error.details, ErrorDetails::ReachRevisionConflict { .. })
     {
         return Details::Generated(error.details);
+    }
+    if matches!(code, Code::Name(name) if name == "push_route_refused")
+        && let Some(refusal) = value.get("refusal").and_then(token)
+    {
+        return Details::PushRouteRefused { refusal };
     }
     let name = match code {
         Code::Name(name) => name.as_str(),
