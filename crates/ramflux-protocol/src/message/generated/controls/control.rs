@@ -11,7 +11,7 @@ pub struct Control {
     pub operation: i32,
     #[prost(
         oneof = "control::Payload",
-        tags = "16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32"
+        tags = "16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33"
     )]
     pub payload: ::core::option::Option<control::Payload>,
 }
@@ -53,6 +53,8 @@ pub mod control {
         Friend(super::FriendControl),
         #[prost(message, tag = "32")]
         AgentSync(super::AgentHostPacket),
+        #[prost(message, tag = "33")]
+        BlockSync(super::BlockDecisionSync),
     }
 }
 impl serde::Serialize for Control {
@@ -127,6 +129,9 @@ impl serde::Serialize for Control {
                 control::Payload::AgentSync(v) => {
                     struct_ser.serialize_field("agentSync", v)?;
                 }
+                control::Payload::BlockSync(v) => {
+                    struct_ser.serialize_field("blockSync", v)?;
+                }
             }
         }
         struct_ser.end()
@@ -171,6 +176,8 @@ impl<'de> serde::Deserialize<'de> for Control {
             "friend",
             "agent_sync",
             "agentSync",
+            "block_sync",
+            "blockSync",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
@@ -192,6 +199,7 @@ impl<'de> serde::Deserialize<'de> for Control {
             OwnMessageCopy,
             Friend,
             AgentSync,
+            BlockSync,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -245,6 +253,7 @@ impl<'de> serde::Deserialize<'de> for Control {
                             }
                             "friend" => Ok(GeneratedField::Friend),
                             "agentSync" | "agent_sync" => Ok(GeneratedField::AgentSync),
+                            "blockSync" | "block_sync" => Ok(GeneratedField::BlockSync),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -419,6 +428,14 @@ impl<'de> serde::Deserialize<'de> for Control {
                             payload__ = map_
                                 .next_value::<::std::option::Option<_>>()?
                                 .map(control::Payload::AgentSync);
+                        }
+                        GeneratedField::BlockSync => {
+                            if payload__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("blockSync"));
+                            }
+                            payload__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(control::Payload::BlockSync);
                         }
                     }
                 }

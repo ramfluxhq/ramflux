@@ -284,6 +284,7 @@ message Control {
     OwnMessageCopy own_message_copy = 30;
     FriendControl friend = 31;
     AgentHostPacket agent_sync = 32;
+    BlockDecisionSync block_sync = 33;
   }
 }
 // Agent creation custody traffic between the paired Human's own devices (AGENT-IDENTITY-01).
@@ -1637,4 +1638,19 @@ message ContactSafetyVerifyResult {
   ContactSafetyConfirmation safety_confirmation = 1;
   string verification_state = 2;
   optional bool sibling_delivery_pending = 3;
+}
+// Block decisions replicated between the account's own devices (BLOCK-PERSIST-01).
+// Each decision is ordered by (counter, device_id): counter is a per-account Lamport value
+// advanced to the maximum seen on apply; decided_at is informational only.
+message BlockDecisionSync {
+  string owner_anchor = 1;
+  QualifiedDevice source = 2;
+  repeated BlockDecision decisions = 3;
+}
+message BlockDecision {
+  string root = 1;
+  string state = 2;
+  uint64 counter = 3;
+  string device_id = 4;
+  int64 decided_at = 5;
 }
