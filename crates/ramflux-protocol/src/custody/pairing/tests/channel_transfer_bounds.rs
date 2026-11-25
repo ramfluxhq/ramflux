@@ -475,9 +475,11 @@ fn channel_contexts(all: &Value) -> TestResult {
         ),
         ("/payload/proposal/body/base_epoch", json!(1), "proposal_head"),
         (
+            // The signed declaration names recipient_ref, so its device binding (channel.rs
+            // layer_declaration) refuses the swap before the proposal context check runs.
             "/payload/proposal/body/recipient_ref/device_id",
             json!("other-device"),
-            "proposal_context",
+            "message_layer.device",
         ),
         (
             "/payload/proposal/body/branch_signing_key",
