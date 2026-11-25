@@ -65,7 +65,11 @@ impl AccountDb {
                 message_id: message_id.to_owned(),
                 created_at,
             };
-            self.persist_message_actor_state(message_id, &candidate_key(created_at, message_id), &value)
+            self.persist_message_actor_state(
+                message_id,
+                &candidate_key(created_at, message_id),
+                &value,
+            )
         })
     }
 
@@ -146,13 +150,7 @@ impl AccountDb {
                              AND (m.created_at < last.created_at
                                   OR (m.created_at = last.created_at
                                       AND m.message_id <= last.message_id))))",
-                params![
-                    candidate.message_id,
-                    candidate.conversation_id,
-                    i64::MIN,
-                    now,
-                    reader
-                ],
+                params![candidate.message_id, candidate.conversation_id, i64::MIN, now, reader],
                 |row| row.get(0),
             )
             .map_err(StorageError::from)

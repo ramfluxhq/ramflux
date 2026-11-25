@@ -911,7 +911,8 @@ impl RamfluxClient {
             self.hold_contact_routed_message(&opened.routing, entry, body, metadata, references)?;
             None
         } else {
-            let existed = self.account_db()?.direct_message_by_id(&opened.routing.message_id)?.is_some();
+            let existed =
+                self.account_db()?.direct_message_by_id(&opened.routing.message_id)?.is_some();
             for (index, (reference, prepared)) in references.into_iter().enumerate() {
                 let registration = self.persist_sender_attachment_reference(
                     reference,
