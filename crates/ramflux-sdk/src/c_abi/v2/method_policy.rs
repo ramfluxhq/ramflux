@@ -321,7 +321,7 @@ pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
 pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
     "b81c4216fc565566fe75bdc8b9958afc22aebb40e643d5952fc1cb563553fd4a";
 /// Immutable product commit whose tree contains this CAS policy and descriptor.
-pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "dd18e6794fb5477f687e4818c1c2d081ce684ffa";
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "d0936a0a8c1357656cbbc896129787c07793fd25";
 
 pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
     let mut rows = METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify");
@@ -337,7 +337,7 @@ pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
         && CONTACT_VERIFY_CAS_CONTRACT == "CONTACT-VERIFY-CAS-01"
         && CONTACT_VERIFY_CAS_REQUEST_TYPE == "ramflux.message.v1.ContactSafetyVerifyRequest"
         && CONTACT_VERIFY_CAS_RESPONSE_TYPE == "ramflux.message.v1.ContactSafetyVerifyResult"
-        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "dd18e6794fb5477f687e4818c1c2d081ce684ffa"
+        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "d0936a0a8c1357656cbbc896129787c07793fd25"
 }
 
 #[cfg(test)]
