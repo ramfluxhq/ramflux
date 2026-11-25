@@ -127,6 +127,8 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) task_approval_cursor: usize,
     pub(crate) task_ack_cursor: usize,
     pub(crate) task_forward_cursor: usize,
+    /// In-band `notifications_cleared` frames not yet published as `device.notifications.cleared`.
+    pub(crate) notifications_cleared_pending: u32,
     #[cfg(test)]
     pub(crate) task_forward_first: bool,
     pub(crate) task_courier_wake: Option<mpsc::Sender<()>>,
@@ -204,6 +206,7 @@ impl LocalBusAccountState {
             task_approval_cursor: 0,
             task_ack_cursor: 0,
             task_forward_cursor: 0,
+            notifications_cleared_pending: 0,
             #[cfg(test)]
             task_forward_first: false,
             task_courier_wake: None,
@@ -268,6 +271,7 @@ impl LocalBusAccountState {
             task_approval_cursor: 0,
             task_ack_cursor: 0,
             task_forward_cursor: 0,
+            notifications_cleared_pending: 0,
             #[cfg(test)]
             task_forward_first: false,
             task_courier_wake: None,

@@ -535,6 +535,7 @@ fn ephemeral_subscription_topic(topic: &str) -> bool {
         "state.changed"
             | "account.restore.finished"
             | "mcp.approval.request"
+            | "device.notifications.cleared"
             | ramflux_protocol::message::TRANSIENT_TOPIC
     )
 }

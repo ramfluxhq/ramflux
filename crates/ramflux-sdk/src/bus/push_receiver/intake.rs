@@ -52,7 +52,8 @@ async fn run_session(
 ) {
     let generation = handle.generation();
     let mut changed = handle.snapshot_watch();
-    let mut events = handle.subscribe([FrameKind::Deliver, FrameKind::Resync]);
+    let mut events =
+        handle.subscribe([FrameKind::Deliver, FrameKind::Resync, FrameKind::NotificationsCleared]);
     let mut pending = BTreeMap::new();
     loop {
         tokio::select! {
@@ -138,6 +139,21 @@ async fn handle_event(
                 return Ok(());
             }
             Box::pin(apply_capable(handle, work, pending, event)).await
+        }
+        SessionEvent::Frame { frame, generation }
+            if matches!(*frame, crate::GatewayServerFrame::NotificationsCleared {}) =>
+        {
+            // The read fan-out reached this session (K12): publish the account event once.
+            if generation != handle.generation() {
+                return Ok(());
+            }
+            crate::bus::couriers::writer::Writer::new(work.clone(), generation)
+                .apply(|account| {
+                    account.notifications_cleared_pending =
+                        account.notifications_cleared_pending.saturating_add(1);
+                    Ok(())
+                })
+                .await
         }
         SessionEvent::Lagged { generation, .. } => {
             if generation == handle.generation() {

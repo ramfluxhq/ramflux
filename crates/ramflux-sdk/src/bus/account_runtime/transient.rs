@@ -130,6 +130,44 @@ impl AccountRuntime {
             .map(tokio::time::Instant::from_std)
     }
 
+    /// Publishes `device.notifications.cleared` for each in-band clear that reached this account's
+    /// session (K12). Transient: a full router slot drops the notice, never the durable events.
+    pub(super) fn publish_cleared_updates(&mut self) {
+        if self.events.capacity() <= 1 {
+            return;
+        }
+        let Some(account) = self.state.accounts.get_mut(&self.id) else {
+            return;
+        };
+        if account.notifications_cleared_pending == 0 {
+            return;
+        }
+        let Ok(permit) = self.events.try_reserve() else {
+            return;
+        };
+        let Ok(access) = crate::bus::app_lock_fence::Fences::for_root(&self.state.config.data_root)
+            .and_then(|fences| fences.token(Some(&self.id)))
+        else {
+            return;
+        };
+        let pending = std::mem::take(&mut account.notifications_cleared_pending);
+        let events = (0..pending.min(16))
+            .map(|_| {
+                let mut event = crate::LocalBusFrame::request(
+                    "",
+                    Some(self.id.clone()),
+                    "ramflux.sdk.v1",
+                    "device.notifications.cleared",
+                    serde_json::json!({}),
+                );
+                event.kind = crate::LocalBusFrameKind::Event;
+                event
+            })
+            .collect::<Vec<_>>();
+        let (accepted, _done) = tokio::sync::oneshot::channel();
+        permit.send(crate::bus::events::EventBatch { events, access: Some(access), accepted });
+    }
+
     pub(super) fn publish_transient_updates(&self) {
         let Some(account) = self.state.accounts.get(&self.id) else {
             return;
