@@ -219,6 +219,10 @@ fn control() -> std::sync::MutexGuard<'static, ()> {
 fn enter(client: u64, token: u64, generation: u64) -> Result<Guard, PcmError> {
     SLOT.guards.fetch_add(1, Ordering::SeqCst);
     let guard = Guard;
+    // Tokens are nonzero. Zero is also the empty marker of RECEIPTS and must never match it.
+    if token == 0 {
+        return Err(PcmError::InvalidArgument);
+    }
     if SLOT.published.load(Ordering::SeqCst)
         && SLOT.token.load(Ordering::SeqCst) == token
         && SLOT.client.load(Ordering::SeqCst) == client
