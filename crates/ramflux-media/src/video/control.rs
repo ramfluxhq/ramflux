@@ -37,17 +37,25 @@ struct Inbound {
 
 impl Inbound {
     /// Counts one authenticated fragment. A new track revision restarts the counters.
-    fn observe(&mut self, header: &FragmentHeader, extended: Option<u64>, bytes: usize, now: Instant) {
+    fn observe(
+        &mut self,
+        header: &FragmentHeader,
+        extended: Option<u64>,
+        bytes: usize,
+        now: Instant,
+    ) {
         if self.revision != Some(header.track_revision) {
             *self = Self { revision: Some(header.track_revision), ..Self::default() };
         }
         let origin = *self.origin.get_or_insert(now);
         self.received_packets = self.received_packets.saturating_add(1);
-        self.received_bytes = self.received_bytes.saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        self.received_bytes =
+            self.received_bytes.saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
         if let Some(sequence) = extended {
             self.observe_sequence(sequence);
         }
-        let arrival = i64::try_from(now.saturating_duration_since(origin).as_micros()).unwrap_or(i64::MAX);
+        let arrival =
+            i64::try_from(now.saturating_duration_since(origin).as_micros()).unwrap_or(i64::MAX);
         let transit = arrival.saturating_sub(i64::try_from(header.pts_us).unwrap_or(i64::MAX));
         let base = *self.delay_base_us.get_or_insert(transit);
         let delta = transit.saturating_sub(base).clamp(i64::from(i32::MIN), i64::from(i32::MAX));
@@ -210,9 +218,8 @@ impl VideoControl {
         if self.inbound.revision.is_none() && !self.requests.pending() {
             return None;
         }
-        let due = self
-            .last_report
-            .is_none_or(|at| now.saturating_duration_since(at) >= REPORT_INTERVAL);
+        let due =
+            self.last_report.is_none_or(|at| now.saturating_duration_since(at) >= REPORT_INTERVAL);
         if !due {
             return None;
         }

@@ -281,8 +281,7 @@ impl Inbound {
     /// Whether `packet` is a video feedback RTP packet (PT113).
     #[must_use]
     pub fn is_feedback(packet: &[u8]) -> bool {
-        RtpHeader::decode(packet)
-            .is_some_and(|header| header.payload_type == FEEDBACK_PAYLOAD_TYPE)
+        RtpHeader::decode(packet).is_some_and(|header| header.payload_type == FEEDBACK_PAYLOAD_TYPE)
     }
 
     /// Opens one feedback packet: authenticates its RTP header with the video

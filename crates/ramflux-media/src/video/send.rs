@@ -19,9 +19,9 @@ use zeroize::Zeroizing;
 
 use super::feedback::{FEEDBACK_PAYLOAD_TYPE, Feedback};
 use super::packet::{AccessUnit, METADATA_LEN, Packetizer, validate_avcc};
-use crate::rtp::RtpHeader;
 use crate::pipeline::{PipelineError, video_kid_ok};
 use crate::relay;
+use crate::rtp::RtpHeader;
 use crate::session::MediaSession;
 use crate::sframe;
 
@@ -73,8 +73,8 @@ impl Pacer {
 
     fn refill(&mut self, now: Instant) {
         if let Some(last) = self.last {
-            let micros = u64::try_from(now.saturating_duration_since(last).as_micros())
-                .unwrap_or(u64::MAX);
+            let micros =
+                u64::try_from(now.saturating_duration_since(last).as_micros()).unwrap_or(u64::MAX);
             let earned = micros.saturating_mul(BYTES_PER_SECOND);
             self.credit = self.credit.saturating_add(earned).min(BURST_BYTES * MICRO);
         }
@@ -211,10 +211,8 @@ impl VideoSender {
             ssrc: self.ssrc,
         };
         self.feedback_sequence = self.feedback_sequence.wrapping_add(1);
-        self.feedback = Some(Pending {
-            metadata: rtp.encode().to_vec(),
-            body: report.encode().to_vec(),
-        });
+        self.feedback =
+            Some(Pending { metadata: rtp.encode().to_vec(), body: report.encode().to_vec() });
     }
 
     /// Whether the stream waits for a keyframe before it sends again.
@@ -257,11 +255,8 @@ impl VideoSender {
 
     /// Worst-case datagram size of the next packet, before sealing.
     fn next_bound(&mut self) -> Option<usize> {
-        let relay_overhead = if self.token.is_empty() {
-            0
-        } else {
-            relay::LENGTH_PREFIX + self.token.len()
-        };
+        let relay_overhead =
+            if self.token.is_empty() { 0 } else { relay::LENGTH_PREFIX + self.token.len() };
         let overhead = relay_overhead + self.sframe_overhead;
         if let Some(report) = self.feedback.as_ref() {
             return Some(overhead + report.metadata.len() + report.body.len());

@@ -35,9 +35,9 @@ use crate::jitter::{JitterBuffer, JitterStats, Playout};
 use crate::pipeline::{Inbound, Outbound, PipelineError, Rebinder};
 use crate::relay::MAX_DATAGRAM;
 use crate::session::MediaSession;
-use crate::video::packet::AccessUnit;
 use crate::video::control::VideoControl;
 use crate::video::feedback::Error as FeedbackError;
+use crate::video::packet::AccessUnit;
 use crate::video::reassembly::Reassembler;
 use crate::video::send::{MAX_DATAGRAMS_PER_TURN, Submitted, VideoSender};
 use zeroize::{Zeroize, Zeroizing};
@@ -702,7 +702,13 @@ impl ReceiveLoop {
                 continue;
             }
             if video {
-                receive_video(&mut self.inbound, &self.video, &self.control, &self.shared, datagram);
+                receive_video(
+                    &mut self.inbound,
+                    &self.video,
+                    &self.control,
+                    &self.shared,
+                    datagram,
+                );
                 continue;
             }
             if feedback {
