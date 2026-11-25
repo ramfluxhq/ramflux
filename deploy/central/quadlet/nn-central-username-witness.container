@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Witness role (UID 10002). Owns the public TLS listener and the only public response writer.
+[Unit]
+Description=Username centre witness
+Requires=nn-central-username-init.service
+After=nn-central-username-init.service
+[Container]
+Image=ghcr.io/ramfluxhq/ramflux-federation@sha256:<DIGEST>
+ContainerName=nn-central-username-witness
+User=10002:10003
+Entrypoint=/usr/local/bin/username-start.sh
+Exec=witness
+EnvironmentFile=/etc/ramflux-username/witness.env
+ReadOnly=true
+DropCapability=ALL
+NoNewPrivileges=true
+Tmpfs=/tmp
+Network=pasta
+PublishPort=127.0.0.1:8443:8443
+Volume=nn-central-username-witness.volume:/var/lib/ramflux/username/witness
+Volume=nn-central-username-socket.volume:/var/lib/ramflux/username/socket
+[Service]
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target

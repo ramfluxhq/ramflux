@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Username centre image (K7): ramflux-federation only (witness and centre roles).
+# Derived from the runtime stage of deploy/Dockerfile (prebuilt-runtime). Build context is a
+# directory holding the release binary `ramflux-federation` and `username-start.sh`:
+#   podman build -f Containerfile.username --build-arg RAMFLUX_PRODUCT_VERSION=... -t ramflux-username:<v> <context>
+FROM debian:trixie-slim
+
+ARG RAMFLUX_PRODUCT_VERSION
+ARG RAMFLUX_PRODUCT_REVISION
+LABEL org.opencontainers.image.version="${RAMFLUX_PRODUCT_VERSION}"
+LABEL org.opencontainers.image.revision="${RAMFLUX_PRODUCT_REVISION}"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libssl3t64 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ramflux-federation /usr/local/bin/ramflux-federation
+COPY username-start.sh /usr/local/bin/username-start.sh
+RUN chmod 0755 /usr/local/bin/ramflux-federation /usr/local/bin/username-start.sh
+
+ENTRYPOINT ["/usr/local/bin/username-start.sh"]

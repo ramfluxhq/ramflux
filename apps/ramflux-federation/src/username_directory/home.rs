@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Ordinary home storage, autonomous reconciliation and authenticated local native dispatch.
-use super::{Result, client::CenterClient, directory, error, flag, refuse, warn_drop, wire};
+use super::{Result, client::CenterClient, directory, error, flag, refuse, wire};
 use crate::{FederationDiscoverySurface, RouterMeshClient};
 use ramflux_protocol::username_directory as w;
 use std::{
@@ -132,7 +132,14 @@ pub(crate) fn local(
                 return Ok(w::NativeUsernameReply::Refused { failure: directory::failure(*code) });
             }
             tracing::warn!(%error, "username home operation unavailable");
-            warn_drop("centre_exchange", home.client.pin.url.as_str(), "exchange", &error);
+            // The peer here is the configured centre endpoint (public pin), not a client address.
+            tracing::warn!(
+                hop = "centre_exchange",
+                centre = %home.client.pin.url,
+                stage = "exchange",
+                %error,
+                "username connection dropped"
+            );
             Ok(w::NativeUsernameReply::Refused {
                 failure: directory::failure(w::DirectoryCode::DirectoryUnavailable),
             })
