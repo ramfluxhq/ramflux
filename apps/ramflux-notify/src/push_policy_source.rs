@@ -40,6 +40,7 @@ pub(crate) fn install(
 /// Polls the central push state file and applies its `dir.policy` to the store.
 pub(crate) fn start_central(store: Arc<ramflux_node_core::NotifyRedbStore>, state_file: PathBuf) {
     let spawned = std::thread::Builder::new().name("notify-push-policy".into()).spawn(move || {
+        let mut published: Option<ramflux_node_core::PolicyStatsHour> = None;
         loop {
             match ramflux_node_core::push_handoff::read_push_central_state(&state_file) {
                 Ok(Some(state)) if state.ks.is_some() => {
@@ -50,10 +51,52 @@ pub(crate) fn start_central(store: Arc<ramflux_node_core::NotifyRedbStore>, stat
                     tracing::debug!(%error, "push policy state not readable yet");
                 }
             }
+            bridge_stats(&store, &state_file, &mut published);
             std::thread::sleep(POLL_INTERVAL);
         }
     });
     if let Err(error) = spawned {
         tracing::warn!(%error, "push policy poller not started; holds stay off");
     }
+}
+
+/// Publishes the newest completed, unacknowledged stats hour for federation's next `sync`, and
+/// applies the acknowledgement federation wrote after an `ok` reply (CENTRAL P2b K11, A7.2).
+fn bridge_stats(
+    store: &Arc<ramflux_node_core::NotifyRedbStore>,
+    state_file: &std::path::Path,
+    published: &mut Option<ramflux_node_core::PolicyStatsHour>,
+) {
+    match ramflux_node_core::push_policy_stats::take_stats_ack(state_file) {
+        Ok(Some(from_ms)) => {
+            if let Err(error) = store.ack_policy_stats(from_ms) {
+                tracing::warn!(%error, "policy stats ack not recorded");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "policy stats ack unreadable"),
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0);
+    let pending = match store.pending_policy_stats(now_ms) {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::warn!(%error, "policy stats unavailable");
+            return;
+        }
+    };
+    if pending == *published {
+        return;
+    }
+    if let Err(error) = ramflux_node_core::push_policy_stats::write_pending_stats(
+        state_file,
+        pending.as_ref(),
+    ) {
+        tracing::warn!(%error, "policy stats file not written");
+        return;
+    }
+    *published = pending;
 }

@@ -25,6 +25,17 @@ const POLICY_CLEARS: TableDefinition<&str, u64> = TableDefinition::new("notify_p
 const HOUR_MS: u64 = 3_600_000;
 
 /// Account group and its other devices as (device, muted).
+/// What the policy gate decided for one wake (central and direct paths share it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyGate {
+    /// The normal send path may run now.
+    Send,
+    /// Held under `t_s`; look again at `not_before_ms`.
+    Held { not_before_ms: u64 },
+    /// Muted or dropped by a read elsewhere; never sent.
+    Withheld,
+}
+
 pub type PolicyGroupPeers = (String, Vec<(String, bool)>);
 
 /// Stored hour row: the public counters plus whether the centre acknowledged them.
@@ -315,6 +326,23 @@ impl NotifyRedbStore {
                 }
                 Ok(true)
             }
+        }
+    }
+
+    /// Policy gate for one central-mode wake. Same decision and counters as the direct path:
+    /// `Send` lets the handoff run now, `Held` defers it to `not_before_ms`, `Withheld` drops it.
+    ///
+    /// # Errors
+    /// Returns an error when the policy rows cannot be read or written.
+    pub fn policy_gate(&self, entry: &NotifyQueueEntry) -> Result<PolicyGate, NodeCoreError> {
+        if self.policy_send_allowed(entry)? {
+            return Ok(PolicyGate::Send);
+        }
+        match self.hold_row(&entry.queue_id)? {
+            Some(row) if row.state == HoldState::Held => {
+                Ok(PolicyGate::Held { not_before_ms: row.not_before_ms })
+            }
+            _ => Ok(PolicyGate::Withheld),
         }
     }
 

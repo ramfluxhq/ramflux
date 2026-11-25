@@ -14,7 +14,7 @@ use ramflux_node_core::push_handoff::{
 };
 use ramflux_node_core::{
     CentralRouteSnapshot, DevicePushRoute, FirstSendState, NodePushConfig, NodeCoreError,
-    NotifyQueueEntry, NotifyRedbStore, PushProviderKind,
+    NotifyQueueEntry, NotifyRedbStore, PolicyGate, PushProviderKind,
 };
 use ramflux_protocol::NotificationDeliveryClass;
 
@@ -182,6 +182,16 @@ impl CentralPush {
             store.central_settle_unsupported(entry)?;
             return Ok(CentralDue::Idle);
         };
+        // Policy (CENTRAL P2b K11/K12): a held wake waits for its hold to end; a muted or read
+        // wake is withheld. Calls are never held (the store decides).
+        match store.policy_gate(entry)? {
+            PolicyGate::Send => {}
+            PolicyGate::Held { not_before_ms } => {
+                let at = ceil_secs(not_before_ms).min(entry.expires_at);
+                return Ok(if at > now_seconds { CentralDue::Retry(at) } else { CentralDue::Idle });
+            }
+            PolicyGate::Withheld => return Ok(CentralDue::Idle),
+        }
         // No state file yet: no session has reported `dir.served`, so nothing is submitted (A6.4).
         // Re-check on a fixed interval instead of waiting for another pulse (H3).
         let Some(state) = read_push_central_state(&self.state_file)? else {

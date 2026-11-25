@@ -50,7 +50,7 @@ pub use policy::{
     DeviceClass, DevicePolicyRecord, HoldDecision, HoldState, POLICY_CLEAR_TTL_S,
     POLICY_DEFAULT_N_S, POLICY_DEFAULT_T_S, PolicyStatsHour,
 };
-pub use policy_store::PolicyClearOutcome;
+pub use policy_store::{PolicyClearOutcome, PolicyGate};
 
 const NOTIFY_WAKE_DUE: TableDefinition<(u64, &str), u8> =
     TableDefinition::new("notify_wake_due_v1");
