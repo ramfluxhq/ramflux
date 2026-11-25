@@ -60,7 +60,8 @@ pub struct HandoffReply {
     pub v: u8,
     pub status: HandoffStatus,
     pub retry_after_ms: Option<u64>,
-    pub why: Option<String>,
+    /// Refusal reason (centre `reason` member of a `rejected` reply).
+    pub reason: Option<String>,
     /// Same length as the request's `wakes` iff `status` is `Ok`.
     pub results: Vec<HandoffResult>,
 }
@@ -78,6 +79,8 @@ pub enum WakeOutcome {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HandoffResult {
+    /// Wake id; must equal the wake at the same position (A8.5), else the reply is a transport failure.
+    pub w: String,
     pub r: WakeOutcome,
     pub why: Option<String>,
     pub at: Option<u64>,
