@@ -25,9 +25,11 @@ fn cooperative_transfer_keeps_all_branch_keys_and_denials() -> TestResult {
         branch.agreement_identity_public_key =
             encode_base64url(crate::X25519KeyPair::from_seed([seed + 1; 32]).public);
         branch.cert_id = encode_base64url([seed; 32]);
+        let message_layer = crate::custody::sign_enrollment_layer(&signing, &branch)?;
         source = old.enroll_device(
             &verify_record(&source, now, None, None)?,
             old.certify_branch(branch)?,
+            message_layer,
             now,
         )?;
     }

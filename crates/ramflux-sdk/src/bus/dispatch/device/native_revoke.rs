@@ -196,6 +196,7 @@ fn prepare(
         recipient_ref: None,
         revoked_id: Some(device.into()),
         certificate: None,
+        message_layer: None,
         display_name: None,
         now,
         branch_vault_ref: account.branch_vault_ref().into(),

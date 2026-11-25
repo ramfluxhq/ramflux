@@ -256,8 +256,9 @@ impl Spec {
         certificate.agreement_identity_public_key =
             ramflux_protocol::encode_base64url(&agreement.public);
         certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+        let message_layer = ramflux_crypto::custody::sign_enrollment_layer(&branch, &certificate)?;
         native.publication.record =
-            key.enroll_device(&current, key.certify_branch(certificate)?, now)?;
+            key.enroll_device(&current, key.certify_branch(certificate)?, message_layer, now)?;
         crate::custody::accept_publication(
             &primary.root,
             &primary.principal,

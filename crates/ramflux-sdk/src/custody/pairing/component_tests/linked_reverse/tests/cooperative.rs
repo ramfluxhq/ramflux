@@ -112,6 +112,7 @@ fn publish_profile(
         recipient_ref: None,
         revoked_id: None,
         certificate: None,
+        message_layer: None,
         display_name: Some("Phone after attended handoff".into()),
         now,
         branch_vault_ref: account.branch_vault_ref().into(),
