@@ -12,6 +12,8 @@ compile_error!("itest-http must not be enabled in release or production builds")
 mod attachment_wire;
 mod authority_refusal;
 mod config;
+mod log_path;
+pub use log_path::log_path;
 mod node_report_config;
 pub use node_report_config::{
     NodeReportCentreConfig, NodeReportConfig, NodeReportRegionConfig, load_node_report_config,

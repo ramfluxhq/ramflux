@@ -90,7 +90,8 @@ pub(crate) async fn handle_gateway_submit(
         &context.notify.signer,
         accepted_at_unix_ms,
     ) {
-        tracing::warn!(%error, envelope_id = %envelope.envelope_id, "gateway franking tag not attached");
+        tracing::warn!(%error, "gateway franking tag not attached");
+        tracing::debug!(envelope_id = %envelope.envelope_id, "gateway franking tag not attached ids");
     }
     capture_itest_gateway_json(
         "submit",
@@ -675,7 +676,8 @@ pub(super) async fn reply_and_deliver_submitted(
     if let Err(error) =
         deliver_submitted_to_peer(context, runtime, response, frame, envelope, metadata).await
     {
-        tracing::warn!(%error, target_delivery_id = %response.target_delivery_id, "post-submit delivery deferred to durable inbox");
+        tracing::warn!(%error, "post-submit delivery deferred to durable inbox");
+        tracing::debug!(target_delivery_id = %response.target_delivery_id, "post-submit delivery deferred ids");
     }
     Ok(())
 }
@@ -856,7 +858,8 @@ pub(crate) async fn handle_gateway_own_device_fanout(
         )
         .await
         {
-            tracing::warn!(%error, target_delivery_id = %delivery.target_delivery_id, "fanout peer delivery deferred to durable inbox");
+            tracing::warn!(%error, "fanout peer delivery deferred to durable inbox");
+            tracing::debug!(target_delivery_id = %delivery.target_delivery_id, "fanout peer delivery deferred ids");
         }
     }
     write_gateway_handle(send, &ramflux_node_core::GatewayServerFrame::OwnDeviceFanout { response })
@@ -1126,7 +1129,8 @@ async fn forward_deliver_on_local_miss(
         Ok(Some(session)) => session,
         Ok(None) => return Ok(false),
         Err(error) => {
-            tracing::warn!(%error, target_delivery_id, "gateway forward presence lookup failed");
+            tracing::warn!(%error, "gateway forward presence lookup failed");
+            tracing::debug!(target_delivery_id, "gateway forward presence lookup failed ids");
             return Ok(false);
         }
     };
@@ -1168,14 +1172,15 @@ async fn forward_deliver_on_local_miss(
         Ok(Err(error)) => {
             tracing::warn!(
                 %error,
-                target_delivery_id,
                 peer_gateway_id = %session.gateway_id,
                 "gateway forward deliver failed"
             );
+            tracing::debug!(target_delivery_id, "gateway forward deliver failed ids");
             Ok(false)
         }
         Err(error) => {
-            tracing::warn!(%error, target_delivery_id, "gateway forward deliver task failed");
+            tracing::warn!(%error, "gateway forward deliver task failed");
+            tracing::debug!(target_delivery_id, "gateway forward deliver task failed ids");
             Ok(false)
         }
     }

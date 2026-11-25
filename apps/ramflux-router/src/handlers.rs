@@ -401,7 +401,7 @@ pub(crate) fn handle_mesh_request(
 
     tracing::info!(
         method = %request.method,
-        path = %request.path,
+        path = %ramflux_node_core::log_path(&request.path),
         "router mesh request received"
     );
     let response = match handle_mesh_request_value(request, router, peer) {
@@ -906,10 +906,13 @@ fn handle_mesh_fast_path_value(
                 envelope_origin_for_peer(peer_service_id)?,
             )?;
             tracing::info!(
-                target_delivery_id = %response.delivery.target_delivery_id,
                 outcome = %response.delivery.outcome,
                 inbox_seq = ?response.delivery.inbox_seq,
                 "router mesh mvp0 envelope returned"
+            );
+            tracing::debug!(
+                target_delivery_id = %response.delivery.target_delivery_id,
+                "router mesh mvp0 envelope ids"
             );
             Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&response)?)))
         }
@@ -1457,7 +1460,7 @@ fn handle_mvp1_prekey_publish(
     store: &ramflux_node_core::RouterRedbStore,
 ) -> anyhow::Result<ramflux_node_core::PrekeyResponse> {
     let request: ramflux_node_core::PrekeyPublishRequest = serde_json::from_slice(body)?;
-    tracing::info!(
+    tracing::debug!(
         device_id = %request.device_id,
         "router decoded mvp1 prekey publish"
     );
@@ -1535,11 +1538,11 @@ fn handle_mvp1_device_manifest_fetch(
         store,
     )?;
     tracing::info!(
-        principal_commitment,
         found = response.is_some(),
         device_count = response.as_ref().map_or(0, |manifest| manifest.devices.len()),
         "router mvp1 device manifest fetch outcome"
     );
+    tracing::debug!(principal_commitment, "router mvp1 device manifest fetch ids");
     Ok(response)
 }
 
@@ -1566,11 +1569,14 @@ fn handle_mvp1_inbox_fetch(
         i64::try_from(ramflux_node_core::now_unix_seconds())?,
     );
     tracing::info!(
-        target_delivery_id = %response.target_delivery_id,
         after_inbox_seq,
         limit,
         entries = response.entries.len(),
         "router mvp1 inbox fetch outcome"
+    );
+    tracing::debug!(
+        target_delivery_id = %response.target_delivery_id,
+        "router mvp1 inbox fetch ids"
     );
     Ok(response)
 }
