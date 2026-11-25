@@ -11,17 +11,6 @@ use super::{NOTIFY_ROUTE_TABLE, NodeCoreError, NotifyRedbStore, route_selection,
 use crate::push_handoff::{CentralClass, Served};
 use redb::{ReadableDatabase, ReadableTable};
 
-/// What a central answer does to one stored route.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CentralEdit {
-    /// Delete the route (`invalid_route` with `at` later than registration).
-    Remove,
-    /// Mark the route as needing a fresh seal (`reseal`).
-    MarkReseal,
-    /// Pause the route until the given Unix ms time (`unserved`).
-    Pause { until_ms: u64 },
-}
-
 /// Identity of the snapshot a central answer refers to.
 #[derive(Clone, Copy, Debug)]
 pub struct CentralRouteSnapshot<'a> {
@@ -46,9 +35,16 @@ impl NotifyRedbStore {
         snapshot: CentralRouteSnapshot<'_>,
         at_ms: u64,
     ) -> Result<bool, NodeCoreError> {
-        self.central_route_edit(device_delivery_id, snapshot, |route| {
-            (route.registered_at_ms < at_ms).then_some(CentralEdit::Remove)
+        self.central_route_update(device_delivery_id, snapshot, |values, index| {
+            let route = values.get(index)?;
+            if route.registered_at_ms < at_ms {
+                values.remove(index);
+                Some(())
+            } else {
+                None
+            }
         })
+        .map(|edited| edited.is_some())
     }
 
     /// `reseal`: the route stops receiving wakes until the device registers again.
@@ -60,7 +56,11 @@ impl NotifyRedbStore {
         device_delivery_id: &str,
         snapshot: CentralRouteSnapshot<'_>,
     ) -> Result<bool, NodeCoreError> {
-        self.central_route_edit(device_delivery_id, snapshot, |_| Some(CentralEdit::MarkReseal))
+        self.central_route_update(device_delivery_id, snapshot, |values, index| {
+            values.get_mut(index)?.needs_reseal = true;
+            Some(())
+        })
+        .map(|edited| edited.is_some())
     }
 
     /// `unserved`: pause the route until `until_ms` (the node uses 3600 s).
@@ -73,24 +73,92 @@ impl NotifyRedbStore {
         snapshot: CentralRouteSnapshot<'_>,
         until_ms: u64,
     ) -> Result<bool, NodeCoreError> {
-        self.central_route_edit(device_delivery_id, snapshot, |_| {
-            Some(CentralEdit::Pause { until_ms })
+        self.central_route_update(device_delivery_id, snapshot, |values, index| {
+            values.get_mut(index)?.unserved_until_ms = until_ms;
+            Some(())
         })
+        .map(|edited| edited.is_some())
     }
 
-    fn central_route_edit(
+    /// Returns the first-send time of `queue_id` on this route, recording `now_ms` when the
+    /// entry has none yet. The value is stored in the route row, so it survives a restart
+    /// (N4). Entries whose window (`max_age_ms`) has passed are pruned first. `Ok(None)` means
+    /// the route is gone or changed.
+    ///
+    /// # Errors
+    /// Returns storage errors, and `Busy` when another local write holds the writer.
+    pub fn central_first_send(
         &self,
         device_delivery_id: &str,
         snapshot: CentralRouteSnapshot<'_>,
-        decide: impl FnOnce(&super::DevicePushRoute) -> Option<CentralEdit>,
+        queue_id: &str,
+        now_ms: u64,
+        max_age_ms: u64,
+    ) -> Result<Option<(u64, bool)>, NodeCoreError> {
+        self.central_route_update(device_delivery_id, snapshot, |values, index| {
+            let route = values.get_mut(index)?;
+            route
+                .central_first_send
+                .retain(|entry| entry.first_send_ms.saturating_add(max_age_ms) >= now_ms);
+            if let Some(existing) =
+                route.central_first_send.iter().find(|entry| entry.queue_id == queue_id)
+            {
+                return Some((existing.first_send_ms, existing.dropped));
+            }
+            route.central_first_send.push(super::device_route::CentralFirstSend {
+                queue_id: queue_id.to_owned(),
+                first_send_ms: now_ms,
+                dropped: false,
+            });
+            Some((now_ms, false))
+        })
+    }
+
+    /// Marks one queue entry as dropped for this route (centre `rejected`, plan section 5): it
+    /// is never resent. Returns `false` when the route is gone.
+    ///
+    /// # Errors
+    /// Returns storage errors, and `Busy` when another local write holds the writer.
+    pub fn central_drop_wake(
+        &self,
+        device_delivery_id: &str,
+        snapshot: CentralRouteSnapshot<'_>,
+        queue_id: &str,
+        now_ms: u64,
     ) -> Result<bool, NodeCoreError> {
+        self.central_route_update(device_delivery_id, snapshot, |values, index| {
+            let route = values.get_mut(index)?;
+            if let Some(existing) =
+                route.central_first_send.iter_mut().find(|entry| entry.queue_id == queue_id)
+            {
+                existing.dropped = true;
+            } else {
+                route.central_first_send.push(super::device_route::CentralFirstSend {
+                    queue_id: queue_id.to_owned(),
+                    first_send_ms: now_ms,
+                    dropped: true,
+                });
+            }
+            Some(())
+        })
+        .map(|edited| edited.is_some())
+    }
+
+    /// Runs `edit` on the exact route the snapshot names. `edit` returns `None` to leave the row
+    /// unchanged. Returns the value of `edit`, or `None` when the route was not found.
+    fn central_route_update<T>(
+        &self,
+        device_delivery_id: &str,
+        snapshot: CentralRouteSnapshot<'_>,
+        edit: impl FnOnce(&mut Vec<super::DevicePushRoute>, usize) -> Option<T>,
+    ) -> Result<Option<T>, NodeCoreError> {
         let _writer = self
             .local_writer
             .try_lock()
             .map_err(|_| crate::send_authority::SendAuthorityError::Busy)?;
         self.resume_route_mutation(device_delivery_id)?;
         let txn = self.db.begin_write().map_err(error)?;
-        let edited = {
+        let outcome = {
             let mut table = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
             let prior = table
                 .get(device_delivery_id)
@@ -106,43 +174,27 @@ impl NotifyRedbStore {
                     && route.route_generation == snapshot.generation
                     && route.token == snapshot.sealed_token
             });
-            let edit = index
-                .and_then(|index| values.get(index))
-                .and_then(|route| decide(route));
-            match (index, edit) {
-                (Some(index), Some(CentralEdit::Remove)) => {
-                    values.remove(index);
-                }
-                (Some(index), Some(CentralEdit::MarkReseal)) => {
-                    if let Some(route) = values.get_mut(index) {
-                        route.needs_reseal = true;
-                    }
-                }
-                (Some(index), Some(CentralEdit::Pause { until_ms })) => {
-                    if let Some(route) = values.get_mut(index) {
-                        route.unserved_until_ms = until_ms;
-                    }
-                }
-                _ => {
-                    drop(table);
-                    txn.abort().map_err(error)?;
-                    return Ok(false);
+            let outcome = index.and_then(|index| edit(&mut values, index));
+            if outcome.is_some() {
+                if values.is_empty() {
+                    table.remove(device_delivery_id).map_err(error)?;
+                } else {
+                    table
+                        .insert(
+                            device_delivery_id,
+                            routes::seal(&self.route_key, device_delivery_id, &values)?.as_slice(),
+                        )
+                        .map_err(error)?;
                 }
             }
-            if values.is_empty() {
-                table.remove(device_delivery_id).map_err(error)?;
-            } else {
-                table
-                    .insert(
-                        device_delivery_id,
-                        routes::seal(&self.route_key, device_delivery_id, &values)?.as_slice(),
-                    )
-                    .map_err(error)?;
-            }
-            true
+            outcome
         };
-        self.commit_route_transaction(txn, device_delivery_id)?;
-        Ok(edited)
+        if outcome.is_some() {
+            self.commit_route_transaction(txn, device_delivery_id)?;
+        } else {
+            txn.abort().map_err(error)?;
+        }
+        Ok(outcome)
     }
 
     /// Routes a central wake may use for `device_delivery_id`, after the same owner check as the

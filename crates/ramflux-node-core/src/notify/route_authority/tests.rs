@@ -154,6 +154,7 @@ fn expiry_cleanup_pages_past_unexpired_routes_with_a_bounded_scan() -> TestResul
                 sealed: false,
                 needs_reseal: false,
                 unserved_until_ms: 0,
+                central_first_send: Vec::new(),
                 expires_at: if index == PAGE { 1 } else { now + 3600 },
                 route_generation: 1,
                 route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),

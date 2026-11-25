@@ -13,6 +13,17 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+/// One persisted first-send time, keyed by the queue entry it belongs to.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CentralFirstSend {
+    pub queue_id: String,
+    pub first_send_ms: u64,
+    /// The centre rejected this wake for this route: it is never resent (plan: `rejected` drops
+    /// the batch).
+    #[serde(default)]
+    pub dropped: bool,
+}
+
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DevicePushRoute {
     pub device_delivery_id: String,
@@ -37,6 +48,10 @@ pub struct DevicePushRoute {
     /// An `unserved` answer pauses the route until this Unix ms time (3600 s).
     #[serde(default)]
     pub unserved_until_ms: u64,
+    /// First handoff time of each queue entry sent to this route (A1.2). Persisted with the
+    /// route so a restart does not extend the handoff deadline (N4). Pruned after one hour.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub central_first_send: Vec<CentralFirstSend>,
     /// Server-allocated id. It is never reused. Zero was not admitted here.
     #[serde(default)]
     pub route_generation: u64,
@@ -134,6 +149,7 @@ pub fn admit_push_registration(
         sealed: false,
         needs_reseal: false,
         unserved_until_ms: 0,
+        central_first_send: Vec::new(),
         expires_at: now.saturating_add(PUSH_ROUTE_TTL_SECONDS),
         route_generation: 0,
         route_tag: registration.route_tag.clone(),
@@ -169,6 +185,7 @@ pub fn admit_sealed_push_registration(
         sealed: true,
         needs_reseal: false,
         unserved_until_ms: 0,
+        central_first_send: Vec::new(),
         expires_at: now.saturating_add(PUSH_ROUTE_TTL_SECONDS),
         route_generation: 0,
         route_tag: registration.route_tag.clone(),

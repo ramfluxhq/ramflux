@@ -507,6 +507,7 @@ impl NativeScenario {
                 sealed: false,
                 needs_reseal: false,
                 unserved_until_ms: 0,
+                central_first_send: Vec::new(),
                 expires_at: now + 3600,
                 route_generation: 0,
                 route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),

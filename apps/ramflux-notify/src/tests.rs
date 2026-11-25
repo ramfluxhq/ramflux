@@ -531,6 +531,7 @@ fn test_prepared_push(
             sealed: false,
             needs_reseal: false,
             unserved_until_ms: 0,
+            central_first_send: Vec::new(),
             expires_at: 4_102_444_800,
             route_generation: 0,
             route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),

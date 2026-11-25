@@ -47,6 +47,7 @@ fn route_for(
         sealed: false,
         needs_reseal: false,
         unserved_until_ms: 0,
+        central_first_send: Vec::new(),
         expires_at: now.saturating_add(86_400),
         route_generation: 1,
         route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),
