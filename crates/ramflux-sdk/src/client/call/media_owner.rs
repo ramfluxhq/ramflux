@@ -4,7 +4,7 @@
 //! One process-wide audio reservation and the account writer's engine lifetime.
 
 use super::handoff::InProcessMediaReceipt;
-use super::media_contract::{HostAudio, issue_media_token};
+use super::media_contract::{HostAudio, issue_media_token, media_view};
 use super::pcm_bridge::{self, DRAIN_DEADLINE};
 use crate::{SdkError, client::RamfluxClient};
 use ramflux_media::authorization::{GateReason, GateSnapshot};
@@ -39,8 +39,15 @@ pub(crate) struct OwnedMedia {
     pub session: Mutex<Option<MediaSession>>,
     binding: Binding,
     running: Mutex<Running>,
-    /// Control part of the last journaled `M` row and when it was journaled (stats coalescing).
-    journal: Mutex<Option<(Instant, serde_json::Value)>>,
+    /// Last journaled `M` row: its journal time, control part and content (stats coalescing).
+    journal: Mutex<Option<JournalMark>>,
+}
+
+/// What the last journaled `M` row said. Control means everything but counters and revision.
+struct JournalMark {
+    at: Instant,
+    control: serde_json::Value,
+    content: serde_json::Value,
 }
 
 struct Binding {
@@ -72,6 +79,33 @@ fn remaining(expires: u64) -> Duration {
         .checked_add(Duration::from_secs(expires))
         .and_then(|expiry| expiry.duration_since(SystemTime::now()).ok())
         .unwrap_or(Duration::ZERO)
+}
+
+/// Minimum spacing of stats-only `call.media.changed` rows per session (at most 4 per second).
+pub(crate) const STATS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How often the account writer reconciles media and journals a due stats row. A trailing stats
+/// change is therefore published at most this long after its coalescing window closes.
+#[cfg(feature = "c-abi")]
+pub(crate) const MEDIA_TICK: Duration = Duration::from_millis(125);
+
+/// The `M` row without its counters and revision: a change here is a control or terminal change.
+pub(crate) fn control_part(value: &serde_json::Value) -> serde_json::Value {
+    let mut control = value.clone();
+    if let Some(object) = control.as_object_mut() {
+        object.remove("stats");
+        object.remove("status_revision");
+    }
+    control
+}
+
+/// The `M` row without its revision: any change here is a row worth journaling.
+pub(crate) fn content_part(value: &serde_json::Value) -> serde_json::Value {
+    let mut content = value.clone();
+    if let Some(object) = content.as_object_mut() {
+        object.remove("status_revision");
+    }
+    content
 }
 
 /// Dropping the owner (account close, lock, revoke or client release) stops it: admission
@@ -138,17 +172,25 @@ impl OwnedMedia {
         self.token
     }
 
-    /// Whether a row with this control part may be journaled now. A control change is always
-    /// due; a stats-only change is due at most once per `interval`.
-    pub(crate) fn journal_due(&self, control: &serde_json::Value, interval: Duration) -> bool {
+    /// Whether a row with this control and content may be journaled now. Nothing changed since
+    /// the last row means nothing is due. A control change is due at once; a stats-only change
+    /// is due once `interval` has passed since the last row (the media tick journals it then).
+    pub(crate) fn journal_due(
+        &self,
+        control: &serde_json::Value,
+        content: &serde_json::Value,
+        interval: Duration,
+    ) -> bool {
         let journal = self.journal.lock().unwrap_or_else(PoisonError::into_inner);
-        journal.as_ref().is_none_or(|(at, last)| last != control || at.elapsed() >= interval)
+        journal.as_ref().is_none_or(|mark| {
+            mark.control != *control || (mark.content != *content && mark.at.elapsed() >= interval)
+        })
     }
 
-    /// Remember the control part of the row just journaled.
-    pub(crate) fn record_journal(&self, control: serde_json::Value) {
+    /// Remember the control and content of the row just journaled.
+    pub(crate) fn record_journal(&self, control: serde_json::Value, content: serde_json::Value) {
         let mut journal = self.journal.lock().unwrap_or_else(PoisonError::into_inner);
-        *journal = Some((Instant::now(), control));
+        *journal = Some(JournalMark { at: Instant::now(), control, content });
     }
 
     /// Copy of the host-reported state with the live PCM counters filled in.
@@ -289,7 +331,7 @@ impl RamfluxClient {
     /// # Errors
     /// Refuses another call's binding or a missing engine.
     pub fn in_process_media_status(&self, call_id: &str) -> Result<InProcessMediaStatus, SdkError> {
-        self.reconcile_in_process_media();
+        self.reconcile_in_process_media()?;
         let owned = self
             .in_process_media
             .as_ref()
@@ -306,7 +348,7 @@ impl RamfluxClient {
         call_id: &str,
         active: bool,
     ) -> Result<InProcessMediaStatus, SdkError> {
-        self.reconcile_in_process_media();
+        self.reconcile_in_process_media()?;
         let owned = self
             .in_process_media
             .as_ref()
@@ -349,7 +391,41 @@ impl RamfluxClient {
         self.media_reservation.borrow_mut().take();
     }
 
-    pub(crate) fn reconcile_in_process_media(&self) {
+    /// Reconcile the owned session with SDK truth, then journal any row it changed (terminal
+    /// changes at once, pending stats once their window has closed).
+    /// # Errors
+    /// Returns the journal error when a changed row cannot be written.
+    /// Journal the owned session's `M` row when it is due (see `OwnedMedia::journal_due`) and
+    /// return it. `force` journals regardless, for controls and close. Reads the engine snapshot
+    /// directly, so it never re-enters reconciliation.
+    /// # Errors
+    /// Returns the account database error when the row cannot be appended.
+    pub(crate) fn flush_media_journal(
+        &self,
+        force: bool,
+    ) -> Result<Option<serde_json::Value>, SdkError> {
+        let Some(owned) = self.in_process_media.as_deref() else { return Ok(None) };
+        let seq = self.voice_calls.get(&owned.receipt.call_id).map_or(0, |call| call.row.seq);
+        let current = media_view(&owned.snapshot(), owned.token(), seq, owned.host_state());
+        let (control, content) = (control_part(&current), content_part(&current));
+        if !force && !owned.journal_due(&control, &content, STATS_INTERVAL) {
+            return Ok(None);
+        }
+        owned.update_host(|_| {});
+        let value = media_view(&owned.snapshot(), owned.token(), seq, owned.host_state());
+        let revision = value["status_revision"].as_str().unwrap_or("0");
+        self.account_db()?.append_journal(
+            &format!("media:{}:{revision}", owned.token()),
+            "call.media.changed",
+            &value,
+            crate::time::now_unix_timestamp(),
+            None,
+        )?;
+        owned.record_journal(control, content_part(&value));
+        Ok(Some(value))
+    }
+
+    pub(crate) fn reconcile_in_process_media(&self) -> Result<(), SdkError> {
         if let Some(owned) = &self.in_process_media {
             self.reconcile_owned_media(owned);
         }
@@ -359,6 +435,7 @@ impl RamfluxClient {
         if release {
             self.media_reservation.borrow_mut().take();
         }
+        self.flush_media_journal(false).map(|_| ())
     }
 
     pub(crate) fn current_call_media_authority(

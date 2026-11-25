@@ -68,6 +68,15 @@ impl AccountRuntime {
         })
     }
 
+    /// Reconcile this account's media session and journal any row now due (the media tick).
+    #[cfg(feature = "c-abi")]
+    pub(super) fn media_tick(&self) -> Result<(), SdkError> {
+        match self.state.accounts.get(&self.id) {
+            Some(account) => account.client.reconcile_in_process_media(),
+            None => Ok(()),
+        }
+    }
+
     #[cfg(feature = "c-abi")]
     pub(super) async fn release_for_suspend(&mut self) -> Result<(), SdkError> {
         // Defence for the window after the suspend probe: refuse before any file is closed.
@@ -299,6 +308,10 @@ fn reject_private(private: PrivateCommand) {
         }
         #[cfg(feature = "c-abi")]
         PrivateCommand::LiveCallProbe { reply } => {
+            let _ = reply.send(Err(error));
+        }
+        #[cfg(feature = "c-abi")]
+        PrivateCommand::MediaTick { reply } => {
             let _ = reply.send(Err(error));
         }
         #[cfg(test)]

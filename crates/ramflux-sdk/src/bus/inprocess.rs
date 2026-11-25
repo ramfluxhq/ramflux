@@ -84,8 +84,14 @@ pub(crate) async fn serve(
     let mut lease_error = None;
     let mut lease_poll = tokio::time::interval(super::session_lease::POLL);
     lease_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut media_tick = tokio::time::interval(crate::client::call::media_owner::MEDIA_TICK);
+    media_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = media_tick.tick() => {
+                // A failed journal append keeps its mark, so the next tick retries the row.
+                let _ = supervisor.media_tick().await;
+            }
             _ = lease_poll.tick(), if supervisor.config.session_lease.is_some() => {
                 match super::session_lease::handoff_requested(&supervisor.config.data_root) {
                     Ok(false) => {},

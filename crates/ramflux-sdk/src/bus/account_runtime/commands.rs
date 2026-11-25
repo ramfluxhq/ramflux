@@ -220,6 +220,10 @@ impl AccountRuntime {
             super::super::actor::PrivateCommand::LiveCallProbe { reply } => {
                 let _ = reply.send(Ok(self.has_live_call()));
             }
+            #[cfg(feature = "c-abi")]
+            super::super::actor::PrivateCommand::MediaTick { reply } => {
+                let _ = reply.send(self.media_tick());
+            }
         }
         Ok(())
     }

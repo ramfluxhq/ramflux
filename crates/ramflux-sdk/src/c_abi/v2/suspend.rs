@@ -125,6 +125,11 @@ fn map_drive_error(result: Result<(), DriveError>) -> Result<(), CAbiError> {
         Err(DriveError::TimedOut) => {
             Err(CAbiError::new(RamfluxErrorCode::Timeout, "lifecycle_timed_out"))
         }
+        Err(DriveError::Failed(crate::SdkError::LocalBusRefused { code, .. }))
+            if code == "LiveCallActive" =>
+        {
+            Err(CAbiError::new(RamfluxErrorCode::AccountBusy, "live_call_active"))
+        }
         Err(DriveError::Failed(crate::SdkError::LocalBusRefused { code, body, .. }))
             if code == "SuspendFailed" =>
         {

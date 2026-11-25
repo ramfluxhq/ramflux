@@ -15,7 +15,6 @@ use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::time::Duration;
 
 fn invalid(message: &str) -> SdkError {
     SdkError::LocalBus(format!("voice call: {message}"))
@@ -121,52 +120,20 @@ fn view(account: &LocalBusAccountState, token: u64, call_id: &str) -> Result<Val
     Ok(media_view(&status, token, seq, owned.host_state()))
 }
 
-/// Minimum spacing of stats-only `call.media.changed` rows per token (at most 4 per second).
-const STATS_INTERVAL: Duration = Duration::from_millis(250);
-
-/// The `M` row without its counters and revision. A change here is a control or terminal change.
-fn control_part(value: &Value) -> Value {
-    let mut control = value.clone();
-    if let Some(object) = control.as_object_mut() {
-        object.remove("stats");
-        object.remove("status_revision");
-    }
-    control
-}
-
-/// Bump the public revision after a control and journal the `M` row immediately.
+/// Journal the `M` row now (controls and close). Stats-only changes go through `observe`.
 fn finish(account: &LocalBusAccountState, token: u64, call_id: &str) -> Result<Value, SdkError> {
-    owned_by_token(account, token)?.update_host(|_| {});
-    journal(account, token, call_id)
+    owned_by_token(account, token)?;
+    account.client.flush_media_journal(true)?;
+    view(account, token, call_id)
 }
 
-/// Journal the current `M` row as `call.media.changed` and remember its control part. Revisions
-/// advance only here, so every journaled revision is strictly larger than the previous one.
-fn journal(account: &LocalBusAccountState, token: u64, call_id: &str) -> Result<Value, SdkError> {
-    let value = view(account, token, call_id)?;
-    let revision = value["status_revision"].as_str().unwrap_or("0").to_owned();
-    account.client.account_db()?.append_journal(
-        &format!("media:{token}:{revision}"),
-        "call.media.changed",
-        &value,
-        crate::time::now_unix_timestamp(),
-        None,
-    )?;
-    owned_by_token(account, token)?.record_journal(control_part(&value));
-    Ok(value)
-}
-
-/// Status read. Control and terminal changes are journaled at once; stats-only changes are
-/// coalesced to at most one row per `STATS_INTERVAL`. A skipped row loses nothing: the read
-/// returns the current counters, and the next journaled row carries a higher revision.
+/// Status read. Journals the row if it is due (a control change at once, stats at most once per
+/// interval) and returns the current counters either way; the media tick journals a stats change
+/// whose window closed without a further read.
 fn observe(account: &LocalBusAccountState, token: u64, call_id: &str) -> Result<Value, SdkError> {
-    let owned = owned_by_token(account, token)?;
-    let current = view(account, token, call_id)?;
-    if !owned.journal_due(&control_part(&current), STATS_INTERVAL) {
-        return Ok(current);
-    }
-    owned.update_host(|_| {});
-    journal(account, token, call_id)
+    owned_by_token(account, token)?;
+    account.client.flush_media_journal(false)?;
+    view(account, token, call_id)
 }
 
 fn status(account: &mut LocalBusAccountState, token: u64) -> Result<Value, SdkError> {

@@ -101,6 +101,11 @@ pub(super) enum PrivateCommand {
     LiveCallProbe {
         reply: oneshot::Sender<Result<bool, SdkError>>,
     },
+    /// Reconcile the owned media session and journal any row that is now due.
+    #[cfg(feature = "c-abi")]
+    MediaTick {
+        reply: oneshot::Sender<Result<(), SdkError>>,
+    },
 }
 pub(super) struct AccountCommand {
     pub admission: Option<Arc<super::command_admission::CommandAdmission>>,
@@ -365,6 +370,13 @@ impl AccountActor {
     pub(super) async fn live_call_probe(&self) -> Result<bool, SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::LiveCallProbe { reply })?;
+        response.await.map_err(|_| stopped())?
+    }
+
+    #[cfg(feature = "c-abi")]
+    pub(super) async fn media_tick(&self) -> Result<(), SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::MediaTick { reply })?;
         response.await.map_err(|_| stopped())?
     }
 

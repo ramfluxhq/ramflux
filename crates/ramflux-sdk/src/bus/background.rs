@@ -73,6 +73,12 @@ impl Supervisor {
             // Keep admission fenced until every owner has been reopened.
             drop(control);
             let rollback = self.resume_for_background().await;
+            // A call admitted after the probe refused the release: that is busy, not a failure.
+            if rollback.is_ok()
+                && matches!(&error, SdkError::LocalBusRefused { code, .. } if code == "LiveCallActive")
+            {
+                return Err(error);
+            }
             return Err(SdkError::LocalBusRefused {
                 code: "SuspendFailed".into(),
                 message: "suspend failed; call resume to recover".into(),
@@ -144,6 +150,18 @@ impl Supervisor {
             super::data_root_lock::DataRootLock::acquire_within(&self.config.data_root, wait)?
         };
         *self.root_lease.borrow_mut() = Some(lease);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "c-abi")]
+impl Supervisor {
+    /// Reconcile every account's media session; the in-process loop calls this on a short tick.
+    pub(super) async fn media_tick(&self) -> Result<(), SdkError> {
+        let accounts = self.accounts.borrow().values().cloned().collect::<Vec<_>>();
+        for actor in &accounts {
+            actor.media_tick().await?;
+        }
         Ok(())
     }
 }

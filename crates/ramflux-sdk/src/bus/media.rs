@@ -123,7 +123,7 @@ pub(super) fn apply(
     account: &mut super::state::LocalBusAccountState,
     command: MediaCommand,
 ) -> Result<InProcessMediaStatus, SdkError> {
-    reconcile(account);
+    account.client.reconcile_in_process_media()?;
     let client = &mut account.client;
     match command {
         MediaCommand::Open { call_id, expected_seq, capture, playback } => {
@@ -157,5 +157,6 @@ pub(crate) fn reconcile(account: &super::state::LocalBusAccountState) {
             .and_then(|metadata| metadata.session.call_session_generation.clone())
     });
     *account.client.media_connection_generation.borrow_mut() = current;
-    account.client.reconcile_in_process_media();
+    // A failed journal append leaves the mark unchanged, so the next reconcile retries it.
+    let _ = account.client.reconcile_in_process_media();
 }

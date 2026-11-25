@@ -480,7 +480,7 @@ impl RamfluxClient {
             && key == transition_key(body)
         {
             self.voice_calls.insert(c.call_id.clone(), *next);
-            self.reconcile_in_process_media();
+            self.reconcile_in_process_media()?;
             return Ok(true);
         }
         // An already committed delivery can be retried after an ACK failure. Its cache refresh
