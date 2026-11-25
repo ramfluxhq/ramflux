@@ -35,6 +35,7 @@ pub(crate) struct PublishInput<'a> {
     pub source: &'a str,
     pub now: u64,
     pub caption: &'a str,
+    pub journal: &'a dyn super::upload::AckJournal,
 }
 
 /// Reserve, seal, bind, upload and commit every file. Nothing is granted or wrapped here, so
@@ -207,8 +208,7 @@ fn reserve_and_seal(input: &PublishInput<'_>, row: Row) -> Result<Row, Refusal> 
         lease_hard_until: row.hard_deadline,
     })
     .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-    let reply =
-        owner_wire::submit(input.plane, &op, &body, input.owner, input.owner_key, input.now)?;
+    let reply = owner_wire::submit(input.plane, &op, &body, input.owner, input.owner_key)?;
     if owner_wire::reply_object(&reply)? != object {
         input.store.fence_secret(row)?;
         return Err(Refusal::new(CODE_SEAL_FAILED));
@@ -243,7 +243,7 @@ fn bind_remote(input: &PublishInput<'_>, row: Row) -> Result<Row, Refusal> {
         body: &manifest,
     })
     .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-    owner_wire::submit(input.plane, &op, &manifest, input.owner, input.owner_key, input.now)?;
+    owner_wire::submit(input.plane, &op, &manifest, input.owner, input.owner_key)?;
     input.store.mark(row, Phase::Uploading)
 }
 
@@ -259,7 +259,7 @@ fn upload_remote(input: &PublishInput<'_>, mut row: Row) -> Result<Row, Refusal>
             row.payload_generation,
         )
         .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-        owner_wire::submit(input.plane, &op, &[], input.owner, input.owner_key, input.now)?;
+        owner_wire::submit(input.plane, &op, &[], input.owner, input.owner_key)?;
     }
     input.store.mark(row, Phase::Committed)
 }
@@ -293,6 +293,6 @@ fn retire(input: &PublishInput<'_>, upload: [u8; 32], object: [u8; 32]) -> Resul
         upload,
     )
     .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-    owner_wire::submit(input.plane, &op, &[], input.owner, input.owner_key, input.now)?;
+    owner_wire::submit(input.plane, &op, &[], input.owner, input.owner_key)?;
     Ok(())
 }

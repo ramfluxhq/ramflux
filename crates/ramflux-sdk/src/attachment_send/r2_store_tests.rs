@@ -66,6 +66,7 @@ fn input<'a>(
     targets: &'a [super::targets::MediaDevice],
 ) -> PublishInput<'a> {
     PublishInput {
+        journal: &crate::attachment_send::upload::TEST_JOURNAL,
         store,
         plane,
         owner,

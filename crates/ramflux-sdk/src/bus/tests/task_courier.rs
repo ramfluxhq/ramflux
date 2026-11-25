@@ -284,6 +284,7 @@ pub(super) fn runtime(
         let _ = control_shutdown.changed().await;
     });
     let runtime = AccountRuntime {
+        attachment_sends: Default::default(),
         timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
         id: "sender".into(),
         state: LocalBusDaemonState {
