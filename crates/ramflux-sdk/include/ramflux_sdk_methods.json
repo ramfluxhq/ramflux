@@ -812,6 +812,60 @@
       "show_once": false
     },
     {
+      "bridge_allowed": true,
+      "capability": "call",
+      "key_export": false,
+      "name": "call.media.audio_active",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "call",
+      "key_export": false,
+      "name": "call.media.audio_route",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "call",
+      "key_export": false,
+      "name": "call.media.close",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "call",
+      "key_export": false,
+      "name": "call.media.open",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "call",
+      "key_export": false,
+      "name": "call.media.set_muted",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "call",
+      "key_export": false,
+      "name": "call.media.status",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
       "bridge_allowed": false,
       "capability": "call",
       "key_export": false,
@@ -1077,9 +1131,9 @@
       "capability": "contact.verify.cas",
       "contract": "CONTACT-VERIFY-CAS-01",
       "key_export": false,
-      "message_descriptor_blake3": "424943ce9bcc6b1b629366deed741bd9dbd2c9bd154643346cd8ced5051ee78d",
+      "message_descriptor_blake3": "4592908138d7d8c4663410190eb494c646b94994b579388f4bff8b4a41bc1546",
       "name": "contact.verify",
-      "product_pin": "dd18e6794fb5477f687e4818c1c2d081ce684ffa",
+      "product_pin": "eb75349091390d333272e627c059eee0d308be8d",
       "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
       "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,
