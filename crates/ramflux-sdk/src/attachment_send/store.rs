@@ -401,6 +401,8 @@ impl Store {
                 row.phase = Phase::Admitted;
                 self.save(&row)?;
                 self.remove_admitted_plaintext(&row)?;
+                // Admitted sends leave the pending list; the progress record is no longer needed.
+                let _ = fs::remove_file(self.dir(id).join(super::transfer::PROGRESS_FILE));
             }
         }
         Ok(())

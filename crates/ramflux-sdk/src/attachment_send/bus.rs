@@ -452,11 +452,15 @@ struct MessageBody {
 /// # Errors
 /// Returns a local-bus error for a missing or oversized `prepare_id`, and `not_ready` when the
 /// prepare has no running upload.
-pub(crate) fn transfer_body(request: &LocalBusFrame) -> Result<Value, SdkError> {
+pub(crate) fn transfer_body(
+    request: &LocalBusFrame,
+    data_root: &std::path::Path,
+) -> Result<Value, SdkError> {
     let account = request_account_id(request)?;
     match request.method.as_str() {
         "attachment.transfer.list" => {
-            let transfers: Vec<Value> = super::transfer::snapshot(account)
+            let prepares = data_root.join("accounts").join(account).join("attachment-prepares");
+            let transfers: Vec<Value> = super::transfer::listed(account, &prepares)
                 .into_iter()
                 .map(|row| {
                     json!({

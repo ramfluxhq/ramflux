@@ -6,6 +6,7 @@
 //! ACK journal; nothing here is persisted, and a process restart simply finds no running entry.
 
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -131,4 +132,60 @@ pub(crate) fn snapshot(account: &str) -> Vec<Snapshot> {
             unique_bytes: control.unique_bytes,
         })
         .collect()
+}
+
+/// Name of the durable progress record kept beside each prepare's segments.
+pub(crate) const PROGRESS_FILE: &str = "progress.json";
+/// Bounds the scan of one account's prepares and the size of each record read.
+const PROGRESS_SCAN_CAP: usize = 256;
+const PROGRESS_BYTES_CAP: u64 = 4096;
+
+/// The non-secret counts written at each ACK checkpoint. Keys and paths never appear here.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct ProgressRecord {
+    pub prepare_id: String,
+    pub total_bytes: u64,
+    pub unique_bytes: u64,
+}
+
+/// Uploads that were in progress when this process last wrote their record. Read-only and
+/// bounded; a record whose name does not match its directory is ignored.
+pub(crate) fn durable(prepares_root: &std::path::Path) -> Vec<Snapshot> {
+    let Ok(entries) = std::fs::read_dir(prepares_root) else { return Vec::new() };
+    let mut rows = Vec::new();
+    for entry in entries.take(PROGRESS_SCAN_CAP).flatten() {
+        let dir = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
+        let Ok(file) = std::fs::File::open(dir.join(PROGRESS_FILE)) else { continue };
+        let mut bytes = Vec::new();
+        if std::io::Read::take(file, PROGRESS_BYTES_CAP + 1).read_to_end(&mut bytes).is_err()
+            || u64::try_from(bytes.len()).is_ok_and(|len| len > PROGRESS_BYTES_CAP)
+        {
+            continue;
+        }
+        let Ok(record) = serde_json::from_slice::<ProgressRecord>(&bytes) else { continue };
+        if record.prepare_id != name {
+            continue;
+        }
+        rows.push(Snapshot {
+            prepare_id: record.prepare_id,
+            paused: false,
+            total_bytes: record.total_bytes,
+            unique_bytes: record.unique_bytes,
+        });
+    }
+    rows.sort_by(|left, right| left.prepare_id.cmp(&right.prepare_id));
+    rows
+}
+
+/// Running uploads first; a durable record of a prepare that is not running here is listed too.
+pub(crate) fn listed(account: &str, prepares_root: &std::path::Path) -> Vec<Snapshot> {
+    let mut rows = snapshot(account);
+    for row in durable(prepares_root) {
+        if !rows.iter().any(|running| running.prepare_id == row.prepare_id) {
+            rows.push(row);
+        }
+    }
+    rows.sort_by(|left, right| left.prepare_id.cmp(&right.prepare_id));
+    rows
 }

@@ -77,19 +77,14 @@ impl AckJournal for JournalSink {
     }
 }
 
-/// Decodes one journal entry. An absent entry is an all-unacknowledged bitmap.
+/// Validates one journal entry. The journal hands back the bitmap bytes already unwrapped from
+/// `AckRecord`, so they are checked for length, never parsed again. An absent entry is an
+/// all-unacknowledged bitmap.
 pub(crate) fn decode_acks(bytes: Option<Vec<u8>>, count: usize) -> Result<Vec<u8>, Refusal> {
     match bytes {
         None => Ok(vec![0; count]),
-        Some(bytes) => {
-            let record: AckRecord =
-                serde_json::from_slice(&bytes).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-            if record.acks.len() == count {
-                Ok(record.acks)
-            } else {
-                Err(Refusal::new(CODE_SEAL_FAILED))
-            }
-        }
+        Some(acks) if acks.len() == count => Ok(acks),
+        Some(_) => Err(Refusal::new(CODE_SEAL_FAILED)),
     }
 }
 
@@ -155,12 +150,38 @@ pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bo
         *ack = if is_committed { status.received_bitmap } else { *ack & status.received_bitmap };
         let confirmed = acked_bytes(length, *ack);
         checkpoint(input, row)?;
+        progress(input, row, &layout, total)?;
         super::transfer::credit(input.store.account_id(), &row.prepare_id, confirmed);
         if !is_committed {
             put_slices(input, row, segment, &cipher)?;
         }
     }
     Ok(committed == Some(true))
+}
+
+/// Writes the non-secret progress record that `attachment.transfer.list` reads after a restart.
+/// It holds only the prepare id and the two byte counts, derived from the journaled ACKs.
+fn progress(
+    input: &PublishInput<'_>,
+    row: &Row,
+    layout: &SegmentLayout,
+    total: u64,
+) -> Result<(), Refusal> {
+    let mut unique = 0_u64;
+    for (segment, ack) in row.upload_acks.iter().enumerate() {
+        let index = u64::try_from(segment).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+        let length =
+            layout.segment_plaintext_length(index).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?
+                + 16;
+        unique = unique.saturating_add(acked_bytes(length, *ack));
+    }
+    let record = super::transfer::ProgressRecord {
+        prepare_id: row.prepare_id.clone(),
+        total_bytes: total,
+        unique_bytes: unique,
+    };
+    let bytes = serde_json::to_vec(&record).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+    input.store.write_named(&row.prepare_id, super::transfer::PROGRESS_FILE, &bytes)
 }
 
 /// Ciphertext bytes of the slices whose ACK bit is set, for a segment of `length` bytes.
