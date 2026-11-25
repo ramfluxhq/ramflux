@@ -179,7 +179,11 @@ impl Fixture {
         let bundle = client.load_x3dh_private_state(&identity)?.bundle;
         let endorsed = crate::custody::layer_declaration::endorsed_for(
             &record,
-            &DeviceRef { account_anchor: anchor.clone(), device_id: device.into(), device_epoch: 1 },
+            &DeviceRef {
+                account_anchor: anchor.clone(),
+                device_id: device.into(),
+                device_epoch: 1,
+            },
         );
         let manifest =
             SdkDeviceManifestResponse::from_native(CustodyManifest {

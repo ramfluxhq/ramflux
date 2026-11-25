@@ -276,10 +276,7 @@ fn all_provider_payloads_and_headers_exclude_message_identifiers() -> Result<(),
         (2_000, 1_000),
         ProviderWireMode::ApnsVoip,
     ))?;
-    assert_exact_keys(
-        &parse(&voip)?,
-        &["aps", "rf", "rf.c", "rf.t", "rf.v", "rf.w"],
-    );
+    assert_exact_keys(&parse(&voip)?, &["aps", "rf", "rf.c", "rf.t", "rf.v", "rf.w"]);
     let fcm = build_provider_parts(&input(
         WakeClass::CallWake,
         &id,

@@ -3,6 +3,7 @@
 
 //! Sibling safety evidence is accepted only from the authenticated origin bytes.
 use crate::client::native_test_support::{Fixture, TestResult};
+use crate::custody::layer_declaration::endorsed_for;
 use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::message as g;
@@ -227,10 +228,7 @@ fn enroll_sibling(
     let qualified =
         ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(&verified, "sibling")?;
     native.devices.push(ramflux_protocol::custody::CustodyManifestDevice {
-        message_layer: crate::custody::layer_declaration::endorsed_for(
-            &native.publication.record,
-            &sibling,
-        ),
+        message_layer: endorsed_for(&native.publication.record, &sibling),
         device_ref: sibling,
         target_delivery_id: qualified.storage_key().into(),
         prekey_bundle: serde_json::to_value(credentials.prekey_bundle()?)?,
