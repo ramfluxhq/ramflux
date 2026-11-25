@@ -61,7 +61,7 @@ fn audio_kid_ok(kid: u64) -> bool {
     kid <= AUDIO_KID_MAX
 }
 
-fn video_kid_ok(kid: u64) -> bool {
+pub(crate) fn video_kid_ok(kid: u64) -> bool {
     VIDEO_KIDS.contains(&kid)
 }
 

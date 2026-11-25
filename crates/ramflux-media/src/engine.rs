@@ -37,6 +37,7 @@ use crate::relay::MAX_DATAGRAM;
 use crate::session::MediaSession;
 use crate::video::packet::AccessUnit;
 use crate::video::reassembly::Reassembler;
+use crate::video::send::{MAX_DATAGRAMS_PER_TURN, Submitted, VideoSender};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Where captured audio comes from.
@@ -133,6 +134,12 @@ pub struct EngineStats {
     pub video_rejected: u64,
     /// Video fragments or access units dropped by the bounded reassembly.
     pub video_dropped: u64,
+    /// Video datagrams sent.
+    pub video_sent: u64,
+    /// Video access units dropped before sending (queue full, or waiting for a keyframe).
+    pub video_send_dropped: u64,
+    /// Video datagrams that failed to send or to seal.
+    pub video_send_errors: u64,
     /// Packets refused because their `SFrame` KID belongs to another track
     /// (audio KIDs on PT112/PT113, video KIDs on PT111). Also counted in
     /// `rejected` or `video_rejected`.
@@ -155,6 +162,7 @@ pub struct Engine {
     muted: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
     video: Arc<Mutex<Reassembler>>,
+    video_out: Option<Arc<Mutex<VideoSender>>>,
     threads: Vec<JoinHandle<()>>,
     local: SocketAddr,
 }
@@ -222,6 +230,9 @@ impl Engine {
         let ssrc = random_u32()?;
         let initial = random_u32()?;
         let outbound = Outbound::new(&mut session, ssrc, (initial >> 16) as u16, random_u32()?)?;
+        let video_ssrc = random_u32()?;
+        let video_out = VideoSender::new(&mut session, video_ssrc, (random_u32()? >> 16) as u16)?
+            .map(|sender| Arc::new(Mutex::new(sender)));
         let inbound = Inbound::new(&session)?;
         let rebinder = Rebinder::new(&mut session);
         drop(session);
@@ -245,6 +256,7 @@ impl Engine {
             stop: stop.clone(),
             muted: muted.clone(),
             shared: shared.clone(),
+            video: video_out.clone(),
         };
         let receiver = ReceiveLoop {
             socket,
@@ -266,8 +278,17 @@ impl Engine {
             stop: stop.clone(),
             shared: shared.clone(),
         };
-        let mut engine =
-            Self { authorization, jitter, stop, muted, shared, video, threads: Vec::new(), local };
+        let mut engine = Self {
+            authorization,
+            jitter,
+            stop,
+            muted,
+            shared,
+            video,
+            video_out,
+            threads: Vec::new(),
+            local,
+        };
         engine.threads.push(spawn("ramflux-call-send", move || sender.run())?);
         engine.threads.push(spawn("ramflux-call-receive", move || receiver.run())?);
         engine.threads.push(spawn("ramflux-call-playout", move || player.run())?);
@@ -306,8 +327,37 @@ impl Engine {
         let accepted = self.authorization.activate_video(active);
         if !active {
             *lock_video(&self.video) = Reassembler::new();
+            self.flush_video_out();
         }
         accepted
+    }
+
+    /// Queues one encoded access unit on the video track. Refused (counted
+    /// as dropped) while the video gate is closed. A full queue flushes to
+    /// the next keyframe (see [`VideoSender::submit`]).
+    ///
+    /// # Errors
+    ///
+    /// [`PipelineError::VideoNotNegotiated`] without video keys, or
+    /// [`PipelineError::Video`] for a malformed access unit.
+    pub fn submit_video(&self, au: &AccessUnit) -> Result<Submitted, PipelineError> {
+        let out = self.video_out.as_ref().ok_or(PipelineError::VideoNotNegotiated)?;
+        let outcome = if self.authorization.lock().admitted_video() {
+            lock_sender(out).submit(au, Instant::now())?
+        } else {
+            Submitted { queued: false, dropped: 1 }
+        };
+        if outcome.dropped > 0 {
+            let dropped = u64::try_from(outcome.dropped).unwrap_or(u64::MAX);
+            lock(&self.shared).stats.video_send_dropped += dropped;
+        }
+        Ok(outcome)
+    }
+
+    fn flush_video_out(&self) {
+        if let Some(out) = self.video_out.as_ref() {
+            lock_sender(out).flush();
+        }
     }
 
     /// The next complete video access unit, in presentation order (expired
@@ -328,6 +378,7 @@ impl Engine {
         self.authorization.retire(reason);
         self.flush_playout();
         *lock_video(&self.video) = Reassembler::new();
+        self.flush_video_out();
         self.authorization.snapshot()
     }
 
@@ -420,6 +471,10 @@ fn lock_video(video: &Mutex<Reassembler>) -> std::sync::MutexGuard<'_, Reassembl
     video.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn lock_sender(video: &Mutex<VideoSender>) -> std::sync::MutexGuard<'_, VideoSender> {
+    video.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 struct SendLoop {
     socket: UdpSocket,
     endpoint: SocketAddr,
@@ -429,6 +484,7 @@ struct SendLoop {
     stop: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
+    video: Option<Arc<Mutex<VideoSender>>>,
 }
 
 impl SendLoop {
@@ -445,6 +501,7 @@ impl SendLoop {
                 if !gate.admitted() {
                     drop(gate);
                     self.capture.discard_pending();
+                    self.video_turn();
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 }
@@ -474,6 +531,8 @@ impl SendLoop {
                     let _ = self.socket.send_to(&keepalive, self.endpoint);
                     last_sent = Instant::now();
                 }
+                drop(gate);
+                self.video_turn();
                 continue;
             };
             let mut frame = frame;
@@ -488,6 +547,7 @@ impl SendLoop {
             let sent = self.outbound.packet(&frame).ok().and_then(|datagram| {
                 gate.admitted().then(|| self.socket.send_to(&datagram, self.endpoint).is_ok())
             });
+            drop(gate);
             last_sent = Instant::now();
             let mut shared = lock(&self.shared);
             match sent {
@@ -495,6 +555,40 @@ impl SendLoop {
                 _ => shared.stats.send_errors += 1,
             }
             shared.stats.microphone_blocked = silent_frames >= BLOCKED_AFTER_FRAMES;
+            drop(shared);
+            self.video_turn();
+        }
+    }
+
+    /// Sends the video datagrams the pacer allows. It runs after this turn's
+    /// audio send, under the video gate, and never holds the gate and the
+    /// sender while it waits for anything.
+    fn video_turn(&self) {
+        let Some(video) = self.video.as_ref() else {
+            return;
+        };
+        let mut gate = self.authorization.lock();
+        if !gate.admitted_video() {
+            return;
+        }
+        let mut sender = lock_sender(video);
+        for _ in 0..MAX_DATAGRAMS_PER_TURN {
+            match sender.next_datagram(Instant::now()) {
+                Ok(Some(datagram)) => {
+                    let sent = self.socket.send_to(&datagram, self.endpoint).is_ok();
+                    let mut shared = lock(&self.shared);
+                    if sent {
+                        shared.stats.video_sent += 1;
+                    } else {
+                        shared.stats.video_send_errors += 1;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    lock(&self.shared).stats.video_send_errors += 1;
+                    break;
+                }
+            }
         }
     }
 }
