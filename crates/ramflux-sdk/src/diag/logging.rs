@@ -85,6 +85,17 @@ impl DiagnosticConfig {
     }
 }
 
+/// One `ramflux.diag.v1` record before it is enveloped. `layer` is `sdk`, `ui` or `bridge`.
+pub(crate) struct Record<'a> {
+    pub(crate) layer: &'a str,
+    pub(crate) level: &'a str,
+    pub(crate) component: &'a str,
+    pub(crate) event: &'a str,
+    pub(crate) cid: Option<&'a str>,
+    pub(crate) fields: Value,
+    pub(crate) error: Option<Value>,
+}
+
 pub(crate) enum Command {
     Record(Value, bool),
     Flush(mpsc::SyncSender<()>),
@@ -97,6 +108,8 @@ pub(crate) struct Session {
     /// Host-requested verbose window (`set_level`): level and its end in Unix milliseconds.
     level_override: Mutex<Option<(tracing::Level, u64)>>,
     dropped: AtomicU64,
+    /// Keys and host records refused by the field registry (`diag.rejected`).
+    rejected: AtomicU64,
     sender: mpsc::SyncSender<Command>,
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -135,6 +148,7 @@ pub(crate) fn start(root: &Path, config: DiagnosticConfig) -> Result<Arc<Session
         epoch,
         level_override: Mutex::new(None),
         dropped: AtomicU64::new(0),
+        rejected: AtomicU64::new(0),
         sender,
         writer: Mutex::new(Some(writer)),
     });
@@ -206,6 +220,15 @@ impl Session {
     pub(crate) fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
+    pub(crate) fn rejected(&self) -> u64 {
+        self.rejected.load(Ordering::Relaxed)
+    }
+    /// Counts keys or host records refused by the field registry.
+    pub(crate) fn note_rejected(&self, count: u64) {
+        if count > 0 {
+            self.rejected.fetch_add(count, Ordering::Relaxed);
+        }
+    }
     pub(crate) fn record(
         &self,
         level: &str,
@@ -214,40 +237,25 @@ impl Session {
         fields: Value,
         error: Option<Value>,
     ) {
-        self.write("sdk", level, component, event, None, fields, error);
+        self.write(Record { layer: "sdk", level, component, event, cid: None, fields, error });
     }
-    /// Writes one `ramflux.diag.v1` record. `layer` is `sdk`, `ui` or `bridge`.
-    #[allow(clippy::too_many_arguments, reason = "one record maps onto the schema fields")]
-    pub(crate) fn write(
-        &self,
-        layer: &str,
-        level: &str,
-        component: &str,
-        event: &str,
-        cid: Option<&str>,
-        fields: Value,
-        error: Option<Value>,
-    ) {
-        if !self.accepts(severity_of(level)) {
+    /// Writes one `ramflux.diag.v1` record. The caller has already filtered its fields.
+    pub(crate) fn write(&self, record: Record<'_>) {
+        if !self.accepts(severity_of(record.level)) {
             return;
         }
         self.report_dropped();
-        let mut record = self.envelope(layer, level, component, event);
-        if let Some(cid) = cid {
-            record["cid"] = json!(cid);
+        let mut line = self.envelope(record.layer, record.level, record.component, record.event);
+        if let Some(cid) = record.cid {
+            line["cid"] = json!(cid);
         }
-        record["f"] = fields;
-        if let Some(error) = error {
-            record["err"] = error;
+        line["f"] = record.fields;
+        if let Some(error) = record.error {
+            line["err"] = error;
         }
-        if self
-            .sender
-            .try_send(Command::Record(
-                record,
-                matches!(level, "E" | "W") || matches!(event, "proc.start" | "proc.stop"),
-            ))
-            .is_err()
-        {
+        let durable =
+            matches!(record.level, "E" | "W") || matches!(record.event, "proc.start" | "proc.stop");
+        if self.sender.try_send(Command::Record(line, durable)).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -265,9 +273,10 @@ impl Session {
             self.dropped.fetch_add(count, Ordering::Relaxed);
         }
     }
+    /// Waits at most five seconds for the writer to drain. A full queue skips the wait.
     pub(crate) fn flush(&self) {
         let (sent, received) = mpsc::sync_channel(1);
-        if self.sender.send(Command::Flush(sent)).is_ok() {
+        if self.sender.try_send(Command::Flush(sent)).is_ok() {
             let _ = received.recv_timeout(std::time::Duration::from_secs(5));
         }
     }
@@ -300,7 +309,6 @@ impl<S: tracing::Subscriber> Layer<S> for DiagnosticLayer {
         }
         let mut visitor = fields::Visitor::new(session.key());
         event.record(&mut visitor);
-        visitor.fields.insert("source".into(), json!(event.metadata().target()));
         let level = match *event.metadata().level() {
             tracing::Level::ERROR => "E",
             tracing::Level::WARN => "W",
@@ -308,15 +316,45 @@ impl<S: tracing::Subscriber> Layer<S> for DiagnosticLayer {
             tracing::Level::DEBUG => "D",
             _ => "T",
         };
+        // Visitor keeps registered keys only; sanitize repeats the check on the value types.
+        let (fields, _refused) = fields::sanitize(Value::Object(visitor.fields));
         session.record(
             level,
             "sdk.trace",
             &fields::Visitor::event(event.metadata().line()),
-            Value::Object(visitor.fields),
+            fields,
             None,
         );
     }
 }
+/// Window of the refused-call rate rule: one line per key per minute, with a suppressed count.
+const RATE_WINDOW_MS: u64 = 60_000;
+const RATE_KEYS: usize = 256;
+/// Per key: the time of the last written line and the lines withheld since then.
+static RATE: LazyLock<Mutex<std::collections::BTreeMap<String, (u64, u64)>>> =
+    LazyLock::new(|| Mutex::new(std::collections::BTreeMap::new()));
+
+/// The rate rule for refused-call `W` lines (M3). The first line of a key is written; later
+/// ones at most once per 60 s. Returns the suppressed count to report, or `None` to skip.
+/// Keys beyond `RATE_KEYS` are not tracked and are always written; the error table keeps exact counts.
+pub(crate) fn rate_gate(key: &str, now: u64) -> Option<u64> {
+    let Ok(mut table) = RATE.lock() else { return Some(0) };
+    if let Some((last, suppressed)) = table.get_mut(key) {
+        if now.saturating_sub(*last) < RATE_WINDOW_MS {
+            *suppressed = suppressed.saturating_add(1);
+            return None;
+        }
+        let withheld = *suppressed;
+        *last = now;
+        *suppressed = 0;
+        return Some(withheld);
+    }
+    if table.len() < RATE_KEYS {
+        table.insert(key.to_owned(), (now, 0));
+    }
+    Some(0)
+}
+
 /// Records a refused admission (status without an operation). Typed failures use `events`.
 #[cfg(feature = "c-abi")]
 pub(crate) fn refusal(value: &Value) {
@@ -333,7 +371,11 @@ pub(crate) fn refusal(value: &Value) {
         .filter(|v| matches!(*v, "none" | "unknown" | "committed"))
         .unwrap_or("unknown");
     let method = value.pointer("/response/method").and_then(Value::as_str).unwrap_or("unknown");
-    let mut fields = json!({"method":method});
+    let method = if fields::token(method) { method } else { "invalid" };
+    let Some(suppressed) = rate_gate(&format!("refused|{method}|{name}"), now_ms()) else {
+        return;
+    };
+    let mut fields = json!({"method":method,"suppressed":suppressed});
     if let Some(account) = value.pointer("/response/account_id").and_then(Value::as_str)
         && let Ok(hash) =
             ramflux_crypto::diagnostic_short_hash(session.key(), "account", account.as_bytes())

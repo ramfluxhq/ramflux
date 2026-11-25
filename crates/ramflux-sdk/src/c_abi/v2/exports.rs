@@ -176,7 +176,12 @@ pub(super) fn call(action: impl FnOnce() -> Result<(), CAbiError>) -> i32 {
             code
         }
         Err(payload) => {
-            crate::diag::events::panic_caught();
+            // The diagnostic write is guarded too: nothing may unwind across the C boundary.
+            if let Err(inner) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                crate::diag::events::panic_caught,
+            )) {
+                std::mem::forget(inner);
+            }
             // Arbitrary panic payload destructors may panic again. Never unwind from this boundary.
             std::mem::forget(payload);
             RamfluxErrorCode::PanicAborted as i32

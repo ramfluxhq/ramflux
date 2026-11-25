@@ -312,7 +312,7 @@ pub(crate) async fn dispatch_local_bus_request(
     let cid = request
         .trace_id
         .clone()
-        .filter(|id| crate::diag::events::valid_trace_id(id))
+        .filter(|id| crate::diag::events::valid_cid(id))
         .unwrap_or_else(crate::diag::events::new_cid);
     crate::diag::events::send_submit(&cid);
     let result = dispatch_routed_request(request, state, connection).await;

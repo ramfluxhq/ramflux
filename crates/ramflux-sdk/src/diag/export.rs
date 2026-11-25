@@ -62,14 +62,22 @@ pub(crate) fn export(data_root: &Path, since_ms: Option<u64>) -> Value {
 
 /// Counters of the sink itself. Per-account counters are not yet collected (see the report).
 pub(crate) fn snapshot(data_root: &Path) -> Value {
-    let (process, level, dropped) = logging::active().map_or_else(
-        || ("none".to_owned(), "none".to_owned(), 0_u64),
-        |session| (session.process().to_owned(), session.level().to_owned(), session.dropped()),
+    let (process, level, dropped, rejected) = logging::active().map_or_else(
+        || ("none".to_owned(), "none".to_owned(), 0_u64, 0_u64),
+        |session| {
+            (
+                session.process().to_owned(),
+                session.level().to_owned(),
+                session.dropped(),
+                session.rejected(),
+            )
+        },
     );
     json!({
         "process": process,
         "level": level,
         "sink_dropped": dropped,
+        "rejected": rejected,
         "errors_recorded": events::error_table(None).len(),
         "files": files(data_root, None).len(),
         "manifest": manifest(),

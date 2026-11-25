@@ -975,9 +975,20 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
             match frame {
                 ramflux_node_core::GatewayClientFrame::Submit { submit } => {
                     // Diagnostics (C-9): the request id is the join key with the client log.
+                    // It is client-chosen, so only a short token-shaped id is logged.
+                    let request_id = submit.signed_request.request_id.as_str();
+                    let logged_id = if request_id.len() <= 64
+                        && request_id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                    {
+                        request_id
+                    } else {
+                        "invalid"
+                    };
                     tracing::debug!(
                         target: "ramflux_gateway_diag",
-                        request_id = %submit.signed_request.request_id,
+                        request_id = %logged_id,
                         "gateway submit received"
                     );
                     handle_gateway_submit(&send, &context, &runtime, &submit).await?;

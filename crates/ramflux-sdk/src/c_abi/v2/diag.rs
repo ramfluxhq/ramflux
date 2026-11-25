@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Process-level diagnostic calls (C-7): init before any account, typed host records,
-//! flush and the verbose window. Non-blocking; errors come back only as return codes.
+//! flush and the verbose window. Never fails the app; errors come back only as return codes.
+//! `flush` waits at most five seconds: call it off the UI thread.
 use super::super::{CAbiError, RamfluxErrorCode};
 use super::exports::call;
 use crate::diag::events;
@@ -137,23 +138,28 @@ pub extern "C" fn ramflux_v2_diag_write(record_json: *const u8, len: usize) -> i
     call(|| {
         let value: Value = serde_json::from_slice(bytes(record_json, len, MAX_RECORD_BYTES)?)
             .map_err(|_| invalid("diag record"))?;
-        let record = host_record(&value).ok_or_else(|| invalid("diag record"))?;
+        let Some(record) = host_record(&value) else {
+            if let Some(session) = logging::active() {
+                session.note_rejected(1);
+            }
+            return Err(invalid("diag record"));
+        };
         if let Some(session) = logging::active() {
-            session.write(
-                &record.layer,
-                &record.level,
-                &record.component,
-                &record.event,
-                record.cid.as_deref(),
-                Value::Object(record.fields),
-                record.err,
-            );
+            session.write(logging::Record {
+                layer: &record.layer,
+                level: &record.level,
+                component: &record.component,
+                event: &record.event,
+                cid: record.cid.as_deref(),
+                fields: Value::Object(record.fields),
+                error: record.err,
+            });
         }
         Ok(())
     })
 }
 
-/// Flushes the process sink to disk. Returns after the writer confirms or after its own bound.
+/// Flushes the process sink to disk. Blocks at most five seconds (see `Session::flush`).
 #[unsafe(no_mangle)]
 #[must_use]
 pub extern "C" fn ramflux_v2_diag_flush() -> i32 {

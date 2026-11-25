@@ -664,7 +664,14 @@ impl Supervisor {
                 return Ok(reply(serde_json::json!({"active_account_id": id})));
             }
             "diag.export" => {
-                let since_ms = request.body.get("since_ms").and_then(serde_json::Value::as_u64);
+                let since_ms = match request.body.get("since_ms") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => Some(value.as_u64().ok_or_else(|| {
+                        SdkError::LocalBus(
+                            "diag.export since_ms must be an unsigned integer".into(),
+                        )
+                    })?),
+                };
                 return Ok(reply(crate::diag::export::export(&self.config.data_root, since_ms)));
             }
             "diag.snapshot" => {

@@ -29,15 +29,16 @@ pub(crate) fn new_cid() -> String {
         .collect()
 }
 
-/// A caller trace id: 1 to 128 bytes of `[A-Za-z0-9_-]` (C-8).
+/// A caller trace id: 1 to 128 bytes of `[A-Za-z0-9_-]` (C-8). Echoed, never logged unless a cid.
+#[cfg(feature = "c-abi")]
 pub(crate) fn valid_trace_id(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= 128
         && text.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
-/// A correlation id is exactly 12 Crockford characters, as `new_cid` makes them.
-#[cfg(feature = "c-abi")]
+/// A correlation id is exactly 12 Crockford characters, as `new_cid` makes them. Only such an id
+/// is ever written to a log or an export; a caller trace id of another form is echoed, not logged.
 pub(crate) fn valid_cid(text: &str) -> bool {
     text.len() == 12 && text.bytes().all(|byte| CROCKFORD.contains(&byte))
 }
@@ -139,7 +140,8 @@ pub(crate) fn backup_job(
     }
 }
 
-/// Writes one typed record through the process sink. Unregistered fields are dropped.
+/// Writes one typed record through the process sink. Unregistered keys and mistyped values are
+/// dropped and counted as `diag.rejected`; a cid that is not a valid correlation id is dropped.
 pub(crate) fn emit(
     level: &str,
     component: &str,
@@ -149,8 +151,23 @@ pub(crate) fn emit(
     error: Option<Value>,
 ) {
     if let Some(session) = logging::active() {
-        session.write("sdk", level, component, event, cid, fields::sanitize(fields), error);
+        let (fields, refused) = fields::sanitize(fields);
+        session.note_rejected(refused);
+        session.write(logging::Record {
+            layer: "sdk",
+            level,
+            component,
+            event,
+            cid: cid.filter(|id| valid_cid(id)),
+            fields,
+            error,
+        });
     }
+}
+
+/// A method name for the log: the token form, or `invalid` for anything else from a client.
+fn log_method(method: &str) -> &str {
+    if fields::token(method) { method } else { "invalid" }
 }
 
 /// The Rust variant name of an error: the identifier before its payload, never the payload.
@@ -211,16 +228,25 @@ pub(crate) fn error_table(since_ms: Option<u64>) -> Vec<Value> {
 }
 
 /// A local bus error reply (`abi.failed`, C-5): name, reason and the Rust variant, no message.
+/// The caller's method and trace id are checked first; the failure table keeps every failure,
+/// while the line itself follows the 60-second rate rule (M3).
 pub(crate) fn bus_failure(method: &str, cid: Option<&str>, error: &SdkError) {
+    let method = log_method(method);
+    let cid = cid.filter(|id| valid_cid(id));
     let name = crate::bus::io::local_bus_error_code(error);
     let variant = variant_of(error);
     note_error(method, 0, name, name, cid);
+    let Some(suppressed) =
+        logging::rate_gate(&format!("failed|{method}|{name}"), logging::now_ms())
+    else {
+        return;
+    };
     emit(
         "W",
         "abi.call",
         "abi.failed",
         cid,
-        json!({"method": method, "name": name, "reason": name, "variant": variant}),
+        json!({"method": method, "name": name, "reason": name, "variant": variant, "suppressed": suppressed}),
         Some(json!({"name": name, "reason": name, "variant": variant, "effect": "unknown"})),
     );
 }
@@ -252,6 +278,7 @@ pub(crate) fn send_finish(cid: &str, method: &str, error: Option<&SdkError>) {
     match error {
         None => emit("I", "sdk.send", "send.stage", Some(cid), json!({"stage": "accepted"}), None),
         Some(error) => {
+            let method = log_method(method);
             let name = crate::bus::io::local_bus_error_code(error);
             let variant = variant_of(error);
             note_error(method, 0, name, name, Some(cid));

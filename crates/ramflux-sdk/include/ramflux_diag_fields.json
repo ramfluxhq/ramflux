@@ -65,6 +65,7 @@
     "stale": "bool",
     "state": "token",
     "stop_reason": "token",
+    "suppressed": "count",
     "target_delivery_id": "hash:delivery",
     "targets": "count",
     "thread": "token",
