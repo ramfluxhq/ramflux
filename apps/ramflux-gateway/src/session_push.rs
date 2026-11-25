@@ -831,7 +831,7 @@ pub(crate) async fn established(
                 },
             };
             let mut value = serde_json::to_value(&frame).map_err(anyhow::Error::from)?;
-            crate::push_central::insert_fields(&mut value, "/session/session", &push)?;
+            crate::push_central::insert_fields(&mut value, "/session", &push)?;
             crate::session::write_gateway_frame(send, &value).await
         } else {
             let frame = ramflux_node_core::GatewayServerFrame::SessionEstablished { session };
