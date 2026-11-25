@@ -89,6 +89,7 @@ pub use passphrase::{
 };
 mod federation;
 mod gateway;
+mod push_keyset;
 mod sealing;
 pub(crate) use sealing::SealingConfig;
 mod group;
