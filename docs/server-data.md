@@ -206,9 +206,12 @@ uses the alert route) and an empty `loc-args` array. There is no literal title,
 body, sender, or message text. A custom `rf` object carries version 1, class
 `m` or `call`, the registered `route_tag`, and the wake id. APNs VoIP carries that
 same `rf` object and an empty `aps`. That wake id is
-the content-free hint. The source envelope id is not copied. Sibling fields
-still carry `wake_id`, `class`, and, for a message, `collapse_key`. The payload
-sets no badge and no `content-available`. Background delivery is unsupported:
+the content-free hint. The source envelope id is not copied. An APNs body has
+exactly two top-level keys, `aps` and `rf`; there are no sibling `wake_id`,
+`class`, or `collapse_key` fields. A message collapse value travels only in the
+`apns-collapse-id` header. A call on the alert route sets
+`aps.interruption-level` to `time-sensitive`; a message alert and VoIP do not.
+The payload sets no badge and no `content-available`. Background delivery is unsupported:
 there is no background push builder. FCM is a data message with the same facts.
 `rf` is a JSON string, because FCM data values are strings, and there is no
 notification text. Android priority is `HIGH`. Web Push encrypts a short body,
