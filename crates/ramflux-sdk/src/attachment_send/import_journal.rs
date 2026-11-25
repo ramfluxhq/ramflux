@@ -286,17 +286,20 @@ pub(crate) fn settle_guarded(
     if current.phase != ImportPhase::Pending {
         return Err(Refusal::new(CODE_CANCELLED));
     }
-    db.persist_actor_state(key, &AckRecord { acks: bytes.to_vec() })
-        .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-    if let Some((source, body)) = event {
-        db.append_journal(
-            &source,
-            super::transfer::TRANSFER_TOPIC,
-            &body,
-            crate::time::now_unix_timestamp(),
-            None,
-        )
-        .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-    }
-    Ok(())
+    // The record and its snapshot commit in one transaction: a bit is durable exactly when its
+    // event is, and a crash never leaves a bit without the snapshot that announces it.
+    db.write_transaction(|| -> Result<(), ramflux_storage::StorageError> {
+        db.persist_actor_state(key, &AckRecord { acks: bytes.to_vec() })?;
+        if let Some((source, body)) = &event {
+            db.append_journal(
+                source,
+                super::transfer::TRANSFER_TOPIC,
+                body,
+                crate::time::now_unix_timestamp(),
+                None,
+            )?;
+        }
+        Ok(())
+    })
+    .map_err(|_| Refusal::new(CODE_SEAL_FAILED))
 }

@@ -97,6 +97,7 @@ policies! {
     "attachment.enable" => ("account", true, true, false, false),
     "attachment.import.begin" => ("account", true, true, false, false),
     "attachment.import.cancel" => ("account", true, true, false, false),
+    "attachment.import.export" => ("account", true, true, false, false),
     "attachment.import.finish" => ("account", true, true, false, false),
     "attachment.import.read" => ("account", true, true, false, false),
     "attachment.import.status" => ("account", false, true, false, false),

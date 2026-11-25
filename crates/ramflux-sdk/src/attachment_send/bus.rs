@@ -541,7 +541,7 @@ fn download_page(
             "direction": "download",
             "generation": record.generation,
             "phase": record.phase.wire(),
-            "paused": false,
+            "paused": super::handles::download_paused(&record.import_id),
             "total_bytes": total,
             "unique_bytes": verified,
             "verified_bytes": verified,
@@ -560,6 +560,25 @@ fn download_page(
 pub(crate) fn transfer_body(request: &LocalBusFrame) -> Result<Value, SdkError> {
     let account = request_account_id(request)?;
     match request.method.as_str() {
+        "attachment.transfer.pause" | "attachment.transfer.resume"
+            if request.body.get("import_id").is_some() =>
+        {
+            // A download is named by its import id and generation; the worker holds its relay reads.
+            let import_id = request
+                .body
+                .get("import_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 256)
+                .ok_or_else(|| {
+                    SdkError::LocalBus("import_id must contain 1 to 256 bytes".into())
+                })?;
+            let generation =
+                request.body.get("generation").and_then(Value::as_u64).ok_or_else(|| {
+                    SdkError::LocalBus("generation must be an unsigned integer".into())
+                })?;
+            let paused = request.method == "attachment.transfer.pause";
+            super::handles::set_download_paused(account, import_id, generation, paused)
+        }
         "attachment.transfer.pause" | "attachment.transfer.resume" => {
             let prepare = request
                 .body

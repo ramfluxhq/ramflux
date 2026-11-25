@@ -47,6 +47,8 @@ const EMIT_INTERVAL: Duration = Duration::from_millis(250);
 pub(crate) const TOMBSTONE: &str = "attachment-tombstone";
 pub(crate) const RETIREMENT: &str = "attachment-retirement";
 const SENT: &str = "attachment-send";
+/// Reason on a download snapshot when a cached segment failed its digest (before its refetch).
+pub(crate) const INTEGRITY_FAILED: &str = "integrity_failed";
 /// Open handles one account may hold, and the whole process.
 const HANDLES_ACCOUNT: usize = 16;
 const HANDLES_PROCESS: usize = 64;
@@ -63,6 +65,8 @@ struct Job {
     ready: AtomicBool,
     failed: Mutex<Option<&'static str>>,
     cancelled: AtomicBool,
+    /// Set by `attachment.transfer.pause`; the worker holds before its next relay read.
+    paused: AtomicBool,
     /// Set at shutdown: the worker stops, the cache and the Pending record are kept.
     stop: Arc<AtomicBool>,
     finished: AtomicBool,
@@ -152,6 +156,7 @@ pub(crate) fn begin(
         ready: AtomicBool::new(false),
         failed: Mutex::new(None),
         cancelled: AtomicBool::new(false),
+        paused: AtomicBool::new(false),
         finished: AtomicBool::new(false),
         meter: budget::Meter::default(),
         privacy: Mutex::new(None),
@@ -451,10 +456,15 @@ fn stream(
         Source::Remote { opened, .. } => {
             let verified = ledger.record.borrow().verified.clone();
             let checkpoint = |bits: &[bool]| checkpoint_record(ledger, bits);
+            let integrity =
+                |_index: u32| ledger.write(ImportPhase::Pending, Some(INTEGRITY_FAILED), true);
+            let paused = || job.paused.load(Ordering::Acquire);
             let mut cache = import_job::SegmentCache {
                 dir: job.dir.as_path(),
                 verified,
                 checkpoint: &checkpoint,
+                integrity: &integrity,
+                paused: &paused,
             };
             import_job::stream_remote(
                 plane.ok_or(Refusal::new(CODE_NOT_GRANTEE))?,
@@ -488,6 +498,40 @@ fn stream(
 fn checkpoint_record(ledger: &Ledger, bits: &[bool]) -> Result<(), Refusal> {
     ledger.record.borrow_mut().verified = bits.to_vec();
     ledger.write(ImportPhase::Pending, None, false)
+}
+
+/// Pauses or resumes a download (`attachment.transfer.pause` / `resume` with `{import_id,
+/// generation}`). A paused worker makes no relay read until resumed; it still answers cancel.
+/// # Errors
+/// Returns `stale_generation` for another generation, `cancelled` for a cancelled import,
+/// `not_ready` once the download is complete, and `not_grantee` without a live handle.
+pub(crate) fn set_download_paused(
+    account: &str,
+    import_id: &str,
+    generation: u64,
+    paused: bool,
+) -> Result<Value, SdkError> {
+    let job = lookup(import_id, account)?;
+    if generation != job.generation {
+        return Err(Refusal::new(CODE_STALE_GENERATION).into());
+    }
+    if job.cancelled.load(Ordering::Acquire) {
+        return Err(Refusal::new(CODE_CANCELLED).into());
+    }
+    if job.ready.load(Ordering::Acquire) {
+        return Err(Refusal::new(CODE_NOT_READY).into());
+    }
+    job.paused.store(paused, Ordering::Release);
+    Ok(json!({ "import_id": import_id, "generation": generation, "paused": paused }))
+}
+
+/// Whether a live download is paused in this process. A download without a live handle is not.
+pub(crate) fn download_paused(import_id: &str) -> bool {
+    jobs()
+        .lock()
+        .ok()
+        .and_then(|table| table.get(import_id).map(|job| job.paused.load(Ordering::Acquire)))
+        .unwrap_or(false)
 }
 
 /// # Errors
@@ -891,6 +935,7 @@ pub(crate) fn test_register_job(import_id: &str, account: &str, message_id: &str
         ready: AtomicBool::new(true),
         failed: Mutex::new(None),
         cancelled: AtomicBool::new(false),
+        paused: AtomicBool::new(false),
         finished: AtomicBool::new(false),
         meter: budget::Meter::default(),
         privacy: Mutex::new(None),

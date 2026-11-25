@@ -71,6 +71,7 @@ methods! {
         "agent.progress",
         "attachment.import.begin",
         "attachment.import.cancel",
+        "attachment.import.export",
         "attachment.import.finish",
         "attachment.import.read",
         "attachment.import.status",

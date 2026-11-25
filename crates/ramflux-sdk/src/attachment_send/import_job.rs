@@ -193,6 +193,24 @@ pub(crate) struct SegmentCache<'a> {
     pub(crate) dir: &'a std::path::Path,
     pub(crate) verified: Vec<bool>,
     pub(crate) checkpoint: &'a dyn Fn(&[bool]) -> Result<(), Refusal>,
+    /// Announces a corrupt or missing cached segment before its refetch. The bit stays set until
+    /// the fresh bytes are durable, so the counts never drop.
+    pub(crate) integrity: &'a dyn Fn(u32) -> Result<(), Refusal>,
+    /// Holds the worker while the download is paused. No relay read happens meanwhile.
+    pub(crate) paused: &'a dyn Fn() -> bool,
+}
+
+/// How long a paused download sleeps between checks of its flag and the cancel fence.
+const PAUSE_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+fn hold_while_paused(paused: &dyn Fn() -> bool, fenced: &dyn Fn() -> bool) -> Result<(), Refusal> {
+    while paused() {
+        if fenced() {
+            return Err(Refusal::new(CODE_CANCELLED));
+        }
+        std::thread::sleep(PAUSE_POLL);
+    }
+    Ok(())
 }
 
 /// Streams the ciphertext from the relay in network-chunk ranges. Verified cached segments are
@@ -225,12 +243,21 @@ pub(crate) fn stream_remote(
         }
         let _held = budget::memory_metered(2 * u64::from(SEGMENT_BYTES), meter)?;
         let expected = opened.manifest.segment_digests[index as usize];
+        if let Some(paused) = cache.as_ref().map(|cache| cache.paused) {
+            hold_while_paused(paused, fenced)?;
+        }
+        let mut corrupt = false;
         let cached = match cache.as_ref() {
             Some(cache) if cache.verified[index as usize] => {
-                super::import_cache::read(cache.dir, index, expected)
+                let hit = super::import_cache::read(cache.dir, index, expected);
+                corrupt = hit.is_none();
+                hit
             }
             _ => None,
         };
+        if corrupt && let Some(cache) = cache.as_ref() {
+            (cache.integrity)(index)?;
+        }
         let cipher = if let Some(bytes) = cached {
             bytes
         } else {
