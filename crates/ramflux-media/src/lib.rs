@@ -23,6 +23,8 @@
 //!   keys), used once.
 //! - [`pipeline`]: one frame out, one packet in, without I/O.
 //! - [`engine`]: the send, receive and playout threads.
+//! - [`video`]: video packetization, bounded reassembly, feedback and rate
+//!   (V2.1; the engine demuxes PT112 onto the same socket).
 //!
 //! No UI toolkit and no async runtime. The host hands a
 //! [`session::MediaSession`] in and reads [`engine::Engine::stats`] back.
@@ -39,6 +41,7 @@ pub mod relay;
 pub mod rtp;
 pub mod session;
 pub mod sframe;
+pub mod video;
 
 pub use engine::{Capture, Engine, EngineError, EngineStats, Playback, Quality};
 pub use rebind::Rebind;
