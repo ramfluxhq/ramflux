@@ -212,6 +212,10 @@ impl AccountRuntime {
             super::super::actor::PrivateCommand::ReopenFiles { reply } => {
                 let _ = reply.send(self.reopen_from_suspend());
             }
+            #[cfg(feature = "c-abi")]
+            super::super::actor::PrivateCommand::LiveCallProbe { reply } => {
+                let _ = reply.send(Ok(self.has_live_call()));
+            }
         }
         Ok(())
     }

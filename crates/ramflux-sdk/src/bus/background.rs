@@ -20,6 +20,16 @@ pub(crate) fn client_suspended() -> SdkError {
     }
 }
 
+/// Refusal for suspend while a call is live or pending. Maps to C ABI AccountBusy (18).
+#[cfg(feature = "c-abi")]
+pub(crate) fn live_call_refused() -> SdkError {
+    SdkError::LocalBusRefused {
+        code: "LiveCallActive".into(),
+        message: "a call is live or pending".into(),
+        body: Box::new(serde_json::Value::Null),
+    }
+}
+
 impl super::LocalBusConfig {
     /// Resume-only wait for the data root lock: retries the kernel lock for up to `wait`
     /// (capped at five seconds) and never asks the holder to yield, unlike `session_lease`.
@@ -33,6 +43,17 @@ impl super::LocalBusConfig {
 
 #[cfg(feature = "c-abi")]
 impl Supervisor {
+    /// Probe every account for a live or pending call, in the account writers' command order.
+    pub(super) async fn live_call_busy(&self) -> Result<bool, SdkError> {
+        let accounts = self.accounts.borrow().values().cloned().collect::<Vec<_>>();
+        for actor in &accounts {
+            if actor.live_call_probe().await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) async fn suspend_for_background(&self) -> Result<(), SdkError> {
         let control = self.app_control.lock().await;
         if self.config.background.load(Ordering::Acquire) && self.root_lease.borrow().is_none() {

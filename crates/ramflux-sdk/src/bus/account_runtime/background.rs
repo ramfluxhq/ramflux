@@ -60,8 +60,20 @@ impl AccountRuntime {
         Ok(Some(self.prepare_receive_turn().await?))
     }
 
+    /// A live or pending call blocks suspend. Checked on the account writer, in command order.
+    #[cfg(feature = "c-abi")]
+    pub(super) fn has_live_call(&self) -> bool {
+        self.state.accounts.get(&self.id).is_some_and(|account| {
+            account.client.voice_calls.values().any(|call| call.row.state != "ended")
+        })
+    }
+
     #[cfg(feature = "c-abi")]
     pub(super) async fn release_for_suspend(&mut self) -> Result<(), SdkError> {
+        // Defence for the window after the suspend probe: refuse before any file is closed.
+        if self.has_live_call() {
+            return Err(super::super::background::live_call_refused());
+        }
         self.resume_receive_until = None;
         self.stop_connection().await;
         self.stop_courier().await;
@@ -284,6 +296,10 @@ fn reject_private(private: PrivateCommand) {
         #[cfg(feature = "c-abi")]
         PrivateCommand::ReleaseFiles { reply } | PrivateCommand::ReopenFiles { reply } => {
             let _ = reply.send(Ok(()));
+        }
+        #[cfg(feature = "c-abi")]
+        PrivateCommand::LiveCallProbe { reply } => {
+            let _ = reply.send(Err(error));
         }
         #[cfg(test)]
         PrivateCommand::HoldLocalMutation { entered, release } => {

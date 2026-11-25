@@ -18,7 +18,9 @@ use std::time::Duration;
 /// A release failure rolls back parked files and returns `StorageFailed` (8).
 /// Diagnostics contain `SuspendFailed` and `suspend_release_failed` or `suspend_rollback_failed`.
 /// Call resume after any failure, then reopen the event subscription from its cursor.
-/// Call off the UI thread. A killed process is a cold start and must unlock again.
+/// A live or pending call in any account returns `AccountBusy` (18) before anything is cancelled
+/// or parked. Idle suspend is unchanged. Call off the UI thread. A killed process is a cold
+/// start and must unlock again.
 #[unsafe(no_mangle)]
 #[must_use]
 pub extern "C" fn ramflux_v2_client_suspend(handle: u64) -> i32 {
@@ -30,6 +32,9 @@ pub extern "C" fn ramflux_v2_client_suspend(handle: u64) -> i32 {
             .try_lock()
             .map_err(|_| CAbiError::new(RamfluxErrorCode::AccountBusy, "lifecycle_in_progress"))?;
         let was_suspended = client.shared.suspended.load(Ordering::Acquire);
+        if !was_suspended {
+            probe(&client)?;
+        }
         client.shared.cancel_for_suspend();
         let result = drive(&client, false);
         if let Err(error) = &result {
@@ -95,8 +100,24 @@ fn refuse_closed(client: &Client) -> Result<(), CAbiError> {
     Ok(())
 }
 
+/// Refuse suspend while any account has a live or pending call. Nothing has been cancelled yet.
+fn probe(client: &Arc<Client>) -> Result<(), CAbiError> {
+    match client.probe_live_calls(Duration::from_secs(10)) {
+        Err(DriveError::Failed(crate::SdkError::LocalBusRefused { code, .. }))
+            if code == "LiveCallActive" =>
+        {
+            Err(CAbiError::new(RamfluxErrorCode::AccountBusy, "live_call_active"))
+        }
+        other => map_drive_error(other),
+    }
+}
+
 fn drive(client: &Arc<Client>, resume: bool) -> Result<(), CAbiError> {
-    match client.drive_lifecycle(resume, Duration::from_secs(10)) {
+    map_drive_error(client.drive_lifecycle(resume, Duration::from_secs(10)))
+}
+
+fn map_drive_error(result: Result<(), DriveError>) -> Result<(), CAbiError> {
+    match result {
         Ok(()) => Ok(()),
         Err(DriveError::Unavailable) => {
             Err(CAbiError::new(RamfluxErrorCode::TransportUnavailable, "lifecycle_unavailable"))

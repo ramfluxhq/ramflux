@@ -42,6 +42,8 @@ impl BusStream for MemoryStream {
 
 pub(crate) struct LifecycleRequest {
     pub resume: bool,
+    /// Only check for live calls; no lifecycle change and no completion callback.
+    pub probe: bool,
     pub complete: Box<dyn FnOnce(bool, bool) + Send>,
     pub reply: std::sync::mpsc::SyncSender<Result<(), SdkError>>,
 }
@@ -158,6 +160,15 @@ async fn drive_lifecycle(
     request: Option<LifecycleRequest>,
 ) -> bool {
     let Some(request) = request else { return false };
+    if request.probe {
+        let result = match supervisor.live_call_busy().await {
+            Ok(true) => Err(super::background::live_call_refused()),
+            Ok(false) => Ok(()),
+            Err(error) => Err(error),
+        };
+        let _ = request.reply.send(result);
+        return true;
+    }
     let result = if request.resume {
         supervisor.resume_for_background().await
     } else {

@@ -95,6 +95,12 @@ pub(super) enum PrivateCommand {
     ReopenFiles {
         reply: oneshot::Sender<Result<(), SdkError>>,
     },
+    /// Whether this account has a live or pending call. Answered in the normal command order,
+    /// so it sees every invite or answer admitted before it.
+    #[cfg(feature = "c-abi")]
+    LiveCallProbe {
+        reply: oneshot::Sender<Result<bool, SdkError>>,
+    },
 }
 pub(super) struct AccountCommand {
     pub admission: Option<Arc<super::command_admission::CommandAdmission>>,
@@ -352,6 +358,13 @@ impl AccountActor {
     pub(super) async fn reopen_files(&self) -> Result<(), SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::ReopenFiles { reply })?;
+        response.await.map_err(|_| stopped())?
+    }
+
+    #[cfg(feature = "c-abi")]
+    pub(super) async fn live_call_probe(&self) -> Result<bool, SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::LiveCallProbe { reply })?;
         response.await.map_err(|_| stopped())?
     }
 

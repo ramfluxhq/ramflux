@@ -233,18 +233,30 @@ impl Client {
     }
 
     pub(super) fn drive_lifecycle(&self, resume: bool, wait: Duration) -> Result<(), DriveError> {
-        let (reply, response) = std::sync::mpsc::sync_channel(1);
         let shared = Arc::clone(&self.shared);
-        let request = crate::bus::inprocess::LifecycleRequest {
-            resume,
-            complete: Box::new(move |suspended, succeeded| {
-                if !resume && succeeded {
-                    shared.finish_suspend();
-                }
-                shared.suspended.store(suspended, Ordering::Release);
-            }),
-            reply,
-        };
+        let complete = Box::new(move |suspended: bool, succeeded: bool| {
+            if !resume && succeeded {
+                shared.finish_suspend();
+            }
+            shared.suspended.store(suspended, Ordering::Release);
+        });
+        self.send_lifecycle(resume, false, complete, wait)
+    }
+
+    /// Ask the account writers whether a call is live or pending. Changes nothing.
+    pub(super) fn probe_live_calls(&self, wait: Duration) -> Result<(), DriveError> {
+        self.send_lifecycle(false, true, Box::new(|_, _| {}), wait)
+    }
+
+    fn send_lifecycle(
+        &self,
+        resume: bool,
+        probe: bool,
+        complete: Box<dyn FnOnce(bool, bool) + Send>,
+        wait: Duration,
+    ) -> Result<(), DriveError> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        let request = crate::bus::inprocess::LifecycleRequest { resume, probe, complete, reply };
         if self.lifecycle.blocking_send(request).is_err() {
             return Err(DriveError::Unavailable);
         }
