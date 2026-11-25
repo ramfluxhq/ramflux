@@ -16,6 +16,9 @@ pub(crate) mod pipe;
 #[cfg(windows)]
 pub(crate) use pipe::listener;
 
+#[cfg(target_vendor = "apple")]
+pub(crate) mod clock_apple;
+
 #[cfg(windows)]
 pub(crate) mod clock_windows;
 

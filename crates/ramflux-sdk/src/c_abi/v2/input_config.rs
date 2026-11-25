@@ -155,6 +155,7 @@ impl Decode for Config {
                 "allow_raw_messages",
                 "allow_secret_exports",
                 "session_lease",
+                "resume_wait_ms",
                 "username_directory",
                 "diag",
             ],
@@ -174,11 +175,22 @@ impl Decode for Config {
             diag: read_diag(v)?,
             username_directory,
             session_lease: read_session_lease(v)?,
+            resume_wait_ms: read_resume_wait(v)?,
             allow_raw_messages: raw,
             allow_secret_exports: secret,
             data_root: root.into(),
             builtin_nodes: nodes.into_iter().map(Profile::own).collect(),
         })
+    }
+}
+
+/// Resume-only lock wait in milliseconds, 0 to 5000. Absent keeps the default 250 ms.
+fn read_resume_wait(v: &Value) -> Result<Option<u64>, CAbiError> {
+    match v.get("resume_wait_ms") {
+        None => Ok(None),
+        Some(value) => {
+            value.as_u64().filter(|wait| *wait <= 5_000).map(Some).ok_or_else(i::invalid)
+        }
     }
 }
 

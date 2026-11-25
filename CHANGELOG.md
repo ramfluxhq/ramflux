@@ -15,6 +15,19 @@
 - Remove unused manual acceptance fixtures and the superseded C ABI header helper; retain the process-level refusal test and current header checker.
 - Remove deployment-specific host references from agent setup and pairing documentation; retain forward-secrecy fixture integrity metadata without internal design-history dumps.
 
+## [0.2.8] - 2026-11-25
+
+- Fix the SDK build on Apple targets: the app-lock continuous clock moves into an audited FFI module, kept out of the public C header.
+- CI checks the SDK for aarch64-apple-ios and aarch64-apple-darwin.
+
+## [0.2.7] - 2026-11-25
+
+- Media uploads keep durable ciphertext checkpoints and resume after a restart.
+- Nodes send the central node report (hello) and the beta allowlist is enforced on the node side.
+- Registration policy is visible only to the node admin; node reports carry no account, device or delivery identifiers.
+- Open accounts publish a signed, revisioned reach record, with SDK methods to manage it.
+- Stricter I-JSON decoding and guard registrations for new decode and ingress sites.
+
 ## [0.2.6] - 2026-11-23
 - Align release metadata with product version 0.2.6.
 

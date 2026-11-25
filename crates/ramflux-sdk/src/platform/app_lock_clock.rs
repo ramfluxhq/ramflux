@@ -75,30 +75,8 @@ impl MonotonicClock for SystemClock {
 #[cfg(target_vendor = "apple")]
 impl MonotonicClock for SystemClock {
     fn now() -> Result<Duration, SdkError> {
-        #[repr(C)]
-        struct Timebase {
-            numerator: u32,
-            denominator: u32,
-        }
-        unsafe extern "C" {
-            fn mach_continuous_time() -> u64;
-            fn mach_timebase_info(info: *mut Timebase) -> i32;
-        }
-        let mut scale = Timebase { numerator: 0, denominator: 0 };
-        // SAFETY: the OS writes the initialized, correctly laid out timebase structure.
-        if unsafe { mach_timebase_info(&raw mut scale) } != 0
-            || scale.denominator == 0
-            || scale.numerator == 0
-        {
-            return Err(unavailable());
-        }
-        // SAFETY: this process-local OS clock takes no pointers and includes system sleep.
-        let ticks = unsafe { mach_continuous_time() };
-        let nanos = u128::from(ticks) * u128::from(scale.numerator) / u128::from(scale.denominator);
-        Ok(Duration::new(
-            u64::try_from(nanos / 1_000_000_000).map_err(|_| unavailable())?,
-            u32::try_from(nanos % 1_000_000_000).map_err(|_| unavailable())?,
-        ))
+        // The continuous clock includes system sleep; the FFI lives in clock_apple.
+        super::clock_apple::continuous_time().ok_or_else(unavailable)
     }
 }
 

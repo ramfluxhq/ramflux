@@ -47,7 +47,20 @@ Transport and runtime are closed before ownership is released.
 
 One page contains at most 32 encrypted envelopes. The output identifies those
 envelopes without exposing plaintext. Empty `items` means an empty fetched page.
-`fetched` establishes transport receipt only: this S1A host does not decrypt or
-apply the page, advance receive/ACK cursors, acknowledge messages, or construct a
-notification. Durable apply/ACK (S1B), notification policy/results and populated
-account RSS acceptance (S1C) remain separate work.
+The host uses the ordinary negotiated receive ledger: W1 projection, receipt,
+terminal or held cover, ACK intent and receive cursor commit under the same
+writer/erasure/incarnation fence. Receive policy may durably hold an entry or
+record a terminal refusal instead of projecting it; held entries are never ACKed.
+Only committed terminal intents feed the ordinary WA batch selector. The host
+flushes pending ACKs before fetching and after applying the page. A process killed
+after commit can therefore settle its pending ACK without projecting twice; an
+uncertain reply retains its durable intent. ACK settlement uses the ordinary
+exact-result-set validation and receipt/locator transaction.
+
+The negotiated inbox is required. A paused page, missing retained input or a point
+fetch beyond this bounded page returns an ordinary pending error and preserves
+its committed progress for the ordinary receiver. Replies remain in their durable
+outboxes; this host never starts a reply courier. Deadlines and errors may follow
+partial durable progress, so callers must safely invoke the operation again.
+`fetched` is not a notification-policy result. Notification policy/results and
+populated-account RSS acceptance (S1C) remain separate work.

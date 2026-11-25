@@ -67,6 +67,9 @@ fn read_inner(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Value, 
     let mut next = None;
     let mut budget = budget::Budget::new(request, field, 512 * 1024, 4096)?;
     for id in ids.iter().take(limit as usize) {
+        if directory == "group" && !client.local_device_is_shared_member(id)? {
+            continue;
+        }
         let row = rows::row(client, directory, id)?;
         if !budget.admit(&row)? {
             let Some(last) = result
@@ -174,6 +177,8 @@ fn legacy_list(
         for id in &ids {
             let row = if directory == "approval" && id.starts_with("task_approval_") {
                 client.task_remote_approval_by_id(id)?
+            } else if directory == "group" && !client.local_device_is_shared_member(id)? {
+                None
             } else {
                 Some(rows::row(client, directory, id)?)
             };

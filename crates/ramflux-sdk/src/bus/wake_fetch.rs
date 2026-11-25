@@ -13,6 +13,8 @@ use tokio::time::Instant;
 
 const PAGE_LIMIT: usize = 32;
 
+mod receive;
+
 #[derive(Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub(crate) enum Outcome {
@@ -22,7 +24,7 @@ pub(crate) enum Outcome {
     Deadline,
 }
 
-/// Transport receipt only. Does not imply decryption, application or acknowledgement.
+/// Identifies fetched entries; ordinary receive policy determines projection or durable hold.
 #[derive(Serialize)]
 pub(crate) struct FetchedItem {
     envelope_id: String,
@@ -63,8 +65,11 @@ pub(crate) fn run(
         Ok(Ok(lease)) => lease,
     };
     let result = runtime.block_on(async {
-        match tokio::time::timeout_at(Instant::from_std(deadline), fetch(config, account_id, vault))
-            .await
+        match tokio::time::timeout_at(
+            Instant::from_std(deadline),
+            Box::pin(fetch(config, account_id, vault)),
+        )
+        .await
         {
             Err(_) => Ok(Outcome::Deadline),
             Ok(Err(error)) => classify(error),
@@ -115,15 +120,27 @@ async fn fetch(
     if super::host_branch::marked_on(&gateway) {
         return Err(SdkError::PairingCode("PublicationPending"));
     }
-    let cursor = gateway.last_seen_inbox_seq;
-    let mut engine = GatewaySessionEngine::connect(gateway).await?;
-    let page = engine.resume_authoritative_after(cursor, PAGE_LIMIT).await;
+    let engine = GatewaySessionEngine::connect(gateway).await?;
+    let anchor = client
+        .born_v3_account
+        .as_ref()
+        .ok_or(SdkError::CustodySetupInvalid)?
+        .record()
+        .body
+        .account_anchor
+        .clone();
+    let mut account =
+        super::state::LocalBusAccountState::disconnected(client, engine.config.clone(), anchor);
+    account.engine = Some(engine);
+    // Data unlock clears branch credentials. Receive needs the same current-head
+    // refresh and certified branch/prekey installation as the ordinary account writer.
+    account.prepare_native_branch().await?;
+    let page = receive::run(&mut account).await;
     // TCP/TLS only: dropping a cancelled future closes its sole session socket directly.
-    engine.shutdown_transport().await;
-    let page = page?;
-    if page.len() > PAGE_LIMIT {
-        return Err(SdkError::GatewaySessionRejected("wake page exceeds requested limit".into()));
+    if let Some(engine) = account.engine.take() {
+        engine.shutdown_transport().await;
     }
+    let page = page?;
     Ok(page
         .into_iter()
         .map(|entry| FetchedItem {

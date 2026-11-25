@@ -427,6 +427,37 @@ jobs:
         if: always() && env.RF_TEST_TMPDIR != ''
         run: python -B scripts/ci/test-tmp.py check
 
+  apple-sdk-check:
+    name: Apple SDK check (${{ matrix.target }})
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-ios, aarch64-apple-darwin]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: |
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal --target ${{ matrix.target }}
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
+          shared-key: apple-sdk-${{ matrix.target }}
+      - name: Check the SDK for the Apple target with warnings denied
+        env:
+          RUSTFLAGS: '-D warnings'
+        run: cargo check --locked -p ramflux-sdk --features c-abi --target ${{ matrix.target }}
+
   doctests:
     name: Doctests
     runs-on: ubuntu-latest
