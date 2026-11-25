@@ -59,6 +59,7 @@ crates/ramflux-sdk/src/bus/dispatch/account.rs | decode_account_backup_file | 1 
 crates/ramflux-sdk/src/bus/dispatch/account.rs | decrypt_account_backup_state | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/call.rs | dispatch | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/call.rs | dispatch | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/dispatch/call.rs | dispatch | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/call.rs | invite | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/call_bot.rs | dispatch_bot_bus_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/call_bot.rs | dispatch_bot_bus_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

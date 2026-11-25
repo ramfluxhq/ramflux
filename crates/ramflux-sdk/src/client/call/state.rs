@@ -67,8 +67,6 @@ pub(crate) struct LiveCall {
     pub(crate) video_offer: Option<ramflux_protocol::VideoOffer>,
     /// This device's video send key for the selected peer (memory only, never persisted).
     pub(crate) video_send_key: Option<Zeroizing<[u8; 32]>>,
-    /// Callee: the user's choice for the video offer. Absent or false is a decline.
-    pub(crate) video_accept: bool,
     #[cfg(feature = "test-support")]
     pub(crate) last_control_error: Option<String>,
 }
@@ -261,7 +259,6 @@ impl LiveCall {
             video: super::video_signaling::VideoTrackPeer::default(),
             video_offer: None,
             video_send_key: None,
-            video_accept: false,
             peer_keys: BTreeMap::new(),
             peer_media: BTreeMap::new(),
             next_seq: 1,
@@ -479,8 +476,8 @@ impl LiveCall {
         let video_selection = match self.video_offer.as_ref() {
             Some(offer) => Some(super::video_signaling::selection(
                 offer,
-                self.video_accept,
-                self.video_accept,
+                self.video.accepts(),
+                self.video.accepts(),
             )?),
             None => None,
         };

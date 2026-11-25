@@ -57,11 +57,11 @@ pub(crate) async fn dispatch(
                 && next.row.state == "incoming_ringing"
                 && !next.expired(now) =>
         {
-            next.video_accept = video_accept;
+            next.video.set_accept(video_accept);
             next.request_answer();
         }
         "call.answer" => {
-            next.video_accept = video_accept;
+            next.video.set_accept(video_accept);
             next.answer(now)?;
         }
         "call.reject" => next.end(true, now)?,

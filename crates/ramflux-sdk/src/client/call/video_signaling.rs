@@ -101,6 +101,8 @@ pub(crate) fn initial_track(max_rung: u32, key: &[u8; 32]) -> ramflux_protocol::
 #[derive(Clone, Default, Eq, PartialEq)]
 pub(crate) struct VideoTrackPeer {
     negotiated: bool,
+    /// Callee: the user's choice for the offer. Absent or false is a decline.
+    accept: bool,
     revision: u64,
     changes: u32,
     key: Option<Zeroizing<[u8; 32]>>,
@@ -110,6 +112,16 @@ impl VideoTrackPeer {
     /// Records the selection outcome. A declined selection never admits a track.
     pub(crate) fn negotiate(&mut self, accepted: bool) {
         self.negotiated = accepted;
+    }
+
+    /// Records the user's choice for an incoming offer (callee side).
+    pub(crate) fn set_accept(&mut self, accept: bool) {
+        self.accept = accept;
+    }
+
+    /// The user's choice for an incoming offer; false is a decline.
+    pub(crate) fn accepts(&self) -> bool {
+        self.accept
     }
 
     /// Whether the selected peer accepted video (a declined selection leaves this false).

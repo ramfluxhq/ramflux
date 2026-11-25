@@ -37,8 +37,11 @@ struct MovedMedia {
     receive_kid: u64,
     receive_key: Zeroizing<[u8; 32]>,
     /// Video send and receive keys, only when both exist (CALLS-VIDEO-V1). Video KIDs are audio KIDs + 2.
-    video: Option<(Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>)>,
+    video: Option<VideoKeys>,
 }
+
+/// Video send and receive keys of one call (CALLS-VIDEO-V1).
+type VideoKeys = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
 
 fn unavailable(message: &str) -> SdkError {
     SdkError::LocalBus(format!("voice call: {message}"))
