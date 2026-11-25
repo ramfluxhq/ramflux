@@ -28,6 +28,11 @@ pub(crate) struct Store {
 }
 
 impl Store {
+    /// The account this store belongs to; transfer control is keyed by it.
+    pub(crate) fn account_id(&self) -> &str {
+        &self.account
+    }
+
     /// # Errors
     /// Returns `seal_failed` when the account directory cannot be created.
     pub(crate) fn open(
@@ -38,6 +43,12 @@ impl Store {
         let root = root.join("attachment-prepares");
         fs::create_dir_all(&root).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
         Ok(Self { root, account: account.to_owned(), account_secret })
+    }
+
+    /// Read-only view for `attachment.transfer.list`, which runs on an account reader thread that
+    /// holds no vault secret. It reads row files and ACK bitmaps only; no sealing path runs on it.
+    pub(crate) fn open_reader(root: &Path, account: &str) -> Result<Self, Refusal> {
+        Self::open(root, account, [0_u8; 32])
     }
 
     /// # Errors
@@ -405,6 +416,30 @@ impl Store {
         row.phase = phase;
         self.save(&row)?;
         Ok(row)
+    }
+
+    /// Prepares whose send is still pending (uploading, uploaded, or granted but not admitted),
+    /// read from the durable rows. Bounded by the index; a row that does not load is skipped.
+    /// # Errors
+    /// Returns `seal_failed` when the index cannot be read.
+    pub(crate) fn pending_rows(&self) -> Result<Vec<Row>, Refusal> {
+        Ok(self
+            .index()?
+            .iter()
+            .filter_map(|entry| self.load(&entry.prepare_id).ok())
+            .filter(|row| {
+                row.upload_id.is_some()
+                    && matches!(
+                        row.phase,
+                        Phase::Reserved
+                            | Phase::Sealing
+                            | Phase::Bound
+                            | Phase::Uploading
+                            | Phase::Committed
+                            | Phase::Granted
+                    )
+            })
+            .collect())
     }
 
     pub(crate) fn load(&self, prepare_id: &str) -> Result<Row, Refusal> {

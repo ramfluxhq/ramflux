@@ -51,8 +51,11 @@ pub(crate) fn submit(
     body: &[u8],
     owner: &QualifiedOwner,
     key: &SigningKey,
-    now: u64,
 ) -> Result<Vec<u8>, Refusal> {
+    // The proof window is 30 s and the relay refuses past it, so it is signed with the live
+    // clock: a send paused and resumed later must not reuse the time it started at.
+    let now = u64::try_from(crate::time::now_unix_timestamp())
+        .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     let proof = prove(op, owner, key, now)?;
     let operation = op.canonical_bytes().map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
     let call =

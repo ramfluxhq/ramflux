@@ -58,7 +58,9 @@ pub(crate) struct Row {
     pub manifest_hash: Option<[u8; 32]>,
     pub payload_generation: u64,
     pub segment_digests: Vec<[u8; 32]>,
-    /// Durably acknowledged network slices, one bitmap per immutable cipher segment.
+    /// Durably acknowledged network slices, one bitmap per immutable cipher segment. Owned by the
+    /// account-DB journal (`upload::journal_key`), never written to `meta.json`.
+    #[serde(skip)]
     pub upload_acks: Vec<u8>,
     pub message_id: Option<String>,
     pub charged: u64,
