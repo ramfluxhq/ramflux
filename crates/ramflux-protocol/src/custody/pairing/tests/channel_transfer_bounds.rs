@@ -505,11 +505,10 @@ fn channel_contexts(all: &Value) -> TestResult {
     ] {
         let mut wrong = enrollment.clone();
         *wrong.pointer_mut(path).ok_or("enrollment field")? = value;
-        assert_eq!(
-            decode_value::<Channel>(&wrong)?.validate_context(&enroll_context),
-            Err(WireError::Field(error)),
-            "{path}"
-        );
+        // A decode-time refusal (the declaration binding) is as much a refusal as a context one.
+        let outcome = decode_value::<Channel>(&wrong)
+            .and_then(|channel| channel.validate_context(&enroll_context));
+        assert_eq!(outcome, Err(WireError::Field(error)), "{path}");
     }
     enroll_context.sender = "initiator";
     assert_eq!(
