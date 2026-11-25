@@ -284,6 +284,24 @@ impl NotifyRedbStore {
         }
     }
 
+    /// Earliest end of a `unserved` pause on this device's sealed routes that is still in the
+    /// future (Unix ms). `None` when no route is paused.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn central_next_pause_expiry(
+        &self,
+        device_delivery_id: &str,
+        now_ms: u64,
+    ) -> Result<Option<u64>, NodeCoreError> {
+        Ok(self
+            .load_notify_routes(device_delivery_id)?
+            .into_iter()
+            .filter(|route| route.sealed && !route.needs_reseal && route.unserved_until_ms > now_ms)
+            .map(|route| route.unserved_until_ms)
+            .min())
+    }
+
     /// Routes a central wake may use for `device_delivery_id`, after the same owner check as the
     /// direct path and the served and state rules of A6.4 (see `select_central_routes`).
     ///

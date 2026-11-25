@@ -27,8 +27,6 @@ const TRANSPORT_BACKOFF_CAP_MS: u64 = 300_000;
 const RETRY_AFTER_DEFAULT_MS: u64 = 2_000;
 const RETRY_AFTER_MIN_MS: u64 = 1_000;
 const RETRY_AFTER_MAX_MS: u64 = 3_600_000;
-/// Wait after a `stopped` batch (federation has no session).
-const STOPPED_WAIT_MS: u64 = 300_000;
 /// Fixed re-check while no state file exists yet, and after a busy local store (H3, M2).
 const HOLD_RECHECK_MS: u64 = 2_000;
 const BUSY_RECHECK_MS: u64 = 1_000;
@@ -213,7 +211,14 @@ impl CentralPush {
             now_ms,
         )?;
         let Some(provider) = routes.first().map(|route| route.provider.clone()) else {
-            return Ok(CentralDue::Idle);
+            // Every route is paused: wake up when the earliest pause ends, never after the entry's
+            // own expiry (plan section 5, unserved).
+            let Some(until_ms) = store.central_next_pause_expiry(&entry.device_delivery_id, now_ms)?
+            else {
+                return Ok(CentralDue::Idle);
+            };
+            let at = ceil_secs(until_ms).min(entry.expires_at);
+            return Ok(if at > now_ms / 1000 { CentralDue::Retry(at) } else { CentralDue::Idle });
         };
         let mut batch = Vec::new();
         let mut unsettled = 0_usize;
@@ -314,11 +319,16 @@ impl CentralPush {
         let mut applied = Applied::default();
         match reply.status {
             HandoffStatus::Ok => {
+                // An `invalid_route` without `at` is a bad reply (L1), never a settled route.
                 let matched = reply.results.len() == chunk.len()
                     && chunk
                         .iter()
                         .zip(reply.results.iter())
-                        .all(|((_, wake), result)| result.w == wake.w);
+                        .all(|((_, wake), result)| result.w == wake.w)
+                    && reply
+                        .results
+                        .iter()
+                        .all(|result| result.r != WakeOutcome::InvalidRoute || result.at.is_some());
                 if !matched {
                     tracing::warn!("central handoff reply does not match the batch; treated as transport failure");
                     self.back_off_transport(now_ms);
@@ -343,11 +353,11 @@ impl CentralPush {
                 return Ok(applied);
             }
             HandoffStatus::Stopped => {
-                let until = now_ms.saturating_add(STOPPED_WAIT_MS);
-                self.set_backoff(until);
+                // Same back-off as a socket failure: 2 s doubling, capped (L2).
+                self.back_off_transport(now_ms);
                 tracing::warn!("central handoff stopped: federation has no session");
                 applied.unsettled = chunk.len();
-                applied.retry = Some(ceil_secs(until));
+                applied.retry = Some(ceil_secs(self.backoff_until()));
                 return Ok(applied);
             }
             HandoffStatus::Rejected => {
