@@ -1311,6 +1311,7 @@ pub(crate) mod tests {
             attempt_count: 0,
             status: ramflux_node_core::NotifyQueueStatus::Pending,
             dnd_active: false,
+            not_before_ms: 0,
         }
     }
 

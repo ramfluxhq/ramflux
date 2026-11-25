@@ -38,8 +38,8 @@ mod route_selection;
 pub use route_selection::{apns_topic_is_voip, voip_push_enabled};
 mod routes;
 mod wake_policy;
-pub use wake_policy::project_wake_v2;
 use crate::push_handoff::PushPolicy;
+pub use wake_policy::project_wake_v2;
 mod policy;
 mod policy_store;
 pub use policy::{

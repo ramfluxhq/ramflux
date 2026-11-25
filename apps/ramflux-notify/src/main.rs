@@ -5,6 +5,7 @@
 
 mod provider_issuance;
 mod provider_outcome;
+mod push_policy_source;
 use provider_issuance::SendBoundary;
 mod delivery_loop;
 mod provider_payload;
@@ -75,6 +76,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         authority.configure_reader(&mut store);
         push_registration::configure(&mut store, &config)?;
         let store = Arc::new(store);
+        push_policy_source::install(&store)?;
         log_notify_wal_recovery(&store);
         store.drop_legacy_pending_wakes()?;
         retention::start(Arc::clone(&store))?;
@@ -820,7 +822,13 @@ fn handle_itest_request(
                 keep_alive,
             )?;
         }
-        ("POST", "/s13/notify/device-policy" | "/s13/notify/activity" | "/s13/notify/clear" | "/s13/notify/clear-plan") => {
+        (
+            "POST",
+            "/s13/notify/device-policy"
+            | "/s13/notify/activity"
+            | "/s13/notify/clear"
+            | "/s13/notify/clear-plan",
+        ) => {
             handle_s13_policy(
                 stream,
                 &ingress.store,
@@ -3619,9 +3627,6 @@ fn handle_s13_policy(
         }
     };
     ramflux_node_core::write_itest_json_response_with_connection(
-        stream,
-        "200 OK",
-        &response,
-        keep_alive,
+        stream, "200 OK", &response, keep_alive,
     )
 }

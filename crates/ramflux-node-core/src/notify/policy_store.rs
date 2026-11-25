@@ -9,8 +9,8 @@ use super::policy::{
     DeviceClass, DevicePolicyRecord, HoldDecision, HoldState, POLICY_CLEAR_TTL_S, PolicyHoldRow,
     PolicyStatsHour, decide_wake, is_call_class, utc_hour_start_ms,
 };
-use crate::push_handoff::PushPolicy;
 use super::{NodeCoreError, NotifyQueueEntry, NotifyRedbStore};
+use crate::push_handoff::PushPolicy;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -23,6 +23,9 @@ const POLICY_NOTIFIED: TableDefinition<&str, u64> =
     TableDefinition::new("notify_policy_notified_v1");
 const POLICY_CLEARS: TableDefinition<&str, u64> = TableDefinition::new("notify_policy_clears_v1");
 const HOUR_MS: u64 = 3_600_000;
+
+/// Account group and its other devices as (device, muted).
+pub type PolicyGroupPeers = (String, Vec<(String, bool)>);
 
 /// Stored hour row: the public counters plus whether the centre acknowledged them.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -361,7 +364,9 @@ impl NotifyRedbStore {
             devices.iter().map(|(device, _)| device.clone()).collect();
         let reached: BTreeSet<String> = live_cleared
             .iter()
-            .filter(|device| group_members.contains(*device) && device.as_str() != device_delivery_id)
+            .filter(|device| {
+                group_members.contains(*device) && device.as_str() != device_delivery_id
+            })
             .cloned()
             .collect();
         self.policy_write(|txn| {
@@ -494,7 +499,7 @@ impl NotifyRedbStore {
     pub fn policy_group_peers(
         &self,
         device_delivery_id: &str,
-    ) -> Result<Option<(String, Vec<(String, bool)>)>, NodeCoreError> {
+    ) -> Result<Option<PolicyGroupPeers>, NodeCoreError> {
         let Some(record) = self.device_policy(device_delivery_id)? else {
             return Ok(None);
         };

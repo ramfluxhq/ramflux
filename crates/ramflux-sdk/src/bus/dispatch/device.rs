@@ -25,9 +25,7 @@ pub(crate) async fn dispatch_device_bus_request(
             dispatch_push_policy_set(request, state, body).await
         }
         "device.activity.report" => dispatch_activity_report(request, state).await,
-        "device.notifications.cleared" => {
-            dispatch_notifications_cleared(request, state).await
-        }
+        "device.notifications.cleared" => dispatch_notifications_cleared(request, state).await,
         "device.sync.export" => {
             let body: LocalBusDeviceSyncExportRequest =
                 serde_json::from_value(request.body.clone())?;

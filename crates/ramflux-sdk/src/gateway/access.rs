@@ -3,8 +3,8 @@
 
 //! Session capabilities shared by direct SDK engines and daemon-managed clients.
 
-use crate::prelude::*;
 use crate::gateway::protocol::GatewayDeviceClass;
+use crate::prelude::*;
 use std::{future::Future, pin::Pin};
 
 /// One bounded session exchange, whose storage effects remain owned by its caller.

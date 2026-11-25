@@ -15,7 +15,11 @@ pub(crate) fn account_group(principal_id: &str) -> String {
     hasher.update(b"ramflux.notify.account_group.v1");
     hasher.update([0_u8]);
     hasher.update(principal_id.as_bytes());
-    hasher.finalize().iter().take(16).map(|byte| format!("{byte:02x}")).collect()
+    hasher.finalize().iter().take(16).fold(String::with_capacity(32), |mut hex, byte| {
+        // Writing to a String cannot fail.
+        let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{byte:02x}"));
+        hex
+    })
 }
 
 fn now_ms() -> u64 {
