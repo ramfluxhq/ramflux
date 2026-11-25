@@ -13,6 +13,11 @@ const MAX_CONFIG_BYTES: usize = 16 * 1024;
 const MAX_RECORD_BYTES: usize = 2048;
 const VERBOSE_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 
+/// Process-level sink handle held by `ramflux_v2_diag_init`.
+static PROCESS_SINK: std::sync::LazyLock<
+    std::sync::Mutex<Option<std::sync::Arc<crate::diag::logging::Session>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
 fn invalid(message: &'static str) -> CAbiError {
     CAbiError::new(RamfluxErrorCode::InvalidArgument, message)
 }
@@ -41,7 +46,12 @@ pub extern "C" fn ramflux_v2_diag_init(config_json: *const u8, len: usize) -> i3
         let config: crate::diag::DiagnosticConfig =
             serde_json::from_value(value).map_err(|_| invalid("diag config"))?;
         let root = super::data_root::validate(&dir)?;
-        crate::diag::start(&root, config).map_err(|error| super::super::map_sdk_error(&error))?;
+        let session = crate::diag::start(&root, config)
+            .map_err(|error| super::super::map_sdk_error(&error))?;
+        // The process keeps its sink open until exit; dropping this handle would stop the writer.
+        if let Ok(mut slot) = PROCESS_SINK.lock() {
+            *slot = Some(session);
+        }
         Ok(())
     })
 }

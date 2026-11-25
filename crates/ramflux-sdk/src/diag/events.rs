@@ -114,7 +114,14 @@ pub(crate) fn backup_job(
     let state = token(serde_json::to_value(row.state));
     match check {
         None => {
-            emit("I", "sdk.backup", "backup.job", None, json!({"kind": kind, "state": state}), None)
+            emit(
+                "I",
+                "sdk.backup",
+                "backup.job",
+                None,
+                json!({"kind": kind, "state": state}),
+                None,
+            );
         }
         Some(code) => {
             let check = token(serde_json::to_value(code));
