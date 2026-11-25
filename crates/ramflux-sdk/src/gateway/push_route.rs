@@ -54,14 +54,10 @@ pub struct GatewayPushRouteRegistration {
     /// Application identifier the token is sealed with. Host input only: never sent to the node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
-    /// The token field is a sealed route (central mode). Absent on direct registrations.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub sealed: bool,
-}
-
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_false(value: &bool) -> bool {
-    !*value
+    /// `Some(true)` when the token field is a sealed route (central mode). Absent on direct
+    /// registrations, so their signed body is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<bool>,
 }
 
 /// APNs host the node will use. FCM and Web Push are production only.
@@ -353,7 +349,7 @@ impl GatewaySessionEngine {
         let provider = body.provider;
         let mut body = body;
         let app = body.app.take();
-        let body = if self.config.push_mode.as_deref() == Some("central") {
+        let body = if self.config.push.mode.as_deref() == Some("central") {
             crate::push_keyset::seal_registration(
                 &self.config,
                 body,
@@ -809,7 +805,7 @@ mod tests {
             webpush_p256dh: Some("p256dh".into()),
             webpush_auth: Some("auth".into()),
             app: None,
-            sealed: false,
+            sealed: None,
         }
     }
 
@@ -1005,7 +1001,7 @@ mod tests {
             webpush_p256dh: None,
             webpush_auth: None,
             app: None,
-            sealed: false,
+            sealed: None,
         }
     }
 
@@ -1020,7 +1016,7 @@ mod tests {
             webpush_p256dh: None,
             webpush_auth: None,
             app: None,
-            sealed: false,
+            sealed: None,
         }
     }
 
@@ -1046,7 +1042,7 @@ mod tests {
             webpush_p256dh: None,
             webpush_auth: None,
             app: None,
-            sealed: false,
+            sealed: None,
         };
         let value = serde_json::to_value(&body).expect("json");
         assert_eq!(value["provider"], "webpush");

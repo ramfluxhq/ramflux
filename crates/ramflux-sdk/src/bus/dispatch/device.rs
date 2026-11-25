@@ -165,9 +165,9 @@ fn dispatch_push_keyset_get(
     let account = local_bus_account(state, account_id)?;
     let config = &account.gateway_config;
     let now = crate::push_keyset::unix_millis_now();
-    let mode = config.push_mode.clone().unwrap_or_else(|| "unknown".to_owned());
+    let mode = config.push.mode.clone().unwrap_or_else(|| "unknown".to_owned());
     let (status, record) =
-        match (crate::push_keyset::configured_push_centre(), config.push_keyset.as_ref()) {
+        match (crate::push_keyset::configured_push_centre(), config.push.keyset.as_ref()) {
             (None, _) => ("no_pin", None),
             (Some(_), None) => ("missing", None),
             (Some(_), Some(record)) if record.expires_at <= now => ("expired", Some(record)),

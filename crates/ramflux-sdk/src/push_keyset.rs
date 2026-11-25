@@ -26,7 +26,7 @@ pub const PUSH_KEYSET_VERIFY_KEYS_ENV: &str = "RAMFLUX_PUSH_KEYSET_VERIFY_KEYS";
 /// Largest serialised key set document.
 pub const MAX_KEYSET_DOC_BYTES: usize = 6144;
 /// Checkpoint holding the held key set record (document, fence and expiry).
-pub(crate) const PUSH_KEYSET_CHECKPOINT: &str = "gateway.push_keyset.v1";
+pub(crate) const PUSH_KEYSET_CHECKPOINT: &str = "gateway.push.keyset.v1";
 
 /// The pinned centre: its identifier and one or two verify keys by `kid`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,6 +61,18 @@ pub(crate) struct PushKeysetRecord {
 /// Environment variable naming an unsigned `rfc-centre-pin-1` bundle file. When set, the bundle is
 /// the pin source; the two variables above are the fallback.
 pub const CENTRE_PIN_FILE_ENV: &str = "RAMFLUX_CENTRE_PIN_FILE";
+
+/// Central push state kept behind one pointer in the session config, so the connection futures
+/// stay small: the echoed mode, the held verified key set, and the pinned node key that seals `nk`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PushSessionState {
+    /// Push mode the gateway echoed at establishment (`direct` or `central`).
+    pub(crate) mode: Option<String>,
+    /// The held, verified key set (document and sequence fence).
+    pub(crate) keyset: Option<PushKeysetRecord>,
+    /// The pinned home node identity key (unpadded base64url) that sealed tokens carry as `nk`.
+    pub(crate) node_public_key: Option<String>,
+}
 
 /// Reads the pin from the bundle file when named, else from the environment. `None` when the
 /// source is missing or malformed (fail closed).
@@ -171,15 +183,15 @@ pub(crate) fn adopt_establishment(
     doc: Option<&PushKeysetDoc>,
     now_ms: u64,
 ) {
-    config.push_mode = mode.map(str::to_owned);
+    config.push.mode = mode.map(str::to_owned);
     if mode != Some("central") {
         return;
     }
     let (Some(pin), Some(doc)) = (configured_push_centre(), doc) else {
         return;
     };
-    if let Ok(record) = offer(&pin, doc, config.push_keyset.as_deref(), now_ms) {
-        config.push_keyset = Some(Box::new(record));
+    if let Ok(record) = offer(&pin, doc, config.push.keyset.as_ref(), now_ms) {
+        config.push.keyset = Some(record);
     }
 }
 
@@ -198,12 +210,12 @@ pub(crate) fn seal_registration(
     let unavailable = || SdkError::PushRouteRefused(GatewayPushRouteRefusal::PushKeysetUnavailable);
     let rejected = || SdkError::PushRouteRefused(GatewayPushRouteRefusal::Rejected);
     let pin = configured_push_centre().ok_or_else(unavailable)?;
-    let record = config.push_keyset.as_ref().ok_or_else(unavailable)?;
+    let record = config.push.keyset.as_ref().ok_or_else(unavailable)?;
     if record.centre_id != pin.centre_id {
         return Err(unavailable());
     }
     offer(&pin, &record.doc, None, now_ms).map_err(|_| unavailable())?;
-    let node_key = config.push_node_public_key.as_deref().ok_or_else(unavailable)?;
+    let node_key = config.push.node_public_key.as_deref().ok_or_else(unavailable)?;
     let nk_bytes = ramflux_protocol::decode_base64url(node_key).map_err(|_| unavailable())?;
     <[u8; 32]>::try_from(nk_bytes.as_slice()).map_err(|_| unavailable())?;
     let recipient_bytes =
@@ -239,7 +251,7 @@ pub(crate) fn seal_registration(
     .map_err(|_| unavailable())?;
     let mut out = registration;
     out.token = encode_sealed_token(&sealed);
-    out.sealed = true;
+    out.sealed = Some(true);
     Ok(out)
 }
 
@@ -275,7 +287,7 @@ pub(crate) fn restore_keyset(
     if value.is_empty() {
         return Ok(());
     }
-    config.push_keyset = Some(Box::new(serde_json::from_str(&value)?));
+    config.push.keyset = Some(serde_json::from_str(&value)?);
     Ok(())
 }
 
@@ -287,7 +299,7 @@ pub(crate) fn persist_keyset(
     client: &RamfluxClient,
     config: &GatewaySessionConfig,
 ) -> Result<(), SdkError> {
-    let Some(record) = &config.push_keyset else {
+    let Some(record) = &config.push.keyset else {
         return Ok(());
     };
     client.set_projection_checkpoint(PUSH_KEYSET_CHECKPOINT, &serde_json::to_string(record)?)?;
