@@ -177,6 +177,14 @@ impl Fixture {
         let anchor = record.body.account_anchor.clone();
         let identity = client.owned_device_identity()?;
         let bundle = client.load_x3dh_private_state(&identity)?.bundle;
+        let endorsed = crate::custody::layer_declaration::endorsed_for(
+            &record,
+            &DeviceRef {
+                account_anchor: anchor.clone(),
+                device_id: device.into(),
+                device_epoch: 1,
+            },
+        );
         let manifest =
             SdkDeviceManifestResponse::from_native(CustodyManifest {
                 publication: Publication { record, compacted_ids: None },
@@ -193,7 +201,7 @@ impl Fixture {
                     },
                     target_delivery_id: identity.storage_key().into(),
                     prekey_bundle: serde_json::to_value(bundle)?,
-                    message_layer: None,
+                    message_layer: endorsed,
                 }],
             })?;
         // The fixture models a directory manifest the account just fetched.
