@@ -133,6 +133,10 @@ pub struct EngineStats {
     pub video_rejected: u64,
     /// Video fragments or access units dropped by the bounded reassembly.
     pub video_dropped: u64,
+    /// Packets refused because their `SFrame` KID belongs to another track
+    /// (audio KIDs on PT112/PT113, video KIDs on PT111). Also counted in
+    /// `rejected` or `video_rejected`.
+    pub kid_mismatch: u64,
 }
 
 #[derive(Debug, Default)]
@@ -567,7 +571,13 @@ impl ReceiveLoop {
                     shared.last_packet = Some(Instant::now());
                     shared.stats.authenticated += 1;
                 }
-                Err(_) => lock(&self.shared).stats.rejected += 1,
+                Err(error) => {
+                    let mut shared = lock(&self.shared);
+                    shared.stats.rejected += 1;
+                    if matches!(error, PipelineError::KidMismatch) {
+                        shared.stats.kid_mismatch += 1;
+                    }
+                }
             }
         }
     }
@@ -591,7 +601,13 @@ fn receive_video(
                 Err(_) => shared.stats.video_dropped += 1,
             }
         }
-        Err(_) => lock(shared).stats.video_rejected += 1,
+        Err(error) => {
+            let mut shared = lock(shared);
+            shared.stats.video_rejected += 1;
+            if matches!(error, PipelineError::KidMismatch) {
+                shared.stats.kid_mismatch += 1;
+            }
+        }
     }
 }
 

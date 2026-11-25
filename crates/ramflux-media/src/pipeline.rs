@@ -45,6 +45,30 @@ pub enum PipelineError {
     /// A video packet failed its video framing (after authentication).
     #[error(transparent)]
     Video(#[from] video_packet::Error),
+    /// The `SFrame` KID does not belong to the packet's track: audio KIDs
+    /// (0 and 1) ride PT111 only; video KIDs (2 and 3) ride PT112 and PT113
+    /// only. Refused before any decryption and counted by the engine.
+    #[error("SFrame KID does not belong to this track")]
+    KidMismatch,
+}
+
+/// Largest audio `SFrame` KID (audio uses KIDs 0 and 1, one per direction).
+pub const AUDIO_KID_MAX: u64 = 1;
+/// Video `SFrame` KIDs (one per direction).
+pub const VIDEO_KIDS: std::ops::RangeInclusive<u64> = 2..=3;
+
+fn audio_kid_ok(kid: u64) -> bool {
+    kid <= AUDIO_KID_MAX
+}
+
+fn video_kid_ok(kid: u64) -> bool {
+    VIDEO_KIDS.contains(&kid)
+}
+
+/// The KID in the `SFrame` header at the start of `data`, read before any
+/// decryption (the header is clear; the KID is not secret).
+fn header_kid(data: &[u8]) -> Result<u64, PipelineError> {
+    Ok(sframe::Header::decode(data)?.0.kid)
 }
 
 /// The sending half of a call.
@@ -76,6 +100,9 @@ impl Outbound {
         timestamp: u32,
     ) -> Result<Self, PipelineError> {
         let suite = sframe::suite(session.suite())?;
+        if !audio_kid_ok(session.send_kid()) {
+            return Err(PipelineError::KidMismatch);
+        }
         let key = session.take_send_key().ok_or(PipelineError::SendKeyUsed)?;
         Ok(Self {
             encoder: Encoder::new()?,
@@ -193,8 +220,16 @@ pub enum Demuxed {
 #[derive(Debug)]
 pub struct Inbound {
     sframe: sframe::Receiver,
-    video: Option<sframe::Receiver>,
+    audio_kid: u64,
+    video: Option<VideoRx>,
     video_sequence: SequenceTracker,
+}
+
+/// The peer's video receiving context: its KID and its decryption keys.
+#[derive(Debug)]
+struct VideoRx {
+    kid: u64,
+    receiver: sframe::Receiver,
 }
 
 impl Inbound {
@@ -206,17 +241,28 @@ impl Inbound {
     pub fn new(session: &MediaSession) -> Result<Self, PipelineError> {
         let suite = sframe::suite(session.suite())?;
         let key = session.receive_key();
+        if !audio_kid_ok(key.kid()) {
+            return Err(PipelineError::KidMismatch);
+        }
         let mut receiver = sframe::Receiver::new();
         receiver.add_key(suite, key.kid(), key.base_key().bytes())?;
         let video = match session.video_receive_key() {
             Some(video_key) => {
+                if !video_kid_ok(video_key.kid()) {
+                    return Err(PipelineError::KidMismatch);
+                }
                 let mut video_receiver = sframe::Receiver::new();
                 video_receiver.add_key(suite, video_key.kid(), video_key.base_key().bytes())?;
-                Some(video_receiver)
+                Some(VideoRx { kid: video_key.kid(), receiver: video_receiver })
             }
             None => None,
         };
-        Ok(Self { sframe: receiver, video, video_sequence: SequenceTracker::default() })
+        Ok(Self {
+            sframe: receiver,
+            audio_kid: key.kid(),
+            video,
+            video_sequence: SequenceTracker::default(),
+        })
     }
 
     /// Whether `packet` is a video RTP packet (PT112), for the gate choice
@@ -255,8 +301,12 @@ impl Inbound {
         if header.payload_type != VIDEO_PAYLOAD_TYPE || packet.len() < METADATA_LEN {
             return Err(PipelineError::NotRtp);
         }
-        let video = self.video.as_mut().ok_or(PipelineError::VideoNotNegotiated)?;
-        let payload = video.decrypt(&packet[..METADATA_LEN], &packet[METADATA_LEN..])?;
+        let track = self.video.as_mut().ok_or(PipelineError::VideoNotNegotiated)?;
+        let body = packet.get(METADATA_LEN..).ok_or(PipelineError::NotRtp)?;
+        if header_kid(body)? != track.kid {
+            return Err(PipelineError::KidMismatch);
+        }
+        let payload = track.receiver.decrypt(&packet[..METADATA_LEN], body)?;
         let fragment =
             video_packet::decode_fragment(&packet[rtp::HEADER_LEN..METADATA_LEN], &payload)?;
         let extended_sequence = self.video_sequence.extend(header.sequence);
@@ -274,7 +324,11 @@ impl Inbound {
         if header.payload_type != OPUS_PAYLOAD_TYPE {
             return Err(PipelineError::NotRtp);
         }
-        let opus = self.sframe.decrypt(&packet[..rtp::HEADER_LEN], &packet[rtp::HEADER_LEN..])?;
+        let body = packet.get(rtp::HEADER_LEN..).ok_or(PipelineError::NotRtp)?;
+        if header_kid(body)? != self.audio_kid {
+            return Err(PipelineError::KidMismatch);
+        }
+        let opus = self.sframe.decrypt(&packet[..rtp::HEADER_LEN], body)?;
         Ok(Received { header, opus })
     }
 }
