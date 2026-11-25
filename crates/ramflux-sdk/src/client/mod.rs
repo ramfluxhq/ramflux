@@ -42,6 +42,7 @@ pub(crate) mod generated_call;
 mod generated_capacity;
 pub(crate) mod generated_content;
 pub(crate) mod generated_control;
+pub(crate) mod layer_renewal;
 mod generated_delete_fence;
 mod generated_edit_retirement;
 mod generated_fields;
