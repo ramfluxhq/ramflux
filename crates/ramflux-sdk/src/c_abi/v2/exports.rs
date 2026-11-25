@@ -47,6 +47,7 @@ pub(super) struct Config {
     pub(super) username_directory: Option<ramflux_protocol::username_directory::NativeDirectoryPin>,
     #[zeroize(skip)]
     pub(super) session_lease: Option<(crate::SessionLeasePriority, u64)>,
+    pub(super) resume_wait_ms: Option<u64>,
     pub(super) allow_raw_messages: bool,
     pub(super) allow_secret_exports: bool,
     pub(super) data_root: String,
@@ -325,6 +326,9 @@ fn open_inner(
     );
     if let Some((priority, wait_ms)) = config.session_lease {
         bus = bus.with_session_lease(priority, std::time::Duration::from_millis(wait_ms));
+    }
+    if let Some(wait_ms) = config.resume_wait_ms {
+        bus = bus.with_resume_wait(std::time::Duration::from_millis(wait_ms));
     }
     bus.builtin_nodes = std::mem::take(&mut config.builtin_nodes)
         .into_iter()
@@ -784,7 +788,7 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "manifest_unavailable"
         | "unsupported_platform" => E::UnsupportedVersion as i32,
         name if super::native_error::auth_failure(name) => E::AuthFailed as i32,
-        "CapabilityRejected" => E::CapabilityRejected as i32,
+        "CapabilityRejected" | "push_route_refused" => E::CapabilityRejected as i32,
         "ReplayRejected" | "ReplayMismatch" => E::ReplayRejected as i32,
         "McpGrantRejected" => E::McpGrantRejected as i32,
         "ObjectTransferFailed" => E::ObjectTransferFailed as i32,

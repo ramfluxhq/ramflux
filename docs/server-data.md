@@ -124,7 +124,10 @@ keys; it does not protect against the running node or its operator.
 
 Clients normally use the SDK: set `GatewaySessionConfig::push_route`, call
 `GatewaySessionEngine::set_push_route`, or send the local bus request
-`device.push_route.set` with `{"registration": {...}}`. `null` clears it and sends
+`device.push_route.set` with `{"registration": {...}}`. A node refusal completes
+the local bus request as `push_route_refused` with `details.refusal` set to one of
+`provider_unavailable`, `rejected`, `rejected_owner`, `unavailable`, `superseded`
+(see c-abi-v2.md, Push route refusals). `null` clears it and sends
 an explicit deregistration, which deletes the node's routes for the device. The
 daemon stores the route in the account database and registers it after every
 authenticated (re)connect, on token change and before renewal is due.

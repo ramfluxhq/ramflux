@@ -115,6 +115,21 @@ pub enum GatewayPushRouteRefusal {
     Unknown,
 }
 
+impl GatewayPushRouteRefusal {
+    /// Stable app-facing token for `details.refusal` in the C ABI completion.
+    /// A newer node's unknown code is reported as `unavailable`, its retry class.
+    #[must_use]
+    pub const fn wire_token(self) -> &'static str {
+        match self {
+            Self::ProviderUnavailable => "provider_unavailable",
+            Self::Rejected => "rejected",
+            Self::RejectedOwner => "rejected_owner",
+            Self::Superseded => "superseded",
+            Self::Unavailable | Self::Unknown => "unavailable",
+        }
+    }
+}
+
 /// Whether a route that expires at `expires_at` must be registered again at `now`.
 #[must_use]
 pub fn push_route_renewal_due(expires_at: Option<u64>, now: u64) -> bool {
@@ -477,8 +492,8 @@ impl GatewaySessionEngine {
                 return Err(SdkError::GatewaySessionRejected(reason.clone()));
             }
             if admitted && matched {
-                if let GatewayServerFrame::PushRouteRefused { reason, .. } = frame {
-                    return Err(SdkError::GatewaySessionRejected(reason));
+                if let GatewayServerFrame::PushRouteRefused { code, .. } = frame {
+                    return Err(SdkError::PushRouteRefused(code));
                 }
                 return Ok(self.push_route_expires_at);
             }
@@ -489,22 +504,22 @@ impl GatewaySessionEngine {
     /// only update state.
     pub(crate) fn apply_push_route_reply(
         &mut self,
-        frame: GatewayServerFrame,
+        frame: &GatewayServerFrame,
     ) -> Result<Option<u64>, SdkError> {
-        let id = push_route_reply_id(&frame).map(str::to_owned);
+        let id = push_route_reply_id(frame).map(str::to_owned);
         let pending = id.as_deref().and_then(|request_id| self.take_pending(request_id));
         match frame {
             GatewayServerFrame::PushRouteRegistered { expires_at, .. } => {
-                self.remember_registered_expiry(pending.as_ref(), expires_at);
-                Ok(Some(expires_at))
+                self.remember_registered_expiry(pending.as_ref(), *expires_at);
+                Ok(Some(*expires_at))
             }
             GatewayServerFrame::PushRouteDeregistered { .. } => {
                 self.apply_deregistered(pending);
                 Ok(None)
             }
-            GatewayServerFrame::PushRouteRefused { reason, code, .. } => {
-                self.apply_refused(pending, code);
-                Err(SdkError::GatewaySessionRejected(reason))
+            GatewayServerFrame::PushRouteRefused { code, .. } => {
+                self.apply_refused(pending, *code);
+                Err(SdkError::PushRouteRefused(*code))
             }
             _ => Ok(None),
         }

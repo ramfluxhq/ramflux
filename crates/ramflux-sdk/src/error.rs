@@ -372,6 +372,9 @@ pub enum SdkError {
     IdentityRootMissing,
     #[error("gateway session rejected: {0}")]
     GatewaySessionRejected(String),
+    /// The node refused push route control with its typed refusal (not a session fault).
+    #[error("push route refused: {0:?}")]
+    PushRouteRefused(crate::GatewayPushRouteRefusal),
     #[error("own-device authorization refresh failed: {0}")]
     OwnDeviceAuthorizationRefreshFailed(String),
     #[error("gateway session is not established")]
