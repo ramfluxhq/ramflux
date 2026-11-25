@@ -39,11 +39,12 @@ pub use route_selection::{apns_topic_is_voip, voip_push_enabled};
 mod routes;
 mod wake_policy;
 pub use wake_policy::project_wake_v2;
+use crate::push_handoff::PushPolicy;
 mod policy;
 mod policy_store;
 pub use policy::{
     DeviceClass, DevicePolicyRecord, HoldDecision, HoldState, POLICY_CLEAR_TTL_S,
-    POLICY_DEFAULT_N_S, POLICY_DEFAULT_T_S, PolicyStatsHour, PushPolicy,
+    POLICY_DEFAULT_N_S, POLICY_DEFAULT_T_S, PolicyStatsHour,
 };
 pub use policy_store::PolicyClearOutcome;
 
@@ -1939,10 +1940,19 @@ impl NotifyRedbStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let raw = self.pending_entries_without_attempts_raw(limit.saturating_mul(2))?;
-        let mut kept = self.apply_policy_to_pending(raw)?;
-        kept.truncate(limit);
-        Ok(kept)
+        // Muted and dropped holds are not live: page the raw scan until `limit` live rows are
+        // found or the scan is exhausted, so terminal rows never hide live ones.
+        let mut want = limit;
+        loop {
+            let raw = self.pending_entries_without_attempts_raw(want)?;
+            let exhausted = raw.len() < want;
+            let mut kept = self.apply_policy_to_pending(raw)?;
+            if kept.len() >= limit || exhausted {
+                kept.truncate(limit);
+                return Ok(kept);
+            }
+            want = want.saturating_mul(2);
+        }
     }
 
     fn pending_entries_without_attempts_raw(

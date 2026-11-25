@@ -7,8 +7,9 @@
 
 use super::policy::{
     DeviceClass, DevicePolicyRecord, HoldDecision, HoldState, POLICY_CLEAR_TTL_S, PolicyHoldRow,
-    PolicyStatsHour, PushPolicy, decide_wake, is_call_class, utc_hour_start_ms,
+    PolicyStatsHour, decide_wake, is_call_class, utc_hour_start_ms,
 };
+use crate::push_handoff::PushPolicy;
 use super::{NodeCoreError, NotifyQueueEntry, NotifyRedbStore};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 use serde::{Deserialize, Serialize};
@@ -481,6 +482,29 @@ impl NotifyRedbStore {
             }
             Ok(())
         })
+    }
+}
+
+impl NotifyRedbStore {
+    /// Account group of `device_delivery_id` and its other devices with their mute state.
+    /// The clear plan the gateway uses to find live peers. `None` without a policy record.
+    ///
+    /// # Errors
+    /// Returns an error when the policy rows cannot be read.
+    pub fn policy_group_peers(
+        &self,
+        device_delivery_id: &str,
+    ) -> Result<Option<(String, Vec<(String, bool)>)>, NodeCoreError> {
+        let Some(record) = self.device_policy(device_delivery_id)? else {
+            return Ok(None);
+        };
+        let peers = self
+            .group_devices(&record.account_group)?
+            .into_iter()
+            .filter(|(device, _)| device != device_delivery_id)
+            .map(|(device, peer)| (device, peer.muted))
+            .collect();
+        Ok(Some((record.account_group, peers)))
     }
 }
 

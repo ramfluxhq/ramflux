@@ -4,6 +4,7 @@
 //! Node-side push policy (CENTRAL P2b, K9-K12): device class, mute, hold, clear and
 //! hourly stats. Pure types and rules; the redb state lives in `policy_store`.
 
+use crate::push_handoff::PushPolicy;
 use serde::{Deserialize, Serialize};
 
 /// `n_s` of the centre's version-0 policy (seconds a peer counts as active).
@@ -25,17 +26,9 @@ pub enum DeviceClass {
     Terminal,
 }
 
-/// Push policy as set by the centre (`dir.policy`). `version` 0 means "none received yet".
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PushPolicy {
-    pub version: u64,
-    pub n_s: u64,
-    pub t_s: u64,
-}
-
-impl PushPolicy {
+impl crate::push_handoff::PushPolicy {
     /// Before the first `ok` reply of a process the node holds nothing (`t_s` 0) and sends
-    /// `policy_version` 0. Not persisted: re-learned on the first reply.
+    /// `policy_version` 0. Never persisted by the node: re-learned on the first reply.
     #[must_use]
     pub const fn before_first_reply() -> Self {
         Self { version: 0, n_s: POLICY_DEFAULT_N_S, t_s: 0 }
@@ -44,9 +37,7 @@ impl PushPolicy {
     /// True when `n_s` and `t_s` are inside the bounds of NN-PUSH 11.4.
     #[must_use]
     pub const fn in_bounds(&self) -> bool {
-        self.n_s >= POLICY_N_S_MIN
-            && self.n_s <= POLICY_N_S_MAX
-            && self.t_s <= POLICY_T_S_MAX
+        self.n_s >= POLICY_N_S_MIN && self.n_s <= POLICY_N_S_MAX && self.t_s <= POLICY_T_S_MAX
     }
 }
 
