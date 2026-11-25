@@ -139,11 +139,18 @@ pub(crate) fn prepare_bytes(plaintext: u64) -> Result<u64, Refusal> {
         .ok_or(Refusal::new(CODE_DISK_FULL))
 }
 
-/// Disk one import needs: the staged plaintext and the margin.
+/// Disk one import needs: the ciphertext cache (every segment plus its tag), the plaintext
+/// staging file that is renamed into place (one copy at a time), and the margin.
 /// # Errors
-/// Returns `disk_full` when the size overflows.
+/// Returns `disk_full` when the size overflows, and `layout_invalid` for a length with no layout.
 pub(crate) fn import_bytes(plaintext: u64) -> Result<u64, Refusal> {
-    plaintext.checked_add(SAFETY_MARGIN).ok_or(Refusal::new(CODE_DISK_FULL))
+    let segments = u64::from(super::import_cache::segment_count(plaintext)?);
+    let cipher =
+        plaintext.checked_add(segments.saturating_mul(16)).ok_or(Refusal::new(CODE_DISK_FULL))?;
+    plaintext
+        .checked_add(cipher)
+        .and_then(|sum| sum.checked_add(SAFETY_MARGIN))
+        .ok_or(Refusal::new(CODE_DISK_FULL))
 }
 
 #[cfg(test)]

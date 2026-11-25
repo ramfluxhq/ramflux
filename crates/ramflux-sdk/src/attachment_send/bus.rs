@@ -42,6 +42,7 @@ pub(crate) async fn dispatch(
         "attachment.import.read" => handles::read(account, request),
         "attachment.import.finish" => handles::finish(account, request),
         "attachment.import.cancel" => handles::cancel(account, request),
+        "attachment.import.export" => handles::export(account, request),
         "attachment.revoke" => revoke(account, request).await,
         "attachment.enable" => enable(account, request).await,
         _ => Err(SdkError::LocalBus(format!("unsupported local bus method: {}", request.method))),
@@ -449,9 +450,14 @@ struct MessageBody {
     message_id: String,
 }
 
+/// Page size of the download part of `attachment.transfer.list`: default 64, at most 128.
+const LIST_DEFAULT: u32 = 64;
+const LIST_MAX: u32 = 128;
+
 /// `attachment.transfer.list` as a reader: running uploads in this process, merged with the
-/// pending sends that the durable rows and the encrypted account-DB ACK journal still hold.
-/// Readers run beside the account actor, so the list answers while an upload is in flight.
+/// pending sends that the durable rows and the encrypted account-DB ACK journal still hold, and
+/// one bounded page of the durable download records. Readers run beside the account actor, so
+/// the list answers while a transfer is in flight.
 /// # Errors
 /// Returns a local-bus error when the request is malformed or the account store cannot open.
 pub(crate) fn transfer_list(
@@ -459,6 +465,14 @@ pub(crate) fn transfer_list(
     request: &LocalBusFrame,
 ) -> Result<Value, SdkError> {
     let account = request_account_id(request)?;
+    let limit = request
+        .body
+        .get("limit")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(LIST_DEFAULT)
+        .clamp(1, LIST_MAX);
+    let cursor = request.body.get("cursor").and_then(Value::as_str).unwrap_or("");
     let root = account_dir(client)?;
     // The reader thread has no vault secret; the listing never unseals, so it reads without one.
     let store = Store::open_reader(&root, account)?;
@@ -477,18 +491,65 @@ pub(crate) fn transfer_list(
             unique_bytes: upload::ack_unique(&row)?,
         });
     }
-    let transfers: Vec<Value> = super::transfer::listed(account, durable)
+    let mut transfers: Vec<Value> = super::transfer::listed(account, durable)
         .into_iter()
         .map(|row| {
             json!({
+                "transfer_id": row.prepare_id,
                 "prepare_id": row.prepare_id,
+                "direction": "upload",
                 "paused": row.paused,
                 "total_bytes": row.total_bytes,
                 "unique_bytes": row.unique_bytes,
             })
         })
         .collect();
-    Ok(json!({ "transfers": transfers }))
+    let (downloads, next_cursor) = download_page(db, cursor, limit)?;
+    transfers.extend(downloads);
+    Ok(json!({ "transfers": transfers, "next_cursor": next_cursor }))
+}
+
+/// One page of the durable download records, in key order, after `cursor`. Finished records are
+/// released and not listed. `next_cursor` is set when the page is full.
+fn download_page(
+    db: &ramflux_storage::AccountDb,
+    cursor: &str,
+    limit: u32,
+) -> Result<(Vec<Value>, Option<String>), SdkError> {
+    if !cursor.is_empty() && !cursor.starts_with(super::import_journal::RECORD_PREFIX) {
+        return Err(SdkError::LocalBus("cursor is not a transfer list cursor".into()));
+    }
+    let keys = db
+        .actor_state_key_page_after(super::import_journal::RECORD_PREFIX, cursor, limit)
+        .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+    let full = u32::try_from(keys.len()).is_ok_and(|len| len == limit);
+    let next = full.then(|| keys.last().cloned()).flatten();
+    let mut rows = Vec::new();
+    for key in keys {
+        let stored =
+            db.load_actor_state::<AckRecord>(&key).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+        let Some(stored) = stored else { continue };
+        let record = super::import_journal::decode(&stored.acks)?;
+        if record.phase == super::import_journal::ImportPhase::Finished {
+            continue;
+        }
+        let total = super::import_journal::ciphertext_total(&record);
+        let verified = super::import_journal::verified_bytes(&record);
+        rows.push(json!({
+            "transfer_id": record.import_id,
+            "import_id": record.import_id,
+            "direction": "download",
+            "generation": record.generation,
+            "phase": record.phase.wire(),
+            "paused": false,
+            "total_bytes": total,
+            "unique_bytes": verified,
+            "verified_bytes": verified,
+            "plaintext_length": record.plaintext_length,
+            "expires_at": record.expires_at,
+        }));
+    }
+    Ok((rows, next))
 }
 
 /// Transfer control of this process's running uploads. Served beside the account actor, so it

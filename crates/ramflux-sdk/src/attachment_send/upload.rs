@@ -63,6 +63,14 @@ pub(crate) enum JournalCall {
         body: serde_json::Value,
         reply: tokio::sync::oneshot::Sender<Result<(), Refusal>>,
     },
+    /// A download record write, guarded by the actor: it lands only while the stored record is
+    /// still `Pending`, so a worker can never undo a cancel. One transfer snapshot may follow it.
+    Import {
+        key: String,
+        record: Vec<u8>,
+        event: Option<(String, serde_json::Value)>,
+        reply: tokio::sync::oneshot::Sender<Result<(), Refusal>>,
+    },
 }
 
 /// Bounded: the worker has at most one call in flight, so this only absorbs scheduling jitter.
@@ -72,6 +80,25 @@ impl JournalSink {
     pub(crate) fn channel() -> (Self, tokio::sync::mpsc::Receiver<JournalCall>) {
         let (tx, rx) = tokio::sync::mpsc::channel(JOURNAL_QUEUE);
         (Self { tx }, rx)
+    }
+}
+
+impl JournalSink {
+    /// Writes a download record through the actor, with its optional progress snapshot.
+    /// # Errors
+    /// Returns `cancelled` when the stored record is no longer pending, or a stable refusal when
+    /// the write is not durable.
+    pub(crate) fn import(
+        &self,
+        key: &str,
+        record: Vec<u8>,
+        event: Option<(String, serde_json::Value)>,
+    ) -> Result<(), Refusal> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.tx
+            .blocking_send(JournalCall::Import { key: key.to_owned(), record, event, reply })
+            .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+        answer.blocking_recv().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?
     }
 }
 

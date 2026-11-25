@@ -5,13 +5,14 @@
 //! worker streams the body to a staging file. Nothing is readable until the worker has
 //! checked every segment digest and the plaintext digest.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,7 +38,11 @@ use super::meta::CHUNK;
 use super::plane::Plane;
 use super::scheduler;
 use super::store::Store;
-use super::upload::{AckJournal, JournalSink};
+use super::transfer::TRANSFER_TOPIC;
+use super::upload::JournalSink;
+
+/// Progress snapshots of one download are at most this far apart (four per second).
+const EMIT_INTERVAL: Duration = Duration::from_millis(250);
 
 pub(crate) const TOMBSTONE: &str = "attachment-tombstone";
 pub(crate) const RETIREMENT: &str = "attachment-retirement";
@@ -167,6 +172,7 @@ pub(crate) fn begin(
         phase: ImportPhase::Pending,
         revision: revision.saturating_add(1),
         verified,
+        failure: None,
     };
     let fresh = resumed.is_none().then_some((body.operation_id.as_str(), fingerprint.as_str()));
     if let Err(error) = admit_record(&account.client, &record, fresh) {
@@ -188,8 +194,11 @@ pub(crate) fn begin(
         job: Arc::clone(&job),
         source,
         plane,
-        journal,
-        record: RefCell::new(record.clone()),
+        ledger: Ledger {
+            journal,
+            record: RefCell::new(record.clone()),
+            last_emit: Cell::new(None),
+        },
         done,
     };
     if let Err(refusal) = scheduler::submit(&id, scheduler_large, move || task.run()) {
@@ -351,25 +360,75 @@ impl Source {
     }
 }
 
+/// What the worker writes through the actor: the record, its progress snapshots and its terminal
+/// snapshot. The actor refuses a write once the stored record is no longer pending.
+struct Ledger {
+    journal: JournalSink,
+    record: RefCell<ImportRecord>,
+    last_emit: Cell<Option<Instant>>,
+}
+
+impl Ledger {
+    /// Writes the record, with a snapshot when one is due. Progress (`force` false) is published
+    /// at most once per interval; a phase change always is.
+    fn write(&self, phase: ImportPhase, reason: Option<&str>, force: bool) -> Result<(), Refusal> {
+        let now = Instant::now();
+        let due = force
+            || self.last_emit.get().is_none_or(|last| now.duration_since(last) >= EMIT_INTERVAL);
+        let mut current = self.record.borrow_mut();
+        current.revision = current.revision.saturating_add(1);
+        let bytes = import_journal::encode(&current).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+        let event = due.then(|| {
+            (
+                import_journal::event_source(&current),
+                import_journal::event_body(&current, phase, reason, false),
+            )
+        });
+        let key = import_journal::record_key(&current.import_id);
+        drop(current);
+        self.journal.import(&key, bytes, event)?;
+        if due {
+            self.last_emit.set(Some(now));
+        }
+        Ok(())
+    }
+
+    /// Moves the record to a phase and publishes that change at once.
+    fn settle(&self, phase: ImportPhase, failure: Option<&str>) -> Result<(), Refusal> {
+        {
+            let mut current = self.record.borrow_mut();
+            current.phase = phase;
+            current.failure = failure.map(str::to_owned);
+        }
+        self.write(phase, failure, true)
+    }
+}
+
 struct Task {
     job: Arc<Job>,
     source: Source,
     plane: Option<Arc<dyn Plane>>,
-    journal: JournalSink,
-    record: RefCell<ImportRecord>,
+    ledger: Ledger,
     done: tokio::sync::oneshot::Sender<()>,
 }
 
 impl Task {
     fn run(self) {
-        let Self { job, source, plane, journal, record, done } = self;
-        let result = stream(&job, &source, plane.as_deref(), &journal, &record);
+        let Self { job, source, plane, ledger, done } = self;
+        let result = stream(&job, &source, plane.as_deref(), &ledger);
         drop(done);
-        match result {
+        match result.and_then(|()| ledger.settle(ImportPhase::Ready, None)) {
             Ok(()) => job.ready.store(true, Ordering::Release),
             Err(refusal) => {
+                // Shutdown keeps the Pending record and the verified cache for a same-operation resume.
+                if job.stop.load(Ordering::Acquire) && !job.cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                // A cancel already wrote its terminal record; only a real failure is recorded.
+                if !job.cancelled.load(Ordering::Acquire) && refusal.code != CODE_CANCELLED {
+                    let _ = ledger.settle(ImportPhase::Failed, Some(refusal.code));
+                }
                 fail(&job, refusal.code);
-                // A failed import never leaves bytes behind and returns what it reserved.
                 let _ = fs::remove_dir_all(&job.dir);
                 job.release();
             }
@@ -381,8 +440,7 @@ fn stream(
     job: &Job,
     source: &Source,
     plane: Option<&dyn Plane>,
-    journal: &JournalSink,
-    record: &RefCell<ImportRecord>,
+    ledger: &Ledger,
 ) -> Result<(), Refusal> {
     fs::create_dir_all(&job.dir).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     let part = job.dir.join("body.part");
@@ -391,8 +449,8 @@ fn stream(
     let fenced = || job.cancelled.load(Ordering::Acquire) || job.stop.load(Ordering::Acquire);
     match source {
         Source::Remote { opened, .. } => {
-            let verified = record.borrow().verified.clone();
-            let checkpoint = |bits: &[bool]| checkpoint_record(journal, record, bits);
+            let verified = ledger.record.borrow().verified.clone();
+            let checkpoint = |bits: &[bool]| checkpoint_record(ledger, bits);
             let mut cache = import_job::SegmentCache {
                 dir: job.dir.as_path(),
                 verified,
@@ -427,16 +485,9 @@ fn stream(
 
 /// Writes the bitmap with its record through the account actor. The worker writes a segment
 /// durably before it reaches here, so a set bit never names missing bytes.
-fn checkpoint_record(
-    journal: &JournalSink,
-    record: &RefCell<ImportRecord>,
-    bits: &[bool],
-) -> Result<(), Refusal> {
-    let mut current = record.borrow_mut();
-    current.verified = bits.to_vec();
-    current.revision = current.revision.saturating_add(1);
-    let acks = import_journal::encode(&current).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-    journal.save(&import_journal::record_key(&current.import_id), &acks)
+fn checkpoint_record(ledger: &Ledger, bits: &[bool]) -> Result<(), Refusal> {
+    ledger.record.borrow_mut().verified = bits.to_vec();
+    ledger.write(ImportPhase::Pending, None, false)
 }
 
 /// # Errors
@@ -543,12 +594,52 @@ pub(crate) fn cancel(
         }
         Err(refusal) => return Err(refusal.into()),
     }
-    import_journal::set_phase(
-        account.client.account_db()?,
-        &body.import_id,
-        ImportPhase::Cancelled,
-    )?;
+    let db = account.client.account_db()?;
+    let before = import_journal::load_record(db, &body.import_id)?;
+    import_journal::set_phase(db, &body.import_id, ImportPhase::Cancelled)?;
+    // The terminal snapshot is published once: only the first cancel of a live record emits it.
+    if let Some(mut terminal) = before.filter(|record| record.phase != ImportPhase::Cancelled) {
+        terminal.phase = ImportPhase::Cancelled;
+        terminal.revision = terminal.revision.saturating_add(1);
+        let body = import_journal::event_body(
+            &terminal,
+            ImportPhase::Cancelled,
+            Some(CODE_CANCELLED),
+            false,
+        );
+        db.append_journal(
+            &import_journal::event_source(&terminal),
+            TRANSFER_TOPIC,
+            &body,
+            crate::time::now_unix_timestamp(),
+            None,
+        )
+        .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+    }
     Ok(local_bus_ok(json!({"import_id": body.import_id, "state": "cancelled"})))
+}
+
+/// `attachment.import.export`: writes the whole verified plaintext to a new file at `path`.
+/// Only a live ready handle exports; a restarted account replays the import first.
+/// # Errors
+/// Returns `not_owner`, `stale_generation`, `not_ready`, `cancelled`, `expired`, or `path_refused`.
+pub(crate) fn export(
+    account: &mut crate::bus::state::LocalBusAccountState,
+    request: &LocalBusFrame,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: ExportBody = serde_json::from_value(request.body.clone())?;
+    let job = lookup(&body.import_id, request_account_id(request)?)?;
+    if body.generation != job.generation {
+        return Err(Refusal::new(CODE_STALE_GENERATION).into());
+    }
+    gate(&account.client, &job)?;
+    ready_or_refuse(&job)?;
+    super::import_export::publish(&job.path, job.length, Path::new(&body.path))?;
+    Ok(local_bus_ok(json!({
+        "import_id": body.import_id,
+        "generation": job.generation,
+        "plaintext_length": job.length,
+    })))
 }
 
 /// `relay_erased` is reported only after a confirmed cleanup ACK.
@@ -776,6 +867,13 @@ struct ReadBody {
 #[derive(Deserialize)]
 struct IdBody {
     import_id: String,
+}
+
+#[derive(Deserialize)]
+struct ExportBody {
+    import_id: String,
+    generation: u64,
+    path: String,
 }
 
 /// Test seam: registers an open import handle so a fence can be observed.

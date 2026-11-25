@@ -262,7 +262,12 @@ pub(in crate::bus) fn answer(account: &LocalBusAccountState, call: JournalCall) 
         (JournalCall::Load { reply, .. }, Err(refusal)) => {
             let _ = reply.send(Err(refusal));
         }
-        (JournalCall::Save { reply, .. } | JournalCall::Emit { reply, .. }, Err(refusal)) => {
+        (
+            JournalCall::Import { reply, .. }
+            | JournalCall::Save { reply, .. }
+            | JournalCall::Emit { reply, .. },
+            Err(refusal),
+        ) => {
             let _ = reply.send(Err(refusal));
         }
         (JournalCall::Emit { source, body, reply }, Ok(db)) => {
@@ -284,6 +289,11 @@ pub(in crate::bus) fn answer(account: &LocalBusAccountState, call: JournalCall) 
                 .map(|record| record.map(|record| record.acks))
                 .map_err(|_| Refusal::new(CODE_SEAL_FAILED));
             let _ = reply.send(loaded);
+        }
+        (JournalCall::Import { key, record, event, reply }, Ok(db)) => {
+            let saved =
+                crate::attachment_send::import_journal::settle_guarded(db, &key, &record, event);
+            let _ = reply.send(saved);
         }
         (JournalCall::Save { key, acks, reply }, Ok(db)) => {
             let saved = db
