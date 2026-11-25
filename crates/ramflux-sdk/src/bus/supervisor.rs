@@ -617,6 +617,18 @@ impl Supervisor {
         request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
+        // Transfer control runs before admission and the app-control guard, so it answers while a
+        // send holds the account actor. It needs only the unlocked account.
+        if matches!(
+            request.method.as_str(),
+            "attachment.transfer.list" | "attachment.transfer.pause" | "attachment.transfer.resume"
+        ) {
+            let id = request_account_id(&request)?.to_owned();
+            if !self.accounts.borrow().contains_key(&id) {
+                return Err(self.account_unavailable(&id));
+            }
+            return Ok(reply(crate::attachment_send::transfer_body(&request)?));
+        }
         self.start_event_router();
         self.ensure_request_allowed(&request)?;
         // Serialize effects in their execution owner, never lifecycle receipt waiters.
@@ -636,16 +648,6 @@ impl Supervisor {
         match request.method.as_str() {
             "account.list" => {
                 return self.account_list().await;
-            }
-            "attachment.transfer.list"
-            | "attachment.transfer.pause"
-            | "attachment.transfer.resume" => {
-                // Transfer control never waits on the account actor, which an upload holds.
-                let id = request_account_id(&request)?.to_owned();
-                if !self.accounts.borrow().contains_key(&id) {
-                    return Err(self.account_unavailable(&id));
-                }
-                return Ok(reply(crate::attachment_send::transfer_body(&request)?));
             }
             "account.switch" => {
                 let id = request_account_id(&request)?.to_owned();
