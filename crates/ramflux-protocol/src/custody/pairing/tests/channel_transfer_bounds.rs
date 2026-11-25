@@ -456,7 +456,8 @@ fn channel_contexts(all: &Value) -> TestResult {
         "requested_role":"secondary",
         "capabilities":enrollment_common["capabilities"],
         "lease_expires_at":enrollment_common["lease_expires_at"],
-        "display_name":source["responder"]["display_name"]
+        "display_name":source["responder"]["display_name"],
+        "message_layer":{"declaration":{"device":source["responder"]["device_ref"],"max_layer":1,"declaration_sequence":1,"issued_at":1,"expires_at":2},"branch_signature":encode_base64url([7u8; 64])}
     }));
     let enrollment = channel(
         enrollment_common,
