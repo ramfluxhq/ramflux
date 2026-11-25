@@ -127,12 +127,17 @@ fn checkpoint(input: &PublishInput<'_>, row: &Row) -> Result<(), Refusal> {
 pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bool, Refusal> {
     let outcome = put_segments_inner(input, row);
     match &outcome {
-        Ok(true) => publish_transfer(input, row, "uploaded", None, false, true)?,
+        // Every slice is acknowledged: the final snapshot is forced so it carries the full unique
+        // count even when the last progress snapshot was paced away.
+        Ok(_) => {
+            if ack_unique(row)? == ciphertext_total(row)? {
+                publish_transfer(input, row, "uploaded", None, false, true)?;
+            }
+        }
         // The failure snapshot is best effort: the refusal itself is what the caller acts on.
         Err(refusal) => {
             let _ = publish_transfer(input, row, "failed", Some(refusal.code), true, true);
         }
-        Ok(false) => {}
     }
     outcome
 }
