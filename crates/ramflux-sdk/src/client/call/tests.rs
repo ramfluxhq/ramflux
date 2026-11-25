@@ -19,6 +19,7 @@ fn outgoing() -> Result<LiveCall, SdkError> {
         "thread".into(),
         endpoint("alice", "a1"),
         vec![endpoint("bob", "b1"), endpoint("bob", "b2")],
+        false,
         100,
     )?;
     assert!(call.media_held, "new outgoing calls must start held");

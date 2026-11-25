@@ -9,7 +9,8 @@ pub(crate) async fn handle_call(socket: PathBuf, command: CallCommand) -> Result
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
         CallAction::Invite(invite) => {
-            let request = LocalBusCallInviteRequest { conversation_id: invite.conversation };
+            let request =
+                LocalBusCallInviteRequest { conversation_id: invite.conversation, video: false };
             print_json(
                 &bus.request(
                     Some(invite.account),

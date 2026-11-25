@@ -18,6 +18,18 @@ pub(crate) const VIDEO_MAX_RUNG: u32 = 3;
 /// User video-state changes allowed per direction and call.
 const MAX_VIDEO_STATE_CHANGES: u32 = 32;
 
+/// The caller's video offer, attached to every Invite only when the caller asks for video.
+pub(crate) fn offer(receive_enabled: bool) -> VideoOffer {
+    VideoOffer {
+        version: VIDEO_VERSION,
+        codec: VIDEO_CODEC.to_owned(),
+        profile: VIDEO_PROFILE.to_owned(),
+        max_rung: VIDEO_MAX_RUNG,
+        packet_format: VIDEO_PACKET_FORMAT,
+        receive_enabled,
+    }
+}
+
 /// Refuses an offer this build cannot honour.
 pub(crate) fn check_offer(offer: &VideoOffer) -> Result<(), SdkError> {
     if offer.version != VIDEO_VERSION

@@ -146,6 +146,7 @@ fn outgoing_call(account: &mut LocalBusAccountState, peer: &RamfluxClient) -> Ca
         conversation,
         account.client.call_local_endpoint()?,
         vec![peer.call_local_endpoint()?],
+        false,
         now_unix_timestamp(),
     )?;
     account.client.persist_call_row(&call.row)?;

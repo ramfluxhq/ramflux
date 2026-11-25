@@ -303,6 +303,7 @@ impl AccountSessionHarness {
                 thread,
                 account.client.call_local_endpoint()?,
                 vec![peer.clone()],
+                false,
                 crate::time::now_unix_timestamp(),
             )?;
             call.pin_peer(peer.clone(), device.branch_public_key.clone())?;

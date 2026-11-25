@@ -130,6 +130,7 @@ async fn native_call_invite_and_replay_hold_media_with_real_master_and_anchor() 
         "native-call-thread".into(),
         local.clone(),
         vec![peer.clone()],
+        false,
         crate::time::now_unix_timestamp(),
     )?;
     outgoing.pin_peer(peer.clone(), bob.manifest.devices[0].branch_public_key.clone())?;
@@ -192,6 +193,7 @@ async fn generated_call_cache_uses_exact_inner_transition_after_native_commit() 
         conversation.clone(),
         local,
         vec![peer.clone()],
+        false,
         crate::time::now_unix_timestamp(),
     )?;
     outgoing.pin_peer(peer, bob.manifest.devices[0].branch_public_key.clone())?;
@@ -249,7 +251,7 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
         let local = alice.client.call_local_endpoint()?;
         let first = bob.client.call_local_endpoint()?;
         let second = secondary.client.call_local_endpoint()?;
-        let mut caller = LiveCall::outgoing(ramflux_protocol::encode_base64url([61;16]), conversation.clone(), local.clone(), vec![first.clone(),second.clone()], now)?;
+        let mut caller = LiveCall::outgoing(ramflux_protocol::encode_base64url([61;16]), conversation.clone(), local.clone(), vec![first.clone(),second.clone()], false, now)?;
         for peer in [&first,&second] {
             let identity = alice.client.call_device_identity(peer)?;
             let record = alice.client.trusted_device(HeadUse::NewAuthorization,&identity)?;
@@ -331,6 +333,7 @@ async fn native_call_invite_crosses_sealed_receive_and_replays_without_reringing
             conversation.clone(),
             local,
             vec![peer.clone()],
+            false,
             crate::time::now_unix_timestamp(),
         )?;
         outgoing.pin_peer(

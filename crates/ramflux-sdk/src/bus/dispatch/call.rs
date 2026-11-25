@@ -84,7 +84,7 @@ async fn invite(
     if account.client.voice_calls.values().any(|c| c.row.state != "ended") {
         return Err(invalid("account busy"));
     }
-    let _: LocalBusCallInviteRequest = serde_json::from_value(request.body.clone())?;
+    let invite_request: LocalBusCallInviteRequest = serde_json::from_value(request.body.clone())?;
     if live_session_lacks_call_resolution(account) {
         return Err(SdkError::CapabilityDenied(
             "voice calls are unavailable: the home node did not negotiate call resolution".into(),
@@ -133,6 +133,7 @@ async fn invite(
         conversation.into(),
         account.client.call_local_endpoint()?,
         invited,
+        invite_request.video,
         now,
     )?;
     call.media_held = true;

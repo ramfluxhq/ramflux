@@ -136,11 +136,15 @@ impl LiveCall {
     pub(super) fn has_seen(&self, sender: &CallEndpoint, seq: u64) -> bool {
         self.seen.get(sender).is_some_and(|old| seq <= *old)
     }
+    /// `video` attaches the video offer to every Invite; `false` keeps the call voice-only.
+    /// # Errors
+    /// Refuses too many devices, no peer device, or a failed key draw.
     pub fn outgoing(
         id: String,
         conversation: String,
         local: CallEndpoint,
         invited: Vec<CallEndpoint>,
+        video: bool,
         now: i64,
     ) -> Result<Self, SdkError> {
         if invited.len() > 96 {
@@ -150,11 +154,12 @@ impl LiveCall {
         let key = Zeroizing::new(ramflux_crypto::random_32()?);
         let mut call = Self::new(id, conversation, (local.clone(), callee), local, key, now);
         call.invited = invited;
+        call.video_offer = video.then(|| super::video_signaling::offer(true));
         for peer in call.invited.clone() {
             let key = Zeroizing::new(ramflux_crypto::random_32()?);
             let body = CallAction::Invite {
                 base_key: ramflux_protocol::encode_base64url(key.as_ref()),
-                video_offer: None,
+                video_offer: call.video_offer.clone(),
             };
             call.offer_keys.insert(peer.clone(), key);
             let mut control = call.control(body, now)?;

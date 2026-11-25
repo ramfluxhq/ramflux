@@ -472,6 +472,7 @@ impl Fixture {
             )?,
             self.peer.client.call_local_endpoint()?,
             vec![self.source.client.call_local_endpoint()?],
+            false,
             now_unix_timestamp(),
         )?;
         let mut control = caller.pending[0].clone();
