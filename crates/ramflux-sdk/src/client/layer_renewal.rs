@@ -90,16 +90,19 @@ impl super::RamfluxClient {
             .ok_or_else(|| refused("own layer renewal has no branch"))?;
         ramflux_crypto::custody::verify_enrollment_layer(certificate, &signed, now)
             .map_err(|_| refused("own layer renewal declaration rejected"))?;
-        if let Some(endorsed) = &row.message_layer {
-            let current = endorsed.declaration.declaration_sequence;
-            if declaration.declaration_sequence < current
-                || (declaration.declaration_sequence == current && endorsed != &signed)
-            {
-                return Err(refused("own layer renewal sequence is not newer"));
-            }
-            if endorsed == &signed {
-                return Ok(());
-            }
+        // The high-water is the endorsed row or the retained pin, whichever is newer: a request
+        // at or below it is refused unless it is exactly the endorsed statement (idempotent).
+        let endorsed = row.message_layer.as_ref();
+        let retained = born.retained_layer_sequence(&declaration.device)?;
+        let current =
+            endorsed.map_or(0, |endorsed| endorsed.declaration.declaration_sequence).max(retained);
+        if declaration.declaration_sequence < current
+            || (declaration.declaration_sequence == current && endorsed != Some(&signed))
+        {
+            return Err(refused("own layer renewal sequence is not newer"));
+        }
+        if declaration.declaration_sequence == current {
+            return Ok(());
         }
         let digest = *blake3::hash(bytes).as_bytes();
         let key = pending_key(&declaration.device);
@@ -126,8 +129,8 @@ impl super::RamfluxClient {
 
 /// Own-copy identity domain of one renewal Control (the complete body is hashed).
 const RENEWAL_DOMAIN: &str = "ramflux.sdk.own_layer_renewal.v1";
-/// Longest validity one declaration may carry (the verifiers' bound).
-const RENEWAL_MAX_VALIDITY: u64 = ramflux_protocol::custody::MAX_LAYER_DECLARATION_VALIDITY_SECONDS;
+/// Validity of one renewal declaration (24 h, or the integration lease).
+const RENEWAL_MAX_VALIDITY: u64 = crate::bus::couriers::layer_publish::DECLARATION_VALIDITY_SECONDS;
 
 /// Actor-state key of the latest renewal this secondary issued for one exact device epoch.
 pub(crate) fn issued_key(device: &DeviceRef) -> String {
@@ -178,10 +181,12 @@ impl super::RamfluxClient {
         if !renewal_due(row.message_layer.as_ref(), now) {
             return Ok(());
         }
+        let retained = born.retained_layer_sequence(&device)?;
         let sequence = issued
             .as_ref()
             .map_or(0, |issued| issued.declaration_sequence)
             .max(endorsed_sequence)
+            .max(retained)
             .checked_add(1)
             .ok_or(SdkError::NetworkingPending)?;
         let expires_at = now.saturating_add(RENEWAL_MAX_VALIDITY).min(certificate.body.expires_at);
@@ -233,6 +238,33 @@ impl super::RamfluxClient {
                 None,
             )
         })
+    }
+}
+
+impl super::RamfluxClient {
+    /// True while this secondary has issued a renewal that the endorsed row does not yet carry.
+    pub(crate) fn own_layer_renewal_in_flight(&self) -> Result<bool, SdkError> {
+        let born = self.born_v3_account.as_deref().ok_or(SdkError::NetworkingPending)?;
+        let record = born.record();
+        let local = born.local_device_id()?;
+        let Some(row) =
+            record.body.devices.iter().find(|device| {
+                device.device_id == local && device.status == DeviceSetStatus::Active
+            })
+        else {
+            return Ok(false);
+        };
+        let Some(certificate) = row.branch_certificate.as_ref() else { return Ok(false) };
+        let device = DeviceRef {
+            account_anchor: record.body.account_anchor.clone(),
+            device_id: local.to_owned(),
+            device_epoch: certificate.body.device_epoch,
+        };
+        let issued =
+            self.account_db()?.load_actor_state::<PendingLayerRenewal>(&issued_key(&device))?;
+        let endorsed =
+            row.message_layer.as_ref().map_or(0, |signed| signed.declaration.declaration_sequence);
+        Ok(issued.is_some_and(|issued| issued.declaration_sequence > endorsed))
     }
 }
 

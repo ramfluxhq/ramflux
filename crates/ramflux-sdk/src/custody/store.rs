@@ -645,6 +645,17 @@ impl BornAccount {
         ramflux_protocol::validate_device_name(id)?;
         Ok(id)
     }
+
+    /// Highest declaration sequence this account has ever pinned for `device`, retained across
+    /// expiry, restart and restore. Anything at or below it, unless it is the pinned statement
+    /// itself, is a rollback or a mutation.
+    pub(crate) fn retained_layer_sequence(
+        &self,
+        device: &ramflux_protocol::custody::DeviceRef,
+    ) -> Result<u64, SdkError> {
+        let key = ramflux_protocol::qualified_device_id(&device.account_anchor, &device.device_id)?;
+        Ok(self.stored.message_layer_sequences.get(&key).copied().unwrap_or_default())
+    }
     #[must_use]
     pub fn record(&self) -> &Envelope<DeviceSet> {
         &self.stored.record

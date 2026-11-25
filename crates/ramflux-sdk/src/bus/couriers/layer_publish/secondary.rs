@@ -164,6 +164,10 @@ fn eligible(
     }) {
         return Ok(false);
     }
+    // A request at or below the retained pin is a stale or rolled-back statement.
+    if born.retained_layer_sequence(&declaration.device)? >= declaration.declaration_sequence {
+        return Ok(false);
+    }
     let Some(certificate) = row.branch_certificate.as_ref() else { return Ok(false) };
     Ok(ramflux_crypto::custody::verify_enrollment_layer(certificate, &pending.signed, now).is_ok())
 }

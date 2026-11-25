@@ -24,8 +24,14 @@ use std::{
 };
 
 pub(crate) const COURIER: &str = "layer-publish";
-/// Longest validity the node and verifiers accept for one declaration.
-const MAX_VALIDITY_SECONDS: u64 = 24 * 60 * 60;
+/// Validity of one declaration this device signs. The node and verifiers accept up to 24 h.
+#[cfg(not(feature = "itest-short-layer-lease"))]
+pub(crate) const DECLARATION_VALIDITY_SECONDS: u64 = 24 * 60 * 60;
+/// Integration lease: 180 s validity, renewed 60 s before expiry (`itest-short-layer-lease`).
+#[cfg(feature = "itest-short-layer-lease")]
+pub(crate) const DECLARATION_VALIDITY_SECONDS: u64 = 180;
+#[cfg(feature = "itest-short-layer-lease")]
+const RENEW_LEAD_SECONDS: u64 = 60;
 /// A certificate that leaves less than this cannot carry a useful declaration.
 const MIN_REMAINING_SECONDS: u64 = 2 * 60 * 60;
 const PUBLISH_DEADLINE: Duration = Duration::from_secs(30);
@@ -146,7 +152,7 @@ pub(crate) struct Plan {
 }
 
 /// Renewal is due when no declaration exists, it is not layer 4, or half of its signed
-/// validity has elapsed.
+/// validity has elapsed (60 s before expiry under `itest-short-layer-lease`).
 #[must_use]
 pub(crate) fn renewal_due(current: Option<&SignedLayerDeclaration>, now: u64) -> bool {
     let Some(signed) = current else { return true };
@@ -154,8 +160,20 @@ pub(crate) fn renewal_due(current: Option<&SignedLayerDeclaration>, now: u64) ->
     if declaration.max_layer != MAX_MESSAGE_LAYER || now >= declaration.expires_at {
         return true;
     }
-    let validity = declaration.expires_at.saturating_sub(declaration.issued_at);
-    now >= declaration.issued_at.saturating_add(validity / 2)
+    now >= renewal_point(declaration.issued_at, declaration.expires_at)
+}
+
+/// Time at which a declaration with this lifetime becomes due for renewal.
+#[cfg(not(feature = "itest-short-layer-lease"))]
+fn renewal_point(issued_at: u64, expires_at: u64) -> u64 {
+    let validity = expires_at.saturating_sub(issued_at);
+    issued_at.saturating_add(validity / 2)
+}
+
+/// Integration lease: renewal is due a fixed lead before expiry.
+#[cfg(feature = "itest-short-layer-lease")]
+fn renewal_point(issued_at: u64, expires_at: u64) -> u64 {
+    expires_at.saturating_sub(RENEW_LEAD_SECONDS).max(issued_at)
 }
 
 fn not_ready(error: &SdkError) -> bool {
@@ -261,6 +279,12 @@ pub(crate) fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Box<P
     if !is_primary {
         // Secondary send half: sign and stage the renewal; the own-device outbox delivers it.
         account.client.stage_own_layer_renewal(now)?;
+        // While an issued renewal awaits its endorsement, refresh the own directory head so the
+        // endorsed declaration is adopted as soon as it lands.
+        if account.client.own_layer_renewal_in_flight()? {
+            let own = account.principal_commitment.clone();
+            let _ = account.head_refresh.enqueue(own);
+        }
         return Ok(None);
     }
     if let Some(head) = account.client.account_db()?.pairing_head()? {
@@ -293,7 +317,7 @@ pub(crate) fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Box<P
         return secondary::prepare_next(account, &config, now);
     }
     let issued_at = now.max(record.body.issued_at.saturating_add(1));
-    let expires_at = issued_at.saturating_add(MAX_VALIDITY_SECONDS).min(certificate_expiry);
+    let expires_at = issued_at.saturating_add(DECLARATION_VALIDITY_SECONDS).min(certificate_expiry);
     if expires_at < issued_at.saturating_add(MIN_REMAINING_SECONDS) {
         tracing::warn!("layer declaration renewal blocked: branch certificate too close to expiry");
         record_error(account, Some("LayerRenewalBlocked"));
