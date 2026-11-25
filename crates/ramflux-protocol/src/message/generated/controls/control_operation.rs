@@ -26,6 +26,7 @@ pub enum ControlOperation {
     ControlOwnMessageCopy = 15,
     ControlFriend = 16,
     ControlAgentSync = 17,
+    ControlOwnLayerRenewal = 18,
 }
 impl ControlOperation {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -52,6 +53,7 @@ impl ControlOperation {
             Self::ControlOwnMessageCopy => "CONTROL_OWN_MESSAGE_COPY",
             Self::ControlFriend => "CONTROL_FRIEND",
             Self::ControlAgentSync => "CONTROL_AGENT_SYNC",
+            Self::ControlOwnLayerRenewal => "CONTROL_OWN_LAYER_RENEWAL",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -75,6 +77,7 @@ impl ControlOperation {
             "CONTROL_OWN_MESSAGE_COPY" => Some(Self::ControlOwnMessageCopy),
             "CONTROL_FRIEND" => Some(Self::ControlFriend),
             "CONTROL_AGENT_SYNC" => Some(Self::ControlAgentSync),
+            "CONTROL_OWN_LAYER_RENEWAL" => Some(Self::ControlOwnLayerRenewal),
             _ => None,
         }
     }
@@ -104,6 +107,7 @@ impl serde::Serialize for ControlOperation {
             Self::ControlOwnMessageCopy => "CONTROL_OWN_MESSAGE_COPY",
             Self::ControlFriend => "CONTROL_FRIEND",
             Self::ControlAgentSync => "CONTROL_AGENT_SYNC",
+            Self::ControlOwnLayerRenewal => "CONTROL_OWN_LAYER_RENEWAL",
         };
         serializer.serialize_str(variant)
     }
@@ -133,6 +137,7 @@ impl<'de> serde::Deserialize<'de> for ControlOperation {
             "CONTROL_OWN_MESSAGE_COPY",
             "CONTROL_FRIEND",
             "CONTROL_AGENT_SYNC",
+            "CONTROL_OWN_LAYER_RENEWAL",
         ];
         struct GeneratedVisitor;
         impl serde::de::Visitor<'_> for GeneratedVisitor {
@@ -181,6 +186,7 @@ impl<'de> serde::Deserialize<'de> for ControlOperation {
                     "CONTROL_OWN_MESSAGE_COPY" => Ok(ControlOperation::ControlOwnMessageCopy),
                     "CONTROL_FRIEND" => Ok(ControlOperation::ControlFriend),
                     "CONTROL_AGENT_SYNC" => Ok(ControlOperation::ControlAgentSync),
+                    "CONTROL_OWN_LAYER_RENEWAL" => Ok(ControlOperation::ControlOwnLayerRenewal),
                     _ => Err(serde::de::Error::unknown_variant(value, FIELDS)),
                 }
             }
