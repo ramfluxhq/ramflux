@@ -30,6 +30,8 @@ const MIN_BODY_LEN: usize = 2;
 const MAX_REPLY_LEN: usize = 16 * 1024;
 const RV: u64 = 1;
 const HELLO_KV: u64 = 1;
+/// Application close reason the edge uses when it closes a connection whose key is no longer `active`.
+const ACCESS_CLOSE_REASON: &[u8] = b"access";
 /// Version of the node's field set (`reg` in ext); the registry file is not yet pinned.
 const NODE_FIELD_REGISTRY: u64 = 1;
 const MAX_LABEL_LEN: usize = 64;
@@ -43,6 +45,9 @@ const MAX_FULL_EVERY_S: u64 = 86_400;
 const DEFAULT_RETRY_MS: u64 = 2000;
 const MAX_RETRY_MS: u64 = 3_600_000;
 const CONNECT_BACKOFF: Duration = Duration::from_secs(60);
+/// Back-off after `unknown_key` or `suspended_key` (section 3.4): 5 min, doubling to 60 min.
+const REFUSAL_BACKOFF_MIN: Duration = Duration::from_mins(5);
+const REFUSAL_BACKOFF_MAX: Duration = Duration::from_hours(1);
 const UNSUPPORTED_RETRY: Duration = Duration::from_secs(3600);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -105,6 +110,7 @@ pub(crate) struct StaticFacts {
 pub(crate) struct HelloInput<'a> {
     pub label: &'a str,
     pub node_key: &'a str,
+    pub key_gen: u64,
     pub boot_id: &'a str,
     pub boot_ts: u64,
     pub seq: u64,
@@ -115,7 +121,7 @@ pub(crate) struct HelloInput<'a> {
 /// Body core members of a `full` hello (section 3.2). Serialised once; the bytes are the signed bytes.
 pub(crate) fn hello_body(input: &HelloInput<'_>) -> Result<Vec<u8>, ReportError> {
     validate_label(input.label)?;
-    for value in [input.boot_ts, input.seq, input.ts] {
+    for value in [input.boot_ts, input.seq, input.ts, input.key_gen] {
         if value > MAX_JSON_INT {
             return Err(ReportError::Body("integer above 2^53-1"));
         }
@@ -128,7 +134,7 @@ pub(crate) fn hello_body(input: &HelloInput<'_>) -> Result<Vec<u8>, ReportError>
         "kind": "hello",
         "kv": HELLO_KV,
         "node_key": input.node_key,
-        "key_gen": 1,
+        "key_gen": input.key_gen,
         "boot_id": input.boot_id,
         "boot_ts": input.boot_ts,
         "seq": input.seq,
@@ -291,10 +297,32 @@ fn jitter(base: Duration) -> Duration {
     base + base.mul_f64(f64::from(byte) / 2550.0)
 }
 
+/// Refusal back-off with jitter, bounded to 5..=60 minutes (section 3.4, owner-decided range).
+fn refusal_wait(step: Duration) -> Duration {
+    jitter(step).clamp(REFUSAL_BACKOFF_MIN, REFUSAL_BACKOFF_MAX)
+}
+
+/// Doubles the refusal back-off, staying within 5..=60 minutes.
+fn next_refusal_step(step: Duration) -> Duration {
+    step.saturating_mul(2).clamp(REFUSAL_BACKOFF_MIN, REFUSAL_BACKOFF_MAX)
+}
+
+/// What one request produced. `AccessClosed` is the edge closing the connection with application reason `access`.
+enum Sent {
+    Reply(Vec<u8>),
+    AccessClosed,
+    Failed(String),
+}
+
+fn access_closed(error: &quinn::ConnectionError) -> bool {
+    matches!(error, quinn::ConnectionError::ApplicationClosed(close) if close.reason.as_ref() == ACCESS_CLOSE_REASON)
+}
+
 struct Reporter {
     seed: [u8; 32],
     centre_id: String,
     node_key: String,
+    key_gen: u64,
     label: String,
     facts: StaticFacts,
     boot_id: String,
@@ -310,6 +338,7 @@ impl Reporter {
         let body = hello_body(&HelloInput {
             label: &self.label,
             node_key: &self.node_key,
+            key_gen: self.key_gen,
             boot_id: &self.boot_id,
             boot_ts: self.boot_ts,
             seq: self.seq,
@@ -341,27 +370,50 @@ fn client_config(ca_path: &str) -> Result<quinn::ClientConfig, String> {
     Ok(quinn::ClientConfig::new(Arc::new(crypto)))
 }
 
-/// One request on one bidirectional stream. Returns the raw reply bytes.
+/// One request on one bidirectional stream.
 async fn send_once(
     endpoint: &quinn::Endpoint,
     centre: SocketAddr,
     server_name: &str,
     frame: &[u8],
-) -> Result<Vec<u8>, String> {
-    let connecting = endpoint.connect(centre, server_name).map_err(|error| error.to_string())?;
-    let connection = tokio::time::timeout(IO_TIMEOUT, connecting)
-        .await
-        .map_err(|_| "connect timeout".to_owned())?
-        .map_err(|error| error.to_string())?;
-    let (mut send, mut recv) = connection.open_bi().await.map_err(|error| error.to_string())?;
-    send.write_all(frame).await.map_err(|error| error.to_string())?;
-    send.finish().map_err(|error| error.to_string())?;
-    let reply = tokio::time::timeout(IO_TIMEOUT, recv.read_to_end(MAX_REPLY_LEN))
-        .await
-        .map_err(|_| "reply timeout".to_owned())?
-        .map_err(|error| error.to_string())?;
+) -> Sent {
+    let connection = match endpoint.connect(centre, server_name) {
+        Ok(connecting) => match tokio::time::timeout(IO_TIMEOUT, connecting).await {
+            Err(_) => return Sent::Failed("connect timeout".to_owned()),
+            Ok(Err(error)) if access_closed(&error) => return Sent::AccessClosed,
+            Ok(Err(error)) => return Sent::Failed(error.to_string()),
+            Ok(Ok(connection)) => connection,
+        },
+        Err(error) => return Sent::Failed(error.to_string()),
+    };
+    let (mut send, mut recv) = match connection.open_bi().await {
+        Ok(streams) => streams,
+        Err(error) if access_closed(&error) => return Sent::AccessClosed,
+        Err(error) => return Sent::Failed(error.to_string()),
+    };
+    match send.write_all(frame).await {
+        Err(quinn::WriteError::ConnectionLost(error)) if access_closed(&error) => {
+            return Sent::AccessClosed;
+        }
+        Err(error) => return Sent::Failed(error.to_string()),
+        Ok(()) => {}
+    }
+    if let Err(error) = send.finish() {
+        return Sent::Failed(error.to_string());
+    }
+    let read = tokio::time::timeout(IO_TIMEOUT, recv.read_to_end(MAX_REPLY_LEN)).await;
+    let reply = match read {
+        Err(_) => return Sent::Failed("reply timeout".to_owned()),
+        Ok(Ok(reply)) => reply,
+        Ok(Err(quinn::ReadToEndError::Read(quinn::ReadError::ConnectionLost(error))))
+            if access_closed(&error) =>
+        {
+            return Sent::AccessClosed;
+        }
+        Ok(Err(error)) => return Sent::Failed(error.to_string()),
+    };
     connection.close(0u32.into(), b"");
-    Ok(reply)
+    Sent::Reply(reply)
 }
 
 async fn sleep_or_cancel(wait: Duration, shutdown: &CancellationToken) -> bool {
@@ -380,6 +432,7 @@ async fn run(
 ) {
     let mut directives = Directives::default();
     let mut pending: Option<(Vec<u8>, u64)> = None;
+    let mut refusal_step = REFUSAL_BACKOFF_MIN;
     loop {
         if !directives.accepts_hello() {
             tracing::warn!("node report: centre advertises no hello; retrying hourly");
@@ -403,32 +456,58 @@ async fn run(
             },
         };
         let wait = match send_once(&endpoint, centre, &server_name, &frame).await {
-            Err(error) => {
+            Sent::Failed(error) => {
                 tracing::warn!(%error, "node report: centre unreachable");
-                CONNECT_BACKOFF
+                jitter(CONNECT_BACKOFF)
             }
-            Ok(bytes) => match parse_reply(&bytes) {
+            Sent::AccessClosed => {
+                // The key is no longer active; the next report learns which refusal applies.
+                tracing::warn!("node report: edge closed the connection (access); backing off");
+                let wait = refusal_wait(refusal_step);
+                refusal_step = next_refusal_step(refusal_step);
+                wait
+            }
+            Sent::Reply(bytes) => match parse_reply(&bytes) {
                 Reply::Accepted { dir } => {
+                    refusal_step = REFUSAL_BACKOFF_MIN;
                     if let Some(dir) = dir {
                         directives.apply(&dir);
                     }
-                    Duration::from_secs(directives.full_every_s)
+                    jitter(Duration::from_secs(directives.full_every_s))
                 }
                 Reply::Retry { after } => {
                     pending = Some((frame, ts));
-                    after
+                    jitter(after)
                 }
-                Reply::Rejected { reason } => {
-                    tracing::warn!(%reason, "node report: rejected");
-                    if reason == "unsupported" {
-                        UNSUPPORTED_RETRY
-                    } else {
-                        Duration::from_secs(directives.full_every_s)
+                Reply::Rejected { reason } => match reason.as_str() {
+                    "revoked_key" => {
+                        tracing::error!(
+                            "node report: centre revoked this key; reports stopped until the configuration changes"
+                        );
+                        return;
                     }
-                }
+                    "unknown_key" | "suspended_key" => {
+                        let wait = refusal_wait(refusal_step);
+                        refusal_step = next_refusal_step(refusal_step);
+                        tracing::warn!(
+                            %reason,
+                            retry_in_s = wait.as_secs(),
+                            "node report: key not admitted; reports paused with back-off"
+                        );
+                        wait
+                    }
+                    "unsupported" => {
+                        tracing::warn!(%reason, "node report: centre does not accept this report");
+                        jitter(UNSUPPORTED_RETRY)
+                    }
+                    _ => {
+                        tracing::warn!(%reason, "node report: rejected");
+                        jitter(Duration::from_secs(directives.full_every_s))
+                    }
+                },
             },
         };
-        if !sleep_or_cancel(jitter(wait), &shutdown).await {
+        if !sleep_or_cancel(wait, &shutdown).await {
             return;
         }
     }
@@ -473,6 +552,7 @@ fn spawn(
         seed,
         centre_id: report.centre.id.clone(),
         node_key: discovery.node_public_key.clone(),
+        key_gen: report.key_gen,
         label: config.node_id.clone(),
         facts,
         boot_id,

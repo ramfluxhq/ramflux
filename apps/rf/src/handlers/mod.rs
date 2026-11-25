@@ -12,6 +12,8 @@ pub(crate) mod agent;
 pub(crate) mod attachment;
 pub(crate) mod bot;
 pub(crate) mod call;
+#[cfg(unix)]
+pub(crate) mod centre;
 pub(crate) mod contact;
 pub(crate) mod conversation_ops;
 pub(crate) mod daemon;
@@ -23,6 +25,14 @@ pub(crate) mod group;
 pub(crate) mod keychain;
 pub(crate) mod mcp;
 pub(crate) mod node;
+#[cfg(not(unix))]
+pub(crate) mod centre {
+    pub(crate) fn handle(_: &crate::cli::CentreCommand) -> Result<(), crate::RfError> {
+        Err(crate::RfError::Message(
+            "centre key material requires Unix descriptor-relative filesystem support".into(),
+        ))
+    }
+}
 #[cfg(unix)]
 mod node_custody;
 #[cfg(unix)]

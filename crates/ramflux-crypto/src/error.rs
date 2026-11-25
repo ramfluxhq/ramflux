@@ -17,6 +17,8 @@ pub enum CryptoError {
     Protocol(#[from] ProtocolError),
     #[error("base64url decode failed: {0}")]
     Base64(#[from] base64::DecodeError),
+    #[error("node enrolment message: {0}")]
+    NodeEnrolment(&'static str),
     #[error("invalid ed25519 signature length: {0}")]
     InvalidSignatureLength(usize),
     #[error("invalid ed25519 public key length: {0}")]
