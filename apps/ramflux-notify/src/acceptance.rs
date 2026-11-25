@@ -261,14 +261,11 @@ fn all_provider_payloads_and_headers_exclude_message_identifiers() -> Result<(),
             "aps.alert.loc-key",
             "aps.mutable-content",
             "aps.sound",
-            "class",
-            "collapse_key",
             "rf",
             "rf.c",
             "rf.t",
             "rf.v",
             "rf.w",
-            "wake_id",
         ],
     );
     let voip = build_provider_parts(&input(
@@ -281,7 +278,7 @@ fn all_provider_payloads_and_headers_exclude_message_identifiers() -> Result<(),
     ))?;
     assert_exact_keys(
         &parse(&voip)?,
-        &["aps", "class", "rf", "rf.c", "rf.t", "rf.v", "rf.w", "wake_id"],
+        &["aps", "rf", "rf.c", "rf.t", "rf.v", "rf.w"],
     );
     let fcm = build_provider_parts(&input(
         WakeClass::CallWake,
