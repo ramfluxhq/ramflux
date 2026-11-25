@@ -309,6 +309,10 @@ impl AccountRuntime {
             self.start_owned_command(command, reply).await?;
             return Ok(false);
         }
+        if let Some(refusal) = self.admit_attachment_send(&command) {
+            let _ = reply.send(Err(refusal));
+            return Ok(false);
+        }
         if super::super::username_directory::handles(&command.request.method) {
             // Boxed: the username handler's future would otherwise enlarge every account command future on the stack.
             Box::pin(self.start_username(command, reply)).await;
@@ -327,6 +331,18 @@ impl AccountRuntime {
                 receive_gate_hook,
             )
             .await;
+        if let Some(upload) = self
+            .state
+            .accounts
+            .get_mut(&self.id)
+            .and_then(|account| account.attachment_send.upload.take())
+        {
+            // The send reached its upload stage: the worker runs off the actor and the waiter
+            // stays open until the loop resumes this operation.
+            let operation = command.request.operation_id.clone().unwrap_or_default();
+            self.attachment_sends.park(operation, command, reply, upload);
+            return Ok(false);
+        }
         if let Some(account) = self.state.accounts.get_mut(&self.id) {
             super::super::control_state::trim(account);
         }
@@ -420,6 +436,63 @@ impl AccountRuntime {
             }
         };
         (dispatched, stopping, cancelled, preempted)
+    }
+
+    /// A prepared send is parked or resumed off the actor. Returns the refusal for a live twin
+    /// or an exhausted parking bound, and otherwise arms the send path for this admission.
+    fn admit_attachment_send(&mut self, command: &AccountCommand) -> Option<SdkError> {
+        let parking = super::super::publication_wait::carries_prepares(&command.request);
+        let account = self.state.accounts.get_mut(&self.id);
+        if let Some(account) = account {
+            account.attachment_send.parking = false;
+        }
+        if !parking {
+            return None;
+        }
+        let operation = command.request.operation_id.as_deref().unwrap_or_default();
+        if self.attachment_sends.contains(operation) {
+            return Some(
+                ramflux_storage::StorageError::OperationReconciliationRequired {
+                    key: operation.to_owned(),
+                }
+                .into(),
+            );
+        }
+        if self.attachment_sends.take_resumed(operation) {
+            return None;
+        }
+        if self.attachment_sends.full() {
+            return Some(super::super::command_admission::unavailable(
+                "too many parked attachment sends",
+            ));
+        }
+        if let Some(account) = self.state.accounts.get_mut(&self.id) {
+            account.attachment_send.parking = true;
+        }
+        None
+    }
+
+    /// Serves one parked send's journal call, or applies its command again once the worker ended.
+    pub(super) async fn service_attachment_send(
+        &mut self,
+        event: super::attachment_sends::Event,
+    ) -> Result<bool, SdkError> {
+        match event {
+            super::attachment_sends::Event::Call(call) => {
+                if let Some(account) = self.state.accounts.get(&self.id) {
+                    super::super::dispatch::attachment_prepare::answer(account, call);
+                }
+                Ok(false)
+            }
+            super::attachment_sends::Event::Finished(operation) => {
+                let Some((mut command, reply)) = self.attachment_sends.take(&operation) else {
+                    return Ok(false);
+                };
+                self.attachment_sends.mark_resumed(&operation);
+                command.reply = Some(reply);
+                self.apply(command).await
+            }
+        }
     }
 
     async fn publish_after_cancel(&mut self, request: &LocalBusFrame) {

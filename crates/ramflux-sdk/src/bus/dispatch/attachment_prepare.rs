@@ -112,6 +112,20 @@ pub(in crate::bus) async fn publish_prepares(
 
     let planned = scope.plan(account, &job.pin).await?;
     remember_roster(&account.client, message_id, &planned)?;
+    if account.attachment_send.parking {
+        // First admission: the upload worker runs off the actor and the send resumes later.
+        let worker = tokio::task::spawn_blocking({
+            let job = Arc::clone(&job);
+            let targets = planned.targets.clone();
+            let rows = rows.clone();
+            move || {
+                let _ = upload_all(&job.input(&targets), &rows);
+            }
+        });
+        account.attachment_send.upload =
+            Some(crate::bus::account_runtime::attachment_sends::ParkedUpload { calls, worker });
+        return Err(Refusal::new(crate::bus::account_runtime::attachment_sends::PARKED).into());
+    }
     // The worker blocks on relay I/O; the account task serves its journal calls meanwhile.
     let mut upload = tokio::task::spawn_blocking({
         let job = Arc::clone(&job);
@@ -200,7 +214,7 @@ async fn serve_journal<T>(
 }
 
 /// Every call gets exactly one reply, so the worker never waits on a dropped account task.
-fn answer(account: &LocalBusAccountState, call: JournalCall) {
+pub(in crate::bus) fn answer(account: &LocalBusAccountState, call: JournalCall) {
     let db = account.client.account_db().map_err(|_| Refusal::new(CODE_SEAL_FAILED));
     match (call, db) {
         (JournalCall::Load { reply, .. }, Err(refusal)) => {

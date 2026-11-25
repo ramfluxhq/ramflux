@@ -137,6 +137,8 @@ pub(crate) struct LocalBusAccountState {
     /// Cached receive-activation discriminator for `(connection generation, target)`.
     /// [`Self::invalidate_receive_active_cache`] must run after activation in the same generation.
     pub(crate) receive_active_cache: Option<(u64, String, bool)>,
+    /// Prepared-send upload parked off the actor (`attachment_sends`).
+    pub(crate) attachment_send: super::account_runtime::attachment_sends::Slot,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -207,6 +209,7 @@ impl LocalBusAccountState {
             object_put_spools: BTreeMap::new(),
             object_get_spools: BTreeMap::new(),
             receive_active_cache: None,
+            attachment_send: Default::default(),
         }
     }
 
@@ -269,6 +272,7 @@ impl LocalBusAccountState {
             object_put_spools: BTreeMap::new(),
             object_get_spools: BTreeMap::new(),
             receive_active_cache: None,
+            attachment_send: Default::default(),
         }
     }
 

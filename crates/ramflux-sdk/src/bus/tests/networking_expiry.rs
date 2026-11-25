@@ -93,6 +93,7 @@ impl Harness {
             let _ = control_shutdown.changed().await;
         });
         let runtime = AccountRuntime {
+            attachment_sends: Default::default(),
             timeouts: super::super::runtime_limits::RuntimeTimeouts::default(),
             lifecycle,
             preempt,

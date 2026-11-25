@@ -290,6 +290,7 @@ fn ack_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRunti
     let (_lifecycle_sender, lifecycle) = mpsc::channel(4);
     let (_preempt_sender, preempt) = watch::channel(0_u64);
     let runtime = super::super::AccountRuntime {
+        attachment_sends: Default::default(),
         timeouts: limits(),
         lifecycle,
         preempt,
