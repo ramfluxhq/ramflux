@@ -5,7 +5,8 @@
 import json, sys, time, urllib.request
 
 gw = sys.argv[1]  # e.g. http://127.0.0.1:18931
-principal = "secrev-principal-row1"
+principal = sys.argv[2]  # principal_id of a real account created through rf (rf account status)
+device = sys.argv[3]  # its device_id, registered for that principal
 
 def post(path, body):
     req = urllib.request.Request(gw + path, data=json.dumps(body).encode(),
@@ -24,14 +25,14 @@ def step(name, status, body):
 now = int(time.time())
 step("start_delete", *post("/mvp7/lifecycle/event", {
     "principal_id": principal, "event_id": "row1-delete-1", "event_type": "identity.deleted",
-    "actor_device_id": "row1-device", "lifecycle_epoch": 1, "now": now,
+    "actor_device_id": device, "lifecycle_epoch": 1, "now": now,
     "reason_code": "user_request", "timelock_seconds": 0}))
 step("get_after_start", *get("/mvp7/lifecycle/" + principal))
 step("cancel", *post("/mvp7/lifecycle/cancel", {"principal_id": principal, "now": now + 1}))
 step("get_after_cancel", *get("/mvp7/lifecycle/" + principal))
 step("start_delete_again", *post("/mvp7/lifecycle/event", {
     "principal_id": principal, "event_id": "row1-delete-2", "event_type": "identity.deleted",
-    "actor_device_id": "row1-device", "lifecycle_epoch": 2, "now": now + 2,
+    "actor_device_id": device, "lifecycle_epoch": 2, "now": now + 2,
     "reason_code": "user_request", "timelock_seconds": 0}))
 step("finalize", *post("/mvp7/lifecycle/finalize", {"principal_id": principal, "now": now + 3}))
 step("get_after_finalize", *get("/mvp7/lifecycle/" + principal))
