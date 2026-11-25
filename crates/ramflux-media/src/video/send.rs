@@ -29,8 +29,10 @@ use crate::sframe;
 pub const QUEUED_ACCESS_UNITS: usize = 2;
 /// Pacer rate: video bytes per second on the wire (relay framing included).
 pub const BYTES_PER_SECOND: u64 = 240_000;
-/// Pacer burst: bytes sent back to back.
-pub const BURST_BYTES: u64 = 2_400;
+/// Pacer burst: bytes sent back to back. The engine refills about every 20 ms, so a burst
+/// below one keyframe's worth (12 kB) caps throughput near 120 kB/s and the send queue
+/// overflows (found in the real run: flushed partial units, loss reports, rate collapse).
+pub const BURST_BYTES: u64 = 12_000;
 /// Pacer cap: video packets per one-second window.
 pub const PACKETS_PER_SECOND: u32 = 340;
 /// Datagrams one engine turn may send, so audio never waits long behind video.
