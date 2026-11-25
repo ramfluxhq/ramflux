@@ -820,6 +820,16 @@ fn handle_itest_request(
                 keep_alive,
             )?;
         }
+        ("POST", "/s13/notify/device-policy" | "/s13/notify/activity" | "/s13/notify/clear") => {
+            handle_s13_policy(
+                stream,
+                &ingress.store,
+                &ingress.store_gate,
+                request.path.as_str(),
+                &request.body,
+                keep_alive,
+            )?;
+        }
         ("POST", "/s13/notify/wake") => {
             let mut body: S13WakeRequest =
                 ramflux_protocol::parse_i_json(&request.body).map_err(|source| {
@@ -3454,6 +3464,7 @@ fn no_push_response(request: &S13WakeRequest) -> S13WakeResponse {
             attempt_count: 0,
             status: ramflux_node_core::NotifyQueueStatus::DroppedExpired,
             dnd_active: request.dnd_active.unwrap_or(false),
+            not_before_ms: 0,
         },
         attempts: Vec::new(),
     }
@@ -3495,3 +3506,100 @@ mod webpush_tests;
 mod native_provider_tests;
 #[cfg(test)]
 mod permit_tests;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct S13DevicePolicyRequest {
+    device_delivery_id: String,
+    account_group: String,
+    device_class: ramflux_node_core::DeviceClass,
+    muted: bool,
+    at_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct S13ActivityRequest {
+    device_delivery_id: String,
+    at_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct S13ClearRequest {
+    device_delivery_id: String,
+    /// Carried for the contract; the group is read from the device's own policy record.
+    #[serde(default)]
+    account_group: Option<String>,
+    at_ms: u64,
+    live_cleared: Vec<String>,
+}
+
+/// Mesh endpoints for the node push policy (CENTRAL P2b K9-K12). The gateway posts what the
+/// authenticated device session reported; the state stays in this node.
+fn handle_s13_policy(
+    stream: &mut std::net::TcpStream,
+    store: &ramflux_node_core::NotifyRedbStore,
+    store_gate: &Arc<Mutex<()>>,
+    path: &str,
+    body: &[u8],
+    keep_alive: bool,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let parse_error =
+        |source: serde_json::Error| ramflux_node_core::NodeCoreError::ItestJson(source.to_string());
+    let response = match path {
+        "/s13/notify/device-policy" => {
+            let request: S13DevicePolicyRequest =
+                serde_json::from_slice(body).map_err(parse_error)?;
+            let _guard = lock_notify_store(store_gate)?;
+            store.set_device_policy(
+                &request.device_delivery_id,
+                &request.account_group,
+                request.device_class,
+                request.muted,
+            )?;
+            tracing::info!(
+                target: "ramflux_notify_policy",
+                event = "policy.device",
+                muted = request.muted,
+                at_ms = request.at_ms,
+                "device policy recorded"
+            );
+            serde_json::json!({"ok": true})
+        }
+        "/s13/notify/activity" => {
+            let request: S13ActivityRequest = serde_json::from_slice(body).map_err(parse_error)?;
+            store.note_device_activity(&request.device_delivery_id, request.at_ms);
+            serde_json::json!({"ok": true})
+        }
+        _ => {
+            let request: S13ClearRequest = serde_json::from_slice(body).map_err(parse_error)?;
+            let _guard = lock_notify_store(store_gate)?;
+            let outcome =
+                store.apply_policy_clear(&request.device_delivery_id, &request.live_cleared)?;
+            tracing::info!(
+                target: "ramflux_notify_policy",
+                event = "policy.clear",
+                held_dropped = outcome.held_dropped,
+                clears_pending = outcome.clears_pending,
+                clears_conn = outcome.clears_conn,
+                muted = outcome.muted,
+                account_group_supplied = request.account_group.is_some(),
+                at_ms = request.at_ms,
+                "in-band clear applied"
+            );
+            serde_json::json!({
+                "held_dropped": outcome.held_dropped,
+                "clears_pending": outcome.clears_pending,
+                "clears_conn": outcome.clears_conn,
+                "muted": outcome.muted,
+            })
+        }
+    };
+    ramflux_node_core::write_itest_json_response_with_connection(
+        stream,
+        "200 OK",
+        &response,
+        keep_alive,
+    )
+}

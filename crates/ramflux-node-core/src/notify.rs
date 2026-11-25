@@ -39,6 +39,13 @@ pub use route_selection::{apns_topic_is_voip, voip_push_enabled};
 mod routes;
 mod wake_policy;
 pub use wake_policy::project_wake_v2;
+mod policy;
+mod policy_store;
+pub use policy::{
+    DeviceClass, DevicePolicyRecord, HoldDecision, HoldState, POLICY_CLEAR_TTL_S,
+    POLICY_DEFAULT_N_S, POLICY_DEFAULT_T_S, PolicyStatsHour, PushPolicy,
+};
+pub use policy_store::PolicyClearOutcome;
 
 const NOTIFY_WAKE_DUE: TableDefinition<(u64, &str), u8> =
     TableDefinition::new("notify_wake_due_v1");
@@ -198,6 +205,18 @@ pub struct NotifyQueueEntry {
     pub status: NotifyQueueStatus,
     #[serde(default)]
     pub dnd_active: bool,
+    /// Unix milliseconds before which a held wake is not sent (0 = due now). Filled from the
+    /// policy hold row when the entry is selected; never stored on the entry itself.
+    #[serde(default)]
+    pub not_before_ms: u64,
+}
+
+impl NotifyQueueEntry {
+    /// True when the hold on this entry (if any) has ended at `now_ms`.
+    #[must_use]
+    pub const fn due(&self, now_ms: u64) -> bool {
+        self.not_before_ms <= now_ms
+    }
 }
 
 #[derive(Deserialize)]
@@ -304,6 +323,7 @@ impl TryFrom<StoredNotifyQueueEntry> for NotifyQueueEntry {
             attempt_count: entry.attempt_count,
             status: entry.status,
             dnd_active: entry.dnd_active,
+            not_before_ms: 0,
         })
     }
 }
@@ -420,6 +440,7 @@ impl NotifyQueueState {
             attempt_count: 0,
             status: NotifyQueueStatus::Pending,
             dnd_active,
+            not_before_ms: 0,
         };
         self.entries_by_id.insert(entry.queue_id.clone(), entry.clone());
         entry
@@ -515,6 +536,8 @@ pub struct NotifyRedbStore {
     runtime_state: Mutex<NotifyRuntimeState>,
     wal_shards: Option<Vec<NotifyWalShard>>,
     delivery_gate: delivery_gate::DeliveryGate,
+    policy_presence: Mutex<BTreeMap<String, u64>>,
+    policy_applied: Mutex<Option<PushPolicy>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -838,6 +861,7 @@ impl NotifyRedbStore {
             .open_table(send_gate::DIAGNOSTICS)
             .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         wake_admission::initialize(&write_txn)?;
+        policy_store::initialize(&write_txn)?;
         route_authority::initialize(&write_txn)?;
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let wal_shards = match (wal_root, shard_count_override) {
@@ -874,6 +898,8 @@ impl NotifyRedbStore {
             runtime_state: Mutex::new(NotifyRuntimeState::default()),
             wal_shards,
             delivery_gate: delivery_gate::DeliveryGate::new(),
+            policy_presence: Mutex::new(BTreeMap::new()),
+            policy_applied: Mutex::new(None),
         })
     }
 
@@ -1913,6 +1939,19 @@ impl NotifyRedbStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let raw = self.pending_entries_without_attempts_raw(limit.saturating_mul(2))?;
+        let mut kept = self.apply_policy_to_pending(raw)?;
+        kept.truncate(limit);
+        Ok(kept)
+    }
+
+    fn pending_entries_without_attempts_raw(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<NotifyQueueEntry>, NodeCoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         if let Some(shards) = &self.wal_shards {
             let mut entries = Vec::with_capacity(limit);
             for (shard_id, shard) in shards.iter().enumerate() {
@@ -2168,6 +2207,9 @@ impl NotifyRedbStore {
             || entry.status != NotifyQueueStatus::Pending
             || entry.expires_at <= now_unix_seconds()
         {
+            return Ok(Vec::new());
+        }
+        if !self.policy_send_allowed(entry)? {
             return Ok(Vec::new());
         }
         self.load_bounded_state()?;
