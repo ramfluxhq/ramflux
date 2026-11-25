@@ -31,15 +31,17 @@ fn error(message: &'static str) -> Error {
 fn refuse<T>(message: &'static str) -> Result<T> {
     Err(error(message))
 }
-/// One WARN line for a connection the directory drops. Carries only the hop, the peer address,
-/// the stage and the error text (static messages or io/TLS errors): never payload, names or keys.
+/// One WARN line for a connection the directory drops. Carries only the hop, the node-keyed source
+/// pseudonym (never the raw address; an IPv6 source collapses to its /64 as in admission), the
+/// stage and the error text (static messages or io/TLS errors): never payload, names or keys.
 fn warn_drop(
     hop: &'static str,
-    peer: impl std::fmt::Display,
+    source: std::net::IpAddr,
     stage: &'static str,
     error: &dyn std::fmt::Display,
 ) {
-    tracing::warn!(hop, %peer, stage, %error, "username connection dropped");
+    let source = ramflux_node_core::source_ip_hash(&source.to_string());
+    tracing::warn!(hop, %source, stage, %error, "username connection dropped");
 }
 
 pub(crate) fn start(
