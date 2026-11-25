@@ -4,6 +4,7 @@
 //! The `rfc-push-1` session: one persistent QUIC connection to the centre edge, `sync` frames, and
 //! wake batches for the handoff socket (at most four streams in flight).
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -22,10 +23,23 @@ const MAX_STREAMS: usize = 4;
 const DEFAULT_RETRY_MS: u64 = 2000;
 const DEFAULT_SYNC_S: u64 = 3600;
 const STOPPED_WAIT: Duration = Duration::from_secs(300);
+/// Transport back-off: 2 s, doubling per consecutive failure, capped at 300 s, with jitter.
+const BACKOFF_BASE: Duration = Duration::from_secs(2);
+const BACKOFF_CAP: Duration = Duration::from_secs(300);
+/// A `rejected` with reason `unsupported` retries hourly (design 3.1).
+const UNSUPPORTED_WAIT: Duration = Duration::from_secs(3600);
+const REJECT_LOG_EVERY: Duration = Duration::from_secs(3600);
 /// QUIC application close codes (A9.1).
 const CLOSE_CLOSED: u64 = 0;
 const CLOSE_REJECTED_TWICE: u64 = 1;
 const CLOSE_ACCESS: u64 = 2;
+
+/// Consecutive transport failures and the instant before which no dial is made.
+#[derive(Default)]
+pub(crate) struct Backoff {
+    streak: u32,
+    until: Option<Instant>,
+}
 
 pub(crate) struct PushShared {
     pub(crate) seed: [u8; 32],
@@ -38,6 +52,9 @@ pub(crate) struct PushShared {
     pub(crate) sync_s: Mutex<u64>,
     /// While set and in the future, handoffs answer `stopped` without contacting the centre.
     pub(crate) stopped_until: Mutex<Option<Instant>>,
+    backoff: Mutex<Backoff>,
+    /// Last time a quiet `rejected` reason was logged (once per hour).
+    reject_logged: Mutex<Option<Instant>>,
     endpoint: quinn::Endpoint,
     centre: SocketAddr,
     server_name: String,
@@ -65,22 +82,42 @@ impl PushShared {
         link: (quinn::Endpoint, SocketAddr, String),
     ) -> Result<Self, String> {
         let (endpoint, centre, server_name) = link;
-        let state = read_push_central_state(&state_path)
-            .map_err(|error| format!("push state: {error}"))?
-            .unwrap_or_else(|| PushCentralState {
-                ks: None,
-                ks_seq: 0,
-                served: ramflux_node_core::push_handoff::Served {
-                    apns: false,
-                    apns_voip: false,
-                    fcm: false,
-                },
-                classes: Vec::new(),
-                ttl_max_s: ramflux_node_core::push_handoff::TtlMax::default(),
-                policy: ramflux_node_core::push_handoff::PushPolicy::default(),
-                quota: None,
-                updated_at_ms: 0,
-            });
+        prepare_state_dir(&state_path)?;
+        let loaded = match read_push_central_state(&state_path) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                // A corrupt state file is loud, but it must not stop the push session: move it
+                // aside and start empty (the SDK keeps its own seq floor, so the fence holds).
+                let bad = bad_state_path(&state_path);
+                match std::fs::rename(&state_path, &bad) {
+                    Ok(()) => tracing::error!(
+                        %error,
+                        bad = %bad.display(),
+                        "push state file unreadable; moved aside, starting empty"
+                    ),
+                    Err(rename) => tracing::error!(
+                        %error,
+                        %rename,
+                        "push state file unreadable and could not be moved; starting empty"
+                    ),
+                }
+                None
+            }
+        };
+        let state = loaded.unwrap_or_else(|| PushCentralState {
+            ks: None,
+            ks_seq: 0,
+            served: ramflux_node_core::push_handoff::Served {
+                apns: false,
+                apns_voip: false,
+                fcm: false,
+            },
+            classes: Vec::new(),
+            ttl_max_s: ramflux_node_core::push_handoff::TtlMax::default(),
+            policy: ramflux_node_core::push_handoff::PushPolicy::default(),
+            quota: None,
+            updated_at_ms: 0,
+        });
         Ok(Self {
             seed,
             centre_id,
@@ -90,6 +127,8 @@ impl PushShared {
             state: Mutex::new(state),
             sync_s: Mutex::new(DEFAULT_SYNC_S),
             stopped_until: Mutex::new(None),
+            backoff: Mutex::new(Backoff::default()),
+            reject_logged: Mutex::new(None),
             endpoint,
             centre,
             server_name,
@@ -149,22 +188,91 @@ impl PushShared {
         }
     }
 
-    /// Current connection, or a new one. One connect at a time.
-    async fn connection(&self) -> Result<quinn::Connection, String> {
+    /// Records one transport failure: doubles the back-off and returns the jittered wait.
+    fn record_failure(&self) -> Duration {
+        let mut backoff = match self.backoff.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let shift = backoff.streak.min(8);
+        let base = BACKOFF_BASE.saturating_mul(1 << shift).min(BACKOFF_CAP);
+        backoff.streak = backoff.streak.saturating_add(1);
+        let wait = jittered(base);
+        backoff.until = Some(Instant::now() + wait);
+        wait
+    }
+
+    /// Any reply from the centre ends the back-off.
+    fn reset_backoff(&self) {
+        let mut backoff = match self.backoff.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *backoff = Backoff::default();
+    }
+
+    /// Time left of the transport back-off; at least 100 ms so a caller never spins.
+    fn backoff_left(&self) -> Duration {
+        let until = match self.backoff.lock() {
+            Ok(guard) => guard.until,
+            Err(poisoned) => poisoned.into_inner().until,
+        };
+        until
+            .and_then(|instant| instant.checked_duration_since(Instant::now()))
+            .unwrap_or(BACKOFF_BASE)
+            .max(Duration::from_millis(100))
+    }
+
+    fn in_backoff(&self) -> bool {
+        let until = match self.backoff.lock() {
+            Ok(guard) => guard.until,
+            Err(poisoned) => poisoned.into_inner().until,
+        };
+        until.is_some_and(|instant| instant > Instant::now())
+    }
+
+    /// Current connection, or a new one. One connect at a time. An idle connection the edge
+    /// closed with code 2 stops the session at once, without a new dial.
+    async fn connection(&self) -> Result<quinn::Connection, Exchange> {
         let mut slot = self.connection.lock().await;
-        if let Some(existing) = slot.as_ref()
-            && existing.close_reason().is_none()
-        {
-            return Ok(existing.clone());
+        if let Some(existing) = slot.as_ref() {
+            match existing.close_reason() {
+                None => return Ok(existing.clone()),
+                Some(reason) => {
+                    if matches!(
+                        reason,
+                        quinn::ConnectionError::ApplicationClosed(ref close)
+                            if close.error_code.into_inner() == CLOSE_ACCESS
+                    ) {
+                        *slot = None;
+                        self.stop_for(STOPPED_WAIT);
+                        return Err(Exchange::Closed(CLOSE_ACCESS));
+                    }
+                    // Any other dead connection is replaced below, after the back-off check.
+                }
+            }
         }
-        let connecting = self
-            .endpoint
-            .connect(self.centre, &self.server_name)
-            .map_err(|error| error.to_string())?;
-        let connection = tokio::time::timeout(IO_TIMEOUT, connecting)
-            .await
-            .map_err(|_| "connect timeout".to_owned())?
-            .map_err(|error| error.to_string())?;
+        if self.in_backoff() {
+            return Err(Exchange::Failed("backoff".to_owned()));
+        }
+        let connecting = match self.endpoint.connect(self.centre, &self.server_name) {
+            Ok(connecting) => connecting,
+            Err(error) => {
+                self.record_failure();
+                return Err(Exchange::Failed(error.to_string()));
+            }
+        };
+        let connection = match tokio::time::timeout(IO_TIMEOUT, connecting).await {
+            Err(_) => {
+                self.record_failure();
+                return Err(Exchange::Failed("connect timeout".to_owned()));
+            }
+            Ok(Err(error)) => {
+                self.record_failure();
+                return Err(Exchange::Failed(error.to_string()));
+            }
+            Ok(Ok(connection)) => connection,
+        };
         *slot = Some(connection.clone());
         Ok(connection)
     }
@@ -176,7 +284,7 @@ impl PushShared {
         };
         let connection = match self.connection().await {
             Ok(connection) => connection,
-            Err(error) => return Exchange::Failed(error),
+            Err(outcome) => return outcome,
         };
         let outcome = async {
             let (mut send, mut recv) =
@@ -187,17 +295,28 @@ impl PushShared {
         };
         match tokio::time::timeout(IO_TIMEOUT, outcome).await {
             Err(_) => {
+                self.record_failure();
                 self.drop_connection(&connection).await;
                 Exchange::Failed("reply timeout".to_owned())
             }
             Ok(Ok(bytes)) => match frame::decode_reply(&bytes) {
-                Ok(value) => Exchange::Reply(value),
-                Err(error) => Exchange::Failed(error),
+                Ok(value) => {
+                    self.reset_backoff();
+                    Exchange::Reply(value)
+                }
+                Err(error) => {
+                    self.record_failure();
+                    Exchange::Failed(error)
+                }
             },
             Ok(Err(error)) => {
                 if let Some(code) = closed_code(&connection) {
+                    if code != CLOSE_ACCESS {
+                        self.record_failure();
+                    }
                     return Exchange::Closed(code);
                 }
+                self.record_failure();
                 self.drop_connection(&connection).await;
                 Exchange::Failed(error)
             }
@@ -227,6 +346,26 @@ pub(crate) async fn pause(shared: &PushShared, wait: Duration) {
             },
         }
     }
+}
+
+/// The state file's directory is created with mode 0700 when absent.
+fn prepare_state_dir(state_path: &std::path::Path) -> Result<(), String> {
+    let Some(parent) = state_path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    if !parent.exists() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("push state directory: {error}"))?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("push state directory mode: {error}"))?;
+    }
+    Ok(())
+}
+
+fn bad_state_path(state_path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = state_path.as_os_str().to_owned();
+    name.push(".bad");
+    std::path::PathBuf::from(name)
 }
 
 fn closed_code(connection: &quinn::Connection) -> Option<u64> {
@@ -300,7 +439,7 @@ pub(crate) async fn sync_once(shared: &PushShared) -> Duration {
         Exchange::Closed(code) => closed_wait(shared, code),
         Exchange::Failed(error) => {
             tracing::warn!(%error, "push centre unreachable");
-            jittered(Duration::from_secs(2))
+            shared.backoff_left()
         }
     }
 }
@@ -313,12 +452,12 @@ fn closed_wait(shared: &PushShared, code: u64) -> Duration {
             STOPPED_WAIT
         }
         CLOSE_CLOSED | CLOSE_REJECTED_TWICE => {
-            tracing::info!(code, "push session closed by edge; reconnecting");
-            Duration::from_secs(2)
+            tracing::info!(code, "push session closed by edge; backing off");
+            shared.backoff_left()
         }
         other => {
-            tracing::warn!(code = other, "push session closed with an unknown code");
-            Duration::from_secs(2)
+            tracing::warn!(code = other, "push session closed with an unknown code; backing off");
+            shared.backoff_left()
         }
     }
 }
@@ -332,11 +471,23 @@ fn refusal_wait(shared: &PushShared, reply: &Value) -> Duration {
         }
         Some("rejected") => {
             let reason = reply.get("reason").and_then(Value::as_str).unwrap_or("");
-            tracing::warn!(reason, "push sync rejected");
             if matches!(reason, "unknown_key" | "suspended_key" | "revoked_key") {
+                tracing::warn!(reason, "push sync rejected; stopped");
                 shared.stop_for(STOPPED_WAIT);
+                return STOPPED_WAIT;
             }
-            STOPPED_WAIT
+            let wait = if reason == "unsupported" { UNSUPPORTED_WAIT } else { STOPPED_WAIT };
+            let quiet = shared.reject_logged.lock().is_ok_and(|mut last| {
+                let due = last.is_none_or(|at| at.elapsed() >= REJECT_LOG_EVERY);
+                if due {
+                    *last = Some(Instant::now());
+                }
+                due
+            });
+            if quiet {
+                tracing::warn!(reason, wait_s = wait.as_secs(), "push sync rejected");
+            }
+            wait
         }
         _ => Duration::from_millis(DEFAULT_RETRY_MS),
     }
@@ -344,6 +495,8 @@ fn refusal_wait(shared: &PushShared, reply: &Value) -> Duration {
 
 /// Splits a wake list so that every frame fits the centre's limit, then sends each frame.
 /// Results keep request order; any non-`ok` chunk makes the whole batch non-`ok`.
+/// Earlier chunks may already be accepted when a later chunk fails; a resend of the whole batch is
+/// safe because the centre dedups by wake id (A8 `duplicate`).
 pub(crate) async fn send_wakes(shared: &PushShared, wakes: &[HandoffWake]) -> HandoffReply {
     if wakes.is_empty() || wakes.len() > MAX_WAKES {
         return reply_status(HandoffStatus::Rejected, Some("malformed"), None, Vec::new());

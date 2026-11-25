@@ -200,7 +200,14 @@ pub fn write_push_central_state(
         file.sync_all()?;
         std::fs::rename(&tmp, path)
     })();
-    result.map_err(|error| {
+    let synced = result.and_then(|()| {
+        // Fsync the directory so the rename itself is durable.
+        match path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            Some(dir) => std::fs::File::open(dir)?.sync_all(),
+            None => Ok(()),
+        }
+    });
+    synced.map_err(|error| {
         let _ = std::fs::remove_file(&tmp);
         invalid(format!("write push state: {error}"))
     })

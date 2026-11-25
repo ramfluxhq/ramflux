@@ -30,13 +30,15 @@ pub(crate) fn established_fields() -> Fields {
     match config() {
         Ok(None) => (Some("direct"), None),
         Ok(Some(push)) => {
-            let ks = read_push_central_state(&push.state_file)
-                .ok()
-                .flatten()
-                .and_then(|state| state.ks)
-                .filter(|doc| {
+            let ks = match read_push_central_state(&push.state_file) {
+                Ok(state) => state.and_then(|state| state.ks).filter(|doc| {
                     serde_json::to_vec(doc).is_ok_and(|bytes| bytes.len() <= MAX_KEYSET_DOC_LEN)
-                });
+                }),
+                Err(error) => {
+                    tracing::warn!(%error, "push state unreadable; established frame has no key set");
+                    None
+                }
+            };
             (Some("central"), ks)
         }
         Err(error) => {
