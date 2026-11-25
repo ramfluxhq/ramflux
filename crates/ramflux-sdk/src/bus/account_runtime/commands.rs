@@ -68,6 +68,10 @@ impl AccountRuntime {
             account.client.stop_in_process_media(ramflux_media::authorization::GateReason::Locked);
         }
         super::command_park::cancel(&self.id, || self.preemption_error())?;
+        let account = self.state.accounts.get(&self.id);
+        self.attachment_sends
+            .drain(&self.id, account, None, super::attachment_sends::shutdown_draining)
+            .await;
         self.username.stop().await;
         self.pairing.stop().await;
         self.transfers.stop().await;
@@ -312,6 +316,19 @@ impl AccountRuntime {
         if let Some(refusal) = self.admit_attachment_send(&command) {
             let _ = reply.send(Err(refusal));
             return Ok(false);
+        }
+        if command.request.method == "attachment.prepare.cancel"
+            && let Some(prepare) =
+                command.request.body.get("prepare_id").and_then(serde_json::Value::as_str)
+        {
+            // A parked upload stops before the cancel runs; its waiter resolves as cancelled.
+            let account = self.state.accounts.get(&self.id);
+            self.attachment_sends
+                .drain(&self.id, account, Some(prepare), || {
+                    crate::attachment_send::Refusal::new(crate::attachment_send::CODE_CANCELLED)
+                        .into()
+                })
+                .await;
         }
         if super::super::username_directory::handles(&command.request.method) {
             // Boxed: the username handler's future would otherwise enlarge every account command future on the stack.

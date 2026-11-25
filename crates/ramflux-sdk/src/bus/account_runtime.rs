@@ -579,6 +579,10 @@ impl AccountRuntime {
                 break;
             }
         }
+        let account = self.state.accounts.get(&self.id);
+        self.attachment_sends
+            .drain(&self.id, account, None, attachment_sends::shutdown_draining)
+            .await;
         command_park::cancel(&self.id, || SdkError::NetworkingPending)?;
         Ok(())
     }

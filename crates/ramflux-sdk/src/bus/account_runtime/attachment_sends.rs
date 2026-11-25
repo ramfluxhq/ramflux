@@ -16,16 +16,27 @@ use std::task::Poll;
 
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio::time::{Duration, Instant};
 
 use super::super::actor::{AccountCommand, ActorResponse};
 use crate::SdkError;
+use crate::attachment_send::transfer;
 use crate::attachment_send::upload::JournalCall;
+use crate::bus::dispatch::attachment_prepare::answer;
+use crate::prelude::LocalBusAccountState;
+
+/// Stop error for a drained send: the operation stays Pending and resumes on a same-operation send.
+pub(crate) fn shutdown_draining() -> SdkError {
+    ramflux_transport::TransportError::ShutdownDraining.into()
+}
 
 /// Refusal used only inside the admission path; it never reaches a client because the actor
 /// intercepts the parked upload before it replies.
 pub(crate) const PARKED: &str = "upload_parked";
 /// Parked sends one account may hold. Each holds a worker thread and a journal queue.
 pub(crate) const MAX_PARKED: usize = 64;
+/// How long a drain waits for parked workers to stop after their uploads are paused.
+const DRAIN_DEADLINE: Duration = Duration::from_secs(30);
 
 type Reply = oneshot::Sender<Result<ActorResponse, SdkError>>;
 
@@ -118,4 +129,76 @@ impl AttachmentSends {
         })
         .await
     }
+
+    /// Pauses the uploads of the named prepares (or of every parked send, when `only` is None),
+    /// serves their journal calls until each worker stops, and resolves their waiters with
+    /// `stopped`. The operations stay Pending, so a later same-operation send resumes them.
+    pub(super) async fn drain(
+        &mut self,
+        account_id: &str,
+        account: Option<&LocalBusAccountState>,
+        only: Option<&str>,
+        stopped: fn() -> SdkError,
+    ) {
+        let targets: Vec<String> = self
+            .parked
+            .iter()
+            .filter(|(operation, parked)| {
+                only.is_none_or(|prepare| {
+                    operation.as_str() == prepare || prepares_of(&parked.command).contains(&prepare)
+                })
+            })
+            .map(|(operation, _)| operation.clone())
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let deadline = Instant::now() + DRAIN_DEADLINE;
+        while targets.iter().any(|operation| self.parked.contains_key(operation)) {
+            for operation in &targets {
+                if let Some(parked) = self.parked.get(operation) {
+                    for prepare in prepares_of(&parked.command) {
+                        // A worker not yet in the transfer registry is paused on the next pass.
+                        let _ = transfer::set_paused(account_id, prepare, true);
+                    }
+                }
+            }
+            match tokio::time::timeout_at(deadline, self.next()).await {
+                Ok(Event::Call(call)) => {
+                    if let Some(account) = account {
+                        answer(account, call);
+                    }
+                }
+                Ok(Event::Finished(operation)) => {
+                    if targets.contains(&operation)
+                        && let Some(parked) = self.parked.remove(&operation)
+                    {
+                        let _ = parked.reply.send(Err(stopped()));
+                    }
+                }
+                // Past the deadline the dropped journal queues make each worker's next call
+                // fail, so it stops at its next slice boundary.
+                Err(_) => break,
+            }
+        }
+        for operation in targets {
+            if let Some(parked) = self.parked.remove(&operation) {
+                let _ = parked.reply.send(Err(stopped()));
+            }
+        }
+    }
+}
+
+fn prepares_of(command: &AccountCommand) -> Vec<&str> {
+    command
+        .request
+        .body
+        .get("prepares")
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("prepare_id").and_then(serde_json::Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default()
 }
