@@ -35,6 +35,7 @@ pub(crate) struct PublishInput<'a> {
     pub source: &'a str,
     pub now: u64,
     pub caption: &'a str,
+    pub journal: &'a dyn super::upload::AckJournal,
 }
 
 /// Reserve, seal, bind, upload and commit every file. Nothing is granted or wrapped here, so

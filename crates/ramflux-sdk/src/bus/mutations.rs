@@ -33,6 +33,7 @@ pub(super) async fn execute(
     connection.topics.clone_from(&command.topics);
     let intent = super::mutation_intent::MutationIntent::new(&command.request)?;
     let key = intent.key;
+    let _live = intent.enter(account_id)?;
     if let Some(account) = state.accounts.get(account_id) {
         let db = account.client.account_db()?;
         if let Some(body) = intent.lookup(db)? {

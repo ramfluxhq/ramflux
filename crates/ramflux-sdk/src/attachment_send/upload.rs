@@ -16,6 +16,88 @@ use super::plane::UploadQuery;
 use super::publish::PublishInput;
 use super::seal_job::segment_name_of;
 
+/// The encrypted account-DB journal of slice ACKs, one entry per upload generation. The
+/// worker reaches it through [`JournalSink`], which the account task serves.
+pub(crate) trait AckJournal: Send + Sync {
+    /// # Errors
+    /// Returns a stable refusal when the journal cannot be read.
+    fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Refusal>;
+    /// # Errors
+    /// Returns a stable refusal when the checkpoint is not durable.
+    fn save(&self, key: &str, acks: &[u8]) -> Result<(), Refusal>;
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct AckRecord {
+    pub(crate) acks: Vec<u8>,
+}
+
+/// Account-DB key of the ACK bitmap. The upload id is part of the key, so an abandoned
+/// generation can never leak ACKs into a fresh one.
+pub(crate) fn journal_key(prepare_id: &str, upload_id: [u8; 32]) -> String {
+    format!("attachment-upload-acks/{prepare_id}/{}", owner_wire::encode_hex(&upload_id))
+}
+
+/// Journal rows are read and written by the account task; the blocking worker blocks on a reply.
+#[derive(Clone)]
+pub(crate) struct JournalSink {
+    tx: tokio::sync::mpsc::Sender<JournalCall>,
+}
+
+pub(crate) enum JournalCall {
+    Load { key: String, reply: tokio::sync::oneshot::Sender<Result<Option<Vec<u8>>, Refusal>> },
+    Save { key: String, acks: Vec<u8>, reply: tokio::sync::oneshot::Sender<Result<(), Refusal>> },
+}
+
+/// Bounded: the worker has at most one call in flight, so this only absorbs scheduling jitter.
+pub(crate) const JOURNAL_QUEUE: usize = 8;
+
+impl JournalSink {
+    pub(crate) fn channel() -> (Self, tokio::sync::mpsc::Receiver<JournalCall>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(JOURNAL_QUEUE);
+        (Self { tx }, rx)
+    }
+}
+
+impl AckJournal for JournalSink {
+    fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Refusal> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.tx
+            .blocking_send(JournalCall::Load { key: key.to_owned(), reply })
+            .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+        answer.blocking_recv().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?
+    }
+
+    fn save(&self, key: &str, acks: &[u8]) -> Result<(), Refusal> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.tx
+            .blocking_send(JournalCall::Save { key: key.to_owned(), acks: acks.to_vec(), reply })
+            .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+        answer.blocking_recv().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?
+    }
+}
+
+/// Decodes one journal entry. An absent entry is an all-unacknowledged bitmap.
+pub(crate) fn decode_acks(bytes: Option<Vec<u8>>, count: usize) -> Result<Vec<u8>, Refusal> {
+    match bytes {
+        None => Ok(vec![0; count]),
+        Some(bytes) => {
+            let record: AckRecord =
+                serde_json::from_slice(&bytes).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+            if record.acks.len() == count {
+                Ok(record.acks)
+            } else {
+                Err(Refusal::new(CODE_SEAL_FAILED))
+            }
+        }
+    }
+}
+
+fn checkpoint(input: &PublishInput<'_>, row: &Row) -> Result<(), Refusal> {
+    let upload = row.upload_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?;
+    input.journal.save(&journal_key(&row.prepare_id, upload), &row.upload_acks)
+}
+
 /// Reconciles every segment before PUT and checkpoints each successful reply before the next
 /// slice. A relay-only ACK is uncertain locally and is replayed byte for byte. Returns true
 /// when all segments were already committed, including recovery of a lost Commit reply.
@@ -26,9 +108,13 @@ pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bo
     };
     let (count, _) = layout.dimensions().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     let count = usize::try_from(count).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
-    if row.segment_digests.len() != count || row.upload_acks.len() != count {
+    if row.segment_digests.len() != count {
         return Err(Refusal::new(CODE_SEAL_FAILED));
     }
+    // The journal, never meta.json, is the only source of ACKs; a fresh upload id finds none.
+    let upload = row.upload_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?;
+    row.upload_acks =
+        decode_acks(input.journal.load(&journal_key(&row.prepare_id, upload))?, count)?;
     let mut committed = None;
     for segment in 0..count {
         let index = u32::try_from(segment).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
@@ -60,7 +146,7 @@ pub(super) fn put_segments(input: &PublishInput<'_>, row: &mut Row) -> Result<bo
         let ack = row.upload_acks.get_mut(segment).ok_or(Refusal::new(CODE_SEAL_FAILED))?;
         // Never silently trust a local checkpoint if the relay no longer confirms it.
         *ack = if is_committed { status.received_bitmap } else { *ack & status.received_bitmap };
-        input.store.save_row(row)?;
+        checkpoint(input, row)?;
         if !is_committed {
             put_slices(input, row, segment, &cipher)?;
         }
@@ -148,7 +234,29 @@ fn put_slices(
             return Err(Refusal::new(CODE_UPLOAD_REJECTED));
         }
         *row.upload_acks.get_mut(segment).ok_or(Refusal::new(CODE_SEAL_FAILED))? |= bit;
-        input.store.save_row(row)?;
+        checkpoint(input, row)?;
     }
     Ok(())
+}
+
+/// In-memory journal for the store fixtures; production always uses [`JournalSink`].
+#[cfg(test)]
+pub(crate) struct MemoryJournal(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+
+#[cfg(test)]
+pub(crate) static TEST_JOURNAL: MemoryJournal =
+    MemoryJournal(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+
+#[cfg(test)]
+impl AckJournal for MemoryJournal {
+    fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Refusal> {
+        let map = self.0.lock().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+        Ok(map.get(key).cloned())
+    }
+
+    fn save(&self, key: &str, acks: &[u8]) -> Result<(), Refusal> {
+        let mut map = self.0.lock().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+        map.insert(key.to_owned(), acks.to_vec());
+        Ok(())
+    }
 }
