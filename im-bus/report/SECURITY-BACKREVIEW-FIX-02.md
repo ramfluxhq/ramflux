@@ -75,4 +75,27 @@ Stack: `~/secrev-local-stack.sh up --bin-dir <bin> --run-dir <run>` (mesh certs 
 - FIX-01's feedback still applies: R3 depends on a device registration that rf does only while its daemon holds a gateway session. The OPEN-ACCOUNT-BETA-01 stack already does this; reuse it.
 - R6 needs a paired second device (same need as FIX-01 row 3). Plan one stack for R3-R7.
 
-STATUS: READY f37c76e1f
+## Round 2: #620 M1 due-point renewal (controller finding from FIX-01 row 3)
+
+Evidence: `im-bus/log/SECURITY-BACKREVIEW-FIX-01/row3/run-row3-210832/driver.log` (itest short lease, 180 s). Seq 2 was endorsed at about t=329. Seq 3 was due at t=445, and at t=640 it had still not been endorsed.
+
+Cause (verified by reading the code; it matches the run): in `eligible()` (`crates/ramflux-sdk/src/bus/couriers/layer_publish/secondary.rs`), FIX-01 checked the per-device last-endorsed stamp unconditionally, after the `due || spaced` check. Any request within 3600 s of the last endorsement was refused, including a due one. `prepare_next` then deletes a refused pending request, so the due renewal was dropped, not delayed.
+
+Fix (commit 0648846ae): a due renewal is always served. A renewal that is not due is served only when the declaration is spaced (`issued_at >= endorsed.issued_at + 3600`) AND the last endorsement of that device is at least 3600 s old. Only early, non-due renewals are refused. The receive side (`receive_own_layer_renewal`, `due || spaced`) was already right and is unchanged.
+
+Production impact: production leases are 24 h, and renewal is due at half the validity (12 h after `issued_at`). So in the normal cadence a due request comes more than 1 h after the last endorsement and was not refused. Production was still affected in an edge case: a declaration endorsed late, less than 1 h before its own due point (primary offline, or a stamp written before a failed publish). Its due renewal was refused and dropped, and the secondary had to send it again. The itest lease (180 s, due 60 s before expiry) hit this every time.
+
+Guards (on 0648846ae): `cargo fmt --check` (QA) pass. `cargo clippy -p ramflux-sdk --all-targets -- -D warnings` (QA) rc 0, also with `ramflux-sdk/itest-short-layer-lease`. `test-timing.py --check`: PASS. `check-account-transactions.py`: 0 violations. `generate-c-abi-methods.py --check` (Mac): METHOD_POLICY_OK. No JSON decoding was touched.
+
+### Real-run row R9 (#620 M1 due-point endorsement)
+
+Rebuild rf with `ramflux-rf/itest-short-layer-lease` (the FIX-01 row 3 build line) from this head. Rerun `im-bus/log/SECURITY-BACKREVIEW-FIX-01/row3/secrev_row3_run.py` unchanged, but promote its last observation to a pass criterion:
+
+| Row | Steps | Pass condition |
+|---|---|---|
+| R9a | pairing, then the first renewal | seq 1, then seq 2 endorsed (as before) |
+| R9b | an immediate second renewal before the due point | no seq 3 before `renewal_due_at` of seq 2 (as before) |
+| R9c | wait past `renewal_due_at` of seq 2, up to `expires_at` of seq 2 | seq 3 endorsed with `issued_at >= renewal_due_at(seq 2)`, seen on the phone and the desktop root before seq 2 expires. The phone never loses an unexpired endorsed declaration. |
+| R9d | keep running through two more lease cycles (about 6 min) | seq 4 and seq 5 each endorsed after their due point; no gap where the latest endorsed declaration has expired |
+
+STATUS: READY 0648846ae
