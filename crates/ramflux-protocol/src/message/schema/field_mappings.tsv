@@ -483,3 +483,23 @@ SurfaceRpcFrame	known_hash	5	a2ui::SurfaceRpcFrame.known_hash	optional string
 SurfaceRpcFrame	function_call_id	6	a2ui::SurfaceRpcFrame.function_call_id	optional string
 SurfaceRpcFrame	rejected_version	7	a2ui::SurfaceRpcFrame.rejected_version	optional uint64
 SurfaceRpcFrame	a2ui	8	a2ui::SurfaceRpcFrame.a2ui	JsonObject
+CallAction	video_track	14	CallAction::VideoTrack{ revision: u64, enabled: bool, max_rung: u32, base_key: Option<String> }	CallActionVideoTrack (uint64 revision = 1;; bool enabled = 2;; uint32 max_rung = 3;; string base_key = 4;)
+CallActionInvite	video_offer	2	CallAction::Invite.video_offer	CallVideoOffer
+CallActionAnswer	video_selection	2	CallAction::Answer.video_selection	CallVideoSelection
+CallVideoOffer	version	1	CallVideoOffer.version	uint32
+CallVideoOffer	codec	2	CallVideoOffer.codec	string
+CallVideoOffer	profile	3	CallVideoOffer.profile	string
+CallVideoOffer	max_rung	4	CallVideoOffer.max_rung	uint32
+CallVideoOffer	packet_format	5	CallVideoOffer.packet_format	uint32
+CallVideoOffer	receive_enabled	6	CallVideoOffer.receive_enabled	bool
+CallVideoSelection	version	1	CallVideoSelection.version	uint32
+CallVideoSelection	accepted	2	CallVideoSelection.accepted	bool
+CallVideoSelection	codec	3	CallVideoSelection.codec	string
+CallVideoSelection	profile	4	CallVideoSelection.profile	string
+CallVideoSelection	max_rung	5	CallVideoSelection.max_rung	uint32
+CallVideoSelection	packet_format	6	CallVideoSelection.packet_format	uint32
+CallVideoSelection	receive_enabled	7	CallVideoSelection.receive_enabled	bool
+CallActionVideoTrack	revision	1	CallActionVideoTrack.revision	uint64
+CallActionVideoTrack	enabled	2	CallActionVideoTrack.enabled	bool
+CallActionVideoTrack	max_rung	3	CallActionVideoTrack.max_rung	uint32
+CallActionVideoTrack	base_key	4	CallActionVideoTrack.base_key	string

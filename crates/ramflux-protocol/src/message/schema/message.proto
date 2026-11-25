@@ -574,12 +574,16 @@ message CallEndpoint {
 }
 message CallActionInvite {
   string base_key = 1;
+  // Layer 6 (CALLS-VIDEO-V1): absent on voice-only invites.
+  CallVideoOffer video_offer = 2;
 }
 message CallActionRinging {
 
 }
 message CallActionAnswer {
   string base_key = 1;
+  // Layer 6 (CALLS-VIDEO-V1): an explicit decline is a selection with accepted = false.
+  CallVideoSelection video_selection = 2;
 }
 message CallActionAck {
   VoicePeerAllocation allocation = 1;
@@ -613,6 +617,33 @@ message CallActionRekeyAck {
   uint64 generation = 1;
   string base_key = 2;
 }
+// Video offer carried in the caller's Invite; no key material (CALLS-VIDEO-V1).
+message CallVideoOffer {
+  uint32 version = 1;
+  string codec = 2;
+  string profile = 3;
+  uint32 max_rung = 4;
+  uint32 packet_format = 5;
+  bool receive_enabled = 6;
+}
+// Callee's answer to a video offer; accepted = false means audio-only consent.
+message CallVideoSelection {
+  uint32 version = 1;
+  bool accepted = 2;
+  string codec = 3;
+  string profile = 4;
+  uint32 max_rung = 5;
+  uint32 packet_format = 6;
+  bool receive_enabled = 7;
+}
+// Video track state. base_key is the sender's fresh 32-byte video base key, present only
+// on the first start (revision 1 onward while enabled); later state controls carry none.
+message CallActionVideoTrack {
+  uint64 revision = 1;
+  bool enabled = 2;
+  uint32 max_rung = 3;
+  string base_key = 4;
+}
 message CallAction {
   oneof value {
     CallActionInvite invite = 1;
@@ -628,6 +659,8 @@ message CallAction {
     CallActionAnsweredElsewhere answered_elsewhere = 11;
     CallActionRekey rekey = 12;
     CallActionRekeyAck rekey_ack = 13;
+    // Layer 6 (CALLS-VIDEO-V1).
+    CallActionVideoTrack video_track = 14;
   }
 }
 message CallControl {

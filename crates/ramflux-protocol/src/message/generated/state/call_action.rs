@@ -7,7 +7,7 @@ use super::super::*;
 
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CallAction {
-    #[prost(oneof = "call_action::Value", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13")]
+    #[prost(oneof = "call_action::Value", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14")]
     pub value: ::core::option::Option<call_action::Value>,
 }
 /// Nested message and enum types in `CallAction`.
@@ -40,6 +40,9 @@ pub mod call_action {
         Rekey(super::CallActionRekey),
         #[prost(message, tag = "13")]
         RekeyAck(super::CallActionRekeyAck),
+        /// Layer 6 (CALLS-VIDEO-V1).
+        #[prost(message, tag = "14")]
+        VideoTrack(super::CallActionVideoTrack),
     }
 }
 impl serde::Serialize for CallAction {
@@ -95,6 +98,9 @@ impl serde::Serialize for CallAction {
                 call_action::Value::RekeyAck(v) => {
                     struct_ser.serialize_field("rekeyAck", v)?;
                 }
+                call_action::Value::VideoTrack(v) => {
+                    struct_ser.serialize_field("videoTrack", v)?;
+                }
             }
         }
         struct_ser.end()
@@ -122,6 +128,8 @@ impl<'de> serde::Deserialize<'de> for CallAction {
             "rekey",
             "rekey_ack",
             "rekeyAck",
+            "video_track",
+            "videoTrack",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
@@ -138,6 +146,7 @@ impl<'de> serde::Deserialize<'de> for CallAction {
             AnsweredElsewhere,
             Rekey,
             RekeyAck,
+            VideoTrack,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -174,6 +183,7 @@ impl<'de> serde::Deserialize<'de> for CallAction {
                             }
                             "rekey" => Ok(GeneratedField::Rekey),
                             "rekeyAck" | "rekey_ack" => Ok(GeneratedField::RekeyAck),
+                            "videoTrack" | "video_track" => Ok(GeneratedField::VideoTrack),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -301,6 +311,14 @@ impl<'de> serde::Deserialize<'de> for CallAction {
                             value__ = map_
                                 .next_value::<::std::option::Option<_>>()?
                                 .map(call_action::Value::RekeyAck);
+                        }
+                        GeneratedField::VideoTrack => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("videoTrack"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::VideoTrack);
                         }
                     }
                 }

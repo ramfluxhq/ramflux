@@ -9,6 +9,9 @@ use super::super::*;
 pub struct CallActionInvite {
     #[prost(string, tag = "1")]
     pub base_key: ::prost::alloc::string::String,
+    /// Layer 6 (CALLS-VIDEO-V1): absent on voice-only invites.
+    #[prost(message, optional, tag = "2")]
+    pub video_offer: ::core::option::Option<CallVideoOffer>,
 }
 impl serde::Serialize for CallActionInvite {
     #[allow(deprecated)]
@@ -21,10 +24,16 @@ impl serde::Serialize for CallActionInvite {
         if !self.base_key.is_empty() {
             len += 1;
         }
+        if self.video_offer.is_some() {
+            len += 1;
+        }
         let mut struct_ser =
             serializer.serialize_struct("ramflux.message.v1.CallActionInvite", len)?;
         if !self.base_key.is_empty() {
             struct_ser.serialize_field("baseKey", &self.base_key)?;
+        }
+        if let Some(v) = self.video_offer.as_ref() {
+            struct_ser.serialize_field("videoOffer", v)?;
         }
         struct_ser.end()
     }
@@ -35,10 +44,11 @@ impl<'de> serde::Deserialize<'de> for CallActionInvite {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] = &["base_key", "baseKey"];
+        const FIELDS: &[&str] = &["base_key", "baseKey", "video_offer", "videoOffer"];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             BaseKey,
+            VideoOffer,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -61,6 +71,7 @@ impl<'de> serde::Deserialize<'de> for CallActionInvite {
                     {
                         match value {
                             "baseKey" | "base_key" => Ok(GeneratedField::BaseKey),
+                            "videoOffer" | "video_offer" => Ok(GeneratedField::VideoOffer),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -79,6 +90,7 @@ impl<'de> serde::Deserialize<'de> for CallActionInvite {
                 V: serde::de::MapAccess<'de>,
             {
                 let mut base_key__ = None;
+                let mut video_offer__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -91,9 +103,18 @@ impl<'de> serde::Deserialize<'de> for CallActionInvite {
                             }
                             base_key__ = Some(map_.next_value()?);
                         }
+                        GeneratedField::VideoOffer => {
+                            if video_offer__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("videoOffer"));
+                            }
+                            video_offer__ = map_.next_value()?;
+                        }
                     }
                 }
-                Ok(CallActionInvite { base_key: base_key__.unwrap_or_default() })
+                Ok(CallActionInvite {
+                    base_key: base_key__.unwrap_or_default(),
+                    video_offer: video_offer__,
+                })
             }
         }
         deserializer.deserialize_struct(
