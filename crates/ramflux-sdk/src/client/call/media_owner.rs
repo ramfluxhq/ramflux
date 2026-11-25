@@ -35,6 +35,9 @@ pub(crate) struct OwnedMedia {
     pub session: Mutex<Option<MediaSession>>,
     binding: Binding,
     running: Mutex<Running>,
+    /// The call selected a video track (its keys reached the session). Video
+    /// authority follows the SDK grant, never the host audio readiness.
+    video_selected: bool,
 }
 
 struct Binding {
@@ -73,7 +76,9 @@ impl OwnedMedia {
         receipt: InProcessMediaReceipt,
         call: &super::state::LiveCall,
     ) -> Self {
+        let video_selected = session.video_receive_key().is_some();
         Self {
+            video_selected,
             binding: Binding {
                 call_ref: call.call_ref.clone(),
                 caller: call.caller.clone(),
@@ -232,10 +237,6 @@ impl RamfluxClient {
             if !engine.audio_active(active) {
                 return Err(SdkError::LocalBusPermissionDenied);
             }
-            if active {
-                // Video authority is separate from audio; packets still need admitted keys.
-                let _ = engine.video_active(true);
-            }
         }
         Ok(owned.snapshot())
     }
@@ -351,6 +352,10 @@ impl RamfluxClient {
         let mut running = owned.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(engine) = &running.engine {
             engine.authorize(reason, lease, allocation.expires_at > running.lease_expires_at);
+            if owned.video_selected {
+                // Independent of audio_active: refused by the engine while the gate is closed.
+                let _ = engine.video_active(true);
+            }
         }
         running.lease_expires_at = allocation.expires_at;
         running.last.receipt.lease_expires_at = allocation.expires_at;
