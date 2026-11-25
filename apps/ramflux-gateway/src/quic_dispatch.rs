@@ -15,7 +15,7 @@ pub(crate) async fn dispatch_quic_json_request(
     }
     tracing::info!(
         method = %request.method,
-        path = %request.path,
+        path = %ramflux_node_core::log_path(&request.path),
         "gateway QUIC request received"
     );
     let body = match (request.method.as_str(), request.path.as_str()) {
@@ -124,10 +124,13 @@ pub(crate) async fn forward_quic_envelope(
         router_post_json_async(router, "/mvp0/envelope", &envelope).await?;
     ramflux_node_core::record_gateway_submit_router_us(elapsed_us(router_started));
     tracing::info!(
-        envelope_id = %envelope.envelope_id,
-        target_delivery_id = %envelope.target_delivery_id,
         outcome = %response.outcome,
         "gateway QUIC forwarded envelope to router"
+    );
+    tracing::debug!(
+        envelope_id = %envelope.envelope_id,
+        target_delivery_id = %envelope.target_delivery_id,
+        "gateway QUIC forwarded envelope to router ids"
     );
     let response_started = Instant::now();
     let body = serde_json::to_value(response)?;

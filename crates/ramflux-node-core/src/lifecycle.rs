@@ -20,6 +20,9 @@ pub enum AccountLifecycleState {
     Deactivated,
     DeletePending,
     Deleted,
+    /// Reserved for the operator console (NODE-ADMIN-CONSOLE-PLAN-01). Beta has no transition
+    /// into this state; it is accepted and serialized so a later release can use it.
+    Suspended,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

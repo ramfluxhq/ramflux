@@ -1156,11 +1156,11 @@ async fn handle_s13_push_route_value_async(
         let route: ramflux_node_core::DevicePushRoute = serde_json::from_slice(&body)
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
         tracing::info!(
-            device_delivery_id = route.device_delivery_id,
             provider = ?route.provider,
             credential_id = route.credential_id.as_deref().unwrap_or(""),
             "notify push route registered"
         );
+        tracing::debug!(device_delivery_id = route.device_delivery_id, "notify push route ids");
         let _guard = lock_notify_store(&ingress.store_gate)?;
         ingress.store.register_push_route(route.clone())?;
         Ok::<_, ramflux_node_core::NodeCoreError>(route)
@@ -1490,11 +1490,11 @@ fn handle_s13_push_route(
     let route: ramflux_node_core::DevicePushRoute = serde_json::from_slice(body)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
     tracing::info!(
-        device_delivery_id = route.device_delivery_id,
         provider = ?route.provider,
         credential_id = route.credential_id.as_deref().unwrap_or(""),
         "notify push route registered"
     );
+    tracing::debug!(device_delivery_id = route.device_delivery_id, "notify push route ids");
     {
         let _guard = lock_notify_store(store_gate)?;
         store.register_push_route(route.clone())?;

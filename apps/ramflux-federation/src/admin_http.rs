@@ -308,7 +308,7 @@ fn log_admin_request(
 }
 
 fn log_home_node_forward_request(request: &ramflux_node_core::FederatedEnvelopeForwardRequest) {
-    tracing::info!(
+    tracing::debug!(
         source_node_id = %request.source_node_id,
         target_node_id = %request.target_node_id,
         envelope_id = %request.envelope.envelope_id,
@@ -319,11 +319,14 @@ fn log_home_node_forward_request(request: &ramflux_node_core::FederatedEnvelopeF
 
 fn log_home_node_forward_response(response: &ramflux_node_core::FederatedEnvelopeForwardResponse) {
     tracing::info!(
+        outcome = %response.delivery.outcome,
+        "federation local home-node migration forward response"
+    );
+    tracing::debug!(
         source_node_id = %response.source_node_id,
         target_node_id = %response.target_node_id,
-        outcome = %response.delivery.outcome,
         target_delivery_id = %response.delivery.target_delivery_id,
-        "federation local home-node migration forward response"
+        "federation local home-node migration forward response ids"
     );
 }
 

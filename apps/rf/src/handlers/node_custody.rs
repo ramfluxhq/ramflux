@@ -7,6 +7,8 @@ mod operation_lock;
 mod output;
 mod private_fs;
 
+pub(crate) use output::read_seed;
+
 use crate::{RfError, cli::NodeCustody};
 use ed25519_dalek::SigningKey;
 use ramflux_crypto::custody::{
