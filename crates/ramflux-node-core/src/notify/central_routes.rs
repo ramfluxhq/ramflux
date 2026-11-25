@@ -131,20 +131,10 @@ impl NotifyRedbStore {
                 };
                 return Some((state, pruned));
             }
+            // Records are never evicted before their entry expires (L6): a settled record of a
+            // still-pending entry on another route must not be recreated as open.
             if route.central_first_send.len() >= CENTRAL_FIRST_SEND_LIMIT {
-                let oldest_settled = route
-                    .central_first_send
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, entry)| entry.settled)
-                    .min_by_key(|(_, entry)| entry.first_send_ms)
-                    .map(|(position, _)| position);
-                match oldest_settled {
-                    Some(position) => {
-                        route.central_first_send.remove(position);
-                    }
-                    None => return Some((FirstSendState::Full, pruned)),
-                }
+                return Some((FirstSendState::Full, pruned));
             }
             route.central_first_send.push(CentralFirstSend {
                 queue_id: queue_id.to_owned(),
@@ -183,6 +173,27 @@ impl NotifyRedbStore {
             Some(((), changed))
         })
         .map(|_| ())
+    }
+
+    /// Settles a wake whose class is not sent centrally in this revision (L7). It is recorded
+    /// against the device's first stored route, so it leaves the pending set. Returns `false` when
+    /// the device has no route at all.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn central_settle_unsupported(
+        &self,
+        entry: &NotifyQueueEntry,
+    ) -> Result<bool, NodeCoreError> {
+        let Some(provider) = self
+            .load_notify_routes(&entry.device_delivery_id)?
+            .first()
+            .map(|route| route.provider.clone())
+        else {
+            return Ok(false);
+        };
+        self.central_record_entry_settled(entry, provider, false)?;
+        Ok(true)
     }
 
     /// Records one settlement attempt for a queue entry, so it leaves the pending set once every

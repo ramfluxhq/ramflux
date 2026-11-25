@@ -178,6 +178,8 @@ impl CentralPush {
             return Ok(CentralDue::Retry(ceil_secs(backoff_until)));
         }
         let Some(class) = central_class(&entry.wake.delivery_class) else {
+            // Not sent centrally in this revision: settle it so it leaves the pending set (L7).
+            store.central_settle_unsupported(entry)?;
             return Ok(CentralDue::Idle);
         };
         // No state file yet: no session has reported `dir.served`, so nothing is submitted (A6.4).
@@ -287,9 +289,10 @@ impl CentralPush {
         self.backoff.lock().map_or(0, |state| state.until_ms)
     }
 
+    /// Extends the back-off. Never shortens one set by another worker (L8).
     fn set_backoff(&self, until_ms: u64) {
         if let Ok(mut state) = self.backoff.lock() {
-            state.until_ms = until_ms;
+            state.until_ms = state.until_ms.max(until_ms);
         }
     }
 
