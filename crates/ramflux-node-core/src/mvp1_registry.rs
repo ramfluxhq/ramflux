@@ -280,6 +280,24 @@ pub(crate) struct IdentityDeviceRecord {
     pub(crate) branch_public_key: String,
     pub(crate) target_delivery_id: String,
     pub(crate) branch_proof: ramflux_crypto::BranchProofDocument,
+    /// Reserved per-account quota override (NODE-ADMIN-CONSOLE-PLAN-01). Keyed by quota name.
+    /// Written as `None` in beta and not enforced; omitted from the serialized form when unset,
+    /// so existing rows read and write unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quota_override: Option<BTreeMap<String, u64>>,
+}
+
+fn device_record_from_registration(request: &IdentityRegisterRequest) -> IdentityDeviceRecord {
+    IdentityDeviceRecord {
+        principal_id: request.proof.principal_id.clone(),
+        principal_commitment: request.principal_commitment.clone(),
+        device_id: request.proof.device_id.clone(),
+        device_epoch: request.proof.device_epoch,
+        branch_public_key: request.branch_public_key.clone(),
+        target_delivery_id: request.target_delivery_id.clone(),
+        branch_proof: request.proof.clone(),
+        quota_override: None,
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -441,15 +459,7 @@ impl IdentityRegistry {
                         NodeCoreError::ItestHttp("registration authority missing".into())
                     })?,
             ),
-            IdentityDeviceRecord {
-                principal_id: request.proof.principal_id.clone(),
-                principal_commitment: request.principal_commitment.clone(),
-                device_id: request.proof.device_id.clone(),
-                device_epoch: request.proof.device_epoch,
-                branch_public_key: request.branch_public_key.clone(),
-                target_delivery_id: request.target_delivery_id.clone(),
-                branch_proof: request.proof.clone(),
-            },
+            device_record_from_registration(request),
         );
         Ok((
             SessionDescriptor {

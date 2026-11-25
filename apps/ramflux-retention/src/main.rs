@@ -251,7 +251,7 @@ async fn handle_retention_async_quic_request(
     accepted: ramflux_transport::MeshQuicAcceptedRequest,
     peer_service_id: &str,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    tracing::info!(method = %accepted.request.method, path = %accepted.request.path, peer_service_id, "retention async QUIC request received");
+    tracing::info!(method = %accepted.request.method, path = %ramflux_node_core::log_path(&accepted.request.path), peer_service_id, "retention async QUIC request received");
     accepted
         .write_text_response(404, "not found")
         .await
@@ -783,7 +783,7 @@ fn handle_mesh_request(
 
     tracing::info!(
         method = %request.method,
-        path = %request.path,
+        path = %ramflux_node_core::log_path(&request.path),
         body_len = request.body.len(),
         peer_service_id,
         "retention mesh request received"

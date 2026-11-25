@@ -153,7 +153,10 @@ impl IdentityRegistry {
         custody.principals.entry(body.principal_id.clone()).or_insert_with(|| master.clone());
         if outcome == PinOutcome::Advanced {
             if verified.capacity_pressure().any() {
-                tracing::warn!(account_anchor = %anchor, "custody authority reached eighty percent capacity; prioritize revocations");
+                tracing::warn!(
+                    "custody authority reached eighty percent capacity; prioritize revocations"
+                );
+                tracing::debug!(account_anchor = %anchor, "custody authority capacity ids");
             }
             custody.records.insert(anchor.clone(), publication.clone());
         }
@@ -275,7 +278,10 @@ impl RouterCore {
             return Err(crate::NodeCoreError::Capacity { resource: "custody account count" });
         }
         if verified.capacity_pressure().any() {
-            tracing::warn!(account_anchor=%anchor,"custody authority reached eighty percent capacity; prioritize revocations");
+            tracing::warn!(
+                "custody authority reached eighty percent capacity; prioritize revocations"
+            );
+            tracing::debug!(account_anchor=%anchor, "custody authority capacity ids");
         }
         drop(control);
         store.record_custody_account(crate::router_store::CustodyAccountWrite {
@@ -408,8 +414,11 @@ impl RouterCore {
 
 fn log_pruned_evidence(anchor: &str, before: u64, after: u64) {
     if after > before {
-        tracing::warn!(account_anchor = %anchor, dropped = after - before,
-            "dropped older custody conflict evidence to enforce retention bounds");
+        tracing::warn!(
+            dropped = after - before,
+            "dropped older custody conflict evidence to enforce retention bounds"
+        );
+        tracing::debug!(account_anchor = %anchor, "dropped custody conflict evidence ids");
     }
 }
 

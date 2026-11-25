@@ -83,14 +83,14 @@ pub(crate) fn handle_s8_forward_envelope(
     } else {
         "remote_federation_forward"
     };
-    tracing::info!(
+    tracing::info!(route_decision, "evaluating federated envelope route");
+    tracing::debug!(
         local_node_id = %discovery.node_id,
         source_node_id = %request.source_node_id,
         target_node_id = %request.target_node_id,
         envelope_id = %request.envelope.envelope_id,
         target_delivery_id = %request.envelope.target_delivery_id,
-        route_decision,
-        "evaluating federated envelope route"
+        "evaluating federated envelope route ids"
     );
     if request.target_node_id == discovery.node_id {
         return Err(ramflux_node_core::NodeCoreError::ItestHttp(format!(
@@ -216,14 +216,17 @@ fn send_signed_forward_to_peer(
     signed_request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
 ) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError> {
     tracing::info!(
+        peer_federation_endpoint_len = peer.endpoint.len(),
+        path = "/s8/federation/envelope",
+        "forwarding federated envelope to peer federation endpoint"
+    );
+    tracing::debug!(
         source_node_id = %signed_request.source_node_id,
         target_node_id = %signed_request.target_node_id,
         peer_endpoint = %peer.endpoint,
-        peer_federation_endpoint_len = peer.endpoint.len(),
-        path = "/s8/federation/envelope",
         envelope_id = %signed_request.envelope.envelope_id,
         target_delivery_id = %signed_request.envelope.target_delivery_id,
-        "forwarding federated envelope to peer federation endpoint"
+        "forwarding federated envelope to peer federation endpoint ids"
     );
     let peer_ca_pems = std::slice::from_ref(&peer.peer_ca_cert_pem);
     let force_tcp = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_FORCE_TCP_MESH")
@@ -259,12 +262,12 @@ fn send_signed_forward_to_peer(
             }
         }
     };
-    tracing::info!(
+    tracing::info!(outcome = %response.delivery.outcome, "federation forward peer response received");
+    tracing::debug!(
         source_node_id = %response.source_node_id,
         target_node_id = %response.target_node_id,
-        outcome = %response.delivery.outcome,
         target_delivery_id = %response.delivery.target_delivery_id,
-        "federation forward peer response received"
+        "federation forward peer response ids"
     );
     Ok(response)
 }
@@ -391,13 +394,16 @@ fn spool_failed_forward(
         outbound_spool_ttl_seconds(),
     )?;
     tracing::warn!(
+        spool_seq = entry.seq,
+        error = %send_error,
+        "federation peer unavailable; persisted outbound forward to spool"
+    );
+    tracing::debug!(
         source_node_id = %signed_request.source_node_id,
         target_node_id = %signed_request.target_node_id,
         envelope_id = %signed_request.envelope.envelope_id,
         target_delivery_id = %signed_request.envelope.target_delivery_id,
-        spool_seq = entry.seq,
-        error = %send_error,
-        "federation peer unavailable; persisted outbound forward to spool"
+        "federation peer unavailable; spooled outbound forward ids"
     );
     Ok(spooled_forward_response(signed_request))
 }
@@ -790,12 +796,15 @@ where
     let (_, source) =
         ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(&request.envelope)?;
     tracing::info!(
+        path = "/mvp0/envelope/forwarded",
+        "accepted federated envelope proof and delivering to local router"
+    );
+    tracing::debug!(
         source_node_id = request.source_node_id,
         target_node_id = request.target_node_id,
-        path = "/mvp0/envelope/forwarded",
         envelope_id = request.envelope.envelope_id,
         target_delivery_id = request.envelope.target_delivery_id,
-        "accepted federated envelope proof and delivering to local router"
+        "accepted federated envelope proof ids"
     );
     let step_started = std::time::Instant::now();
     // Migration retries must reach the router's durable tuple receipt. A federation
@@ -812,25 +821,19 @@ where
         )?
     };
     let Some(delivery) = delivery else {
-        tracing::info!(
-            source_node_id = %request.source_node_id,
-            target_node_id = %request.target_node_id,
-            envelope_id = %request.envelope.envelope_id,
-            target_delivery_id = %request.envelope.target_delivery_id,
-            "deduplicated replayed federated envelope before local router delivery"
-        );
+        tracing::info!("deduplicated replayed federated envelope before local router delivery");
         return Ok(duplicate_forward_response(request));
     };
     if let Some(observability) = observability {
         observability.record_receive_router_post(step_started.elapsed());
     }
-    tracing::info!(
+    tracing::info!(outcome = %delivery.outcome, "delivered inbound federated envelope to local router");
+    tracing::debug!(
         source_node_id = %request.source_node_id,
         target_node_id = %request.target_node_id,
         envelope_id = %request.envelope.envelope_id,
         target_delivery_id = %request.envelope.target_delivery_id,
-        outcome = %delivery.outcome,
-        "delivered inbound federated envelope to local router"
+        "delivered inbound federated envelope ids"
     );
     let response = ramflux_node_core::FederatedEnvelopeForwardResponse {
         accepted: matches!(
@@ -883,7 +886,7 @@ fn verify_inbound_federated_forward(
         observability.record_receive_signature_verify(step_started.elapsed());
         observability.record_receive_signature_segments(verify_timings);
     }
-    tracing::info!(
+    tracing::debug!(
         source_node_id = %request.source_node_id,
         target_node_id = %request.target_node_id,
         envelope_id = %request.envelope.envelope_id,

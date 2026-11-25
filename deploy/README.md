@@ -643,6 +643,17 @@ preserve all of these volumes. The relay reset changes only its two named files.
 | `signaling-redb` | Signaling allocation/service state | No |
 | `retention-redb` | Retention lifecycle, hold and incident state | No |
 | `node-privacy` | Shared privacy and fingerprint keys, mounted by all seven services | No |
+| `admin-redb` | **Reserved** for the operator console (NODE-ADMIN-CONSOLE-PLAN-01). Not created by beta Compose | n/a |
+
+#### Reserved names for the operator console
+
+Reserved now, not implemented in beta; no Compose service uses them yet:
+
+- Mesh identity `ramflux-admin` (SPIFFE service id). The router admits it only on the
+  per-route caller policy for `POST /mvp6/registration/policy`; other service identities are refused.
+- HTTP path prefix `/admin/v1/`.
+- Loopback port `18090`, configured through `RAMFLUX_ADMIN_LOOPBACK_PORT`.
+- Volume `admin-redb` (see the table above).
 
 Inside `DEMO_DATA_DIR`, `config/` and frozen Compose files are generated deployment
 inputs; `certs/`, `secrets/`, `.env` and `identity.env` contain credentials, identity
