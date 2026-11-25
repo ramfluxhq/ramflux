@@ -42,7 +42,6 @@ pub(crate) mod generated_call;
 mod generated_capacity;
 pub(crate) mod generated_content;
 pub(crate) mod generated_control;
-pub(crate) mod layer_renewal;
 mod generated_delete_fence;
 mod generated_edit_retirement;
 mod generated_fields;
@@ -67,6 +66,7 @@ pub mod home_migration;
 pub mod identity;
 pub mod identity_authority;
 pub(crate) mod inbox_failure;
+pub(crate) mod layer_renewal;
 #[cfg(test)]
 mod legacy_activation_guard_tests;
 pub mod mcp_a2ui;

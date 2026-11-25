@@ -84,8 +84,14 @@ fn enroll_desktop(human: &mut Driver) -> Result {
         encode_base64url(desktop_branch.signing_key.verifying_key().as_bytes());
     certificate.agreement_identity_public_key = encode_base64url(&agreement.public);
     certificate.cert_id = encode_base64url([HUMAN_SEED + 8; 32]);
-    human.publication.record =
-        primary.enroll_device(&current, primary.certify_branch(certificate)?, NOW)?;
+    let message_layer =
+        ramflux_crypto::custody::sign_enrollment_layer(&desktop_branch, &certificate)?;
+    human.publication.record = primary.enroll_device(
+        &current,
+        primary.certify_branch(certificate)?,
+        message_layer,
+        NOW,
+    )?;
     Ok(())
 }
 

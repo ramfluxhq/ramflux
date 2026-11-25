@@ -126,7 +126,11 @@ impl LocalPairingParticipant {
         })?;
         drop(primary); // The public certificate goes to a separate head signing owner.
         let message_layer = p.message_layer.clone();
-        ramflux_crypto::custody::verify_enrollment_layer(&certificate, &message_layer, custody::network_now()?)?;
+        ramflux_crypto::custody::verify_enrollment_layer(
+            &certificate,
+            &message_layer,
+            custody::network_now()?,
+        )?;
         let live = db
             .pairing_live_rows()?
             .into_iter()

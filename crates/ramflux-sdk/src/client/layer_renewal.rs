@@ -9,9 +9,9 @@
 use crate::SdkError;
 use ramflux_crypto::RootQualifiedDeviceRef;
 use ramflux_protocol::DeviceSetStatus;
+use ramflux_protocol::canonical_json_bytes;
 use ramflux_protocol::custody::{DeviceRef, SignedLayerDeclaration};
 use ramflux_protocol::message as g;
-use ramflux_protocol::canonical_json_bytes;
 use serde::{Deserialize, Serialize};
 
 /// Pending request held per exact account/device/epoch until the courier endorses it.
@@ -61,9 +61,8 @@ impl super::RamfluxClient {
         }
         let declaration = &signed.declaration;
         let db = self.account_db()?;
-        let sender_epoch = db
-            .client_device_record(source)?
-            .and_then(|record| record["device_epoch"].as_u64());
+        let sender_epoch =
+            db.client_device_record(source)?.and_then(|record| record["device_epoch"].as_u64());
         if declaration.device.account_anchor != own_anchor
             || declaration.device.device_id != source.device_id()
             || Some(declaration.device.device_epoch) != sender_epoch
@@ -84,8 +83,10 @@ impl super::RamfluxClient {
                     && device.status == DeviceSetStatus::Active
             })
             .ok_or_else(|| refused("own layer renewal device not active"))?;
-        let certificate =
-            row.branch_certificate.as_ref().ok_or_else(|| refused("own layer renewal has no branch"))?;
+        let certificate = row
+            .branch_certificate
+            .as_ref()
+            .ok_or_else(|| refused("own layer renewal has no branch"))?;
         ramflux_crypto::custody::verify_enrollment_layer(certificate, &signed, now)
             .map_err(|_| refused("own layer renewal declaration rejected"))?;
         if let Some(endorsed) = &row.message_layer {
@@ -115,11 +116,7 @@ impl super::RamfluxClient {
             }
             db.persist_actor_state(
                 &key,
-                &PendingLayerRenewal {
-                    declaration_sequence: sequence,
-                    digest,
-                    signed,
-                },
+                &PendingLayerRenewal { declaration_sequence: sequence, digest, signed },
             )?;
             Ok(())
         })

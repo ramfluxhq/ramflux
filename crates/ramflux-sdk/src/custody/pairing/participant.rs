@@ -453,10 +453,8 @@ impl LocalPairingParticipant {
     ) -> Result<Option<ramflux_protocol::custody::SignedLayerDeclaration>, SdkError> {
         let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
-        let Some(row) = db
-            .pairing_live_rows()?
-            .into_iter()
-            .find(|row| row.operation_id == operation_id)
+        let Some(row) =
+            db.pairing_live_rows()?.into_iter().find(|row| row.operation_id == operation_id)
         else {
             return Ok(None);
         };

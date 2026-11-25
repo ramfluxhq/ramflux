@@ -2,7 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 //! Typed primary operations preserve space and give revocation priority over enrollment.
-use super::{SelfSigningKey, VerifiedRecord, validate::{message_layer_declaration, reject}};
+use super::{
+    SelfSigningKey, VerifiedRecord,
+    validate::{message_layer_declaration, reject},
+};
 use crate::CryptoError;
 use ramflux_protocol::{
     DeviceSetStatus,
@@ -11,6 +14,40 @@ use ramflux_protocol::{
         MigrationState, SignedLayerDeclaration, decode_epoch, encode_epoch, object_hash,
     },
 };
+
+/// Sign the enrolling branch's own message-layer declaration for the certificate it joins with.
+/// The declaration starts at the lease start and lasts at most 24 hours, inside the lease.
+/// # Errors
+/// Returns an error when the signing bytes cannot be built.
+pub fn sign_enrollment_layer(
+    branch: &crate::DeviceBranch,
+    certificate: &BranchCertificate,
+) -> Result<SignedLayerDeclaration, CryptoError> {
+    let issued_at = certificate.not_before;
+    let expires_at = certificate.expires_at.min(
+        issued_at.saturating_add(ramflux_protocol::custody::MAX_LAYER_DECLARATION_VALIDITY_SECONDS),
+    );
+    let declaration = ramflux_protocol::custody::LayerDeclaration {
+        device: DeviceRef {
+            account_anchor: certificate.account_anchor.clone(),
+            device_id: certificate.device_id.clone(),
+            device_epoch: certificate.device_epoch,
+        },
+        max_layer: ramflux_protocol::custody::MESSAGE_LAYER_FLOOR,
+        declaration_sequence: 1,
+        issued_at,
+        expires_at,
+    };
+    let bytes = ramflux_protocol::custody::signing_bytes(
+        ramflux_protocol::domain::CUSTODY_MESSAGE_LAYER_DECLARATION,
+        &declaration,
+    )
+    .map_err(|_| reject("message-layer declaration signing bytes"))?;
+    Ok(SignedLayerDeclaration {
+        branch_signature: crate::sign_canonical_bytes_with_device_branch(&bytes, branch),
+        declaration,
+    })
+}
 
 /// Verify a recipient's enrollment declaration against the exact certificate it will join with.
 /// The primary runs this before journaling, so an invalid or out-of-lease statement never reaches

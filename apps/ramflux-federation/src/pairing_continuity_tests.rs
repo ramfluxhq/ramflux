@@ -929,7 +929,7 @@ fn enroll_secondary(
     let current = verify_record(genesis, now, None, None)?;
     let signing = encode_base64url(secondary.signing_key.verifying_key().to_bytes());
     let agreement_public = encode_base64url(agreement.public);
-    let cert = primary.certify_branch(BranchCertificate {
+    let body = BranchCertificate {
         schema: ramflux_protocol::domain::CUSTODY_BRANCH_CERTIFICATE.into(),
         version: 1,
         account_anchor: genesis.body.account_anchor.clone(),
@@ -946,8 +946,10 @@ fn enroll_secondary(
         not_before: now,
         expires_at: now.saturating_add(MAX_BRANCH_LEASE_SECONDS),
         cert_id: encode_base64url([seed.wrapping_add(8); 32]),
-    })?;
-    Ok(primary.enroll_device(&current, cert, now.saturating_add(1))?)
+    };
+    let message_layer = ramflux_crypto::custody::sign_enrollment_layer(secondary, &body)?;
+    let cert = primary.certify_branch(body)?;
+    Ok(primary.enroll_device(&current, cert, message_layer, now.saturating_add(1))?)
 }
 
 pub(super) fn native_issue_refused_when_disabled() -> TestResult {
