@@ -417,3 +417,6 @@ crates/ramflux-sdk/src/bus/username_directory/reach.rs | prepare_set | 1 | E | e
 crates/ramflux-sdk/src/c_abi/v2/native_error.rs | details | 1 | E | excluded=typed public reach-conflict error projection after authenticated SDK validation; no signed message Envelope/Ack/Nack ingress
 crates/ramflux-sdk/src/bus/attachment_plane.rs | upload_status | 1 | A | strict=parse_i_json; admission=A ingress boundary: attachment upload-status reply from the home relay (untrusted peer bytes)
 crates/ramflux-sdk/src/client/layer_renewal.rs | receive_own_layer_renewal | 1 | A | admission=strict parse_i_json, then canonical re-encode equality, then verify_enrollment_layer against the current roster certificate and endorsed sequence before any write
+crates/ramflux-sdk/src/attachment_send/handles.rs | export | 1 | E | excluded=local bus request body; SDK authorizes the account before any attachment admission
+crates/ramflux-sdk/src/attachment_send/import_journal.rs | decode | 1 | E | excluded=account-local import record in the encrypted account DB; not signed Envelope/Ack/Nack ingress
+crates/ramflux-sdk/src/attachment_send/import_journal.rs | load_binding | 1 | E | excluded=account-local operation binding in the encrypted account DB; not signed Envelope/Ack/Nack ingress
