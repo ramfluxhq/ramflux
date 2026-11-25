@@ -7,6 +7,7 @@
 //! authenticated own-device Control. The primary authenticates it against the current roster
 //! and stores one pending request for the layer-publish courier. Receipt never publishes.
 use crate::SdkError;
+use crate::bus::couriers::layer_publish::renewal_due;
 use ramflux_crypto::RootQualifiedDeviceRef;
 use ramflux_protocol::DeviceSetStatus;
 use ramflux_protocol::canonical_json_bytes;
@@ -119,6 +120,118 @@ impl super::RamfluxClient {
                 &PendingLayerRenewal { declaration_sequence: sequence, digest, signed },
             )?;
             Ok(())
+        })
+    }
+}
+
+/// Own-copy identity domain of one renewal Control (the complete body is hashed).
+const RENEWAL_DOMAIN: &str = "ramflux.sdk.own_layer_renewal.v1";
+/// Longest validity one declaration may carry (the verifiers' bound).
+const RENEWAL_MAX_VALIDITY: u64 = ramflux_protocol::custody::MAX_LAYER_DECLARATION_VALIDITY_SECONDS;
+
+/// Actor-state key of the latest renewal this secondary issued for one exact device epoch.
+pub(crate) fn issued_key(device: &DeviceRef) -> String {
+    format!(
+        "layer-renewal/issued/{}/{}/{}",
+        device.account_anchor, device.device_id, device.device_epoch
+    )
+}
+
+impl super::RamfluxClient {
+    /// Secondary send half. Signs a fresh branch declaration when the endorsed one is absent,
+    /// expired, capability-stale or half elapsed, unless a newer issued one is still in flight.
+    /// The issuance high-water and the own-device Control outbox row commit together.
+    /// # Errors
+    /// Typed refusal when the branch cannot be used or the certificate lease cannot carry a
+    /// declaration. Primary devices return without work.
+    pub(crate) fn stage_own_layer_renewal(&self, now: u64) -> Result<(), SdkError> {
+        let born = self.born_v3_account.as_deref().ok_or(SdkError::NetworkingPending)?;
+        let record = born.record();
+        let primary = &record.body.master_certificate.body.primary_device_ref;
+        let local = born.local_device_id()?;
+        if primary.device_id == local {
+            return Ok(());
+        }
+        let row = record
+            .body
+            .devices
+            .iter()
+            .find(|device| device.device_id == local && device.status == DeviceSetStatus::Active)
+            .ok_or(SdkError::NetworkingPending)?;
+        let certificate = row.branch_certificate.as_ref().ok_or(SdkError::NetworkingPending)?;
+        let device = DeviceRef {
+            account_anchor: record.body.account_anchor.clone(),
+            device_id: local.to_owned(),
+            device_epoch: certificate.body.device_epoch,
+        };
+        let db = self.account_db()?;
+        let key = issued_key(&device);
+        let issued = db.load_actor_state::<PendingLayerRenewal>(&key)?;
+        let endorsed_sequence =
+            row.message_layer.as_ref().map_or(0, |signed| signed.declaration.declaration_sequence);
+        if let Some(issued) = &issued
+            && issued.declaration_sequence > endorsed_sequence
+            && !renewal_due(Some(&issued.signed), now)
+        {
+            return Ok(());
+        }
+        if !renewal_due(row.message_layer.as_ref(), now) {
+            return Ok(());
+        }
+        let sequence = issued
+            .as_ref()
+            .map_or(0, |issued| issued.declaration_sequence)
+            .max(endorsed_sequence)
+            .checked_add(1)
+            .ok_or(SdkError::NetworkingPending)?;
+        let expires_at = now.saturating_add(RENEWAL_MAX_VALIDITY).min(certificate.body.expires_at);
+        if now < certificate.body.not_before || expires_at <= now {
+            return Err(refused("own layer renewal has no usable certificate lease"));
+        }
+        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let signed = crate::custody::layer_declaration::candidate(
+            branch,
+            device.clone(),
+            ramflux_protocol::message::registry::COMPILED_LAYER,
+            sequence,
+            now,
+            expires_at,
+        )?;
+        ramflux_crypto::custody::verify_enrollment_layer(certificate, &signed, now)
+            .map_err(|_| refused("own layer renewal declaration rejected"))?;
+        let bytes = canonical_json_bytes(&signed)?;
+        let renewal = g::OwnLayerRenewal {
+            primary: Some(g::QualifiedDevice {
+                account_anchor: primary.account_anchor.clone(),
+                device_id: primary.device_id.clone(),
+                device_epoch: primary.device_epoch,
+            }),
+            signed_declaration_json: bytes.clone(),
+        };
+        let control = crate::client::generated_control::control_from_payload(
+            g::control::Payload::OwnLayerRenewal(renewal),
+        )?;
+        let body = prost::Message::encode_to_vec(&control);
+        let id = ramflux_protocol::hash_base64url(RENEWAL_DOMAIN, &body);
+        let pending = PendingLayerRenewal {
+            declaration_sequence: sequence,
+            digest: *blake3::hash(&bytes).as_bytes(),
+            signed,
+        };
+        db.join_write(|| {
+            db.persist_actor_state(&key, &pending)?;
+            crate::bus::own_device_copy::stage(
+                self,
+                crate::client::own_device_copy::OwnMessageInput {
+                    payload_kind: crate::client::own_device_copy::OwnPayloadKind::Control,
+                    id: &id,
+                    created_at: i64::try_from(now).unwrap_or(i64::MAX),
+                    conversation: "own-layer-renewal",
+                    group: None,
+                    body: &body,
+                },
+                None,
+            )
         })
     }
 }
