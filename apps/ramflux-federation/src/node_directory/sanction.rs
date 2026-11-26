@@ -4,7 +4,9 @@
 //! Sanction checks at the node's peer boundaries: outbound pin/forward, inbound envelopes and
 //! installation of a pin. The decision reads sticky state (section 3a point 4), so an expired
 //! snapshot keeps applying what it taught. Under `refuse` a sanctioned peer or a peer that breaks
-//! the domain binding is refused; under `observe` it is only logged. A sanction never removes a pin.
+//! the domain binding is refused; under `observe` it is only logged. A suspension keeps the pin. A
+//! pin whose key the directory revoked is dropped (`release_revoked_pin`); the revoked key stays
+//! refused for good and the domain can pin again only a key equal to the directory's live key.
 
 use ramflux_node_core::{NodeCoreError, NodeDirectorySanctionMode};
 
@@ -44,4 +46,26 @@ pub(crate) fn check_peer(
             })
         }
     }
+}
+
+/// Drops the pin of `domain` when it holds a key the directory has revoked (section 3: revoked
+/// drops the pin). Does nothing under `observe`, for suspended keys or when no pin exists.
+pub(crate) fn release_revoked_pin(
+    domain: &str,
+    state: &crate::state::SharedFederationTrustState,
+    store: &ramflux_node_core::FederationRedbStore,
+) -> Result<(), NodeCoreError> {
+    if !matches!(sanction_mode(), Some(NodeDirectorySanctionMode::Refuse)) {
+        return Ok(());
+    }
+    let Some(key) = state.snapshot()?.pinned_node_public_key(domain) else { return Ok(()) };
+    if !super::key_revoked(&key) {
+        return Ok(());
+    }
+    let dropped =
+        state.update_and_save(store, |trust| Ok(trust.drop_discovery_pin(domain, &key)))?;
+    if dropped {
+        tracing::warn!(target: LOG_TARGET, %domain, "pin dropped: pinned key revoked by directory");
+    }
+    Ok(())
 }
