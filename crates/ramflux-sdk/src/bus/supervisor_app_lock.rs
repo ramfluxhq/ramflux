@@ -208,6 +208,10 @@ impl Supervisor {
         let armed = self.app_fences.epoch(&account_id)?.deadline;
         let enabled = required_bool(&request.body)?;
         let timeout_ms = required_timeout(&request.body)?;
+        let stored = self.index.app_lock_policy(&account_id)?;
+        if stored.enabled && (!enabled || timeout_ms > stored.timeout_ms) {
+            self.reauthenticate_app_lock(request, connection, &account_id).await?;
+        }
         let policy = if enabled {
             self.write_app_lock(account_id.clone(), true, timeout_ms, None).await?
         } else {
@@ -226,6 +230,52 @@ impl Supervisor {
         }
         self.emit_app_lock_change(request, &account_id)?;
         Ok(super::reply(self.app_lock_body(&policy, &account_id)?))
+    }
+    /// Weakening the lock needs the account code, asked through the connection's private
+    /// credential callback and checked by the ordinary unlock verification, so wrong codes
+    /// share the unlock attempt counter. The code never enters a JSON frame.
+    async fn reauthenticate_app_lock(
+        &self,
+        request: &LocalBusFrame,
+        connection: &LocalBusConnectionState,
+        account_id: &str,
+    ) -> Result<(), SdkError> {
+        if !connection.credential_prompts
+            && !self.config.credential_callback.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(reauth_required());
+        }
+        let Some(call) =
+            super::super::credentials::reauth_call(&self.config.data_root, request, connection)?
+        else {
+            return Err(reauth_required());
+        };
+        let secret = match super::super::credentials::unlock_secret(
+            self.config.data_root.clone(),
+            account_id.to_owned(),
+        )
+        .await
+        {
+            Ok(secret) => secret,
+            Err(SdkError::PairingCode("VaultUnavailable")) => return Err(reauth_required()),
+            Err(error) => return Err(error),
+        };
+        call.require_live()?;
+        let actor = self.accounts.borrow().get(account_id).cloned().ok_or_else(unauthorized)?;
+        match actor
+            .unlock_native(super::super::native_account::NativeUnlockSecret::Code(secret), None)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(SdkError::Storage(StorageError::Integrity(
+                "wrong passphrase or damaged local key",
+            ))) => Err(SdkError::LocalBusRefused {
+                code: "wrong_passphrase".to_owned(),
+                message: "the account code is wrong".to_owned(),
+                body: Box::new(serde_json::json!({"reason_code": "wrong_passphrase"})),
+            }),
+            Err(error) => Err(error),
+        }
     }
     pub(in crate::bus) fn attach_app_control(&self, connection: u64, id: &str) {
         if !self.accounts.borrow().contains_key(id) && self.index.account(id).is_err() {
@@ -406,6 +456,14 @@ fn unauthorized() -> SdkError {
         code: "app_lock_unauthorized".to_owned(),
         message: "app lock policy requires the unlocked account".to_owned(),
         body: Box::new(serde_json::json!({"reason_code": "app_lock_unauthorized"})),
+    }
+}
+
+fn reauth_required() -> SdkError {
+    SdkError::LocalBusRefused {
+        code: "reauth_required".to_owned(),
+        message: "weakening the app lock needs the account code".to_owned(),
+        body: Box::new(serde_json::json!({"reason_code": "reauth_required"})),
     }
 }
 

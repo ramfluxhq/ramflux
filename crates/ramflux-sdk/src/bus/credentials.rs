@@ -121,6 +121,25 @@ pub(super) fn call(
     let account = request.account_id.as_deref().ok_or(SdkError::PairingField("account_id"))?;
     Ok(Some(bind_call(root, account, request.request_id.clone(), kind, channel.clone())?))
 }
+/// Binds the connection's private credential channel for an app-lock weakening. `None` when
+/// the connection has no credential channel. The caller decides that a code is needed first.
+pub(super) fn reauth_call(
+    root: &Path,
+    request: &LocalBusFrame,
+    connection: &LocalBusConnectionState,
+) -> Result<Option<PrivateCredentialCall>, SdkError> {
+    let Some(channel) = &connection.credential_channel else {
+        return Ok(None);
+    };
+    let account = request.account_id.as_deref().ok_or(SdkError::PairingField("account_id"))?;
+    Ok(Some(bind_call(
+        root,
+        account,
+        request.request_id.clone(),
+        PrivateCredentialCallKind::Reauth,
+        channel.clone(),
+    )?))
+}
 /// Acquire the private ordinary-unlock input off the account actor thread. This never
 /// constructs a JSON request containing the result.
 pub(super) async fn unlock_secret(
