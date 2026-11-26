@@ -1706,7 +1706,10 @@ async fn k_b1_turn_context_and_agent_checks_with_targeting_off() {
             .set_targeted_agents(&caps, false, &switch.revision)
             .await
             .expect("K-B1-12: targeting off");
-        assert!(off.configured && !off.effective && off.restart_required, "K-B1-12: {off:?}");
+        assert!(
+            !off.configured && off.effective && off.restart_required,
+            "K-B1-12: configured is the new value, effective keeps the old one until restart: {off:?}"
+        );
         daemon.stop();
         daemon.start();
         daemon.wait_ready().await;
