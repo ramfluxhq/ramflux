@@ -244,10 +244,10 @@ fn collapse_for_class(
             Ok(Some(key))
         }
         (WakeClass::Message, None) => Err(ProviderBuildError::MissingCollapseKey),
-        (WakeClass::CallWake, None) => Ok(None),
-        (WakeClass::CallWake, Some(_)) => Err(ProviderBuildError::UnexpectedCollapseKey),
-        (WakeClass::Test, None) => Ok(None),
-        (WakeClass::Test, Some(_)) => Err(ProviderBuildError::UnexpectedCollapseKey),
+        (WakeClass::CallWake | WakeClass::Test, None) => Ok(None),
+        (WakeClass::CallWake | WakeClass::Test, Some(_)) => {
+            Err(ProviderBuildError::UnexpectedCollapseKey)
+        }
     }
 }
 
