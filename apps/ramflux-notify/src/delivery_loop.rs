@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use ramflux_node_core::NotifyQueueEntry;
 
+use super::central_handoff::CentralDue;
 use super::{ConcurrentProviderPushWorkerPool, note_provider_send};
 
 enum AfterClaim {
@@ -76,14 +77,15 @@ fn worker_loop(
 ) {
     let mut seen = store.delivery_generation();
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
+        let clear_at = clear_pass(store);
         match notify_async_claim_entries(store, in_flight, scan_limit) {
             Ok(entries) if entries.is_empty() => {
-                seen = store.wait_for_delivery(seen, None);
+                seen = store.wait_for_delivery(seen, clear_at);
             }
             Ok(entries) => match deliver_claimed(store, provider_workers, in_flight, entries) {
                 AfterClaim::Retry => {}
                 AfterClaim::Idle(deadline) => {
-                    seen = store.wait_for_delivery(seen, deadline);
+                    seen = store.wait_for_delivery(seen, earliest_instant(deadline, clear_at));
                 }
             },
             Err(error) => {
@@ -134,6 +136,50 @@ pub(crate) fn notify_async_claim_entries(
     Ok(claimed)
 }
 
+/// Node-originated clears (`x`): central mode sends them; direct mode drops and counts them
+/// (`x_direct_unsupported`). Returns when the centre asked for a later look.
+/// Single-flight guard: every delivery worker wakes on the same change, and a clear must be
+/// handed to the centre once, so only one worker runs the clear pass at a time.
+static CLEAR_PASS: Mutex<()> = Mutex::new(());
+
+fn clear_pass(store: &Arc<ramflux_node_core::NotifyRedbStore>) -> Option<Instant> {
+    let Ok(_pass) = CLEAR_PASS.try_lock() else {
+        return None;
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+    if let Some(central) = super::central_handoff::active() {
+        match central.deliver_clears(store, now_ms) {
+            Ok(CentralDue::Retry(at)) => Some(due_instant(at)),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(%error, "central clear delivery failed");
+                Some(Instant::now() + Duration::from_secs(2))
+            }
+        }
+    } else {
+        match store.drop_direct_policy_clears(now_ms) {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(
+                target: "ramflux_notify_policy",
+                event = "x_direct_unsupported",
+                count,
+                "node clears dropped in direct mode"
+            ),
+            Err(error) => tracing::warn!(%error, "direct clear drop failed"),
+        }
+        None
+    }
+}
+
+fn earliest_instant(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (one, other) => one.or(other),
+    }
+}
+
 fn release_entry(in_flight: &Arc<Mutex<BTreeSet<String>>>, queue_id: &str) {
     match in_flight.lock() {
         Ok(mut guard) => {
@@ -153,12 +199,28 @@ fn deliver_claimed(
     let mut earliest: Option<u64> = None;
     for entry in entries {
         let queue_id = entry.queue_id.clone();
-        match deliver_entry(store, provider_workers, &entry) {
-            Ok(true) => retry_now = true,
-            Ok(false) => earliest = earlier_due(store, &entry, earliest, &mut retry_now),
-            Err(error) => {
-                tracing::warn!(queue_id = queue_id, %error, "notify async delivery failed");
-                retry_now = true;
+        if let Some(central) = super::central_handoff::active() {
+            // Central mode: the path says when to look again (H3); no direct due time applies.
+            match central.deliver(store, &entry) {
+                Ok(CentralDue::Changed) => retry_now = true,
+                Ok(CentralDue::Retry(at)) => {
+                    earliest = Some(earliest.map_or(at, |current| current.min(at)));
+                }
+                Ok(CentralDue::Idle) => {}
+                Err(error) => {
+                    tracing::warn!(queue_id = queue_id, %error, "central delivery failed");
+                    let at = ramflux_node_core::now_unix_seconds().saturating_add(2);
+                    earliest = Some(earliest.map_or(at, |current| current.min(at)));
+                }
+            }
+        } else {
+            match deliver_entry(store, provider_workers, &entry) {
+                Ok(true) => retry_now = true,
+                Ok(false) => earliest = earlier_due(store, &entry, earliest, &mut retry_now),
+                Err(error) => {
+                    tracing::warn!(queue_id = queue_id, %error, "notify async delivery failed");
+                    retry_now = true;
+                }
             }
         }
         release_entry(in_flight, &queue_id);

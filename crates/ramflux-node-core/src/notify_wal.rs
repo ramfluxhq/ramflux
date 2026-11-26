@@ -57,6 +57,8 @@ pub struct NotifyWalPendingCounts {
     pub raw_wake_count: usize,
 }
 
+// The queue entry is the hot variant; the size gap is accepted (same as session_push_frames).
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum NotifyWalPayload {
     QueueEntry(NotifyQueueEntry),
@@ -227,6 +229,7 @@ impl TryFrom<StoredNotifyWalQueueEntry> for NotifyQueueEntry {
             attempt_count: entry.attempt_count,
             status: entry.status,
             dnd_active: entry.dnd_active,
+            not_before_ms: 0,
         })
     }
 }
@@ -1741,6 +1744,7 @@ mod tests {
             attempt_count: 0,
             status: NotifyQueueStatus::Pending,
             dnd_active: false,
+            not_before_ms: 0,
         }
     }
 

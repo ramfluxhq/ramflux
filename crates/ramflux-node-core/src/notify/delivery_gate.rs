@@ -86,6 +86,11 @@ impl NotifyRedbStore {
         let until = open
             .filter(|open| *open > now)
             .map_or(entry.expires_at, |open| open.min(entry.expires_at));
+        // A held wake is looked at again when its hold ends (or right away, if it already did).
+        let until = match self.held_until_ms(&entry.queue_id)? {
+            Some(held_ms) => until.min(held_ms.div_ceil(1_000).max(now + 1)),
+            None => until,
+        };
         Ok(Some(until))
     }
 

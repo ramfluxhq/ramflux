@@ -165,7 +165,7 @@ fn revocation_sweep_batches_authority_lookups() -> Result<(), Box<dyn std::error
         let mut open = gateway_open_frame("phone", "stream");
         open.target_delivery_id = format!("batched-{index:03}");
         let mut route = notify_webpush_route(&open.target_delivery_id, "web");
-        route.registered_at = now;
+        route.registered_at_ms = now;
         route.expires_at = now + PUSH_ROUTE_TTL_SECONDS;
         store.register_authenticated_push_route(&gateway_registered_key(&open)?, &route)?;
     }

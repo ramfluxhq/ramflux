@@ -17,6 +17,7 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use super::frame;
 use super::state::{apply_ok, now_ms};
+use ramflux_node_core::push_policy_stats::{SyncStats, read_pending_stats, write_stats_ack};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_STREAMS: usize = 4;
@@ -419,6 +420,7 @@ fn body_json(
     shared: &PushShared,
     kind: &str,
     wakes: Option<&[HandoffWake]>,
+    policy_stats: Option<SyncStats>,
 ) -> Result<Vec<u8>, String> {
     let state = shared.snapshot();
     let mut body = json!({
@@ -436,12 +438,26 @@ fn body_json(
             object.insert("wakes".to_owned(), wakes);
         }
     }
+    if let Some(policy_stats) = policy_stats {
+        let value = serde_json::to_value(policy_stats).map_err(|error| error.to_string())?;
+        if let Some(object) = body.as_object_mut() {
+            object.insert("stats".to_owned(), value);
+        }
+    }
     serde_json::to_vec(&body).map_err(|error| error.to_string())
 }
 
 /// Sends one `sync` now. Returns the wait before the next sync and whether the session is stopped.
 pub(crate) async fn sync_once(shared: &PushShared) -> Duration {
-    let body = match body_json(shared, "sync", None) {
+    // `sync.stats`: the newest completed hour notify published (A7.2). Acked only after `ok`.
+    let stats = match read_pending_stats(&shared.state_path) {
+        Ok(stats) => stats,
+        Err(error) => {
+            tracing::warn!(%error, "policy stats not readable; sync without stats");
+            None
+        }
+    };
+    let body = match body_json(shared, "sync", None, stats) {
         Ok(body) => body,
         Err(error) => {
             tracing::error!(%error, "push sync body");
@@ -459,6 +475,11 @@ pub(crate) async fn sync_once(shared: &PushShared) -> Duration {
         Exchange::Reply(reply) => {
             if reply.get("status").and_then(Value::as_str) == Some("ok") {
                 shared.apply_reply(&reply);
+                if let Some(stats) = stats
+                    && let Err(error) = write_stats_ack(&shared.state_path, stats.from)
+                {
+                    tracing::warn!(%error, "policy stats ack not written");
+                }
                 if let Ok(mut until) = shared.stopped_until.lock() {
                     *until = None;
                 }
@@ -543,7 +564,7 @@ pub(crate) async fn send_wakes(shared: &PushShared, wakes: &[HandoffWake]) -> Ha
     let mut results = Vec::with_capacity(wakes.len());
     let mut pending: Vec<&[HandoffWake]> = vec![wakes];
     while let Some(chunk) = pending.pop() {
-        let body = match body_json(shared, "wake", Some(chunk)) {
+        let body = match body_json(shared, "wake", Some(chunk), None) {
             Ok(body) => body,
             Err(error) => {
                 tracing::error!(%error, "push wake body");

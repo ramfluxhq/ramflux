@@ -1089,6 +1089,32 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
                 ramflux_node_core::GatewayClientFrame::Nack { nack } => {
                     handle_gateway_nack(&send, &context, &runtime, &nack).await?;
                 }
+                ramflux_node_core::GatewayClientFrame::DevicePolicy { device_class, muted } => {
+                    if let Err(error) = crate::device_policy::handle_device_policy(
+                        &context,
+                        &runtime,
+                        device_class,
+                        muted,
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "device policy not recorded");
+                    }
+                }
+                ramflux_node_core::GatewayClientFrame::Activity {} => {
+                    if let Err(error) =
+                        crate::device_policy::handle_activity(&context, &runtime).await
+                    {
+                        tracing::warn!(%error, "device activity not recorded");
+                    }
+                }
+                ramflux_node_core::GatewayClientFrame::NotificationsCleared {} => {
+                    if let Err(error) =
+                        crate::device_policy::handle_notifications_cleared(&context, &runtime).await
+                    {
+                        tracing::warn!(%error, "notifications cleared not recorded");
+                    }
+                }
                 ramflux_node_core::GatewayClientFrame::Heartbeat { now } => {
                     write_gateway_handle(
                         &send,

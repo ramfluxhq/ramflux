@@ -19,6 +19,22 @@ pub(crate) enum DeviceAction {
     Refresh(DeviceRefresh),
     List(AccountSelector),
     Sync(DeviceSyncCommand),
+    /// Node-local push policy of this device: class and mute (CENTRAL K9).
+    PushPolicy(DevicePushPolicy),
+    /// "User active now" (CENTRAL K10).
+    Activity(AccountSelector),
+    /// Notifications on this device are read (CENTRAL K12 in-band clear).
+    NotificationsCleared(AccountSelector),
+}
+
+#[derive(Args)]
+pub(crate) struct DevicePushPolicy {
+    #[arg(allow_hyphen_values = true, long)]
+    pub(crate) account: String,
+    #[arg(long, value_parser = ["phone", "tablet", "desktop", "terminal"])]
+    pub(crate) class: String,
+    #[arg(long, action = clap::ArgAction::Set, value_parser = clap::value_parser!(bool))]
+    pub(crate) muted: bool,
 }
 
 #[derive(Args)]

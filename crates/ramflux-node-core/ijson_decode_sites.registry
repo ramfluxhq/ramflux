@@ -39,6 +39,7 @@ crates/ramflux-node-core/src/notify.rs | load_state_with_incremental_flag | 1 | 
 crates/ramflux-node-core/src/notify.rs | parse_raw_wake_entry | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/notify.rs | signed_wake_from_raw | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/notify.rs | try_from | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/notify/policy_store.rs | decode | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-node-core/src/notify/route_authority.rs | load_marks | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-node-core/src/notify/route_authority.rs | open_binding | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-node-core/src/notify/routes.rs | open | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -52,6 +53,8 @@ crates/ramflux-node-core/src/notify/wake_admission.rs | retire_call | 1 | E | ex
 crates/ramflux-node-core/src/notify_wal.rs | raw_body_is_current_wake | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-node-core/src/notify_wal.rs | try_from | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/pairing_relay/full_resume/forward.rs | decode | 1 | A | strict=parse_i_json_secret; admission=bounded confidential federation admission/permit bytes before native token scope and one-use reservation
+crates/ramflux-node-core/src/push_policy_stats.rs | read_pending_stats | 1 | E | excluded=local state file written by this node, not an ingress admission
+crates/ramflux-node-core/src/push_policy_stats.rs | take_stats_ack | 1 | E | excluded=local ack file written by this node, not an ingress admission
 crates/ramflux-node-core/src/redb_store.rs | load_snapshot | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/relay/attachment/backend/mod.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/relay/attachment/grants/fixture.rs | set_generations | 1 | E | excluded=fixture generation data; not a received signed-envelope ingress

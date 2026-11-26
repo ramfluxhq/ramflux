@@ -5,7 +5,9 @@
 
 mod provider_issuance;
 mod provider_outcome;
+mod push_policy_source;
 use provider_issuance::SendBoundary;
+mod central_handoff;
 mod delivery_loop;
 mod provider_payload;
 mod push_registration;
@@ -75,6 +77,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         authority.configure_reader(&mut store);
         push_registration::configure(&mut store, &config)?;
         let store = Arc::new(store);
+        push_policy_source::install(&store)?;
         log_notify_wal_recovery(&store);
         store.drop_legacy_pending_wakes()?;
         retention::start(Arc::clone(&store))?;
@@ -91,6 +94,9 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         }
         let async_accept = notify_async_accept_enabled();
         if async_accept {
+            central_handoff::configure(ramflux_node_core::load_node_push_config(
+                std::env::args().skip(1),
+            )?)?;
             delivery_loop::start(&store)?;
         }
         let store_gate = Arc::new(Mutex::new(()));
@@ -651,6 +657,19 @@ fn handle_notify_mesh_quic_request(
                 })?,
             })
         }
+        (
+            "POST",
+            path @ ("/s13/notify/device-policy"
+            | "/s13/notify/activity"
+            | "/s13/notify/clear"
+            | "/s13/notify/clear-plan"),
+        ) => {
+            let body = serde_json::to_vec(&request.body).map_err(|source| {
+                ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+            })?;
+            let value = s13_policy_value(&ingress.store, &ingress.store_gate, path, &body)?;
+            Ok(ramflux_transport::GatewayQuicResponse { status: 200, body: value })
+        }
         _ => Ok(ramflux_transport::GatewayQuicResponse {
             status: 404,
             body: serde_json::json!({ "error": "not found" }),
@@ -820,6 +839,22 @@ fn handle_itest_request(
                 keep_alive,
             )?;
         }
+        (
+            "POST",
+            "/s13/notify/device-policy"
+            | "/s13/notify/activity"
+            | "/s13/notify/clear"
+            | "/s13/notify/clear-plan",
+        ) => {
+            handle_s13_policy(
+                stream,
+                &ingress.store,
+                &ingress.store_gate,
+                request.path.as_str(),
+                &request.body,
+                keep_alive,
+            )?;
+        }
         ("POST", "/s13/notify/wake") => {
             let mut body: S13WakeRequest =
                 ramflux_protocol::parse_i_json(&request.body).map_err(|source| {
@@ -871,6 +906,7 @@ enum AsyncItestHttpRoute {
     S13NotifyPushRoute,
     S13NotifyProviderCredential,
     S13NotifyWake,
+    S13NotifyPolicy(String),
     S13NotifyProviderAttempts(String),
     Mvp10NotifyDeliver,
     Mvp10NotifyState,
@@ -1068,6 +1104,21 @@ async fn handle_itest_request_value_async(
             };
             async_json_response("200 OK", &response, keep_alive)
         }
+        AsyncItestHttpRoute::S13NotifyPolicy(path) => {
+            let blocking_ingress = Arc::clone(&ingress);
+            let body = request.body;
+            let value = tokio::task::spawn_blocking(move || {
+                s13_policy_value(
+                    &blocking_ingress.store,
+                    &blocking_ingress.store_gate,
+                    &path,
+                    &body,
+                )
+            })
+            .await
+            .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))??;
+            async_json_response("200 OK", &value, keep_alive)
+        }
         AsyncItestHttpRoute::S13NotifyProviderAttempts(queue_id) => {
             let blocking_ingress = Arc::clone(&ingress);
             let attempts = tokio::task::spawn_blocking(move || {
@@ -1110,6 +1161,13 @@ fn async_itest_route(method: &str, path: &str) -> AsyncItestHttpRoute {
             AsyncItestHttpRoute::S13NotifyProviderCredential
         }
         ("POST", "/s13/notify/wake") => AsyncItestHttpRoute::S13NotifyWake,
+        (
+            "POST",
+            path @ ("/s13/notify/device-policy"
+            | "/s13/notify/activity"
+            | "/s13/notify/clear"
+            | "/s13/notify/clear-plan"),
+        ) => AsyncItestHttpRoute::S13NotifyPolicy(path.to_owned()),
         ("POST", "/mvp10/notify/deliver") => AsyncItestHttpRoute::Mvp10NotifyDeliver,
         ("GET", "/mvp10/notify/state") => AsyncItestHttpRoute::Mvp10NotifyState,
         ("GET", value) if value.starts_with("/s13/notify/provider-attempts/") => {
@@ -3454,6 +3512,7 @@ fn no_push_response(request: &S13WakeRequest) -> S13WakeResponse {
             attempt_count: 0,
             status: ramflux_node_core::NotifyQueueStatus::DroppedExpired,
             dnd_active: request.dnd_active.unwrap_or(false),
+            not_before_ms: 0,
         },
         attempts: Vec::new(),
     }
@@ -3495,3 +3554,139 @@ mod webpush_tests;
 mod native_provider_tests;
 #[cfg(test)]
 mod permit_tests;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct S13DevicePolicyRequest {
+    device_delivery_id: String,
+    account_group: String,
+    device_class: ramflux_node_core::DeviceClass,
+    muted: bool,
+    at_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct S13ClearPlanRequest {
+    device_delivery_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct S13ActivityRequest {
+    device_delivery_id: String,
+    at_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct S13ClearRequest {
+    device_delivery_id: String,
+    /// Carried for the contract; the group is read from the device's own policy record.
+    #[serde(default)]
+    account_group: Option<String>,
+    at_ms: u64,
+    live_cleared: Vec<String>,
+}
+
+/// Mesh endpoints for the node push policy (CENTRAL P2b K9-K12). The gateway posts what the
+/// authenticated device session reported; the state stays in this node.
+fn handle_s13_policy(
+    stream: &mut std::net::TcpStream,
+    store: &ramflux_node_core::NotifyRedbStore,
+    store_gate: &Arc<Mutex<()>>,
+    path: &str,
+    body: &[u8],
+    keep_alive: bool,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let response = s13_policy_value(store, store_gate, path, body)?;
+    ramflux_node_core::write_itest_json_response_with_connection(
+        stream, "200 OK", &response, keep_alive,
+    )
+}
+
+/// Applies one node-local push policy request and returns its JSON reply; shared by the
+/// blocking and the async itest HTTP surfaces.
+fn s13_policy_value(
+    store: &ramflux_node_core::NotifyRedbStore,
+    store_gate: &Arc<Mutex<()>>,
+    path: &str,
+    body: &[u8],
+) -> Result<serde_json::Value, ramflux_node_core::NodeCoreError> {
+    let parse_error =
+        |source: serde_json::Error| ramflux_node_core::NodeCoreError::ItestJson(source.to_string());
+    let response = match path {
+        "/s13/notify/device-policy" => {
+            let request: S13DevicePolicyRequest =
+                serde_json::from_slice(body).map_err(parse_error)?;
+            let _guard = lock_notify_store(store_gate)?;
+            store.set_device_policy(
+                &request.device_delivery_id,
+                &request.account_group,
+                request.device_class,
+                request.muted,
+            )?;
+            tracing::info!(
+                target: "ramflux_notify_policy",
+                event = "policy.device",
+                muted = request.muted,
+                at_ms = request.at_ms,
+                "device policy recorded"
+            );
+            serde_json::json!({"ok": true})
+        }
+        "/s13/notify/clear-plan" => {
+            let request: S13ClearPlanRequest = serde_json::from_slice(body).map_err(parse_error)?;
+            match store.policy_group_peers(&request.device_delivery_id)? {
+                Some((account_group, peers)) => serde_json::json!({
+                    "account_group": account_group,
+                    "peers": peers
+                        .into_iter()
+                        .map(|(device_delivery_id, muted)| serde_json::json!({
+                            "device_delivery_id": device_delivery_id,
+                            "muted": muted,
+                        }))
+                        .collect::<Vec<_>>(),
+                }),
+                None => serde_json::Value::Null,
+            }
+        }
+        "/s13/notify/activity" => {
+            let request: S13ActivityRequest = serde_json::from_slice(body).map_err(parse_error)?;
+            store.note_device_activity(&request.device_delivery_id, request.at_ms);
+            serde_json::json!({"ok": true})
+        }
+        _ => {
+            let request: S13ClearRequest = serde_json::from_slice(body).map_err(parse_error)?;
+            let _guard = lock_notify_store(store_gate)?;
+            let outcome =
+                store.apply_policy_clear(&request.device_delivery_id, &request.live_cleared)?;
+            if outcome.held_dropped > 0 {
+                tracing::info!(
+                    target: "ramflux_notify_policy",
+                    event = "policy.held_dropped",
+                    held_dropped = outcome.held_dropped,
+                    "held wakes dropped by read"
+                );
+            }
+            tracing::info!(
+                target: "ramflux_notify_policy",
+                event = "policy.clear",
+                held_dropped = outcome.held_dropped,
+                clears_pending = outcome.clears_pending,
+                clears_conn = outcome.clears_conn,
+                muted = outcome.muted,
+                account_group_supplied = request.account_group.is_some(),
+                at_ms = request.at_ms,
+                "in-band clear applied"
+            );
+            serde_json::json!({
+                "held_dropped": outcome.held_dropped,
+                "clears_pending": outcome.clears_pending,
+                "clears_conn": outcome.clears_conn,
+                "muted": outcome.muted,
+            })
+        }
+    };
+    Ok(response)
+}

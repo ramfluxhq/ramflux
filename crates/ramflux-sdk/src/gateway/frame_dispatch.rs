@@ -29,6 +29,7 @@ pub(crate) enum FrameKind {
     Heartbeat,
     Drain,
     InBandWake,
+    NotificationsCleared,
     PushKeyset,
     Ephemeral,
     EphemeralResult,
@@ -75,6 +76,7 @@ impl FrameKind {
             GatewayServerFrame::Heartbeat { .. } => Self::Heartbeat,
             GatewayServerFrame::Drain { .. } => Self::Drain,
             GatewayServerFrame::InBandWake { .. } => Self::InBandWake,
+            GatewayServerFrame::NotificationsCleared {} => Self::NotificationsCleared,
             GatewayServerFrame::PushKeyset { .. } => Self::PushKeyset,
             GatewayServerFrame::Ephemeral { .. } => Self::Ephemeral,
             GatewayServerFrame::EphemeralResult { .. } => Self::EphemeralResult,
@@ -99,6 +101,7 @@ impl FrameKind {
             }
             Self::Deliver
             | Self::InBandWake
+            | Self::NotificationsCleared
             | Self::PushKeyset
             | Self::Resync
             | Self::Ephemeral

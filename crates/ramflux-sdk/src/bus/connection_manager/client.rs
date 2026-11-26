@@ -5,6 +5,7 @@
 
 use super::{ConnectionHandle, SessionMetadata};
 use crate::gateway::access::{GatewayCallFuture, GatewayPushAccess, GatewaySessionAccess};
+use crate::gateway::protocol::GatewayDeviceClass;
 use crate::prelude::*;
 use tokio::time::Instant;
 
@@ -302,6 +303,33 @@ impl GatewaySessionAccess for SessionClient {
     ) -> GatewayCallFuture<'_, Option<u64>> {
         Box::pin(self.handle.call_generation(
             move |engine| Box::pin(async move { engine.set_push_route(route).await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
+    fn send_device_policy(
+        &mut self,
+        device_class: GatewayDeviceClass,
+        muted: bool,
+    ) -> GatewayCallFuture<'_, ()> {
+        Box::pin(self.handle.call_generation(
+            move |engine| {
+                Box::pin(async move { engine.send_device_policy(device_class, muted).await })
+            },
+            self.deadline,
+            self.generation,
+        ))
+    }
+    fn send_activity(&mut self) -> GatewayCallFuture<'_, ()> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.send_activity().await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
+    fn send_notifications_cleared(&mut self) -> GatewayCallFuture<'_, ()> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.send_notifications_cleared().await }),
             self.deadline,
             self.generation,
         ))

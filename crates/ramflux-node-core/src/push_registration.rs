@@ -33,6 +33,45 @@ pub struct PushRouteRegistration {
     pub webpush_p256dh: Option<String>,
     #[serde(default)]
     pub webpush_auth: Option<String>,
+    /// `true` when `token` is a sealed central token (`st`, central mode only). Omitted when false
+    /// so direct-mode canonical bytes do not change.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sealed: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Largest sealed token (`st`) in bytes, and its base64url length (`sv = 1`, see A2.3).
+pub const SEALED_TOKEN_MIN_BYTES: usize = 52;
+pub const SEALED_TOKEN_MAX_BYTES: usize = 1110;
+
+/// `true` when `token` is a sealed central token: unpadded base64url, 52..1110 bytes, `sv = 1`,
+/// `klen` 1..32, `kid` grammar `^[a-z0-9-]{1,32}$`, and the length of `2 + klen + 32 + 16` at least.
+/// The node never opens the token; it checks only what it can see.
+#[must_use]
+pub fn sealed_token_valid(token: &str) -> bool {
+    let Ok(bytes) = ramflux_protocol::decode_base64url(token) else {
+        return false;
+    };
+    if ramflux_protocol::encode_base64url(&bytes) != token
+        || !(SEALED_TOKEN_MIN_BYTES..=SEALED_TOKEN_MAX_BYTES).contains(&bytes.len())
+        || bytes.first() != Some(&1)
+    {
+        return false;
+    }
+    let Some(&klen) = bytes.get(1) else {
+        return false;
+    };
+    let klen = usize::from(klen);
+    if !(1..=32).contains(&klen) || bytes.len() < 2 + klen + 32 + 16 {
+        return false;
+    }
+    bytes.get(2..2 + klen).is_some_and(|kid| {
+        kid.iter().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+    })
 }
 
 /// APNs host the node will use. FCM and Web Push are production only.
@@ -181,8 +220,10 @@ impl PushRouteRegistration {
                     .as_ref()
                     .is_none_or(|value| value.len() <= 4096 && !value.chars().any(char::is_control))
             });
+        let sealed_valid = !self.sealed || sealed_token_valid(&self.token);
         if !token_valid
             || !keys_valid
+            || !sealed_valid
             || !push_route_tag_valid(&self.route_tag)
             || !capability_matches(&self.provider, self.capability)
         {

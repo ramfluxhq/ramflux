@@ -108,6 +108,8 @@ pub(crate) struct LocalBusAccountState {
     /// (unlock, pairing, role refresh) and regains them only when a session is installed. Anything
     /// that seals or signs an envelope outside a live session uses [`Self::sealing_config`].
     pub(crate) gateway_config: GatewaySessionConfig,
+    /// Last `device.activity.report` send (ms); the SDK sends at most one per 60 s.
+    pub(crate) last_activity_ms: Option<u64>,
     pub(crate) principal_commitment: String,
     pub(crate) target_delivery_id: String,
     pub(crate) pending_deliveries: Vec<GatewayInboxEntry>,
@@ -125,6 +127,8 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) task_approval_cursor: usize,
     pub(crate) task_ack_cursor: usize,
     pub(crate) task_forward_cursor: usize,
+    /// In-band `notifications_cleared` frames not yet published as `device.notifications.cleared`.
+    pub(crate) notifications_cleared_pending: u32,
     #[cfg(test)]
     pub(crate) task_forward_first: bool,
     pub(crate) task_courier_wake: Option<mpsc::Sender<()>>,
@@ -183,6 +187,7 @@ impl LocalBusAccountState {
             #[cfg(test)]
             test_task_deliveries_applied: None,
             relay_quic_pool: None,
+            last_activity_ms: None,
             gateway_config,
             principal_commitment,
             target_delivery_id,
@@ -201,6 +206,7 @@ impl LocalBusAccountState {
             task_approval_cursor: 0,
             task_ack_cursor: 0,
             task_forward_cursor: 0,
+            notifications_cleared_pending: 0,
             #[cfg(test)]
             task_forward_first: false,
             task_courier_wake: None,
@@ -246,6 +252,7 @@ impl LocalBusAccountState {
             #[cfg(test)]
             test_task_deliveries_applied: None,
             relay_quic_pool: None,
+            last_activity_ms: None,
             gateway_config,
             principal_commitment,
             target_delivery_id,
@@ -264,6 +271,7 @@ impl LocalBusAccountState {
             task_approval_cursor: 0,
             task_ack_cursor: 0,
             task_forward_cursor: 0,
+            notifications_cleared_pending: 0,
             #[cfg(test)]
             task_forward_first: false,
             task_courier_wake: None,

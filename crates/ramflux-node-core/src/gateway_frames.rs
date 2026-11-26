@@ -332,6 +332,15 @@ pub enum GatewayClientFrame {
     },
     /// Ask the gateway to re-admit the live native custody grant. A heartbeat does not.
     GrantRenew,
+    /// Node-local push policy of this device (CENTRAL K9): class and mute. Never sent centre-ward.
+    DevicePolicy {
+        device_class: crate::DeviceClass,
+        muted: bool,
+    },
+    /// "User active now" (K10). The SDK sends at most one per 60 s while active.
+    Activity {},
+    /// Notification state is empty on this device (K12 read fan-out). Clears the account's peers.
+    NotificationsCleared {},
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -405,6 +414,8 @@ pub enum GatewayServerFrame {
     Heartbeat {
         now: u64,
     },
+    /// Another device of this account read its notifications (K12 in-band clear).
+    NotificationsCleared {},
     Drain {
         session_id: String,
         reason: String,
