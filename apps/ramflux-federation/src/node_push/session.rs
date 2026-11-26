@@ -4,7 +4,7 @@
 //! The `rfc-push-1` session: one persistent QUIC connection to the centre edge, `sync` frames, and
 //! wake batches for the handoff socket (at most four streams in flight).
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -12,11 +12,11 @@ use ramflux_node_core::push_handoff::{
     HandoffReply, HandoffResult, HandoffStatus, HandoffWake, MAX_WAKES, PushCentralState,
     WakeOutcome, read_push_central_state, write_push_central_state,
 };
-use ramflux_node_core::push_policy_stats::{SyncStats, read_pending_stats, write_stats_ack};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use super::frame;
+use ramflux_node_core::push_policy_stats::{SyncStats, read_pending_stats, write_stats_ack};
 use super::state::{apply_ok, now_ms};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -54,8 +54,8 @@ pub(crate) struct PushShared {
     /// While set and in the future, handoffs answer `stopped` without contacting the centre.
     pub(crate) stopped_until: Mutex<Option<Instant>>,
     backoff: Mutex<Backoff>,
-    /// Last time a quiet `rejected` reason was logged (once per hour).
-    reject_logged: Mutex<Option<Instant>>,
+    /// Last quiet `rejected` reason logged and when (once per hour per reason).
+    reject_logged: Mutex<Option<(String, Instant)>>,
     endpoint: quinn::Endpoint,
     centre: SocketAddr,
     server_name: String,
@@ -68,8 +68,11 @@ pub(crate) struct PushShared {
 /// What one request produced on the wire.
 pub(crate) enum Exchange {
     Reply(Value),
-    /// The edge closed the connection with an application close code.
+    /// The edge closed the connection with an application close code. The session state has
+    /// already been moved (code 2: stopped; any other code: back-off) and the slot is empty.
     Closed(u64),
+    /// No dial was made because the transport back-off is still running.
+    Backoff,
     Failed(String),
 }
 
@@ -87,6 +90,14 @@ impl PushShared {
         let loaded = match read_push_central_state(&state_path) {
             Ok(loaded) => loaded,
             Err(error) => {
+                // An I/O error (for example permission denied) is a start failure, not corruption:
+                // the file is left in place.
+                let readable = std::fs::File::open(&state_path)
+                    .and_then(|file| file.metadata())
+                    .map_err(|io| format!("push state file: {io}"))?;
+                if !readable.is_file() {
+                    return Err(format!("push state file: {error}"));
+                }
                 // A corrupt state file is loud, but it must not stop the push session: move it
                 // aside and start empty (the SDK keeps its own seq floor, so the fence holds).
                 let bad = bad_state_path(&state_path);
@@ -232,29 +243,40 @@ impl PushShared {
         until.is_some_and(|instant| instant > Instant::now())
     }
 
-    /// Current connection, or a new one. One connect at a time. An idle connection the edge
-    /// closed with code 2 stops the session at once, without a new dial.
+    /// Moves the session for an application close seen from the edge (A9.1): code 2 stops the
+    /// session for 300 s and clears the back-off, so the probe at the end of the stop dials at
+    /// once; code 0, 1 or any other code counts as one transport failure (redial with back-off).
+    fn on_closed(&self, code: u64) {
+        if code == CLOSE_ACCESS {
+            self.reset_backoff();
+            self.stop_for(STOPPED_WAIT);
+        } else {
+            self.record_failure();
+        }
+    }
+
+    /// Current connection, or a new one. One connect at a time. A dead connection always leaves
+    /// the slot. One the edge closed with code 2 while idle stops the session without a new dial;
+    /// one closed with any other code is replaced by a dial (subject to the back-off).
     async fn connection(&self) -> Result<quinn::Connection, Exchange> {
         let mut slot = self.connection.lock().await;
-        if let Some(existing) = slot.as_ref() {
+        if let Some(existing) = slot.take() {
             match existing.close_reason() {
-                None => return Ok(existing.clone()),
+                None => {
+                    *slot = Some(existing.clone());
+                    return Ok(existing);
+                }
                 Some(reason) => {
-                    if matches!(
-                        reason,
-                        quinn::ConnectionError::ApplicationClosed(ref close)
-                            if close.error_code.into_inner() == CLOSE_ACCESS
-                    ) {
-                        *slot = None;
-                        self.stop_for(STOPPED_WAIT);
+                    if closed_code(&existing) == Some(CLOSE_ACCESS) {
+                        self.on_closed(CLOSE_ACCESS);
                         return Err(Exchange::Closed(CLOSE_ACCESS));
                     }
-                    // Any other dead connection is replaced below, after the back-off check.
+                    tracing::info!(%reason, "push connection closed while idle; dialling again");
                 }
             }
         }
         if self.in_backoff() {
-            return Err(Exchange::Failed("backoff".to_owned()));
+            return Err(Exchange::Backoff);
         }
         let connecting = match self.endpoint.connect(self.centre, &self.server_name) {
             Ok(connecting) => connecting,
@@ -267,6 +289,12 @@ impl PushShared {
             Err(_) => {
                 self.record_failure();
                 return Err(Exchange::Failed("connect timeout".to_owned()));
+            }
+            Ok(Err(quinn::ConnectionError::ApplicationClosed(close))) => {
+                // The edge refused during the handshake with a close code: same rules as later.
+                let code = close.error_code.into_inner();
+                self.on_closed(code);
+                return Err(Exchange::Closed(code));
             }
             Ok(Err(error)) => {
                 self.record_failure();
@@ -294,44 +322,50 @@ impl PushShared {
             send.finish().map_err(|error| error.to_string())?;
             recv.read_to_end(frame::MAX_REPLY_LEN + 4).await.map_err(|error| error.to_string())
         };
-        match tokio::time::timeout(IO_TIMEOUT, outcome).await {
-            Err(_) => {
-                self.record_failure();
-                self.drop_connection(&connection).await;
-                Exchange::Failed("reply timeout".to_owned())
-            }
-            Ok(Ok(bytes)) => match frame::decode_reply(&bytes) {
-                Ok(value) => {
-                    self.reset_backoff();
-                    Exchange::Reply(value)
-                }
-                Err(error) => {
-                    self.record_failure();
-                    Exchange::Failed(error)
-                }
-            },
-            Ok(Err(error)) => {
-                if let Some(code) = closed_code(&connection) {
-                    if code != CLOSE_ACCESS {
-                        self.record_failure();
+        let error = match tokio::time::timeout(IO_TIMEOUT, outcome).await {
+            Ok(Ok(bytes)) => {
+                return match frame::decode_reply(&bytes) {
+                    Ok(value) => {
+                        self.reset_backoff();
+                        Exchange::Reply(value)
                     }
-                    return Exchange::Closed(code);
-                }
-                self.record_failure();
-                self.drop_connection(&connection).await;
-                Exchange::Failed(error)
+                    Err(error) => {
+                        self.record_failure();
+                        Exchange::Failed(error)
+                    }
+                };
             }
+            Ok(Err(error)) => error,
+            Err(_) => "reply timeout".to_owned(),
+        };
+        // Read the close code before the slot is cleared: clearing closes the connection locally.
+        let code = closed_code(&connection);
+        let current = self.drop_connection(&connection).await;
+        if let Some(code) = code {
+            // Several streams can see the same close; only the first one moves the back-off.
+            if code == CLOSE_ACCESS || current {
+                self.on_closed(code);
+            }
+            return Exchange::Closed(code);
         }
+        if current {
+            self.record_failure();
+        }
+        Exchange::Failed(error)
     }
 
     /// Forgets a connection that failed, so the next request dials again (a restarted edge would
     /// otherwise stay unreachable until QUIC notices the dead peer).
-    async fn drop_connection(&self, failed: &quinn::Connection) {
+    /// Returns whether `failed` was still the current connection.
+    async fn drop_connection(&self, failed: &quinn::Connection) -> bool {
         let mut slot = self.connection.lock().await;
-        if slot.as_ref().is_some_and(|current| current.stable_id() == failed.stable_id()) {
+        let current =
+            slot.as_ref().is_some_and(|current| current.stable_id() == failed.stable_id());
+        if current {
             *slot = None;
         }
         failed.close(0u32.into(), b"");
+        current
     }
 }
 
@@ -355,10 +389,11 @@ fn prepare_state_dir(state_path: &std::path::Path) -> Result<(), String> {
         return Ok(());
     };
     if !parent.exists() {
-        std::fs::create_dir_all(parent)
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
             .map_err(|error| format!("push state directory: {error}"))?;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("push state directory mode: {error}"))?;
     }
     Ok(())
 }
@@ -458,6 +493,7 @@ pub(crate) async fn sync_once(shared: &PushShared) -> Duration {
             }
         }
         Exchange::Closed(code) => closed_wait(shared, code),
+        Exchange::Backoff => shared.backoff_left(),
         Exchange::Failed(error) => {
             tracing::warn!(%error, "push centre unreachable");
             shared.backoff_left()
@@ -465,12 +501,12 @@ pub(crate) async fn sync_once(shared: &PushShared) -> Duration {
     }
 }
 
+/// Logs a close and returns the wait before the next request. The state was moved by `on_closed`.
 fn closed_wait(shared: &PushShared, code: u64) -> Duration {
     match code {
         CLOSE_ACCESS => {
-            shared.stop_for(STOPPED_WAIT);
             tracing::warn!("push session: admission revoked (close 2); stopped, sync every 300 s");
-            STOPPED_WAIT
+            shared.stop_remaining().unwrap_or(STOPPED_WAIT).max(Duration::from_millis(100))
         }
         CLOSE_CLOSED | CLOSE_REJECTED_TWICE => {
             tracing::info!(code, "push session closed by edge; backing off");
@@ -498,10 +534,13 @@ fn refusal_wait(shared: &PushShared, reply: &Value) -> Duration {
                 return STOPPED_WAIT;
             }
             let wait = if reason == "unsupported" { UNSUPPORTED_WAIT } else { STOPPED_WAIT };
+            // Logged once per hour, and at once when the reason changes.
             let quiet = shared.reject_logged.lock().is_ok_and(|mut last| {
-                let due = last.is_none_or(|at| at.elapsed() >= REJECT_LOG_EVERY);
+                let due = last.as_ref().is_none_or(|(logged, at)| {
+                    logged != reason || at.elapsed() >= REJECT_LOG_EVERY
+                });
                 if due {
-                    *last = Some(Instant::now());
+                    *last = Some((reason.to_owned(), Instant::now()));
                 }
                 due
             });
@@ -568,13 +607,22 @@ pub(crate) async fn send_wakes(shared: &PushShared, wakes: &[HandoffWake]) -> Ha
                 Err(reply) => return reply,
             },
             Exchange::Closed(code) => {
-                let _ = closed_wait(shared, code);
+                let wait = closed_wait(shared, code);
                 let status = if code == CLOSE_ACCESS {
                     HandoffStatus::Stopped
                 } else {
                     HandoffStatus::Unavailable
                 };
-                return reply_status(status, Some("closed"), Some(DEFAULT_RETRY_MS), Vec::new());
+                return reply_status(status, Some("closed"), Some(millis(wait)), Vec::new());
+            }
+            Exchange::Backoff => {
+                tracing::debug!("push wake refused: transport back-off");
+                return reply_status(
+                    HandoffStatus::Unavailable,
+                    Some("transport"),
+                    Some(millis(shared.backoff_left())),
+                    Vec::new(),
+                );
             }
             Exchange::Failed(error) => {
                 tracing::warn!(%error, "push wake exchange failed");
@@ -668,6 +716,10 @@ fn map_wake_reply(
             Vec::new(),
         )),
     }
+}
+
+fn millis(wait: Duration) -> u64 {
+    u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn status_name(status: HandoffStatus) -> &'static str {

@@ -360,6 +360,7 @@ crates/ramflux-sdk/src/gateway/engine.rs | read_gateway_server_frame_bytes | 1 |
 crates/ramflux-sdk/src/gateway/session_push.rs | decode_server_frame | 1 | A | strict=parse_i_json; admission=A ingress boundary
 crates/ramflux-sdk/src/gateway/session_push.rs | direct_frame | 1 | A | strict=parse_i_json; admission=A ingress boundary
 crates/ramflux-sdk/src/gateway/session_push.rs | from_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/gateway/session_push.rs | from_bytes | 2 | E | excluded=establishment echo; the key set document inside is verified by push_keyset offer before use
 crates/ramflux-sdk/src/gateway/session_push.rs | route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/node/discovery.rs | fetch_client_record | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/node/probe.rs | app_challenge | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -372,6 +373,8 @@ crates/ramflux-sdk/src/prekey.rs | sdk_http_json_request_with_deadline | 1 | E |
 crates/ramflux-sdk/src/prekey.rs | sdk_tcp_tls_gateway_request | 1 | C | admission=crates/ramflux-sdk/src/prekey.rs#sdk_tcp_tls_gateway_request#1
 crates/ramflux-sdk/src/prekey/http_async.rs | request | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-sdk/src/prekey/manifest.rs | deserialize | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+crates/ramflux-sdk/src/push_keyset.rs | pin_from_bundle | 1 | E | excluded=operator-provisioned local pin file, not a network ingress frame
+crates/ramflux-sdk/src/push_keyset.rs | restore_keyset | 1 | D | admitted-before-persist: the stored record is re-derived from its own signed document before use
 crates/ramflux-sdk/src/search/hydration.rs | json | 1 | E | excluded=bounded local actor display metadata; no signed Envelope/Ack/Nack admission
 crates/ramflux-sdk/src/search/hydration.rs | sources | 1 | E | excluded=locally stored native EventIdentity verified before hydration; outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/search/hydration.rs | sources | 2 | E | excluded=locally accepted group display projection; outside Envelope/Ack/Nack containment closure

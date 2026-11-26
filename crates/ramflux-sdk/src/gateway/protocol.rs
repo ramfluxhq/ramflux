@@ -139,12 +139,8 @@ pub struct GatewaySessionConfig {
     pub push_route_last_seq: u64,
     /// This device's node-local push policy, re-sent on every (re)connect.
     pub device_policy: Option<(GatewayDeviceClass, bool)>,
-    /// Push mode the gateway echoed at establishment (`direct` or `central`).
-    pub(crate) push_mode: Option<String>,
-    /// The held, verified central key set (document and sequence fence).
-    pub(crate) push_keyset: Option<Box<crate::push_keyset::PushKeysetRecord>>,
-    /// The pinned home node identity key (unpadded base64url) that sealed tokens carry as `nk`.
-    pub(crate) push_node_public_key: Option<String>,
+    /// Central push key set state, shared by every copy of the account's config (one owner).
+    pub(crate) push: crate::push_keyset::PushKeysetStore,
     /// Advertise the session-push capability in the signed scope. Production sets this
     /// from the receive-activation discriminator (Activated iff advertised). Test
     /// constructors may set it directly for negotiation unit tests without a DB.
@@ -317,9 +313,7 @@ impl GatewaySessionConfig {
             push_route_retries: BTreeMap::new(),
             push_route_last_seq: 0,
             device_policy: None,
-            push_mode: None,
-            push_keyset: None,
-            push_node_public_key: None,
+            push: crate::push_keyset::PushKeysetStore::default(),
             session_push_advertise: false,
             connection_race: ConnectionRace::default(),
             native_grant_expires_at: None,
@@ -754,6 +748,12 @@ pub enum GatewayServerFrame {
     InBandWake {
         target_delivery_id: String,
         delivery_class: ramflux_protocol::DeliveryClass,
+    },
+    /// Key set the node relays mid-session (central mode); the SDK verifies it before use.
+    PushKeyset {
+        key_id: String,
+        body: String,
+        sig: String,
     },
     Ephemeral {
         envelope: ramflux_protocol::Envelope,

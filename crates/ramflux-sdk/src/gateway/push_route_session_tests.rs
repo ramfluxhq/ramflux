@@ -151,7 +151,7 @@ fn engine_with_stray(
             webpush_p256dh: Some("p256dh".into()),
             webpush_auth: Some("auth".into()),
             app: None,
-            sealed: false,
+            sealed: None,
         },
     );
     let registrations = Arc::new(Mutex::new(0));

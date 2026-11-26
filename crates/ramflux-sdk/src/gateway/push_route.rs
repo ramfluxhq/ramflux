@@ -54,14 +54,10 @@ pub struct GatewayPushRouteRegistration {
     /// Application identifier the token is sealed with. Host input only: never sent to the node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
-    /// The token field is a sealed route (central mode). Absent on direct registrations.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub sealed: bool,
-}
-
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_false(value: &bool) -> bool {
-    !*value
+    /// `Some(true)` when the token field is a sealed route (central mode). Absent on direct
+    /// registrations, so their signed body is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<bool>,
 }
 
 /// APNs host the node will use. FCM and Web Push are production only.
@@ -216,6 +212,11 @@ impl PushRouteRetry {
                 self.failures = 0;
                 self.not_before = sent_at.saturating_add(PUSH_ROUTE_PERMANENT_RETRY_SECONDS);
             }
+            GatewayPushRouteRefusal::PushKeysetUnavailable => {
+                // Contract retry (A1.5): the next connect, with no long wait.
+                self.failures = 0;
+                self.not_before = sent_at;
+            }
             GatewayPushRouteRefusal::Unavailable | GatewayPushRouteRefusal::Unknown => {
                 self.failures = self.failures.saturating_add(1);
                 let jitter = ramflux_crypto::random_32().map_or(0, |bytes| bytes[0]);
@@ -295,7 +296,12 @@ impl GatewaySessionEngine {
             .collect();
         let mut last = None;
         for registration in routes {
-            last = self.send_provider_registration(now, registration).await?;
+            match self.send_provider_registration(now, registration).await {
+                Ok(answer) => last = answer,
+                // A local refusal (no usable key set) skips this route; the others still go.
+                Err(SdkError::PushRouteRefused(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(last)
     }
@@ -356,7 +362,8 @@ impl GatewaySessionEngine {
         let provider = body.provider;
         let mut body = body;
         let app = body.app.take();
-        let body = if self.config.push_mode.as_deref() == Some("central") {
+        let body = if self.config.push.is_central() {
+            self.config.push.retry_save();
             crate::push_keyset::seal_registration(
                 &self.config,
                 body,
@@ -630,6 +637,7 @@ impl GatewaySessionEngine {
     }
 
     pub(crate) async fn refresh_push_route_at(&mut self, now: u64) {
+        self.config.push.retry_save();
         self.expire_stale_push_controls(now);
         if self.config.push_route_clear_pending {
             self.refresh_delete_all(now).await;
@@ -812,7 +820,7 @@ mod tests {
             webpush_p256dh: Some("p256dh".into()),
             webpush_auth: Some("auth".into()),
             app: None,
-            sealed: false,
+            sealed: None,
         }
     }
 
@@ -1008,7 +1016,7 @@ mod tests {
             webpush_p256dh: None,
             webpush_auth: None,
             app: None,
-            sealed: false,
+            sealed: None,
         }
     }
 
@@ -1023,7 +1031,7 @@ mod tests {
             webpush_p256dh: None,
             webpush_auth: None,
             app: None,
-            sealed: false,
+            sealed: None,
         }
     }
 
@@ -1049,7 +1057,7 @@ mod tests {
             webpush_p256dh: None,
             webpush_auth: None,
             app: None,
-            sealed: false,
+            sealed: None,
         };
         let value = serde_json::to_value(&body).expect("json");
         assert_eq!(value["provider"], "webpush");
