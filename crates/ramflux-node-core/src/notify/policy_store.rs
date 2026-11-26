@@ -281,6 +281,7 @@ impl NotifyRedbStore {
                         bump_stats(txn, now, |hour| hour.held_sent += 1)?;
                         set_notified(txn, device)
                     })?;
+                    tracing::info!(target: "ramflux_notify_policy", event = "policy.held_sent", "held wake sent");
                     Ok(true)
                 }
                 HoldState::Held | HoldState::Dropped | HoldState::Muted => Ok(false),

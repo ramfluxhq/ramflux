@@ -657,6 +657,19 @@ fn handle_notify_mesh_quic_request(
                 })?,
             })
         }
+        (
+            "POST",
+            path @ ("/s13/notify/device-policy"
+            | "/s13/notify/activity"
+            | "/s13/notify/clear"
+            | "/s13/notify/clear-plan"),
+        ) => {
+            let body = serde_json::to_vec(&request.body).map_err(|source| {
+                ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+            })?;
+            let value = s13_policy_value(&ingress.store, &ingress.store_gate, path, &body)?;
+            Ok(ramflux_transport::GatewayQuicResponse { status: 200, body: value })
+        }
         _ => Ok(ramflux_transport::GatewayQuicResponse {
             status: 404,
             body: serde_json::json!({ "error": "not found" }),
@@ -3648,6 +3661,14 @@ fn s13_policy_value(
             let _guard = lock_notify_store(store_gate)?;
             let outcome =
                 store.apply_policy_clear(&request.device_delivery_id, &request.live_cleared)?;
+            if outcome.held_dropped > 0 {
+                tracing::info!(
+                    target: "ramflux_notify_policy",
+                    event = "policy.held_dropped",
+                    held_dropped = outcome.held_dropped,
+                    "held wakes dropped by read"
+                );
+            }
             tracing::info!(
                 target: "ramflux_notify_policy",
                 event = "policy.clear",
