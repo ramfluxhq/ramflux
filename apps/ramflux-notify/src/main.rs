@@ -893,6 +893,7 @@ enum AsyncItestHttpRoute {
     S13NotifyPushRoute,
     S13NotifyProviderCredential,
     S13NotifyWake,
+    S13NotifyPolicy(String),
     S13NotifyProviderAttempts(String),
     Mvp10NotifyDeliver,
     Mvp10NotifyState,
@@ -1090,6 +1091,21 @@ async fn handle_itest_request_value_async(
             };
             async_json_response("200 OK", &response, keep_alive)
         }
+        AsyncItestHttpRoute::S13NotifyPolicy(path) => {
+            let blocking_ingress = Arc::clone(&ingress);
+            let body = request.body;
+            let value = tokio::task::spawn_blocking(move || {
+                s13_policy_value(
+                    &blocking_ingress.store,
+                    &blocking_ingress.store_gate,
+                    &path,
+                    &body,
+                )
+            })
+            .await
+            .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))??;
+            async_json_response("200 OK", &value, keep_alive)
+        }
         AsyncItestHttpRoute::S13NotifyProviderAttempts(queue_id) => {
             let blocking_ingress = Arc::clone(&ingress);
             let attempts = tokio::task::spawn_blocking(move || {
@@ -1132,6 +1148,13 @@ fn async_itest_route(method: &str, path: &str) -> AsyncItestHttpRoute {
             AsyncItestHttpRoute::S13NotifyProviderCredential
         }
         ("POST", "/s13/notify/wake") => AsyncItestHttpRoute::S13NotifyWake,
+        (
+            "POST",
+            path @ ("/s13/notify/device-policy"
+            | "/s13/notify/activity"
+            | "/s13/notify/clear"
+            | "/s13/notify/clear-plan"),
+        ) => AsyncItestHttpRoute::S13NotifyPolicy(path.to_owned()),
         ("POST", "/mvp10/notify/deliver") => AsyncItestHttpRoute::Mvp10NotifyDeliver,
         ("GET", "/mvp10/notify/state") => AsyncItestHttpRoute::Mvp10NotifyState,
         ("GET", value) if value.starts_with("/s13/notify/provider-attempts/") => {
@@ -3563,6 +3586,20 @@ fn handle_s13_policy(
     body: &[u8],
     keep_alive: bool,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let response = s13_policy_value(store, store_gate, path, body)?;
+    ramflux_node_core::write_itest_json_response_with_connection(
+        stream, "200 OK", &response, keep_alive,
+    )
+}
+
+/// Applies one node-local push policy request and returns its JSON reply; shared by the
+/// blocking and the async itest HTTP surfaces.
+fn s13_policy_value(
+    store: &ramflux_node_core::NotifyRedbStore,
+    store_gate: &Arc<Mutex<()>>,
+    path: &str,
+    body: &[u8],
+) -> Result<serde_json::Value, ramflux_node_core::NodeCoreError> {
     let parse_error =
         |source: serde_json::Error| ramflux_node_core::NodeCoreError::ItestJson(source.to_string());
     let response = match path {
@@ -3630,7 +3667,5 @@ fn handle_s13_policy(
             })
         }
     };
-    ramflux_node_core::write_itest_json_response_with_connection(
-        stream, "200 OK", &response, keep_alive,
-    )
+    Ok(response)
 }
