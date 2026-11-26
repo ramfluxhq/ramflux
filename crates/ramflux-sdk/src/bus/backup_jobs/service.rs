@@ -99,6 +99,7 @@ impl BackupJobs {
             return Err(refused("interrupted"));
         }
         let row = update(&mut state.registry)?;
+        crate::diag::events::backup_job(&row, None);
         state.head = state.head.checked_add(1).ok_or_else(|| refused("interrupted"))?;
         let seq = state.head;
         state.events.push_back((seq, row.clone()));
@@ -258,12 +259,14 @@ impl BackupJobs {
             failure.available_bytes = Some(available);
             failure.needed_bytes = Some(available.saturating_add(2 * 1024 * 1024));
         }
+        let check = failure.code;
         let discard = {
             let Ok(mut state) = self.state.lock() else { return };
             if state.cancelling.contains(id) {
                 return;
             }
             let Ok((row, staging)) = state.registry.fail(id, failure, now()) else { return };
+            crate::diag::events::backup_job(&row, Some(check));
             state.head += 1;
             let seq = state.head;
             state.events.push_back((seq, row));
