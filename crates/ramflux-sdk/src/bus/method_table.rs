@@ -206,6 +206,8 @@ methods! {
         "task.list",
     ];
     LocalRead(Always) => Supervisor: [
+        "diag.export",
+        "diag.snapshot",
         "account.app_lock.state",
         "account.list",
         "daemon.status",

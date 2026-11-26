@@ -170,3 +170,5 @@ crates/ramflux-node-core/src/router_store/agent_publish/owner_continuity.rs | ho
 crates/ramflux-node-core/src/notify/route_authority.rs | registered_owner | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-node-core/src/username_directory/home/reach.rs | authorize_reply | 1 | E | excluded=account reach policy or local message intent metadata; no message Envelope/Ack/Nack admission
 crates/ramflux-node-core/src/username_directory/home/reach.rs | decode | 1 | E | excluded=account reach policy or local message intent metadata; no message Envelope/Ack/Nack admission
+crates/ramflux-node-core/src/push_handoff.rs | exchange_handoff | 1 | A | strict=parse_i_json; admission=local push handoff socket reply, bounded frame
+crates/ramflux-node-core/src/push_handoff.rs | read_push_central_state | 1 | E | excluded=node-owned push central state file written by this node, not signed-envelope ingress

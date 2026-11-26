@@ -62,6 +62,8 @@ struct Request {
     /// Required absolute Unix milliseconds. The bridge never fabricates a mutation key.
     deadline_ms: u64,
     operation_id: Option<String>,
+    /// Optional caller trace id (C-8); the SDK creates one when absent.
+    trace_id: Option<String>,
 }
 
 impl Drop for Request {
@@ -174,6 +176,12 @@ pub(super) fn call(action: impl FnOnce() -> Result<(), CAbiError>) -> i32 {
             code
         }
         Err(payload) => {
+            // The diagnostic write is guarded too: nothing may unwind across the C boundary.
+            if let Err(inner) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                crate::diag::events::panic_caught,
+            )) {
+                std::mem::forget(inner);
+            }
             // Arbitrary panic payload destructors may panic again. Never unwind from this boundary.
             std::mem::forget(payload);
             RamfluxErrorCode::PanicAborted as i32
@@ -318,6 +326,7 @@ fn open_inner(
         id
     };
     let _opening = Opening(candidate_root.clone());
+    let opened_at = std::time::Instant::now();
     let diagnostics = crate::diag::start(&candidate_root, config.diag.clone())
         .map_err(|e| super::super::map_sdk_error(&e))?;
     let mut bus = LocalBusConfig::in_process(
@@ -348,6 +357,10 @@ fn open_inner(
         .allow_secret_exports
         .store(config.allow_secret_exports, std::sync::atomic::Ordering::Release);
     registry.clients.insert(id, client);
+    crate::diag::events::account_event(
+        "account.open.end",
+        serde_json::json!({"result": "ok", "duration_ms": crate::diag::events::elapsed_ms(opened_at)}),
+    );
     write_handle(out_client, id)
 }
 
@@ -479,6 +492,7 @@ pub extern "C" fn ramflux_v2_execute(
             request.account_id.as_deref(),
         )
         .map_err(|_| internal())?;
+        let trace_id = request.trace_id.take().unwrap_or_else(crate::diag::events::new_cid);
         let mut frame = LocalBusFrame::request(
             id.to_string(),
             request.account_id.take(),
@@ -488,11 +502,13 @@ pub extern "C" fn ramflux_v2_execute(
         );
         frame.deadline_ms = Some(request.deadline_ms);
         frame.operation_id = request.operation_id.take();
+        frame.trace_id = Some(trace_id.clone());
         let bytes = crate::bus::inprocess::encode_request(frame);
         let bytes =
             zeroize::Zeroizing::new(bytes.map_err(|error| super::super::map_sdk_error(&error))?);
         let operation = Arc::new(Operation::default());
         operation.state.lock().map_err(|_| internal())?.access = access;
+        operation.state.lock().map_err(|_| internal())?.trace_id = Some(trace_id);
         operation.state.lock().map_err(|_| internal())?.kind = if subscription {
             OperationKind::Subscription
         } else if frame_method_close {
@@ -959,8 +975,12 @@ impl super::input::Decode for Request {
         use super::input as i;
         i::object(
             value,
-            &["account_id", "sdk_api", "method", "body", "deadline_ms", "operation_id"],
+            &["account_id", "sdk_api", "method", "body", "deadline_ms", "operation_id", "trace_id"],
         )?;
+        let trace = i::optional(value, "trace_id")?;
+        if trace.is_some_and(|id| !crate::diag::events::valid_trace_id(id)) {
+            return Err(i::invalid());
+        }
         let account = i::optional(value, "account_id")?;
         let api = i::string(value, "sdk_api")?;
         let method = i::string(value, "method")?;
@@ -978,6 +998,7 @@ impl super::input::Decode for Request {
             body: serde_json::Value::Null,
             deadline_ms: deadline,
             operation_id: operation.map(str::to_owned),
+            trace_id: trace.map(str::to_owned),
         };
         let mut result = result;
         result.body =

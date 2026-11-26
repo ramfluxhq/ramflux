@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded process-owned diagnostic sink, independent of stderr filtering.
-mod fields;
+pub(crate) mod fields;
 mod files;
 mod key;
 use crate::SdkError;
@@ -85,6 +85,17 @@ impl DiagnosticConfig {
     }
 }
 
+/// One `ramflux.diag.v1` record before it is enveloped. `layer` is `sdk`, `ui` or `bridge`.
+pub(crate) struct Record<'a> {
+    pub(crate) layer: &'a str,
+    pub(crate) level: &'a str,
+    pub(crate) component: &'a str,
+    pub(crate) event: &'a str,
+    pub(crate) cid: Option<&'a str>,
+    pub(crate) fields: Value,
+    pub(crate) error: Option<Value>,
+}
+
 pub(crate) enum Command {
     Record(Value, bool),
     Flush(mpsc::SyncSender<()>),
@@ -93,7 +104,12 @@ pub(crate) enum Command {
 pub(crate) struct Session {
     config: DiagnosticConfig,
     key: zeroize::Zeroizing<[u8; 32]>,
+    epoch: u64,
+    /// Host-requested verbose window (`set_level`): level and its end in Unix milliseconds.
+    level_override: Mutex<Option<(tracing::Level, u64)>>,
     dropped: AtomicU64,
+    /// Keys and host records refused by the field registry (`diag.rejected`).
+    rejected: AtomicU64,
     sender: mpsc::SyncSender<Command>,
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -129,7 +145,10 @@ pub(crate) fn start(root: &Path, config: DiagnosticConfig) -> Result<Arc<Session
     let session = Arc::new(Session {
         config,
         key,
+        epoch,
+        level_override: Mutex::new(None),
         dropped: AtomicU64::new(0),
+        rejected: AtomicU64::new(0),
         sender,
         writer: Mutex::new(Some(writer)),
     });
@@ -141,16 +160,74 @@ pub(crate) fn start(root: &Path, config: DiagnosticConfig) -> Result<Arc<Session
     session.record("I", "sdk.diag", "proc.start", json!({"build_class":session.config.build_class,"level":session.config.level,"key_epoch":epoch}), None);
     Ok(session)
 }
+
+/// The live process sink, if one is open. Never blocks: a sink being opened is skipped.
+pub(crate) fn active() -> Option<Arc<Session>> {
+    ACTIVE.try_lock().ok().and_then(|active| active.upgrade())
+}
+
+fn severity_of(level: &str) -> tracing::Level {
+    match level {
+        "E" => tracing::Level::ERROR,
+        "W" => tracing::Level::WARN,
+        "D" => tracing::Level::DEBUG,
+        "T" => tracing::Level::TRACE,
+        _ => tracing::Level::INFO,
+    }
+}
+
+fn maximum_of(level: &str) -> tracing::Level {
+    match level {
+        "error" => tracing::Level::ERROR,
+        "warn" => tracing::Level::WARN,
+        "debug" => tracing::Level::DEBUG,
+        "trace" => tracing::Level::TRACE,
+        _ => tracing::Level::INFO,
+    }
+}
+
 impl Session {
     pub(crate) fn accepts(&self, level: tracing::Level) -> bool {
-        let maximum = match self.config.level.as_str() {
-            "error" => tracing::Level::ERROR,
-            "warn" => tracing::Level::WARN,
-            "debug" => tracing::Level::DEBUG,
-            "trace" => tracing::Level::TRACE,
-            _ => tracing::Level::INFO,
+        let configured = maximum_of(&self.config.level);
+        let maximum = match self.level_override.lock() {
+            Ok(guard) => match *guard {
+                Some((verbose, until)) if now_ms() < until => verbose,
+                _ => configured,
+            },
+            Err(_) => configured,
         };
         level <= maximum
+    }
+    /// Opens the verbose window requested by the host. The caller checks the bounds.
+    #[cfg(feature = "c-abi")]
+    pub(crate) fn set_level_override(&self, level: tracing::Level, until: Option<u64>) {
+        if let Ok(mut guard) = self.level_override.lock() {
+            *guard = until.map(|until| (level, until));
+        }
+    }
+    pub(crate) fn key(&self) -> &[u8; 32] {
+        &self.key
+    }
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub(crate) fn process(&self) -> &str {
+        &self.config.process
+    }
+    pub(crate) fn level(&self) -> &str {
+        &self.config.level
+    }
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+    pub(crate) fn rejected(&self) -> u64 {
+        self.rejected.load(Ordering::Relaxed)
+    }
+    /// Counts keys or host records refused by the field registry.
+    pub(crate) fn note_rejected(&self, count: u64) {
+        if count > 0 {
+            self.rejected.fetch_add(count, Ordering::Relaxed);
+        }
     }
     pub(crate) fn record(
         &self,
@@ -160,50 +237,46 @@ impl Session {
         fields: Value,
         error: Option<Value>,
     ) {
-        let severity = match level {
-            "E" => tracing::Level::ERROR,
-            "W" => tracing::Level::WARN,
-            "D" => tracing::Level::DEBUG,
-            "T" => tracing::Level::TRACE,
-            _ => tracing::Level::INFO,
-        };
-        if !self.accepts(severity) {
+        self.write(Record { layer: "sdk", level, component, event, cid: None, fields, error });
+    }
+    /// Writes one `ramflux.diag.v1` record. The caller has already filtered its fields.
+    pub(crate) fn write(&self, record: Record<'_>) {
+        if !self.accepts(severity_of(record.level)) {
             return;
         }
         self.report_dropped();
-        let mut record = self.envelope(level, component, event);
-        record["f"] = fields;
-        if let Some(error) = error {
-            record["err"] = error;
+        let mut line = self.envelope(record.layer, record.level, record.component, record.event);
+        if let Some(cid) = record.cid {
+            line["cid"] = json!(cid);
         }
-        if self
-            .sender
-            .try_send(Command::Record(
-                record,
-                matches!(level, "E" | "W") || matches!(event, "proc.start" | "proc.stop"),
-            ))
-            .is_err()
-        {
+        line["f"] = record.fields;
+        if let Some(error) = record.error {
+            line["err"] = error;
+        }
+        let durable =
+            matches!(record.level, "E" | "W") || matches!(record.event, "proc.start" | "proc.stop");
+        if self.sender.try_send(Command::Record(line, durable)).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
-    fn envelope(&self, level: &str, component: &str, event: &str) -> Value {
-        json!({"schema":"ramflux.diag.v1","t":now_ms(),"m":elapsed_ms(),"lv":level,"p":self.config.process,"ly":"sdk","c":component,"e":event})
+    fn envelope(&self, layer: &str, level: &str, component: &str, event: &str) -> Value {
+        json!({"schema":"ramflux.diag.v1","t":now_ms(),"m":elapsed_ms(),"lv":level,"p":self.config.process,"ly":layer,"c":component,"e":event})
     }
     fn report_dropped(&self) {
         let count = self.dropped.swap(0, Ordering::Relaxed);
         if count == 0 {
             return;
         }
-        let mut record = self.envelope("W", "sdk.diag", "diag.dropped");
+        let mut record = self.envelope("sdk", "W", "sdk.diag", "diag.dropped");
         record["f"] = json!({"count":count});
         if self.sender.try_send(Command::Record(record, true)).is_err() {
             self.dropped.fetch_add(count, Ordering::Relaxed);
         }
     }
+    /// Waits at most five seconds for the writer to drain. A full queue skips the wait.
     pub(crate) fn flush(&self) {
         let (sent, received) = mpsc::sync_channel(1);
-        if self.sender.send(Command::Flush(sent)).is_ok() {
+        if self.sender.try_send(Command::Flush(sent)).is_ok() {
             let _ = received.recv_timeout(std::time::Duration::from_secs(5));
         }
     }
@@ -225,8 +298,7 @@ impl Drop for Session {
 pub struct DiagnosticLayer;
 impl<S: tracing::Subscriber> Layer<S> for DiagnosticLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
-        let session = ACTIVE.try_lock().ok().and_then(|active| active.upgrade());
-        let Some(session) = session else { return };
+        let Some(session) = active() else { return };
         if !event.metadata().target().starts_with("ramflux_sdk")
             && event.metadata().target() != "rf_diag"
         {
@@ -235,9 +307,8 @@ impl<S: tracing::Subscriber> Layer<S> for DiagnosticLayer {
         if !session.accepts(*event.metadata().level()) {
             return;
         }
-        let mut visitor = fields::Visitor::new(&session.key);
+        let mut visitor = fields::Visitor::new(session.key());
         event.record(&mut visitor);
-        visitor.fields.insert("source".into(), json!(event.metadata().target()));
         let level = match *event.metadata().level() {
             tracing::Level::ERROR => "E",
             tracing::Level::WARN => "W",
@@ -245,19 +316,49 @@ impl<S: tracing::Subscriber> Layer<S> for DiagnosticLayer {
             tracing::Level::DEBUG => "D",
             _ => "T",
         };
+        // Visitor keeps registered keys only; sanitize repeats the check on the value types.
+        let (fields, _refused) = fields::sanitize(Value::Object(visitor.fields));
         session.record(
             level,
             "sdk.trace",
             &fields::Visitor::event(event.metadata().line()),
-            Value::Object(visitor.fields),
+            fields,
             None,
         );
     }
 }
+/// Window of the refused-call rate rule: one line per key per minute, with a suppressed count.
+const RATE_WINDOW_MS: u64 = 60_000;
+const RATE_KEYS: usize = 256;
+/// Per key: the time of the last written line and the lines withheld since then.
+static RATE: LazyLock<Mutex<std::collections::BTreeMap<String, (u64, u64)>>> =
+    LazyLock::new(|| Mutex::new(std::collections::BTreeMap::new()));
+
+/// The rate rule for refused-call `W` lines (M3). The first line of a key is written; later
+/// ones at most once per 60 s. Returns the suppressed count to report, or `None` to skip.
+/// Keys beyond `RATE_KEYS` are not tracked and are always written; the error table keeps exact counts.
+pub(crate) fn rate_gate(key: &str, now: u64) -> Option<u64> {
+    let Ok(mut table) = RATE.lock() else { return Some(0) };
+    if let Some((last, suppressed)) = table.get_mut(key) {
+        if now.saturating_sub(*last) < RATE_WINDOW_MS {
+            *suppressed = suppressed.saturating_add(1);
+            return None;
+        }
+        let withheld = *suppressed;
+        *last = now;
+        *suppressed = 0;
+        return Some(withheld);
+    }
+    if table.len() < RATE_KEYS {
+        table.insert(key.to_owned(), (now, 0));
+    }
+    Some(0)
+}
+
+/// Records a refused admission (status without an operation). Typed failures use `events`.
 #[cfg(feature = "c-abi")]
 pub(crate) fn refusal(value: &Value) {
-    let session = ACTIVE.try_lock().ok().and_then(|active| active.upgrade());
-    let Some(session) = session else { return };
+    let Some(session) = active() else { return };
     let code = value.get("code").and_then(Value::as_i64).unwrap_or(0);
     if code == 0 {
         return;
@@ -270,10 +371,14 @@ pub(crate) fn refusal(value: &Value) {
         .filter(|v| matches!(*v, "none" | "unknown" | "committed"))
         .unwrap_or("unknown");
     let method = value.pointer("/response/method").and_then(Value::as_str).unwrap_or("unknown");
-    let mut fields = json!({"method":method});
+    let method = if fields::token(method) { method } else { "invalid" };
+    let Some(suppressed) = rate_gate(&format!("refused|{method}|{name}"), now_ms()) else {
+        return;
+    };
+    let mut fields = json!({"method":method,"suppressed":suppressed});
     if let Some(account) = value.pointer("/response/account_id").and_then(Value::as_str)
         && let Ok(hash) =
-            ramflux_crypto::diagnostic_short_hash(&session.key, "account", account.as_bytes())
+            ramflux_crypto::diagnostic_short_hash(session.key(), "account", account.as_bytes())
     {
         fields["account_id"] = json!(hash);
     }

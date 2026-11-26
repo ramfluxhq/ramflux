@@ -157,6 +157,8 @@ policies! {
     "daemon.status" => ("daemon", false, false, false, false),
     "daemon.stop" => ("daemon", true, false, false, false),
     "diag.residue" => ("diag", true, false, false, false),
+    "diag.export" => ("diag", true, false, false, false),
+    "diag.snapshot" => ("diag", true, false, false, false),
     "device.activity.report" => ("device", true, true, false, false),
     "device.list" => ("device", false, true, false, false),
     "device.notifications.cleared" => ("device", true, true, false, false),
