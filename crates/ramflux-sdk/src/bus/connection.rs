@@ -287,7 +287,7 @@ async fn admit_frame(
     } else {
         Some(state.supervisor.app_fences.for_method(&source.method, source.account_id.as_deref())?)
     };
-    let refusal = super::io::local_bus_error(source, &super::app_lock_fence::locked());
+    let refusal = super::io::local_bus_error_unlogged(source, &super::app_lock_fence::locked());
     if let Some(bytes) = local_method(
         &mut incoming,
         state.supervisor,
@@ -584,6 +584,11 @@ async fn write_responses<W: AsyncWrite + Unpin>(
                 let Some(mut response) = bytes else { break; };
                 let _delivery = Arc::clone(&supervisor.app_fences.delivery).read_owned().await;
                 if response.access.as_ref().is_some_and(|access| access.check().is_err()) {
+                    crate::diag::events::bus_failure(
+                        &response.refusal.method,
+                        response.refusal.trace_id.as_deref(),
+                        &super::app_lock_fence::locked(),
+                    );
                     response.bytes = zeroize::Zeroizing::new(super::io::encode_local_bus_frame(&response.refusal)?);
                 }
                 tokio::time::timeout(Duration::from_secs(10),super::io::write_encoded_local_bus_frame(&mut writer,&response.bytes)).await.map_err(|_|closed())??;
