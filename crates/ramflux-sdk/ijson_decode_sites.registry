@@ -86,6 +86,7 @@ crates/ramflux-sdk/src/bus/dispatch/device.rs | dispatch_device_bus_request | 1 
 crates/ramflux-sdk/src/bus/dispatch/device.rs | dispatch_device_bus_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/device.rs | dispatch_device_bus_request | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/device.rs | dispatch_push_route_set | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/dispatch/device.rs | dispatch_push_route_test | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/device.rs | stored_device_policy | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/dispatch/device.rs | stored_push_route | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/dispatch/device.rs | stored_push_route | 2 | D | admitted-before-persist; stored row is not an ingress decoder

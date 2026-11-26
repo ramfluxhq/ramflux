@@ -579,14 +579,13 @@ impl GatewaySessionEngine {
                 reason,
                 retry_after_ms,
             } = &frame
+                && id == request_id
             {
-                if id == request_id {
-                    return Ok(GatewayPushRouteTestAnswer {
-                        status: status.clone(),
-                        reason: reason.clone(),
-                        retry_after_ms: *retry_after_ms,
-                    });
-                }
+                return Ok(GatewayPushRouteTestAnswer {
+                    status: status.clone(),
+                    reason: reason.clone(),
+                    retry_after_ms: *retry_after_ms,
+                });
             }
             if let GatewayServerFrame::Nack { reason } = &frame {
                 return Err(SdkError::GatewaySessionRejected(reason.clone()));

@@ -2610,13 +2610,13 @@ pub fn notification_default_ttl(
     delivery_class: &ramflux_protocol::NotificationDeliveryClass,
 ) -> u32 {
     match delivery_class {
-        ramflux_protocol::NotificationDeliveryClass::SelfDeviceControlNotification => 300,
+        ramflux_protocol::NotificationDeliveryClass::SelfDeviceControlNotification
+        | ramflux_protocol::NotificationDeliveryClass::PushTestNotification => 300,
         ramflux_protocol::NotificationDeliveryClass::UserContentNotification
         | ramflux_protocol::NotificationDeliveryClass::ConferenceWakeNotification => 86_400,
         ramflux_protocol::NotificationDeliveryClass::AiTaskNotification => 1_800,
         ramflux_protocol::NotificationDeliveryClass::A2uiSurfaceNotification => 600,
         ramflux_protocol::NotificationDeliveryClass::CallWakeNotification => 30,
-        ramflux_protocol::NotificationDeliveryClass::PushTestNotification => 300,
     }
 }
 
