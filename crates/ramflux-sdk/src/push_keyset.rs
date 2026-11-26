@@ -148,14 +148,15 @@ impl PushKeysetStore {
     /// once) or refuses it (keeping the held record and recording the cause).
     fn adopt(&self, pin: &PushCentrePin, doc: &PushKeysetDoc, now_ms: u64) {
         let mut state = self.lock();
-        let record = match offer(pin, doc, held_for(&state.keysets, &pin.centre_id), now_ms) {
-            Ok(record) => record,
-            Err(cause) => {
-                tracing::warn!(cause, centre_id = %pin.centre_id, "push key set refused");
-                state.last_refusal = Some(cause);
-                return;
-            }
-        };
+        let record =
+            match offer_adoptable(pin, doc, held_for(&state.keysets, &pin.centre_id), now_ms) {
+                Ok(record) => record,
+                Err(cause) => {
+                    tracing::warn!(cause, centre_id = %pin.centre_id, "push key set refused");
+                    state.last_refusal = Some(cause);
+                    return;
+                }
+            };
         if held_for(&state.keysets, &pin.centre_id) == Some(&record) {
             return;
         }
@@ -305,11 +306,32 @@ pub(crate) fn offer(
     held: Option<&PushKeysetRecord>,
     now_ms: u64,
 ) -> Result<PushKeysetRecord, &'static str> {
+    offer_checked(pin, doc, held, now_ms, true)
+}
+
+/// Adoption keeps an already-expired higher `seq` document (expiry stops only new sealing; the
+/// status reports `expired`). Sealing still re-verifies with [`offer`], which refuses it.
+fn offer_adoptable(
+    pin: &PushCentrePin,
+    doc: &PushKeysetDoc,
+    held: Option<&PushKeysetRecord>,
+    now_ms: u64,
+) -> Result<PushKeysetRecord, &'static str> {
+    offer_checked(pin, doc, held, now_ms, false)
+}
+
+fn offer_checked(
+    pin: &PushCentrePin,
+    doc: &PushKeysetDoc,
+    held: Option<&PushKeysetRecord>,
+    now_ms: u64,
+    refuse_expired: bool,
+) -> Result<PushKeysetRecord, &'static str> {
     if now_ms == 0 {
         return Err("no_clock");
     }
     let record = derive_record(pin, doc)?;
-    if record.expires_at <= now_ms {
+    if refuse_expired && record.expires_at <= now_ms {
         return Err("expired");
     }
     let Some(held) = held.filter(|held| held.centre_id == pin.centre_id) else {
