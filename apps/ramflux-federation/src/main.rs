@@ -27,6 +27,7 @@ mod itest_http;
 mod key_migration;
 mod mesh;
 mod mesh_auth;
+mod node_directory;
 mod node_push;
 mod node_report;
 mod pairing_full;
@@ -114,7 +115,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         let router = Arc::new(router_mesh_client(&config)?);
         let mesh_observability = Arc::new(FederationMeshObservability::default());
         let discovery = federation_discovery_surface(&config, node_signing_seed);
-        node_report::start(&config, &discovery, node_signing_seed);
+        node_report::start(&config, &discovery, node_signing_seed)?;
         node_push::start(&discovery, node_signing_seed).map_err(|error| {
             ramflux_node_core::NodeCoreError::InvalidConfiguration(format!("push_central: {error}"))
         })?;
