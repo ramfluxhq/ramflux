@@ -14,7 +14,15 @@ mod authority_refusal;
 mod config;
 mod log_path;
 pub use log_path::log_path;
+mod node_directory_config;
+mod node_push_config;
 mod node_report_config;
+pub use node_directory_config::{
+    NodeDirectoryConfig, NodeDirectorySanctionMode, NodeDirectoryVerifyKey,
+    load_node_directory_config, load_node_directory_config_file,
+};
+pub use node_push_config::{NodePushConfig, load_node_push_config, load_node_push_config_file};
+pub mod push_handoff;
 pub use node_report_config::{
     NodeReportCentreConfig, NodeReportConfig, NodeReportRegionConfig, load_node_report_config,
     load_node_report_config_file,

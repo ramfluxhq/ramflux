@@ -8,6 +8,9 @@ use super::generated_content::GeneratedEventStream;
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::message as g;
 use ramflux_protocol::message::registry::CONTROLS;
+
+/// Largest canonical signed declaration an own-layer renewal may carry (SECONDARY-LAYER-01).
+const MAX_OWN_LAYER_RENEWAL_BYTES: usize = 4096;
 use ramflux_protocol::message::validation::ValidationError;
 
 /// Operation number and payload tag for one Control oneof arm.
@@ -28,6 +31,7 @@ fn payload_operation_and_tag(payload: &g::control::Payload) -> (u32, u32) {
         g::control::Payload::OwnContactTombstone(_) => (13, 28),
         g::control::Payload::OwnGroupConsent(_) => (14, 29),
         g::control::Payload::OwnMessageCopy(_) => (15, 30),
+        g::control::Payload::OwnLayerRenewal(_) => (18, 34),
         g::control::Payload::Friend(_) => (16, 31),
         g::control::Payload::AgentSync(_) => (17, 32),
     }
@@ -66,10 +70,24 @@ pub fn validate_control_operation(control: &g::Control) -> Result<(), SdkError> 
 /// Native payload checks that proto optionality does not encode.
 /// # Errors
 /// Refuses a mismatched arm or a payload that fails its named native rule.
+/// Bounded shape of an own-layer renewal request; the primary authenticates its content on receipt.
+/// # Errors
+/// Refuses a missing primary or an empty or oversized declaration.
+fn validate_own_layer_renewal(body: &g::OwnLayerRenewal) -> Result<(), SdkError> {
+    if body.primary.is_none()
+        || body.signed_declaration_json.is_empty()
+        || body.signed_declaration_json.len() > MAX_OWN_LAYER_RENEWAL_BYTES
+    {
+        return Err(refused("own layer renewal requires a primary and a bounded declaration"));
+    }
+    Ok(())
+}
+
 pub fn validate_control_native(control: &g::Control) -> Result<(), SdkError> {
     validate_control_operation(control)?;
     match control.payload.as_ref() {
         Some(g::control::Payload::Reset(_) | g::control::Payload::ResetAck(_)) => Ok(()),
+        Some(g::control::Payload::OwnLayerRenewal(body)) => validate_own_layer_renewal(body),
         Some(g::control::Payload::ContactControl(body)) => require_canonical(
             body.consent.as_ref().map(|leaf| leaf.canonical.as_slice()),
             "contact control requires native consent",

@@ -356,8 +356,10 @@ fn full_roster_and_reserved_enrollment_space_do_not_block_in_place_revocation() 
     let verified = verify_record(&record, now, None, None)?;
     let mut branch = record.body.devices[0].branch_certificate.clone().ok_or("branch")?;
     branch.body.device_id = "new-device".into();
+    let dummy = crate::create_device_branch("vector.example", "new-device", 1, [9; 32]);
+    let message_layer = crate::custody::sign_enrollment_layer(&dummy, &branch.body)?;
     let branch = primary.certify_branch(branch.body)?;
-    assert!(primary.enroll_device(&verified, branch, now + 1).is_err());
+    assert!(primary.enroll_device(&verified, branch, message_layer, now + 1).is_err());
     let revoked = primary.revoke_device(&verified, "primary", now + 1)?;
     assert_eq!(revoked.body.devices.len(), MAX_ROSTER);
     verify_record(&revoked, now + 1, None, None)?;

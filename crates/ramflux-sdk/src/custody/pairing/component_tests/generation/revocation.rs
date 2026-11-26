@@ -148,6 +148,7 @@ pub(in crate::custody::pairing::component_tests) fn revoke_source(
         recipient_ref: None,
         revoked_id: Some(source_id.into()),
         certificate: None,
+        message_layer: None,
         display_name: None,
         now: rig.now,
         branch_vault_ref: account.branch_vault_ref().into(),

@@ -716,6 +716,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
+ "cipher 0.5.2",
  "cpufeatures 0.3.0",
  "rand_core 0.10.1",
 ]
@@ -729,8 +730,20 @@ dependencies = [
  "aead 0.5.2",
  "chacha20 0.9.1",
  "cipher 0.4.4",
- "poly1305",
+ "poly1305 0.8.0",
  "zeroize",
+]
+
+[[package]]
+name = "chacha20poly1305"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb"
+dependencies = [
+ "aead 0.6.1",
+ "chacha20 0.10.2",
+ "cipher 0.5.2",
+ "poly1305 0.9.1",
 ]
 
 [[package]]
@@ -2056,6 +2069,7 @@ checksum = "a5324110b02044183df000f0bd7d2d7e61f1000631508627e77f63983b6fdffb"
 dependencies = [
  "aead 0.6.1",
  "aes-gcm 0.11.1",
+ "chacha20poly1305 0.11.0",
  "hkdf 0.13.0",
  "hybrid-array",
  "rand_core 0.10.1",
@@ -3382,6 +3396,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "poly1305"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
+dependencies = [
+ "cpufeatures 0.3.0",
+ "universal-hash 0.6.1",
+]
+
+[[package]]
 name = "polyval"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3669,7 +3693,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "ramflux-agent-host"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "base64",
  "bytes",
@@ -3700,7 +3724,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-card"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -3720,11 +3744,11 @@ dependencies = [
 
 [[package]]
 name = "ramflux-client-model"
-version = "0.2.6"
+version = "0.2.9"
 
 [[package]]
 name = "ramflux-core"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -3733,7 +3757,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-crypto"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "aes-gcm 0.10.3",
  "aes-gcm 0.11.1",
@@ -3742,7 +3766,7 @@ dependencies = [
  "bip39",
  "blake3",
  "chacha20 0.9.1",
- "chacha20poly1305",
+ "chacha20poly1305 0.10.1",
  "curve25519-dalek",
  "ed25519-dalek",
  "getrandom 0.3.4",
@@ -3750,7 +3774,7 @@ dependencies = [
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "hpke",
- "poly1305",
+ "poly1305 0.8.0",
  "prost",
  "ramflux-core",
  "ramflux-protocol",
@@ -3767,9 +3791,10 @@ dependencies = [
 
 [[package]]
 name = "ramflux-federation"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "compio",
+ "nix 0.29.0",
  "quinn",
  "ramflux-crypto",
  "ramflux-node-core",
@@ -3797,7 +3822,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-gateway"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "compio",
@@ -3826,7 +3851,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-media"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "aes-gcm 0.10.3",
  "getrandom 0.3.4",
@@ -3842,7 +3867,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-message-schema"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "pbjson-build",
  "prettyplease",
@@ -3855,7 +3880,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-node-core"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -3891,7 +3916,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-notify"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -3926,7 +3951,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-protocol"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "base64",
  "blake3",
@@ -3964,7 +3989,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-prx-client"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "ramflux-protocol",
  "reqwest",
@@ -3978,7 +4003,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-relay"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "dhat",
@@ -4002,7 +4027,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-retention"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "ramflux-node-core",
  "ramflux-test-support",
@@ -4018,7 +4043,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-rf"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "base64",
  "clap",
@@ -4049,7 +4074,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-router"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "compio",
@@ -4075,7 +4100,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-sdk"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -4083,7 +4108,7 @@ dependencies = [
  "bytes",
  "cbindgen",
  "chacha20 0.9.1",
- "chacha20poly1305",
+ "chacha20poly1305 0.10.1",
  "core-foundation",
  "dbus-secret-service",
  "ed25519-dalek",
@@ -4091,7 +4116,7 @@ dependencies = [
  "getrandom 0.3.4",
  "keyring",
  "mime",
- "poly1305",
+ "poly1305 0.8.0",
  "prost",
  "prost-reflect",
  "quinn",
@@ -4116,6 +4141,7 @@ dependencies = [
  "security-framework-sys",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "syn 2.0.117",
  "tempfile",
  "thiserror 2.0.21",
@@ -4131,7 +4157,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-signaling"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "ramflux-node-core",
@@ -4146,11 +4172,11 @@ dependencies = [
 
 [[package]]
 name = "ramflux-storage"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "blake3",
  "caseless",
- "chacha20poly1305",
+ "chacha20poly1305 0.10.1",
  "ed25519-dalek",
  "fs2",
  "hkdf 0.13.0",
@@ -4176,9 +4202,9 @@ dependencies = [
 
 [[package]]
 name = "ramflux-sync"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
- "chacha20poly1305",
+ "chacha20poly1305 0.10.1",
  "ramflux-core",
  "ramflux-crypto",
  "ramflux-protocol",
@@ -4190,14 +4216,14 @@ dependencies = [
 
 [[package]]
 name = "ramflux-test-support"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "ramflux-transport"
-version = "0.2.6"
+version = "0.2.9"
 dependencies = [
  "arc-swap",
  "base64",

@@ -267,7 +267,11 @@ async fn permit_lookup_cancel_expiry() -> TestResult {
             assert_eq!(captured.path, "/push", "provider path changed");
             let body: serde_json::Value = serde_json::from_slice(&captured.body)?;
             assert_eq!(
-                body.get("wake_id").and_then(serde_json::Value::as_str),
+                // APNs bodies carry the wake only at rf.w (RFCORE-142 CR12); FCM and Web Push keep
+                // the top-level wake_id.
+                body.get("wake_id")
+                    .or_else(|| body.pointer("/rf/w"))
+                    .and_then(serde_json::Value::as_str),
                 Some(prepared.payload.wake_id.as_str()),
                 "provider did not receive this exact opaque wake"
             );

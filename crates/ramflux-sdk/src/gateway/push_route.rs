@@ -51,6 +51,13 @@ pub struct GatewayPushRouteRegistration {
     pub webpush_p256dh: Option<String>,
     #[serde(default)]
     pub webpush_auth: Option<String>,
+    /// Application identifier the token is sealed with. Host input only: never sent to the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    /// `Some(true)` when the token field is a sealed route (central mode). Absent on direct
+    /// registrations, so their signed body is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<bool>,
 }
 
 /// APNs host the node will use. FCM and Web Push are production only.
@@ -110,9 +117,27 @@ pub enum GatewayPushRouteRefusal {
     Superseded,
     /// Verifiably not the routes' bound owner: retrying cannot succeed.
     RejectedOwner,
+    /// Local refusal: central mode has no usable key set or pin, so nothing was sent.
+    PushKeysetUnavailable,
     /// A code from a newer node; retried like `unavailable` so it never breaks the session.
     #[serde(other)]
     Unknown,
+}
+
+impl GatewayPushRouteRefusal {
+    /// Stable app-facing token for `details.refusal` in the C ABI completion.
+    /// A newer node's unknown code is reported as `unavailable`, its retry class.
+    #[must_use]
+    pub const fn wire_token(self) -> &'static str {
+        match self {
+            Self::ProviderUnavailable => "provider_unavailable",
+            Self::Rejected => "rejected",
+            Self::RejectedOwner => "rejected_owner",
+            Self::PushKeysetUnavailable => "push_keyset_unavailable",
+            Self::Superseded => "superseded",
+            Self::Unavailable | Self::Unknown => "unavailable",
+        }
+    }
 }
 
 /// Whether a route that expires at `expires_at` must be registered again at `now`.
@@ -185,6 +210,11 @@ impl PushRouteRetry {
             | GatewayPushRouteRefusal::RejectedOwner => {
                 self.failures = 0;
                 self.not_before = sent_at.saturating_add(PUSH_ROUTE_PERMANENT_RETRY_SECONDS);
+            }
+            GatewayPushRouteRefusal::PushKeysetUnavailable => {
+                // Contract retry (A1.5): the next connect, with no long wait.
+                self.failures = 0;
+                self.not_before = sent_at;
             }
             GatewayPushRouteRefusal::Unavailable | GatewayPushRouteRefusal::Unknown => {
                 self.failures = self.failures.saturating_add(1);
@@ -262,7 +292,12 @@ impl GatewaySessionEngine {
             .collect();
         let mut last = None;
         for registration in routes {
-            last = self.send_provider_registration(now, registration).await?;
+            match self.send_provider_registration(now, registration).await {
+                Ok(answer) => last = answer,
+                // A local refusal (no usable key set) skips this route; the others still go.
+                Err(SdkError::PushRouteRefused(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(last)
     }
@@ -321,6 +356,19 @@ impl GatewaySessionEngine {
         body: GatewayPushRouteRegistration,
     ) -> Result<Option<String>, SdkError> {
         let provider = body.provider;
+        let mut body = body;
+        let app = body.app.take();
+        let body = if self.config.push.is_central() {
+            self.config.push.retry_save();
+            crate::push_keyset::seal_registration(
+                &self.config,
+                body,
+                app,
+                crate::push_keyset::unix_millis_now(),
+            )?
+        } else {
+            body
+        };
         let signed_request = self.session_bound_request(GATEWAY_PUSH_ROUTE_PATH, &body)?;
         let request_id = signed_request.request_id.clone();
         self.write_push_route_frame(GatewayClientFrame::PushRouteRegister {
@@ -477,8 +525,8 @@ impl GatewaySessionEngine {
                 return Err(SdkError::GatewaySessionRejected(reason.clone()));
             }
             if admitted && matched {
-                if let GatewayServerFrame::PushRouteRefused { reason, .. } = frame {
-                    return Err(SdkError::GatewaySessionRejected(reason));
+                if let GatewayServerFrame::PushRouteRefused { code, .. } = frame {
+                    return Err(SdkError::PushRouteRefused(code));
                 }
                 return Ok(self.push_route_expires_at);
             }
@@ -489,22 +537,22 @@ impl GatewaySessionEngine {
     /// only update state.
     pub(crate) fn apply_push_route_reply(
         &mut self,
-        frame: GatewayServerFrame,
+        frame: &GatewayServerFrame,
     ) -> Result<Option<u64>, SdkError> {
-        let id = push_route_reply_id(&frame).map(str::to_owned);
+        let id = push_route_reply_id(frame).map(str::to_owned);
         let pending = id.as_deref().and_then(|request_id| self.take_pending(request_id));
         match frame {
             GatewayServerFrame::PushRouteRegistered { expires_at, .. } => {
-                self.remember_registered_expiry(pending.as_ref(), expires_at);
-                Ok(Some(expires_at))
+                self.remember_registered_expiry(pending.as_ref(), *expires_at);
+                Ok(Some(*expires_at))
             }
             GatewayServerFrame::PushRouteDeregistered { .. } => {
                 self.apply_deregistered(pending);
                 Ok(None)
             }
-            GatewayServerFrame::PushRouteRefused { reason, code, .. } => {
-                self.apply_refused(pending, code);
-                Err(SdkError::GatewaySessionRejected(reason))
+            GatewayServerFrame::PushRouteRefused { code, .. } => {
+                self.apply_refused(pending, *code);
+                Err(SdkError::PushRouteRefused(*code))
             }
             _ => Ok(None),
         }
@@ -585,6 +633,7 @@ impl GatewaySessionEngine {
     }
 
     pub(crate) async fn refresh_push_route_at(&mut self, now: u64) {
+        self.config.push.retry_save();
         self.expire_stale_push_controls(now);
         if self.config.push_route_clear_pending {
             self.refresh_delete_all(now).await;
@@ -766,6 +815,8 @@ mod tests {
             endpoint: Some("https://push.example/sub".into()),
             webpush_p256dh: Some("p256dh".into()),
             webpush_auth: Some("auth".into()),
+            app: None,
+            sealed: None,
         }
     }
 
@@ -960,6 +1011,8 @@ mod tests {
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
+            app: None,
+            sealed: None,
         }
     }
 
@@ -973,6 +1026,8 @@ mod tests {
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
+            app: None,
+            sealed: None,
         }
     }
 
@@ -997,6 +1052,8 @@ mod tests {
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
+            app: None,
+            sealed: None,
         };
         let value = serde_json::to_value(&body).expect("json");
         assert_eq!(value["provider"], "webpush");

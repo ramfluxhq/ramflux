@@ -51,12 +51,14 @@ macro_rules! methods {
 methods! {
     LocalRead(Always) => Reader: ["search.query", "search.index.status"];
     LocalRead(Always) => Supervisor: ["search.cancel", "search.cursor.close", "search.index.rebuild.cancel"];
+    LocalRead(Always) => Reader: ["attachment.transfer.list"];
+    LocalMutation(Always) => Supervisor: ["attachment.transfer.pause", "attachment.transfer.resume"];
     LocalMutation(Always) => Actor: ["search.index.rebuild"];
     LocalRead(Always) => Actor: ["account.config.get", "diag.residue"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     NeedsNetwork(AuthorityFromNode) => Actor: ["attachment.enable"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin", "username.mutate", "profile.update", "account.reach.set"];
-    LocalRead(Always) => Actor: ["a2i.list_pending", "agent.approval.list", "agent.job.list", "agent.job.sessions", "device.pair.status", "device.transfer.status"];
+    LocalRead(Always) => Actor: ["a2i.list_pending", "agent.approval.list", "agent.job.list", "agent.job.sessions", "device.pair.status", "device.transfer.status", "push.keyset.get"];
     LocalMutation(Always) => Actor: [
         "account.config.set",
         "a2i.acknowledge",
@@ -204,6 +206,8 @@ methods! {
         "task.list",
     ];
     LocalRead(Always) => Supervisor: [
+        "diag.export",
+        "diag.snapshot",
         "account.app_lock.state",
         "account.list",
         "daemon.status",

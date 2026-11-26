@@ -209,6 +209,16 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         "session.rs:route_envelope",
         Class::NonIngress("session routing lookup; no persistent envelope effect"),
     ),
+    (
+        "username_directory/home/reach.rs:commit_reach",
+        Class::NonIngress(
+            "reach-policy CAS over a signed device-set authority; persists only the reach record, never a message envelope",
+        ),
+    ),
+    (
+        "username_directory/home/reach.rs:state",
+        Class::NonIngress("pure reach-state view builder; no persistence or delivery"),
+    ),
 ];
 
 #[test]
@@ -225,7 +235,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
     assert_eq!(
         (ingress_count, sink_count, non_ingress_count),
-        (20, 7, 44),
+        (20, 7, 46),
         "registry counts match the classified live functions"
     );
     for (entry, class) in DURABLE_INGRESS {

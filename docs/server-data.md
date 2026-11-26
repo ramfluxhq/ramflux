@@ -124,7 +124,10 @@ keys; it does not protect against the running node or its operator.
 
 Clients normally use the SDK: set `GatewaySessionConfig::push_route`, call
 `GatewaySessionEngine::set_push_route`, or send the local bus request
-`device.push_route.set` with `{"registration": {...}}`. `null` clears it and sends
+`device.push_route.set` with `{"registration": {...}}`. A node refusal completes
+the local bus request as `push_route_refused` with `details.refusal` set to one of
+`provider_unavailable`, `rejected`, `rejected_owner`, `unavailable`, `superseded`
+(see c-abi-v2.md, Push route refusals). `null` clears it and sends
 an explicit deregistration, which deletes the node's routes for the device. The
 daemon stores the route in the account database and registers it after every
 authenticated (re)connect, on token change and before renewal is due.
@@ -206,9 +209,12 @@ uses the alert route) and an empty `loc-args` array. There is no literal title,
 body, sender, or message text. A custom `rf` object carries version 1, class
 `m` or `call`, the registered `route_tag`, and the wake id. APNs VoIP carries that
 same `rf` object and an empty `aps`. That wake id is
-the content-free hint. The source envelope id is not copied. Sibling fields
-still carry `wake_id`, `class`, and, for a message, `collapse_key`. The payload
-sets no badge and no `content-available`. Background delivery is unsupported:
+the content-free hint. The source envelope id is not copied. An APNs body has
+exactly two top-level keys, `aps` and `rf`; there are no sibling `wake_id`,
+`class`, or `collapse_key` fields. A message collapse value travels only in the
+`apns-collapse-id` header. A call on the alert route sets
+`aps.interruption-level` to `time-sensitive`; a message alert and VoIP do not.
+The payload sets no badge and no `content-available`. Background delivery is unsupported:
 there is no background push builder. FCM is a data message with the same facts.
 `rf` is a JSON string, because FCM data values are strings, and there is no
 notification text. Android priority is `HIGH`. Web Push encrypts a short body,

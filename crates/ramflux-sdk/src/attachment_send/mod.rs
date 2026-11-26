@@ -39,15 +39,20 @@ mod seal;
 mod seal_job;
 #[cfg(test)]
 mod section10;
+pub(crate) mod send_journal;
 mod store;
 mod targets;
 mod thumbnail;
-mod upload;
+pub(crate) mod transfer;
+pub(crate) mod upload;
 
-pub(crate) use bus::{AuthorityPin, authority, dispatch, open_store, plane_for, unix_now};
+pub(crate) use bus::{
+    AuthorityPin, authority, dispatch, open_store, plane_for, transfer_body, transfer_list,
+    unix_now,
+};
 pub(crate) use codes::{
     CODE_AUTHORITY_UNAVAILABLE, CODE_CANCELLED, CODE_DUPLICATE, CODE_LAYOUT_INVALID,
-    CODE_MANIFEST_TOO_LARGE, CODE_STREAM_CLOSED, Refusal, because, refusal_for,
+    CODE_MANIFEST_TOO_LARGE, CODE_SEAL_FAILED, CODE_STREAM_CLOSED, Refusal, because, refusal_for,
 };
 pub use digest::PlaintextDigester;
 pub(crate) use grant_wrap::{load as grants_of, stored_media};

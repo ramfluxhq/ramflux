@@ -31,6 +31,7 @@ mod pre_auth;
 #[cfg(test)]
 mod pre_auth_transport_tests;
 mod principal_directory;
+mod push_central;
 mod push_queue;
 mod push_registration;
 mod quic_dispatch;

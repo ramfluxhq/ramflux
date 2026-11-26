@@ -50,6 +50,12 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         "state.rs:record_receive_signature_segments",
         Class::NonIngress("observability timing recorder"),
     ),
+    (
+        "username_directory/home_reach.rs:execute_reach",
+        Class::NonIngress(
+            "reach and reply-permission action dispatcher over a device-set authority; never a message envelope",
+        ),
+    ),
 ];
 
 #[test]
@@ -63,7 +69,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
         DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Ingress).count();
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
-    assert_eq!((ingress_count, non_ingress_count), (4, 8));
+    assert_eq!((ingress_count, non_ingress_count), (4, 9));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");

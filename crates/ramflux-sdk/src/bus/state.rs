@@ -137,6 +137,8 @@ pub(crate) struct LocalBusAccountState {
     /// Cached receive-activation discriminator for `(connection generation, target)`.
     /// [`Self::invalidate_receive_active_cache`] must run after activation in the same generation.
     pub(crate) receive_active_cache: Option<(u64, String, bool)>,
+    /// Prepared-send upload parked off the actor (`attachment_sends`).
+    pub(crate) attachment_send: super::account_runtime::attachment_sends::Slot,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -207,6 +209,7 @@ impl LocalBusAccountState {
             object_put_spools: BTreeMap::new(),
             object_get_spools: BTreeMap::new(),
             receive_active_cache: None,
+            attachment_send: super::account_runtime::attachment_sends::Slot::default(),
         }
     }
 
@@ -269,6 +272,7 @@ impl LocalBusAccountState {
             object_put_spools: BTreeMap::new(),
             object_get_spools: BTreeMap::new(),
             receive_active_cache: None,
+            attachment_send: super::account_runtime::attachment_sends::Slot::default(),
         }
     }
 
@@ -540,6 +544,8 @@ impl LocalBusAccountState {
         self.gateway_config.resume_token = config.resume_token;
         self.gateway_config.last_seen_inbox_seq =
             self.gateway_config.last_seen_inbox_seq.max(config.last_seen_inbox_seq);
+        // The key set store is shared with the session; only a pending failed save is retried.
+        self.gateway_config.push.retry_save();
     }
 
     pub(crate) fn retire_session(&mut self, client: &SessionClient) -> Result<(), SdkError> {

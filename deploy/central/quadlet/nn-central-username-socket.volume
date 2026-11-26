@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Shared socket volume (group 10003). Witness creates witness.sock; the centre connects to it.
+[Volume]
+VolumeName=nn-central-username-socket

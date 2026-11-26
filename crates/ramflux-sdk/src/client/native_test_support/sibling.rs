@@ -38,8 +38,13 @@ impl Fixture {
         certificate.agreement_identity_public_key =
             ramflux_protocol::encode_base64url(&agreement.public);
         certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-        native.publication.record =
-            primary.enroll_device(&current, primary.certify_branch(certificate)?, now)?;
+        let message_layer = ramflux_crypto::custody::sign_enrollment_layer(&branch, &certificate)?;
+        native.publication.record = primary.enroll_device(
+            &current,
+            primary.certify_branch(certificate)?,
+            message_layer,
+            now,
+        )?;
         let account_id = self.client.account_db()?.local_account_id.clone();
         crate::custody::accept_publication(
             &self.root.0,

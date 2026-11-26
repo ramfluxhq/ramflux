@@ -3,6 +3,7 @@
 
 //! Sibling safety evidence is accepted only from the authenticated origin bytes.
 use crate::client::native_test_support::{Fixture, TestResult};
+use crate::custody::layer_declaration::endorsed_for;
 use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::message as g;
@@ -201,8 +202,13 @@ fn enroll_sibling(
     certificate.agreement_identity_public_key =
         ramflux_protocol::encode_base64url(&agreement.public);
     certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
-    native.publication.record =
-        primary.enroll_device(&current, primary.certify_branch(certificate)?, now)?;
+    let message_layer = ramflux_crypto::custody::sign_enrollment_layer(&branch, &certificate)?;
+    native.publication.record = primary.enroll_device(
+        &current,
+        primary.certify_branch(certificate)?,
+        message_layer,
+        now,
+    )?;
     own.client.observe_custody_manifest(&native, &own.manifest.principal_commitment, now)?;
     let sibling = ramflux_protocol::custody::DeviceRef {
         account_anchor: own.manifest.principal_commitment.clone(),
@@ -222,10 +228,10 @@ fn enroll_sibling(
     let qualified =
         ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(&verified, "sibling")?;
     native.devices.push(ramflux_protocol::custody::CustodyManifestDevice {
+        message_layer: endorsed_for(&native.publication.record, &sibling),
         device_ref: sibling,
         target_delivery_id: qualified.storage_key().into(),
         prekey_bundle: serde_json::to_value(credentials.prekey_bundle()?)?,
-        message_layer: None,
     });
     let fetched = crate::prekey::SdkDeviceManifestResponse::from_native(native.clone())?;
     own.client.persist_observed_identity_directory_now(&fetched)?;

@@ -28,6 +28,9 @@ pub enum HeadKind {
     Revoke,
     /// The primary's own message-layer declaration, endorsed by a new native head.
     Layer(crate::custody::DeclarationValidity),
+    /// Endorse a secondary's branch-signed renewal (`message_layer`) for the device named by
+    /// `recipient_ref`. Journal kind stays `layer_update`; recipient ref is not persisted.
+    SecondaryLayer,
 }
 
 /// Request for one fenced primary head write.
@@ -44,6 +47,8 @@ pub struct HeadWrite {
     pub recipient_ref: Option<DeviceRef>,
     pub revoked_id: Option<String>,
     pub certificate: Option<Envelope<BranchCertificate>>,
+    /// The enrolling recipient's branch-signed layer declaration (SECONDARY-LAYER-01, enroll only).
+    pub message_layer: Option<ramflux_protocol::custody::SignedLayerDeclaration>,
     pub display_name: Option<String>,
     pub now: u64,
     pub branch_vault_ref: String,
@@ -307,6 +312,7 @@ fn prepare_candidate_leased(
                 HeadKind::Enroll => primary.enroll_device(
                     account.verified(),
                     write.certificate.clone().ok_or(SdkError::PairingField("certificate"))?,
+                    write.message_layer.clone().ok_or(SdkError::PairingField("message_layer"))?,
                     write.now,
                 )?,
                 HeadKind::Profile => {
@@ -324,6 +330,22 @@ fn prepare_candidate_leased(
                     write.revoked_id.as_deref().ok_or(SdkError::PairingField("revoked_ref"))?,
                     write.now,
                 )?,
+                HeadKind::SecondaryLayer => {
+                    let declaration = write
+                        .message_layer
+                        .clone()
+                        .ok_or(SdkError::PairingField("message_layer"))?;
+                    let target = write
+                        .recipient_ref
+                        .as_ref()
+                        .ok_or(SdkError::PairingField("recipient_ref"))?;
+                    primary.endorse_device_layer(
+                        account.verified(),
+                        &target.device_id,
+                        declaration,
+                        write.now,
+                    )?
+                }
                 HeadKind::Layer(validity) => {
                     if validity.issued_at != write.now {
                         return Err(SdkError::PairingField("issued_at"));
@@ -627,7 +649,7 @@ fn kind_label(kind: HeadKind) -> &'static str {
         HeadKind::Enroll => "enroll",
         HeadKind::Profile => "head_update",
         HeadKind::Revoke => "revoke",
-        HeadKind::Layer(_) => "layer_update",
+        HeadKind::Layer(_) | HeadKind::SecondaryLayer => "layer_update",
     }
 }
 

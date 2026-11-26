@@ -8,6 +8,9 @@
 //! the source envelope id is not copied. `rf.t` is the route tag from registration.
 //! Background push is unsupported: this module has no background builder.
 //! Custom `ramflux-*` headers are not produced. A call omits collapse fields.
+//! APNs bodies carry `aps` and exactly one custom key, `rf`; collapse travels only in
+//! the `apns-collapse-id` header. A call alert route adds `interruption-level`
+//! `time-sensitive`; messages and `VoIP` do not.
 //! `VoIP` keeps an empty `aps` and `apns-expiration` `0`. Message and call alerts
 //! use APNs priority 10. FCM data messages use `HIGH` and carry no notification text.
 
@@ -22,6 +25,7 @@ pub const WEB_ENCRYPTED_BODY_LIMIT: usize = 4096;
 const MESSAGE_LOC_KEY: &str = "RF_PUSH_MESSAGE";
 const CALL_LOC_KEY: &str = "RF_PUSH_CALL";
 const ALERT_SOUND: &str = "default";
+const CALL_INTERRUPTION_LEVEL: &str = "time-sensitive";
 const LOC_ARGS_NONE: &[&str] = &[];
 const WAKE_ID_BYTES: usize = 16;
 const COLLAPSE_BYTES: usize = 24;
@@ -157,8 +161,7 @@ pub fn build_provider_parts(
     let (body, headers) = match input.mode {
         ProviderWireMode::ApnsAlert => {
             validate_alert_topic(input.topic)?;
-            let body =
-                apns_alert_body(input.class, input.wake_id, class_name, collapse, input.route_tag)?;
+            let body = apns_alert_body(input.class, input.wake_id, input.route_tag)?;
             let headers = apns_headers(input, false, collapse);
             (body, headers)
         }
@@ -167,7 +170,7 @@ pub fn build_provider_parts(
                 return Err(ProviderBuildError::VoipRequiresCall);
             }
             validate_voip_topic(input.topic)?;
-            let body = apns_voip_body(input.wake_id, class_name, input.route_tag)?;
+            let body = apns_voip_body(input.wake_id, input.route_tag)?;
             let headers = apns_headers(input, true, None);
             (body, headers)
         }
@@ -284,19 +287,19 @@ fn apns_headers(
 fn apns_alert_body(
     class: WakeClass,
     wake_id: &str,
-    class_name: &'static str,
-    collapse: Option<&str>,
     route_tag: &str,
 ) -> Result<Vec<u8>, ProviderBuildError> {
+    let interruption_level = match class {
+        WakeClass::CallWake => Some(CALL_INTERRUPTION_LEVEL),
+        WakeClass::Message => None,
+    };
     serde_json::to_vec(&ApnsAlertBody {
         aps: ApnsAlertAps {
             alert: ApnsLocAlert { loc_key: alert_loc_key(class), loc_args: LOC_ARGS_NONE },
             mutable_content: 1,
             sound: ALERT_SOUND,
+            interruption_level,
         },
-        wake_id,
-        class: class_name,
-        collapse_key: collapse,
         rf: rf_meta(class, wake_id, route_tag),
     })
     .map_err(|_source| ProviderBuildError::PayloadTooLarge)
@@ -325,15 +328,9 @@ fn rf_json(class: WakeClass, wake_id: &str, route_tag: &str) -> Result<String, P
         .map_err(|_source| ProviderBuildError::PayloadTooLarge)
 }
 
-fn apns_voip_body(
-    wake_id: &str,
-    class_name: &'static str,
-    route_tag: &str,
-) -> Result<Vec<u8>, ProviderBuildError> {
+fn apns_voip_body(wake_id: &str, route_tag: &str) -> Result<Vec<u8>, ProviderBuildError> {
     serde_json::to_vec(&ApnsVoipBody {
         aps: ApnsEmpty {},
-        wake_id,
-        class: class_name,
         rf: rf_meta(WakeClass::CallWake, wake_id, route_tag),
     })
     .map_err(|_source| ProviderBuildError::PayloadTooLarge)
@@ -376,6 +373,8 @@ struct ApnsAlertAps {
     #[serde(rename = "mutable-content")]
     mutable_content: u8,
     sound: &'static str,
+    #[serde(rename = "interruption-level", skip_serializing_if = "Option::is_none")]
+    interruption_level: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -389,10 +388,6 @@ struct RfMeta<'a> {
 #[derive(Serialize)]
 struct ApnsAlertBody<'a> {
     aps: ApnsAlertAps,
-    wake_id: &'a str,
-    class: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    collapse_key: Option<&'a str>,
     rf: RfMeta<'a>,
 }
 
@@ -402,8 +397,6 @@ struct ApnsEmpty {}
 #[derive(Serialize)]
 struct ApnsVoipBody<'a> {
     aps: ApnsEmpty,
-    wake_id: &'a str,
-    class: &'static str,
     rf: RfMeta<'a>,
 }
 
@@ -500,8 +493,20 @@ mod tests {
         assert_eq!(parsed["rf"]["c"], "m");
         assert_eq!(parsed["rf"]["t"], ROUTE_TAG);
         assert_eq!(parsed["rf"]["w"], id);
-        assert_eq!(parsed["class"], "message");
-        assert_eq!(parsed["collapse_key"], key);
+        assert_eq!(
+            parsed.as_object().map(serde_json::Map::len),
+            Some(2),
+            "APNs body must be aps plus rf"
+        );
+        assert!(parsed.get("class").is_none() && parsed.get("wake_id").is_none());
+        assert!(parsed.get("collapse_key").is_none(), "collapse travels in the header only");
+        assert!(
+            parsed["aps"].get("interruption-level").is_none(),
+            "messages are not time-sensitive"
+        );
+        assert!(
+            alert.headers.iter().any(|(name, value)| name == "apns-collapse-id" && *value == key)
+        );
         assert!(alert.headers.iter().any(|(name, value)| name == "apns-priority" && value == "10"));
         assert!(
             alert.headers.iter().any(|(name, value)| name == "apns-expiration" && value == "2000")
@@ -574,8 +579,14 @@ mod tests {
         assert_eq!(parsed["aps"]["mutable-content"], 1);
         assert_eq!(parsed["rf"]["c"], "call");
         assert_eq!(parsed["rf"]["w"], id);
-        assert_eq!(parsed["class"], "call_wake");
+        assert_eq!(
+            parsed.as_object().map(serde_json::Map::len),
+            Some(2),
+            "APNs body must be aps plus rf"
+        );
+        assert!(parsed.get("class").is_none() && parsed.get("wake_id").is_none());
         assert!(parsed.get("collapse_key").is_none());
+        assert_eq!(parsed["aps"]["interruption-level"], "time-sensitive");
         assert!(alert.headers.iter().all(|(name, _)| name != "apns-collapse-id"));
         assert!(alert.headers.iter().any(|(name, value)| name == "apns-priority" && value == "10"));
         assert!(
@@ -596,6 +607,12 @@ mod tests {
         let parsed = json_of(&voip)?;
         assert_eq!(parsed["aps"], serde_json::json!({}));
         assert_eq!(parsed["rf"]["t"], ROUTE_TAG);
+        assert_eq!(
+            parsed.as_object().map(serde_json::Map::len),
+            Some(2),
+            "APNs body must be aps plus rf"
+        );
+        assert!(parsed.get("class").is_none() && parsed.get("wake_id").is_none());
         assert!(parsed.get("collapse_key").is_none());
         assert!(voip.headers.iter().any(|(name, value)| name == "apns-expiration" && value == "0"));
         assert!(

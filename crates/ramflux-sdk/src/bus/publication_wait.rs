@@ -31,6 +31,21 @@ pub(super) enum Dispatch {
 
 const IMMEDIATE_RETRIES: u8 = 2;
 
+/// A send that carries prepared attachments is a durable upload, not an ordinary command: the
+/// relay calls, the owner's pause and the same-operation resume can outlast the command deadline.
+/// It is ended by its own completion, its cancel path or the account lifecycle, never by this.
+pub(crate) const ATTACHMENT_SEND_BUDGET: Duration = Duration::from_hours(24);
+
+/// Whether a `conversation.send` request names at least one prepared attachment.
+pub(crate) fn carries_prepares(request: &super::protocol::LocalBusFrame) -> bool {
+    request.method == "conversation.send"
+        && request
+            .body
+            .get("prepares")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|prepares| !prepares.is_empty())
+}
+
 pub(super) async fn dispatch(
     state: &mut LocalBusDaemonState,
     account_id: &str,
@@ -38,10 +53,14 @@ pub(super) async fn dispatch(
     command_timeout: Duration,
     final_attempt: bool,
 ) -> Dispatch {
-    let deadline = command
-        .admission
-        .as_ref()
-        .map_or_else(|| Instant::now() + command_timeout, |admission| admission.command_deadline);
+    let deadline = if carries_prepares(&command.request) {
+        Instant::now() + ATTACHMENT_SEND_BUDGET
+    } else {
+        command.admission.as_ref().map_or_else(
+            || Instant::now() + command_timeout,
+            |admission| admission.command_deadline,
+        )
+    };
     super::command_admission::COMMAND_CONTEXT
         .scope(deadline, dispatch_bounded(state, account_id, command, deadline, final_attempt))
         .await

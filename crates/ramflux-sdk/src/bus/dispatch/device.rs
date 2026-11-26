@@ -12,6 +12,7 @@ pub(crate) async fn dispatch_device_bus_request(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match request.method.as_str() {
         "device.list" => dispatch_device_list(request, state),
+        "push.keyset.get" => dispatch_push_keyset_get(request, state),
         "device.refresh" => {
             super::identity_authority::dispatch_identity_authority(request, state).await
         }
@@ -143,6 +144,7 @@ async fn dispatch_push_route_set(
     let outcome = engine.set_push_route(body.registration).await;
     account.apply_session_metadata(engine);
     account.persist_push_route_seq();
+    account.gateway_config.push.retry_save();
     let expires_at = outcome?;
     if cleared {
         account.client.set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, EMPTY_PUSH_ROUTE_BOOK)?;
@@ -151,6 +153,44 @@ async fn dispatch_push_route_set(
         "registered": expires_at.is_some(),
         "deregistered": cleared,
         "expires_at": expires_at,
+    })))
+}
+
+/// Local read of the central push key set state: mode, verified key set and its status.
+fn dispatch_push_keyset_get(
+    request: &LocalBusFrame,
+    state: &LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?;
+    let account = local_bus_account(state, account_id)?;
+    let now = crate::push_keyset::unix_millis_now();
+    let pin = crate::push_keyset::configured_push_centre();
+    let snapshot =
+        account.gateway_config.push.snapshot(pin.as_ref().map(|pin| pin.centre_id.as_str()));
+    let mode = snapshot.mode.clone().unwrap_or_else(|| "unknown".to_owned());
+    let held = snapshot.held.as_ref();
+    let (status, record) = match (&pin, held, now) {
+        (None, _, _) => ("no_pin", None),
+        (Some(_), None, _) => ("missing", None),
+        (Some(_), Some(record), None) => ("no_clock", Some(record)),
+        (Some(_), Some(record), Some(now)) if record.expires_at <= now => ("expired", Some(record)),
+        (Some(pin), Some(record), Some(now)) => {
+            if crate::push_keyset::offer(pin, &record.doc, None, now).is_ok() {
+                ("ok", Some(record))
+            } else {
+                ("invalid", Some(record))
+            }
+        }
+    };
+    Ok(local_bus_ok(serde_json::json!({
+        "mode": mode,
+        "status": status,
+        "centre_id": record.map(|record| record.centre_id.clone()),
+        "seq": record.map(|record| record.seq),
+        "active_kid": record.map(|record| record.active_kid.clone()),
+        "expires_at": record.map(|record| record.expires_at),
+        "saved": !snapshot.save_pending,
+        "last_refusal": snapshot.last_refusal,
     })))
 }
 

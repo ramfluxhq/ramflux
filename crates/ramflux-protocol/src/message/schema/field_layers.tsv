@@ -150,6 +150,9 @@ Control	own_group_consent	29	1
 Control	own_message_copy	30	1
 Control	friend	31	1
 Control	agent_sync	32	1
+Control	own_layer_renewal	34	3
+OwnLayerRenewal	primary	1	3
+OwnLayerRenewal	signed_declaration_json	2	3
 AgentHostPacket	owner_anchor	1	1
 AgentHostPacket	source	2	1
 AgentHostPacket	recipient	3	1

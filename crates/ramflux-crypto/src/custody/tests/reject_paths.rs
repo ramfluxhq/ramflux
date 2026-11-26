@@ -60,7 +60,11 @@ fn enroll_secondary(
         genesis.body.devices[0].branch_certificate.as_ref().ok_or("branch")?.body.clone();
     branch.device_id = "secondary".into();
     branch.cert_id = encode_base64url([27; 32]);
-    primary.enroll_device(&current, primary.certify_branch(branch)?, now + 1).map_err(Into::into)
+    let signer = crate::create_device_branch("vector.example", "primary", 1, [3; 32]);
+    let message_layer = crate::custody::sign_enrollment_layer(&signer, &branch)?;
+    primary
+        .enroll_device(&current, primary.certify_branch(branch)?, message_layer, now + 1)
+        .map_err(Into::into)
 }
 
 #[test]

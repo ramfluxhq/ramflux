@@ -351,6 +351,17 @@ impl RamfluxClient {
             roles,
         }))
     }
+    /// Whether this account's device is a current member of a shared group, so that a device
+    /// excluded by an applied leave or removal stops seeing the group in `group.list`.
+    /// Groups without a verified shared state keep their existing listing rules.
+    pub(crate) fn local_device_is_shared_member(&self, group: &str) -> Result<bool, SdkError> {
+        let Some(verified) = self.account_db()?.shared_group_state(group)? else {
+            return Ok(true);
+        };
+        let own = self.owned_device_identity()?;
+        Ok(verified.view().effective_role(own.root_commitment(), own.device_id()).is_some())
+    }
+
     pub(crate) fn shared_group_metadata(&self, group: &str) -> Result<Option<Value>, SdkError> {
         let Some(verified) = self.account_db()?.shared_group_state(group)? else {
             return Ok(None);
