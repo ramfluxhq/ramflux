@@ -78,8 +78,14 @@ impl CenterPin {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirectoryRole {
-    Home { database: PathBuf, service: HomeServiceConfig },
-    Center { primary: PathBuf, witness: WitnessPeer },
+    Home {
+        database: PathBuf,
+        service: HomeServiceConfig,
+    },
+    Center {
+        primary: PathBuf,
+        witness: WitnessPeer,
+    },
     Witness {
         database: PathBuf,
         peer: WitnessPeer,
@@ -260,9 +266,8 @@ impl DirectoryConfig {
 }
 
 fn witness_peer(socket: String, center_uid: &str, witness_uid: &str) -> Result<WitnessPeer> {
-    let uid = |value: &str| {
-        u32::try_from(decimal(value)?).map_err(|_| CheckpointError::Refused("uid"))
-    };
+    let uid =
+        |value: &str| u32::try_from(decimal(value)?).map_err(|_| CheckpointError::Refused("uid"));
     let peer = WitnessPeer {
         socket: PathBuf::from(socket),
         center_uid: uid(center_uid)?,

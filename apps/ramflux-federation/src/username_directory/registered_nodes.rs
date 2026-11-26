@@ -176,10 +176,7 @@ impl RegisteredNodes {
     fn check_expiry(&mut self, now: u64) {
         let expired = now >= self.current.generated_at.saturating_add(LIFETIME_SECONDS);
         if expired && !self.expired {
-            tracing::error!(
-                generated_at = self.current.generated_at,
-                "registered_nodes expired"
-            );
+            tracing::error!(generated_at = self.current.generated_at, "registered_nodes expired");
         } else if !expired && self.expired {
             tracing::info!("registered_nodes valid");
         }

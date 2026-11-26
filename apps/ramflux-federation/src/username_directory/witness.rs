@@ -79,15 +79,14 @@ pub fn run(
         sender.clone(),
         quic::Admission { slots: Arc::clone(&slots), sources: Arc::clone(&sources) },
     )?;
-    let mut state =
-        WitnessState {
-            authority,
-            signer,
-            nodes,
-            workers: Vec::new(),
-            peer: None,
-            pending: Vec::new(),
-        };
+    let mut state = WitnessState {
+        authority,
+        signer,
+        nodes,
+        workers: Vec::new(),
+        peer: None,
+        pending: Vec::new(),
+    };
     let recovery = flag("--username-initialize") || flag("--username-recovery");
     let io = WitnessIo {
         node,
@@ -392,7 +391,8 @@ fn admit(
     incoming: tcp::Incoming,
     pin: &directory::CenterPin,
 ) -> Result<(Pending, directory::CheckpointHead)> {
-    let (report, reporter) = match authenticate(authority, nodes, node_rate_per_min, &incoming, pin) {
+    let (report, reporter) = match authenticate(authority, nodes, node_rate_per_min, &incoming, pin)
+    {
         Ok(value) => value,
         Err(error) => {
             use ramflux_protocol::username_directory::DirectoryCode as Code;
