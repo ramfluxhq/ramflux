@@ -270,6 +270,12 @@ impl NotifyRedbStore {
         &self,
         entry: &NotifyQueueEntry,
     ) -> Result<bool, NodeCoreError> {
+        // An own-device push test bypasses mute and hold and leaves no policy row.
+        if entry.wake.delivery_class
+            == ramflux_protocol::NotificationDeliveryClass::PushTestNotification
+        {
+            return Ok(true);
+        }
         let now = now_unix_ms();
         let device = entry.device_delivery_id.as_str();
         if let Some(row) = self.hold_row(&entry.queue_id)? {

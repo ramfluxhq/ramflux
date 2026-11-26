@@ -336,4 +336,26 @@ impl NotifyRedbStore {
         };
         Ok(route_selection::select_central_routes(routes, class, served, now_ms))
     }
+
+    /// Provider of the live, authorized route of `device_delivery_id` that carries `route_tag`.
+    /// `None` means the device has no such route (unknown, foreign, expired or unauthorized).
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn push_test_route_provider(
+        &self,
+        device_delivery_id: &str,
+        route_tag: &str,
+    ) -> Result<Option<super::PushProviderKind>, NodeCoreError> {
+        let now_seconds = crate::now_unix_seconds();
+        let provider = self
+            .load_notify_routes(device_delivery_id)?
+            .into_iter()
+            .find(|route| route.route_tag == route_tag && route.expires_at > now_seconds)
+            .map(|route| route.provider);
+        if provider.is_some() && !self.authorize_push_route(device_delivery_id)? {
+            return Ok(None);
+        }
+        Ok(provider)
+    }
 }

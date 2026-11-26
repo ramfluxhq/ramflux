@@ -142,7 +142,8 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
             SdkError::CustodyAdmission { retry, .. } => {
                 Some(u64::from(retry.clamped().retry_after_ms))
             }
-            SdkError::NetworkingPendingContext { retry_after_ms, .. } => *retry_after_ms,
+            SdkError::NetworkingPendingContext { retry_after_ms, .. }
+            | SdkError::PushTestRefused { retry_after_ms, .. } => *retry_after_ms,
             SdkError::AccountCommandBackpressure
             | SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some(1_000),
             SdkError::CustodyCapacity { capacity } => {
@@ -173,7 +174,9 @@ fn refused_retry_after_ms(body: &serde_json::Value) -> Option<u64> {
 fn bus_reason_code(error: &SdkError) -> Option<String> {
     Some(match error {
         SdkError::AccountCommandBackpressure => "account_command_backpressure".into(),
-        SdkError::PushRouteRefused(_) => "push_route_refused".into(),
+        SdkError::PushRouteRefused(_) | SdkError::PushTestRefused { .. } => {
+            "push_route_refused".into()
+        }
         SdkError::UsernameDirectoryRefused(code) => code.as_str().into(),
         SdkError::Storage(StorageError::AccountWriterBusy(_)) => "account_busy".into(),
         SdkError::ContactInput(reason) => reason.to_string(),
@@ -206,7 +209,7 @@ fn bus_error_details(error: &SdkError) -> Option<Box<serde_json::Value>> {
             Some(Box::new(serde_json::json!({"capacity": capacity})))
         }
         SdkError::CustodyVault(reason) => Some(Box::new(vault_reason_details(*reason))),
-        SdkError::PushRouteRefused(refusal) => {
+        SdkError::PushRouteRefused(refusal) | SdkError::PushTestRefused { refusal, .. } => {
             Some(Box::new(serde_json::json!({"refusal": refusal.wire_token()})))
         }
         SdkError::ContactConfirmationRequired(change) => Some(Box::new(serde_json::json!(change))),
@@ -301,7 +304,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::RestoreSetupRequired => "restore_setup_required",
         SdkError::Storage(StorageError::AuthorizationRejected) => "authorization_rejected",
         SdkError::NoNodeSelected => "NoNodeSelected",
-        SdkError::PushRouteRefused(_) => "push_route_refused",
+        SdkError::PushRouteRefused(_) | SdkError::PushTestRefused { .. } => "push_route_refused",
         SdkError::PushKeysetCheckpointMalformed(_) => "push_keyset_checkpoint_malformed",
         SdkError::CustodyVault(reason) => reason.wire_code(),
         SdkError::AccountNotOpen(_) => "AccountNotOpen",

@@ -40,7 +40,10 @@ pub use device_route::{
     push_provider_endpoint,
 };
 mod route_selection;
-pub use route_selection::{apns_topic_is_voip, voip_push_enabled};
+pub use route_selection::{
+    TEST_ROUTE_TAG_EXT_KEY, apns_topic_is_voip, only_test_target, test_target_route_tag,
+    voip_push_enabled,
+};
 mod routes;
 mod wake_policy;
 use crate::push_handoff::PushPolicy;
@@ -1350,7 +1353,7 @@ impl NotifyRedbStore {
             };
         let mut credential_cache: BTreeMap<String, ProviderCredential> = BTreeMap::new();
         let routes = route_selection::select_wake_routes(
-            routes,
+            only_test_target(routes, &normalized_wake),
             &normalized_wake.delivery_class,
             self.voip_enabled(),
             |route| {
@@ -2241,7 +2244,7 @@ impl NotifyRedbStore {
             };
         let mut credential_cache: BTreeMap<String, ProviderCredential> = BTreeMap::new();
         let routes = route_selection::select_wake_routes(
-            routes,
+            only_test_target(routes, &entry.wake),
             &entry.wake.delivery_class,
             self.voip_enabled(),
             |route| {
@@ -2613,6 +2616,7 @@ pub fn notification_default_ttl(
         ramflux_protocol::NotificationDeliveryClass::AiTaskNotification => 1_800,
         ramflux_protocol::NotificationDeliveryClass::A2uiSurfaceNotification => 600,
         ramflux_protocol::NotificationDeliveryClass::CallWakeNotification => 30,
+        ramflux_protocol::NotificationDeliveryClass::PushTestNotification => 300,
     }
 }
 
@@ -2622,7 +2626,8 @@ pub fn notification_default_priority(
     requested: &ramflux_protocol::PushPriority,
 ) -> ramflux_protocol::PushPriority {
     match delivery_class {
-        ramflux_protocol::NotificationDeliveryClass::CallWakeNotification => {
+        ramflux_protocol::NotificationDeliveryClass::CallWakeNotification
+        | ramflux_protocol::NotificationDeliveryClass::PushTestNotification => {
             ramflux_protocol::PushPriority::High
         }
         ramflux_protocol::NotificationDeliveryClass::SelfDeviceControlNotification => {
@@ -2664,7 +2669,8 @@ pub fn canonical_collapse_key(
 ) -> String {
     match wake.delivery_class {
         ramflux_protocol::NotificationDeliveryClass::CallWakeNotification
-        | ramflux_protocol::NotificationDeliveryClass::ConferenceWakeNotification => {
+        | ramflux_protocol::NotificationDeliveryClass::ConferenceWakeNotification
+        | ramflux_protocol::NotificationDeliveryClass::PushTestNotification => {
             format!("wake:{}", wake.wake_id)
         }
         ramflux_protocol::NotificationDeliveryClass::SelfDeviceControlNotification => format!(

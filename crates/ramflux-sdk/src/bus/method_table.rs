@@ -229,6 +229,7 @@ methods! {
         "device.notifications.cleared",
         "device.push_policy.set",
         "device.push_route.set",
+        "device.push_route.test",
         "device.refresh",
         "device.revoke",
         "device.sync.export",

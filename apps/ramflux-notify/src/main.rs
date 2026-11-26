@@ -11,6 +11,7 @@ mod central_handoff;
 mod delivery_loop;
 mod provider_payload;
 mod push_registration;
+mod push_test;
 mod retention;
 mod send_authority;
 
@@ -639,7 +640,7 @@ fn handle_notify_mesh_quic_request(
             })
         }
         ("POST", ramflux_node_core::PUSH_ROUTE_TEST_PATH) => {
-            let body: S13WakeRequest =
+            let body: ramflux_node_core::PushRouteTestMeshRequest =
                 serde_json::from_value(request.body.clone()).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;

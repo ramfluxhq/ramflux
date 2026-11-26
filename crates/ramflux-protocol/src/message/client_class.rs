@@ -50,7 +50,8 @@ pub fn client_class_from_notification(class: &NotificationDeliveryClass) -> Clie
         NotificationDeliveryClass::SelfDeviceControlNotification
         | NotificationDeliveryClass::UserContentNotification
         | NotificationDeliveryClass::AiTaskNotification
-        | NotificationDeliveryClass::A2uiSurfaceNotification => ClientDeliveryClass::Message,
+        | NotificationDeliveryClass::A2uiSurfaceNotification
+        | NotificationDeliveryClass::PushTestNotification => ClientDeliveryClass::Message,
     }
 }
 

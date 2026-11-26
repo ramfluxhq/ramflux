@@ -112,7 +112,7 @@ impl NotifyRedbStore {
         }
         let mut credential_cache = BTreeMap::new();
         let routes = super::route_selection::select_wake_routes(
-            routes,
+            super::only_test_target(routes, &entry.wake),
             &entry.wake.delivery_class,
             self.voip_enabled(),
             |route| {

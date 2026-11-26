@@ -967,7 +967,9 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         SdkError::LifecycleShared(source) => sdk_error_code(source),
         SdkError::DirectoryAuthorityUnavailable { source, .. } => sdk_error_code(source),
         SdkError::DataRootInUse => RamfluxErrorCode::AccountBusy,
-        SdkError::PushRouteRefused(_) => RamfluxErrorCode::CapabilityRejected,
+        SdkError::PushRouteRefused(_) | SdkError::PushTestRefused { .. } => {
+            RamfluxErrorCode::CapabilityRejected
+        }
         SdkError::LocalBusRefused { code, .. } if code == "SessionLeaseBusy" => {
             RamfluxErrorCode::AccountBusy
         }

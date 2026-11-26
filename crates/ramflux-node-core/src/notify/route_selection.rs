@@ -21,6 +21,32 @@ pub fn voip_push_enabled() -> bool {
     crate::environment::var("RAMFLUX_NOTIFY_APNS_VOIP_ENABLED").as_deref() == Ok("1")
 }
 
+/// `NotificationWake.ext` key that names the one route a push test wake may use.
+pub const TEST_ROUTE_TAG_EXT_KEY: &str = "test_route_tag";
+
+/// The route tag a push test wake is bound to; `None` for every other wake.
+#[must_use]
+pub fn test_target_route_tag(wake: &ramflux_protocol::NotificationWake) -> Option<&str> {
+    if wake.delivery_class != NotificationDeliveryClass::PushTestNotification {
+        return None;
+    }
+    wake.ext.ext.get(TEST_ROUTE_TAG_EXT_KEY).and_then(serde_json::Value::as_str)
+}
+
+/// Narrows `routes` to the one route a push test wake is bound to. Other wakes are untouched.
+/// A test wake that names no route keeps none (it is never a fan-out).
+#[must_use]
+pub fn only_test_target(
+    mut routes: Vec<super::DevicePushRoute>,
+    wake: &ramflux_protocol::NotificationWake,
+) -> Vec<super::DevicePushRoute> {
+    if wake.delivery_class == NotificationDeliveryClass::PushTestNotification {
+        let tag = test_target_route_tag(wake);
+        routes.retain(|route| tag == Some(route.route_tag.as_str()));
+    }
+    routes
+}
+
 /// Keep the routes this wake may send.
 ///
 /// `voip_ready` reports whether a `VoIP` route still has a current `VoIP` credential.

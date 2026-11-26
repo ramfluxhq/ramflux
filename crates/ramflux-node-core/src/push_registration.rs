@@ -299,13 +299,21 @@ pub const PUSH_ROUTE_TEST_SIGNED_PATH: &str = "/notify/v1/push-route/test";
 /// Notify mesh path of the authenticated push test. The gateway posts its signed test wake here.
 pub const PUSH_ROUTE_TEST_PATH: &str = "/s13/notify/push-test";
 
-/// Client request body of `device.push_route.test`. Only the calling device is ever targeted.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+/// Client request body of `device.push_route.test`. The route must be one of the caller's own.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PushRouteTestRequest {
-    /// `alert` (default) or `voip`. `voip` is refused until a PushKit test payload exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub class: Option<String>,
+    /// Route tag of one of the calling device's registered routes.
+    pub route_tag: String,
+}
+
+/// Gateway to notify mesh request of the push test: the signed wake plus the one route it targets.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushRouteTestMeshRequest {
+    pub device_delivery_id: String,
+    pub signed_wake: ramflux_protocol::SignedWakeV2,
+    pub route_tag: String,
 }
 
 /// Signed session frame of the push test; its signature domain is the route-control one.

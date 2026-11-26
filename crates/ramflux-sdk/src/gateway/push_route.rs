@@ -88,13 +88,12 @@ impl std::fmt::Debug for GatewayPushRouteRegistration {
     }
 }
 
-/// Own-device push test request. The target is always the calling device.
-#[derive(Clone, Debug, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+/// Own-device push test request. The target is the calling device and one of its own routes.
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GatewayPushRouteTestRequest {
-    /// `alert` (default) or `voip`; `voip` is refused by the node for now.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub class: Option<String>,
+    /// Route tag of one of the calling device's registered routes.
+    pub route_tag: String,
 }
 
 /// Signed session frame of the push test.
@@ -110,6 +109,27 @@ pub struct GatewayPushRouteTestAnswer {
     pub status: String,
     pub reason: Option<String>,
     pub retry_after_ms: Option<u64>,
+}
+
+impl GatewayPushRouteTestAnswer {
+    /// `Ok` for `queued`; a typed refusal otherwise, using the same refusal error as
+    /// `device.push_route.set` plus the retry hint of a rate limit.
+    fn into_result(self) -> Result<(), SdkError> {
+        if self.status == "queued" {
+            return Ok(());
+        }
+        if self.status != "refused" {
+            return Err(SdkError::GatewaySessionRejected("unknown push test answer".into()));
+        }
+        let refusal = match self.reason.as_deref() {
+            Some("rate_limited") => GatewayPushRouteRefusal::RateLimited,
+            Some("unsupported_class") => GatewayPushRouteRefusal::UnsupportedClass,
+            Some("rejected") => GatewayPushRouteRefusal::Rejected,
+            Some("unavailable") => GatewayPushRouteRefusal::Unavailable,
+            _ => GatewayPushRouteRefusal::Unknown,
+        };
+        Err(SdkError::PushTestRefused { refusal, retry_after_ms: self.retry_after_ms })
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
@@ -145,6 +165,10 @@ pub enum GatewayPushRouteRefusal {
     RejectedOwner,
     /// Local refusal: central mode has no usable key set or pin, so nothing was sent.
     PushKeysetUnavailable,
+    /// Push test only: one test per device per 30 seconds.
+    RateLimited,
+    /// Push test only: the route's class has no test payload (`VoIP`, Web Push).
+    UnsupportedClass,
     /// A code from a newer node; retried like `unavailable` so it never breaks the session.
     #[serde(other)]
     Unknown,
@@ -160,6 +184,8 @@ impl GatewayPushRouteRefusal {
             Self::Rejected => "rejected",
             Self::RejectedOwner => "rejected_owner",
             Self::PushKeysetUnavailable => "push_keyset_unavailable",
+            Self::RateLimited => "rate_limited",
+            Self::UnsupportedClass => "unsupported_class",
             Self::Superseded => "superseded",
             Self::Unavailable | Self::Unknown => "unavailable",
         }
@@ -242,7 +268,10 @@ impl PushRouteRetry {
                 self.failures = 0;
                 self.not_before = sent_at;
             }
-            GatewayPushRouteRefusal::Unavailable | GatewayPushRouteRefusal::Unknown => {
+            GatewayPushRouteRefusal::Unavailable
+            | GatewayPushRouteRefusal::Unknown
+            | GatewayPushRouteRefusal::RateLimited
+            | GatewayPushRouteRefusal::UnsupportedClass => {
                 self.failures = self.failures.saturating_add(1);
                 let jitter = ramflux_crypto::random_32().map_or(0, |bytes| bytes[0]);
                 self.not_before =
@@ -507,16 +536,14 @@ impl GatewaySessionEngine {
             .map_err(|_| SdkError::GatewaySessionRejected("push route send timed out".to_owned()))?
     }
 
-    /// Reads frames until the answer to `request_id`, buffering deliveries meanwhile. Any other
-    /// unrelated push is dispatched immediately; a drain or close ends the wait.
-    /// Sends the own-device push test and waits for its answer by request id.
+    /// Sends the own-device push test for `route_tag` and waits for its answer by request id.
+    /// `Ok` means the node queued the test wake, not that a provider delivered it.
+    ///
     /// # Errors
-    /// Returns transport, signing or session-ending errors; refusals are answers.
-    pub async fn test_push_route(
-        &mut self,
-        class: Option<String>,
-    ) -> Result<GatewayPushRouteTestAnswer, SdkError> {
-        let body = GatewayPushRouteTestRequest { class };
+    /// Returns transport, signing or session-ending errors, and [`SdkError::PushTestRefused`]
+    /// when the node refuses the test.
+    pub async fn test_push_route(&mut self, route_tag: String) -> Result<(), SdkError> {
+        let body = GatewayPushRouteTestRequest { route_tag };
         let signed_request = self.session_bound_request(GATEWAY_PUSH_ROUTE_TEST_PATH, &body)?;
         let request_id = signed_request.request_id.clone();
         self.write_push_route_frame(GatewayClientFrame::PushRouteTest {
@@ -529,7 +556,7 @@ impl GatewaySessionEngine {
         )
         .await
         {
-            Ok(result) => result,
+            Ok(result) => result?.into_result(),
             Err(_elapsed) => {
                 self.terminal_reason =
                     Some(crate::bus::connection_manager::DisconnectReason::CallTimeout);
@@ -586,6 +613,8 @@ impl GatewaySessionEngine {
         }
     }
 
+    /// Reads frames until the answer to `request_id`, buffering deliveries meanwhile. Any other
+    /// unrelated push is dispatched immediately; a drain or close ends the wait.
     async fn await_push_reply(&mut self, request_id: &str) -> Result<Option<u64>, SdkError> {
         loop {
             let frame = self.read_stream_frame("push route answer").await?;
