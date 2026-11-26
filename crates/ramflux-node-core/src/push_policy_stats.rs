@@ -63,7 +63,7 @@ pub fn ack_path(state_file: &Path) -> PathBuf {
     state_file.with_file_name(POLICY_STATS_ACK_FILE)
 }
 
-fn io_error(context: &str, error: std::io::Error) -> NodeCoreError {
+fn io_error(context: &str, error: &dyn std::fmt::Display) -> NodeCoreError {
     NodeCoreError::InvalidConfiguration(format!("{context}: {error}"))
 }
 
@@ -76,7 +76,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), NodeCoreError> {
         file.sync_all()?;
         std::fs::rename(&tmp, path)
     })();
-    result.map_err(|error| io_error("policy stats file", error))
+    result.map_err(|error| io_error("policy stats file", &error))
 }
 
 /// Writes the pending stats hour (notify side). `None` removes the file.
@@ -91,13 +91,13 @@ pub fn write_pending_stats(
     match hour {
         Some(hour) => {
             let bytes = serde_json::to_vec(&SyncStats::from(hour))
-                .map_err(|error| io_error("encode policy stats", std::io::Error::other(error)))?;
+                .map_err(|error| io_error("encode policy stats", &std::io::Error::other(error)))?;
             write_atomic(&path, &bytes)
         }
         None => match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(io_error("remove policy stats file", error)),
+            Err(error) => Err(io_error("remove policy stats file", &error)),
         },
     }
 }
@@ -110,9 +110,9 @@ pub fn read_pending_stats(state_file: &Path) -> Result<Option<SyncStats>, NodeCo
     match std::fs::read(stats_path(state_file)) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map(Some)
-            .map_err(|error| io_error("decode policy stats", std::io::Error::other(error))),
+            .map_err(|error| io_error("decode policy stats", &std::io::Error::other(error))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(io_error("read policy stats file", error)),
+        Err(error) => Err(io_error("read policy stats file", &error)),
     }
 }
 
@@ -122,7 +122,7 @@ pub fn read_pending_stats(state_file: &Path) -> Result<Option<SyncStats>, NodeCo
 /// Returns an error when the ack file cannot be written.
 pub fn write_stats_ack(state_file: &Path, from_ms: u64) -> Result<(), NodeCoreError> {
     let bytes = serde_json::to_vec(&AckFile { from_ms })
-        .map_err(|error| io_error("encode policy ack", std::io::Error::other(error)))?;
+        .map_err(|error| io_error("encode policy ack", &std::io::Error::other(error)))?;
     write_atomic(&ack_path(state_file), &bytes)
 }
 
@@ -135,10 +135,10 @@ pub fn take_stats_ack(state_file: &Path) -> Result<Option<u64>, NodeCoreError> {
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io_error("read policy ack file", error)),
+        Err(error) => return Err(io_error("read policy ack file", &error)),
     };
     let _ = std::fs::remove_file(&path);
     let ack: AckFile = serde_json::from_slice(&bytes)
-        .map_err(|error| io_error("decode policy ack", std::io::Error::other(error)))?;
+        .map_err(|error| io_error("decode policy ack", &std::io::Error::other(error)))?;
     Ok(Some(ack.from_ms))
 }

@@ -420,7 +420,7 @@ fn body_json(
     shared: &PushShared,
     kind: &str,
     wakes: Option<&[HandoffWake]>,
-    stats: Option<SyncStats>,
+    policy_stats: Option<SyncStats>,
 ) -> Result<Vec<u8>, String> {
     let state = shared.snapshot();
     let mut body = json!({
@@ -438,10 +438,10 @@ fn body_json(
             object.insert("wakes".to_owned(), wakes);
         }
     }
-    if let Some(stats) = stats {
-        let stats = serde_json::to_value(stats).map_err(|error| error.to_string())?;
+    if let Some(policy_stats) = policy_stats {
+        let value = serde_json::to_value(policy_stats).map_err(|error| error.to_string())?;
         if let Some(object) = body.as_object_mut() {
-            object.insert("stats".to_owned(), stats);
+            object.insert("stats".to_owned(), value);
         }
     }
     serde_json::to_vec(&body).map_err(|error| error.to_string())
