@@ -33,7 +33,7 @@ pub(crate) struct DevicePushPolicy {
     pub(crate) account: String,
     #[arg(long, value_parser = ["phone", "tablet", "desktop", "terminal"])]
     pub(crate) class: String,
-    #[arg(long, value_parser = clap::value_parser!(bool))]
+    #[arg(long, action = clap::ArgAction::Set, value_parser = clap::value_parser!(bool))]
     pub(crate) muted: bool,
 }
 
