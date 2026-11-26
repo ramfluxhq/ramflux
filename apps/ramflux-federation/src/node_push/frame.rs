@@ -63,5 +63,5 @@ pub(crate) fn decode_reply(bytes: &[u8]) -> Result<Value, String> {
     if u32::from_be_bytes(*len_bytes) as usize != json.len() || json.len() > MAX_REPLY_LEN {
         return Err("reply length mismatch".to_owned());
     }
-    serde_json::from_slice(json).map_err(|error| format!("reply JSON: {error}"))
+    ramflux_protocol::parse_i_json(json).map_err(|error| format!("reply JSON: {error}"))
 }
