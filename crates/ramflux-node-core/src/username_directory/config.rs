@@ -206,19 +206,10 @@ impl DirectoryConfig {
                 }
             }
             "center" | "witness" => {
-                let peer = WitnessPeer {
-                    socket: PathBuf::from(take("WITNESS_SOCKET")?),
-                    center_uid: u32::try_from(decimal(&take("CENTER_UID")?)?)
-                        .map_err(|_| CheckpointError::Refused("uid"))?,
-                    witness_uid: u32::try_from(decimal(&take("WITNESS_UID")?)?)
-                        .map_err(|_| CheckpointError::Refused("uid"))?,
-                };
-                validate_path(&peer.socket)?;
-                require(
-                    peer.center_uid != 0
-                        && peer.witness_uid != 0
-                        && peer.center_uid != peer.witness_uid,
-                    "uid_separation",
+                let peer = witness_peer(
+                    take("WITNESS_SOCKET")?,
+                    &take("CENTER_UID")?,
+                    &take("WITNESS_UID")?,
                 )?;
                 if role == "center" {
                     DirectoryRole::Center {
@@ -226,17 +217,8 @@ impl DirectoryConfig {
                         witness: peer,
                     }
                 } else {
-                    let registered_nodes =
-                        registered_nodes.clone().ok_or(CheckpointError::Refused("config_incomplete"))?;
-                    validate_path(&registered_nodes)?;
-                    let node_rate_per_min = match &node_rate {
-                        Some(value) => decimal(value)?,
-                        None => DEFAULT_AUTH_NODE_RATE_PER_MIN,
-                    };
-                    require(
-                        (1..=MAX_AUTH_NODE_RATE_PER_MIN).contains(&node_rate_per_min),
-                        "auth_node_rate",
-                    )?;
+                    let (registered_nodes, node_rate_per_min) =
+                        witness_inputs(registered_nodes.clone(), node_rate.as_deref())?;
                     DirectoryRole::Witness {
                         database: PathBuf::from(take("WITNESS_DB")?),
                         peer,
@@ -275,6 +257,35 @@ impl DirectoryConfig {
         }
         Ok(Some(Self { center, role }))
     }
+}
+
+fn witness_peer(socket: String, center_uid: &str, witness_uid: &str) -> Result<WitnessPeer> {
+    let uid = |value: &str| {
+        u32::try_from(decimal(value)?).map_err(|_| CheckpointError::Refused("uid"))
+    };
+    let peer = WitnessPeer {
+        socket: PathBuf::from(socket),
+        center_uid: uid(center_uid)?,
+        witness_uid: uid(witness_uid)?,
+    };
+    validate_path(&peer.socket)?;
+    require(
+        peer.center_uid != 0 && peer.witness_uid != 0 && peer.center_uid != peer.witness_uid,
+        "uid_separation",
+    )?;
+    Ok(peer)
+}
+
+/// Required list path and the per-node quota (default when absent; zero or unparsable refuses).
+fn witness_inputs(file: Option<PathBuf>, rate: Option<&str>) -> Result<(PathBuf, u64)> {
+    let file = file.ok_or(CheckpointError::Refused("config_incomplete"))?;
+    validate_path(&file)?;
+    let rate = match rate {
+        Some(value) => decimal(value)?,
+        None => DEFAULT_AUTH_NODE_RATE_PER_MIN,
+    };
+    require((1..=MAX_AUTH_NODE_RATE_PER_MIN).contains(&rate), "auth_node_rate")?;
+    Ok((file, rate))
 }
 
 pub type HttpsOrigin = ramflux_protocol::username_directory::DirectoryOrigin;

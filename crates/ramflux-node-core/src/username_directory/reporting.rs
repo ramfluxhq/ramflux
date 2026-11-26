@@ -69,6 +69,15 @@ fn prune(
     Ok(())
 }
 
+fn charge_node(
+    table: &mut redb::Table<&str, &[u8]>,
+    channel: &ReportingChannel<'_>,
+    now: u64,
+) -> Result<()> {
+    let key = format!("auth_node:{}", channel.node_key);
+    rate(table, &key, channel.node_rate_per_min, 60, now, false)
+}
+
 fn rate(
     table: &mut redb::Table<&str, &[u8]>,
     key: &str,
@@ -163,14 +172,7 @@ impl DirectoryAuthority {
             .map_err(storage)?;
             let result = (|| {
                 rate(&mut meta, "auth_global_rate", 1000, 1, time.wall, false)?;
-                rate(
-                    &mut meta,
-                    &format!("auth_node:{}", channel.node_key),
-                    channel.node_rate_per_min,
-                    60,
-                    time.wall,
-                    false,
-                )?;
+                charge_node(&mut meta, channel, time.wall)?;
                 rate(
                     &mut meta,
                     &format!(
