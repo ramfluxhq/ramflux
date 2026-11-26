@@ -296,6 +296,114 @@ impl CentralPush {
         Ok(CentralDue::Retry(retry.unwrap_or(now_ms / 1000 + HOLD_RECHECK_MS.div_ceil(1000))))
     }
 
+    /// Sends the pending node-originated clears (wire class `x`). A clear is a node row, never a
+    /// message wake: its wake id is generated here and it carries no sender or message signature;
+    /// the federation session signs the request with the node identity, as for every frame.
+    pub(crate) fn deliver_clears(
+        &self,
+        store: &NotifyRedbStore,
+        now_ms: u64,
+    ) -> Result<CentralDue, NodeCoreError> {
+        let devices = store.pending_policy_clears(now_ms)?;
+        if devices.is_empty() {
+            return Ok(CentralDue::Idle);
+        }
+        if now_ms < self.backoff_until() {
+            return Ok(CentralDue::Retry(ceil_secs(self.backoff_until())));
+        }
+        let Some(state) = read_push_central_state(&self.state_file)? else {
+            return Ok(CentralDue::Idle);
+        };
+        let ttl = state.ttl_max_s.x.min(CAP_X_S);
+        let mut batch: Vec<(String, HandoffWake)> = Vec::new();
+        for device in &devices {
+            let routes =
+                store.central_candidate_routes(device, CentralClass::X, state.served, now_ms)?;
+            for route in routes {
+                let w = format!("clear-{now_ms}-{}", batch.len());
+                batch.push((
+                    device.clone(),
+                    HandoffWake {
+                        w,
+                        c: CentralClass::X,
+                        ttl,
+                        rt: route.route_tag.clone(),
+                        st: route.token.clone(),
+                    },
+                ));
+            }
+        }
+        // A device with no candidate route has nothing to receive; its row is settled.
+        for device in &devices {
+            if !batch.iter().any(|(owner, _)| owner == device) {
+                store.ack_policy_clear(device)?;
+            }
+        }
+        let mut retry: Option<u64> = None;
+        for chunk in batch.chunks(MAX_WAKES) {
+            let request = HandoffRequest {
+                v: ramflux_node_core::push_handoff::HANDOFF_VERSION,
+                wakes: chunk.iter().map(|(_, wake)| wake.clone()).collect(),
+            };
+            let reply = match exchange_handoff(&self.handoff_socket, &request) {
+                Ok(reply) => reply,
+                Err(error) => {
+                    tracing::warn!(%error, "central clear exchange failed");
+                    self.back_off_transport(now_ms);
+                    retry = Some(ceil_secs(self.backoff_until()));
+                    continue;
+                }
+            };
+            match reply.status {
+                HandoffStatus::Ok => {
+                    let matched = reply.results.len() == chunk.len()
+                        && chunk
+                            .iter()
+                            .zip(reply.results.iter())
+                            .all(|((_, wake), result)| result.w == wake.w);
+                    if !matched {
+                        tracing::warn!("central clear reply does not match the batch");
+                        self.back_off_transport(now_ms);
+                        retry = Some(ceil_secs(self.backoff_until()));
+                        continue;
+                    }
+                    if let Ok(mut backoff) = self.backoff.lock() {
+                        backoff.transport_failures = 0;
+                    }
+                    for (device, _) in chunk {
+                        store.ack_policy_clear(device)?;
+                    }
+                    tracing::info!(
+                        target: "ramflux_notify_policy",
+                        event = "policy.clear_sent",
+                        count = chunk.len(),
+                        "node clear wakes handed to the centre"
+                    );
+                }
+                HandoffStatus::Rejected => {
+                    tracing::warn!(reason = ?reply.reason, "central clear batch rejected; dropped");
+                    for (device, _) in chunk {
+                        store.ack_policy_clear(device)?;
+                    }
+                }
+                HandoffStatus::Unavailable | HandoffStatus::Throttled => {
+                    let retry_ms = reply
+                        .retry_after_ms
+                        .unwrap_or(RETRY_AFTER_DEFAULT_MS)
+                        .clamp(RETRY_AFTER_MIN_MS, RETRY_AFTER_MAX_MS);
+                    let until = now_ms.saturating_add(with_jitter(retry_ms, now_ms));
+                    self.set_backoff(until);
+                    retry = Some(ceil_secs(until));
+                }
+                HandoffStatus::Stopped => {
+                    self.back_off_transport(now_ms);
+                    retry = Some(ceil_secs(self.backoff_until()));
+                }
+            }
+        }
+        Ok(retry.map_or(CentralDue::Idle, CentralDue::Retry))
+    }
+
     fn backoff_until(&self) -> u64 {
         self.backoff.lock().map_or(0, |state| state.until_ms)
     }

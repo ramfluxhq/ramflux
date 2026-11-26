@@ -465,6 +465,26 @@ impl NotifyRedbStore {
         Ok(devices)
     }
 
+    /// Direct mode has no `x` wire: every pending clear row is dropped and the count returned
+    /// (plan-02 section 2.3 row 49, `x_direct_unsupported`).
+    ///
+    /// # Errors
+    /// Returns an error when the clear rows cannot be read or removed.
+    pub fn drop_direct_policy_clears(&self, now_ms: u64) -> Result<u64, NodeCoreError> {
+        let devices = self.pending_policy_clears(now_ms)?;
+        if devices.is_empty() {
+            return Ok(0);
+        }
+        self.policy_write(|txn| {
+            let mut table = txn.open_table(POLICY_CLEARS).map_err(redb_error)?;
+            for device in &devices {
+                table.remove(device.as_str()).map_err(redb_error)?;
+            }
+            Ok(())
+        })?;
+        Ok(u64::try_from(devices.len()).unwrap_or(u64::MAX))
+    }
+
     /// Remove a clear row once it was sent or expired.
     ///
     /// # Errors
