@@ -349,7 +349,7 @@ impl Reporter {
     }
 }
 
-fn client_config(ca_path: &str) -> Result<quinn::ClientConfig, String> {
+pub(crate) fn client_config(ca_path: &str, alpn: &[u8]) -> Result<quinn::ClientConfig, String> {
     let pem = std::fs::read(ca_path).map_err(|error| format!("read ca_cert: {error}"))?;
     let mut roots = rustls::RootCertStore::empty();
     for cert in rustls_pemfile::certs(&mut pem.as_slice()) {
@@ -364,7 +364,7 @@ fn client_config(ca_path: &str) -> Result<quinn::ClientConfig, String> {
     .map_err(|error| error.to_string())?
     .with_root_certificates(roots)
     .with_no_client_auth();
-    tls.alpn_protocols = vec![ALPN.to_vec()];
+    tls.alpn_protocols = vec![alpn.to_vec()];
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
         .map_err(|error| error.to_string())?;
     Ok(quinn::ClientConfig::new(Arc::new(crypto)))
@@ -560,7 +560,7 @@ fn spawn(
         seq: 0,
     };
     let centre: SocketAddr = report.centre.addr.parse().map_err(|_| "centre addr".to_owned())?;
-    let client = client_config(&report.centre.ca_cert)?;
+    let client = client_config(&report.centre.ca_cert, ALPN)?;
     let server_name = report.centre.server_name.clone();
     ramflux_node_core::spawn_service_worker("ramflux-node-report", move |shutdown| {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {

@@ -413,6 +413,8 @@ pub(super) async fn configure_pending(account: &mut LocalBusAccountState) -> Res
             vault: super::custody_setup::primary_provider(setup),
         })
         .with_account_identity(&account.client)?;
+    gateway.push.set_node_public_key(profile.node_public_key.clone());
+    crate::push_keyset::restore_keyset(&account.client, &gateway)?;
     let relay = profile.relay_options(root, &gateway.principal_id).await?;
     account.client.account_db()?.persist_actor_state("account/node-id", &profile.node_id)?;
     account.client.account_db()?.persist_actor_state("sync/node-id", &Some(&profile.node_id))?;

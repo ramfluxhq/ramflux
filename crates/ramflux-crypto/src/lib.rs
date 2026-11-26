@@ -56,6 +56,8 @@ mod kdf;
 mod key_verification;
 pub mod node_enrolment;
 mod prekey;
+pub mod push_keyset;
+pub mod push_token;
 mod recovery;
 mod sframe;
 mod signing;

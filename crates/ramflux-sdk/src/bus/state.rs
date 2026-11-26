@@ -544,6 +544,8 @@ impl LocalBusAccountState {
         self.gateway_config.resume_token = config.resume_token;
         self.gateway_config.last_seen_inbox_seq =
             self.gateway_config.last_seen_inbox_seq.max(config.last_seen_inbox_seq);
+        // The key set store is shared with the session; only a pending failed save is retried.
+        self.gateway_config.push.retry_save();
     }
 
     pub(crate) fn retire_session(&mut self, client: &SessionClient) -> Result<(), SdkError> {

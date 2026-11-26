@@ -310,6 +310,10 @@ pub enum SdkError {
     SurfaceDeliveryTooLarge { bytes: usize, limit: usize },
     #[error("surface checkpoint does not match its owning row")]
     SurfaceCheckpointMismatch,
+    /// The saved central push key set checkpoint is not the current record list format (for
+    /// example one written by an earlier pre-release build). No legacy format is read before v1.
+    #[error("push key set checkpoint gateway.push.keyset.v1 is malformed: {0}")]
+    PushKeysetCheckpointMalformed(String),
     #[error("contact root replacement requires confirmation")]
     ContactConfirmationRequired(Box<crate::ContactRootChange>),
     #[error("contact lookup unavailable: {0}")]

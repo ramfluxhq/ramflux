@@ -167,6 +167,7 @@ policies! {
     "device.pair.join" => ("device", true, true, false, false),
     "device.pair.status" => ("device", false, true, false, false),
     "device.push_route.set" => ("device", true, true, false, false),
+    "push.keyset.get" => ("push", false, true, false, false),
     "device.refresh" => ("device", true, true, false, false),
     "device.revoke" => ("device", true, true, false, false),
     "device.sync.export" => ("device", true, true, false, true),

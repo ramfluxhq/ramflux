@@ -40,6 +40,7 @@ mod backup_self_sync;
 mod backup_self_sync_tests;
 mod backup_shared_groups;
 pub mod bot;
+pub(crate) mod checkpoint_writer;
 mod contact_consent;
 mod contact_request_retention;
 mod contact_requests;

@@ -287,6 +287,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::Storage(StorageError::AuthorizationRejected) => "authorization_rejected",
         SdkError::NoNodeSelected => "NoNodeSelected",
         SdkError::PushRouteRefused(_) => "push_route_refused",
+        SdkError::PushKeysetCheckpointMalformed(_) => "push_keyset_checkpoint_malformed",
         SdkError::CustodyVault(reason) => reason.wire_code(),
         SdkError::AccountNotOpen(_) => "AccountNotOpen",
         SdkError::ReplayMismatch => "ReplayMismatch",
