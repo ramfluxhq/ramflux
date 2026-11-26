@@ -81,7 +81,9 @@ struct Change {
     provider: Option<String>,
     model: Option<String>,
     autonomy: Option<String>,
-    prompt: Option<String>,
+    /// `Some(None)` (JSON null) resets the prompt to the one PRX composes; absent keeps it.
+    #[allow(clippy::option_option)]
+    prompt: Option<Option<String>>,
     tools: Option<Vec<String>>,
     enabled: Option<bool>,
     /// `Some(None)` clears the limits.
@@ -126,7 +128,7 @@ async fn change(
     let new = overlay(base, &parsed.change)?;
     let (readback, applied) =
         apply(&client, &caps, &name, &new, reviewed.as_ref(), &parsed).await?;
-    mirror(request, state, &parsed.anchor, &readback)?;
+    mirror(request, state, &parsed.anchor, &readback, parsed.change.prompt == Some(None))?;
     Ok(local_bus_ok(answer(&parsed.anchor, &readback, applied)))
 }
 
@@ -201,6 +203,7 @@ fn mirror(
     state: &mut LocalBusDaemonState,
     anchor: &str,
     readback: &AgentReadback,
+    reset_prompt: bool,
 ) -> Result<(), SdkError> {
     let store = account(request, state)?.agent_record_store()?;
     let Some(mut record) = store.load(anchor)? else {
@@ -210,6 +213,10 @@ fn mirror(
         return Ok(());
     }
     fields::set_mirror(&mut record, &readback.config, readback.revision.as_str());
+    if reset_prompt {
+        // PRX composed the prompt; the mirror keeps none so `agent.get` shows it as reset.
+        record.prompt = None;
+    }
     store.save(&mut record)
 }
 
@@ -245,7 +252,7 @@ fn overlay(mut config: AgentConfig, change: &Change) -> Result<AgentConfig, SdkE
         config.autonomy = fields::autonomy_of(text).ok_or_else(|| field_invalid("autonomy"))?;
     }
     if let Some(prompt) = &change.prompt {
-        config.prompt = Some(prompt.clone());
+        config.prompt.clone_from(prompt);
     }
     if let Some(names) = &change.tools {
         config.tools = fields::tools_of(names);
@@ -322,7 +329,7 @@ fn parse(body: &Value, switch: Option<bool>) -> Result<Parsed, SdkError> {
         provider: text_of(body, "provider")?,
         model: text_of(body, "model")?,
         autonomy: text_of(body, "autonomy")?,
-        prompt: text_of(body, "prompt")?,
+        prompt: prompt_of(body)?,
         tools: tools_of(body)?,
         enabled: switch.or(flag_of(body, "enabled")?),
         limits: limits_of(body)?,
@@ -347,6 +354,16 @@ fn text_of(body: &Value, key: &str) -> Result<Option<String>, SdkError> {
         None => Ok(None),
         Some(Value::String(text)) => Ok(Some(text.clone())),
         Some(_) => Err(field_invalid(key)),
+    }
+}
+
+#[allow(clippy::option_option)]
+fn prompt_of(body: &Value) -> Result<Option<Option<String>>, SdkError> {
+    match body.get("prompt") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(text)) => Ok(Some(Some(text.clone()))),
+        Some(_) => Err(field_invalid("prompt")),
     }
 }
 

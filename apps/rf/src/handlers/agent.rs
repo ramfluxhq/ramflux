@@ -172,6 +172,8 @@ fn update_body(agent: &str, revision: Option<&str>, update: &AgentUpdateArgs) ->
     }
     if let Some(prompt) = &update.prompt {
         object.insert("prompt".into(), json!(prompt));
+    } else if update.reset_prompt {
+        object.insert("prompt".into(), Value::Null);
     }
     if let Some(tools) = &update.tools {
         object.insert("tools".into(), json!(tools));

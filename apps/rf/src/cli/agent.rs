@@ -64,6 +64,9 @@ pub(crate) struct AgentUpdateArgs {
     pub(crate) autonomy: Option<String>,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) prompt: Option<String>,
+    /// Reset the prompt to the one PRX composes (sends `prompt: null`).
+    #[arg(long, conflicts_with = "prompt")]
+    pub(crate) reset_prompt: bool,
     /// Tool names, comma separated; `*` is all of Main's tools.
     #[arg(long, value_delimiter = ',')]
     pub(crate) tools: Option<Vec<String>>,
