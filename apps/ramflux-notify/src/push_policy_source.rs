@@ -91,10 +91,9 @@ fn bridge_stats(
     if pending == *published {
         return;
     }
-    if let Err(error) = ramflux_node_core::push_policy_stats::write_pending_stats(
-        state_file,
-        pending.as_ref(),
-    ) {
+    if let Err(error) =
+        ramflux_node_core::push_policy_stats::write_pending_stats(state_file, pending.as_ref())
+    {
         tracing::warn!(%error, "policy stats file not written");
         return;
     }

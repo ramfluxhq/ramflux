@@ -402,7 +402,7 @@ pub(super) async fn configure_pending(account: &mut LocalBusAccountState) -> Res
     };
     let endpoint = profile.gateway_config(root, endpoint).await?;
     let tcp = crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?;
-    let mut gateway = GatewaySessionConfig::auto(endpoint)
+    let gateway = GatewaySessionConfig::auto(endpoint)
         .with_host_network(setup)
         .with_tcp_gateway_addr(tcp)
         .with_native_custody(GatewayCustodyConfig {

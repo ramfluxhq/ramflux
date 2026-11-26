@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use super::frame;
-use ramflux_node_core::push_policy_stats::{SyncStats, read_pending_stats, write_stats_ack};
 use super::state::{apply_ok, now_ms};
+use ramflux_node_core::push_policy_stats::{SyncStats, read_pending_stats, write_stats_ack};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_STREAMS: usize = 4;

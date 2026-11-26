@@ -70,11 +70,8 @@ fn io_error(context: &str, error: std::io::Error) -> NodeCoreError {
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), NodeCoreError> {
     let tmp = path.with_extension("tmp");
     let result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
+        let mut file =
+            std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)

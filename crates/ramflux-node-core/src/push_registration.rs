@@ -69,7 +69,9 @@ pub fn sealed_token_valid(token: &str) -> bool {
     if !(1..=32).contains(&klen) || bytes.len() < 2 + klen + 32 + 16 {
         return false;
     }
-    bytes.get(2..2 + klen).is_some_and(|kid| kid.iter().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-'))
+    bytes.get(2..2 + klen).is_some_and(|kid| {
+        kid.iter().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+    })
 }
 
 /// APNs host the node will use. FCM and Web Push are production only.

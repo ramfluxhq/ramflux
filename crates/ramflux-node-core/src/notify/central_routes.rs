@@ -245,10 +245,8 @@ impl NotifyRedbStore {
         let txn = self.db.begin_write().map_err(error)?;
         let outcome = {
             let mut table = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
-            let prior = table
-                .get(device_delivery_id)
-                .map_err(error)?
-                .map(|value| value.value().to_vec());
+            let prior =
+                table.get(device_delivery_id).map_err(error)?.map(|value| value.value().to_vec());
             let mut values = match prior {
                 Some(prior) => routes::open(&self.route_key, device_delivery_id, &prior)?,
                 None => Vec::new(),

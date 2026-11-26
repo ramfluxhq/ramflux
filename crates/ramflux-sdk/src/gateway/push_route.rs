@@ -207,8 +207,7 @@ impl PushRouteRetry {
             }
             GatewayPushRouteRefusal::ProviderUnavailable
             | GatewayPushRouteRefusal::Rejected
-            | GatewayPushRouteRefusal::RejectedOwner
-            | GatewayPushRouteRefusal::PushKeysetUnavailable => {
+            | GatewayPushRouteRefusal::RejectedOwner => {
                 self.failures = 0;
                 self.not_before = sent_at.saturating_add(PUSH_ROUTE_PERMANENT_RETRY_SECONDS);
             }
