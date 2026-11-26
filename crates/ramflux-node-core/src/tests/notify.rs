@@ -98,6 +98,7 @@ fn provider_attempts_are_redacted() -> Result<(), Box<dyn std::error::Error>> {
         attempt_count: 0,
         status: NotifyQueueStatus::Pending,
         dnd_active: false,
+        not_before_ms: 0,
     };
     let prepared = PreparedProviderPush {
         route: DevicePushRoute {

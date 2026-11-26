@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 238fa1706eb81dc43da11ea5d9607883f9ba7681>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 46e829e5245238150a96802a7cea2b0f1babe778>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "238fa1706eb81dc43da11ea5d9607883f9ba7681";
+const PIN: &str = "6e39b39670548ddf123fac98f169fb17b599ea59";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -561,8 +561,9 @@ async fn bounded<F: std::future::Future<Output = ()>>(body: F) {
 }
 
 /// The tokens K-AC2-1 accepts at the pin. `host_bootstrap_v1` is advertised and not
-/// called. `targeted_agents_v1` stays out unless the daemon enables it.
-const LANDED_AT_PIN: [&str; 19] = [
+/// called. `targeted_agents_v1` is in `capabilities` while targeting is effective (the default at
+/// 6e39b396, PRX d4681e3b) and in `available` while it is off.
+const LANDED_AT_PIN: [&str; 20] = [
     CAPABILITIES_V1,
     AGENT_CATALOG_V1,
     AGENT_CRUD_V1,
@@ -582,7 +583,11 @@ const LANDED_AT_PIN: [&str; 19] = [
     STREAM_FRAMES_V1,
     RUN_APPROVALS_V1,
     HOST_BOOTSTRAP_V1,
+    TARGETED_AGENTS_V1,
 ];
+
+/// Turn and job waits: PRX 429/502/504 retries can make one turn up to ~110 s slower.
+const TURN_DEADLINE: Duration = Duration::from_secs(150);
 
 #[tokio::test]
 #[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
@@ -1157,17 +1162,23 @@ async fn k_ac1a_10_targeted_agents_across_restart() {
         let client = daemon.client();
         let caps = capabilities(&client).await;
 
-        // K-AC1a-10: enable on a fresh install; the response says a restart is required
+        // K-AC1a-10: targeting defaults to true at 6e39b396, so set the opposite of the current
+        // effective value; the response says a restart is required and the old value still runs.
         let before = client.targeted_agents(&caps).await.expect("K-AC1a-10: targeted read");
-        let on = client
-            .set_targeted_agents(&caps, true, &before.revision)
+        let target = !before.effective;
+        assert!(before.effective, "K-AC1a-10: default is effective at the pin: {before:?}");
+        let changed = client
+            .set_targeted_agents(&caps, target, &before.revision)
             .await
-            .expect("K-AC1a-10: enable");
+            .expect("K-AC1a-10: change");
         assert!(
-            on.configured && on.restart_required,
-            "K-AC1a-10: configured and restart required: {on:?}"
+            changed.configured == target && changed.restart_required,
+            "K-AC1a-10: configured is the new value and restart required: {changed:?}"
         );
-        assert!(!on.effective, "K-AC1a-10: not effective before the restart");
+        assert_eq!(
+            changed.effective, before.effective,
+            "K-AC1a-10: effective keeps the old value before the restart: {changed:?}"
+        );
         daemon.stop();
         daemon.start();
         daemon.wait_ready().await;
@@ -1176,8 +1187,8 @@ async fn k_ac1a_10_targeted_agents_across_restart() {
         let after =
             client.targeted_agents(&caps).await.expect("K-AC1a-10: targeted read after restart");
         assert!(
-            after.configured && after.effective && !after.restart_required,
-            "K-AC1a-10: effective after restart: {after:?}"
+            after.configured == target && after.effective == target && !after.restart_required,
+            "K-AC1a-10: all three agree after the restart: {after:?}"
         );
         report("K-AC1a-10");
         daemon.stop();
@@ -1482,7 +1493,10 @@ async fn k_b1_sessions_and_message_validation() {
         let expected: std::collections::BTreeSet<String> =
             LANDED_AT_PIN.iter().map(|token| (*token).to_owned()).collect();
         assert_eq!(caps.capabilities, expected, "K-B1-16: advertised tokens at the pin");
-        assert!(!caps.has(TARGETED_AGENTS_V1), "K-B1-16: targeted_agents_v1 is off here");
+        assert!(
+            caps.has(TARGETED_AGENTS_V1),
+            "K-B1-16: targeted_agents_v1 is effective by default"
+        );
         assert_eq!(caps.commit, BuildCommit::Sha(PIN.to_owned()), "K-B1-16: commit is the pin");
         report("K-B1-16");
 
@@ -1647,7 +1661,7 @@ async fn wait_job_terminal(client: &PrxClient, caps: &Capabilities, job_id: &str
         if job.status.is_terminal() {
             return job;
         }
-        assert!(started.elapsed() < WAIT_DEADLINE, "test: job {job_id} did not end in time");
+        assert!(started.elapsed() < TURN_DEADLINE, "test: job {job_id} did not end in time");
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -1676,6 +1690,7 @@ async fn k_b1_turn_context_and_agent_checks_with_targeting_off() {
         let hold = ModelStub::start(Duration::from_secs(600)).await;
         let mut daemon =
             Daemon::prepare_with_provider(&fast.provider(), &priced(&hold.provider(), ""));
+        // First start creates the `.defaults-migration` marker in the config dir.
         daemon.start();
         daemon.wait_ready().await;
         daemon.pair().await;
@@ -1685,6 +1700,27 @@ async fn k_b1_turn_context_and_agent_checks_with_targeting_off() {
         put_agent(&client, &caps, "worker", &hold.provider(), true).await;
         put_agent(&client, &caps, "other", &fast.provider(), true).await;
         put_agent(&client, &caps, "off1", &fast.provider(), false).await;
+        // Targeting off, then restart: the switch is effective only after the restart.
+        let switch = client.targeted_agents(&caps).await.expect("K-B1-12: targeted read");
+        let off = client
+            .set_targeted_agents(&caps, false, &switch.revision)
+            .await
+            .expect("K-B1-12: targeting off");
+        assert!(
+            !off.configured && off.effective && off.restart_required,
+            "K-B1-12: configured is the new value, effective keeps the old one until restart: {off:?}"
+        );
+        daemon.stop();
+        daemon.start();
+        daemon.wait_ready().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        let now =
+            client.targeted_agents(&caps).await.expect("K-B1-12: targeted read after restart");
+        assert!(
+            !now.effective && !now.configured,
+            "K-B1-12: effective false after restart: {now:?}"
+        );
 
         // K-B1-11 (targeting off): an unknown agent is 404 agent_unknown; existence comes first.
         match client
@@ -1875,7 +1911,7 @@ const NEVER_ISSUED_ID: &str = "00000000-0000-4000-8000-0000000000ff";
 async fn wait_model_requests(daemon: &Daemon, stub: &ModelStub, count: usize) {
     let started = Instant::now();
     while stub.count() < count {
-        if started.elapsed() >= WAIT_DEADLINE {
+        if started.elapsed() >= TURN_DEADLINE {
             for name in ["daemon.err", "daemon.out"] {
                 let log = std::fs::read_to_string(daemon.dir.path().join(name)).unwrap_or_default();
                 let tail: Vec<&str> = log.lines().rev().take(30).collect();
@@ -1966,7 +2002,7 @@ async fn k_b2a_turn_replay_conflict_main_key_and_cancel_of_ended_run() {
                 break answer;
             }
             assert!(
-                started.elapsed() < WAIT_DEADLINE,
+                started.elapsed() < TURN_DEADLINE,
                 "K-B2-2: replay stayed running; daemon: {:?}",
                 daemon.error_lines()
             );
@@ -2554,7 +2590,7 @@ async fn k_op2_storage_refusal_when_user_messages_are_not_recorded() {
 
 #[tokio::test]
 #[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
-async fn k_op1_agent_put_with_custom_endpoint_answers_428() {
+async fn k_op1_agent_put_with_custom_endpoint_accepts_without_confirmation() {
     bounded(async {
         let stub = ModelStub::start(Duration::ZERO).await;
         let mut daemon = Daemon::prepare_with_provider("openrouter", &priced(&stub.provider(), ""));
@@ -2567,19 +2603,11 @@ async fn k_op1_agent_put_with_custom_endpoint_answers_428() {
         let cfg = config(&stub.provider(), "stub-model", None, Tools::All, true);
         let rev = list_revision(&client, &caps).await;
 
-        // Open point 1: a PUT that points an agent at a custom endpoint, without confirmation.
-        let refused = client.put(&caps, &name, &cfg, &rev, false).await;
-        eprintln!("ROW K-OP1-1 PUT custom endpoint without confirmation: {refused:?}");
-        let revision = match &refused {
-            Err(PrxError::Api {
-                status: 428,
-                code: ApiCode::ConfirmationRequired,
-                revision,
-                ..
-            }) => revision.clone().expect("K-OP1-1: 428 carries the revision"),
-            other => panic!("K-OP1-1: must be 428 confirmation_required, got {other:?}"),
-        };
-        // The raw answer, for the report (the reason text PRX gives).
+        // Agent management accepts custom endpoints without high-risk confirmation.
+        let created = client.put(&caps, &name, &cfg, &rev, false).await;
+        eprintln!("ROW K-OP1-1 PUT custom endpoint without confirmation: {created:?}");
+        let created = created.expect("K-OP1-1: unconfirmed agent PUT succeeds");
+        assert_eq!(created.kind, PutKind::Created, "K-OP1-1: first PUT creates the agent");
         let raw_body = serde_json::json!({
             "provider": cfg.provider, "model": "stub-model", "autonomy": "full",
             "tools": ["*"], "enabled": true
@@ -2588,26 +2616,27 @@ async fn k_op1_agent_put_with_custom_endpoint_answers_428() {
             .raw_authorized(
                 reqwest::Method::PUT,
                 &format!("/api/agents/{}", name.as_str()),
-                Some(rev.as_str()),
+                Some(created.readback.revision.as_str()),
                 Some(raw_body),
             )
             .await;
         eprintln!("ROW K-OP1-1 raw answer: {status} {text}");
-        assert_eq!(status, 428, "K-OP1-1 raw");
+        assert_eq!(status, 200, "K-OP1-1: raw unconfirmed replacement succeeds");
         report("K-OP1-1");
 
-        // K-OP1-2: the apply helper turns the same 428 into NeedsConfirmation with the revision.
+        // The apply helper succeeds directly for agent changes.
         match client.apply_agent(&caps, &name, &cfg, None).await {
-            Ok(ApplyOutcome::NeedsConfirmation { revision: got }) => {
-                assert_eq!(got, revision, "K-OP1-2: the revision PRX reported");
+            Ok(ApplyOutcome::Applied(outcome)) => {
+                assert_eq!(outcome.readback.config, cfg, "K-OP1-2: intended config is stored");
             }
-            other => panic!("K-OP1-2: apply must report NeedsConfirmation, got {other:?}"),
+            other => panic!("K-OP1-2: apply must succeed without confirmation, got {other:?}"),
         }
         report("K-OP1-2");
 
-        // K-OP1-3: confirming with that revision applies the change.
+        // The optional confirmation flag remains accepted for agent changes.
+        let revision = list_revision(&client, &caps).await;
         let applied = client.put(&caps, &name, &cfg, &revision, true).await;
-        assert!(applied.is_ok(), "K-OP1-3: confirmed PUT applies: {applied:?}");
+        assert!(applied.is_ok(), "K-OP1-3: confirmed agent PUT also applies: {applied:?}");
         report("K-OP1-3");
         daemon.stop();
     })
@@ -2646,7 +2675,7 @@ async fn k_b2a_failed_turn_replay_is_failed() {
             .post_turn(&caps, RF_SESSION, &rf_message(id, fail1.clone(), "fail me"))
             .await
             .expect("F-2: replay answers");
-        while started.elapsed() < WAIT_DEADLINE
+        while started.elapsed() < TURN_DEADLINE
             && replay.disposition
                 == (TurnDisposition::Replayed { status: RunState::Running, code: None })
         {
@@ -2768,9 +2797,10 @@ async fn rec_ancestor_group_writable_refuses_turns_context_still_answers() {
     .await;
 }
 
-/// REC-CFG-1 (item 5 of the repin card): the group-writable directory is `<cfg>/workspace`, which
-/// is on the physical path to `<cfg>/workspace/memory`. Set after the state is built, with
-/// PRX's order intact, so only that directory is group-writable.
+/// REC-CFG-1 (item 5 of the repin card): the daemon runs with `OPENPRX_CONFIG_DIR=<dir>/cfg` and
+/// `OPENPRX_WORKSPACE=<dir>/workspace`; since PRX b004c7ac the workspace is `OPENPRX_WORKSPACE`, so
+/// the group-writable directory is `<dir>/workspace` (the one the gateway log prints), on the
+/// physical path to `<dir>/workspace/memory`. Set after the state is built, so only it is 0775.
 #[tokio::test]
 #[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
 async fn rec_cfg_workspace_group_writable_refuses_turns() {
@@ -2778,11 +2808,13 @@ async fn rec_cfg_workspace_group_writable_refuses_turns() {
         use std::os::unix::fs::PermissionsExt;
         let stub = ModelStub::start_completing(Duration::ZERO).await;
         let mut daemon = Daemon::prepare_unchecked_in(&state_base(), &stub.provider(), "");
-        // The harness does not create <cfg>/workspace (the daemon does); create it first.
-        let workspace = daemon.dir.path().join("cfg/workspace");
-        std::fs::create_dir_all(&workspace).expect("test: create cfg/workspace");
+        // OPENPRX_WORKSPACE is <dir>/workspace (created 0700 by the harness); make that one 0775.
+        let workspace = daemon.dir.path().join("workspace");
         std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o775))
-            .expect("test: chmod cfg/workspace");
+            .expect("test: chmod workspace");
+        let mode =
+            std::fs::metadata(&workspace).expect("test: stat workspace").permissions().mode();
+        assert_eq!(mode & 0o777, 0o775, "REC-CFG-1: the workspace PRX uses is group-writable");
         daemon.start();
         daemon.wait_ready().await;
         daemon.pair().await;

@@ -517,6 +517,7 @@ impl AccountRuntime {
         }
         self.refresh_transient_host().await;
         self.publish_transient_updates();
+        self.publish_cleared_updates();
         let transient = self.transient_deadline();
         let username = self.username.deadline();
         Box::pin(self.refresh_pairing_reader_generation()).await?;

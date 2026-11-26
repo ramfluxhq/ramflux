@@ -21,6 +21,12 @@ pub(crate) async fn dispatch_device_bus_request(
             dispatch_device_revoke(request, state, body).await
         }
         "device.push_route.set" => Box::pin(dispatch_push_route_set(request, state)).await,
+        "device.push_policy.set" => {
+            let body: LocalBusPushPolicySetRequest = serde_json::from_value(request.body.clone())?;
+            dispatch_push_policy_set(request, state, body).await
+        }
+        "device.activity.report" => dispatch_activity_report(request, state).await,
+        "device.notifications.cleared" => dispatch_notifications_cleared(request, state).await,
         "device.sync.export" => {
             let body: LocalBusDeviceSyncExportRequest =
                 serde_json::from_value(request.body.clone())?;
@@ -54,6 +60,89 @@ pub(crate) const EMPTY_PUSH_ROUTE_BOOK: &str = r#"{"routes":{},"clears":[],"clea
 #[serde(deny_unknown_fields)]
 struct LocalBusPushRouteSetRequest {
     registration: Option<GatewayPushRouteRegistration>,
+}
+
+/// Checkpoint holding this device's node-local push policy (class and mute).
+pub(crate) const DEVICE_POLICY_CHECKPOINT: &str = "gateway.device_policy.v1";
+
+fn wall_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Minimum spacing of `device.activity.report` sends, in milliseconds (K10).
+const ACTIVITY_MIN_INTERVAL_MS: u64 = 60_000;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalBusPushPolicySetRequest {
+    device_class: crate::gateway::protocol::GatewayDeviceClass,
+    muted: bool,
+}
+
+/// The stored device policy, restored into the gateway config at startup.
+pub(crate) fn stored_device_policy(
+    client: &RamfluxClient,
+) -> Result<Option<(crate::gateway::protocol::GatewayDeviceClass, bool)>, SdkError> {
+    match client.projection_checkpoint(DEVICE_POLICY_CHECKPOINT)? {
+        Some(value) => Ok(Some(serde_json::from_str(&value)?)),
+        None => Ok(None),
+    }
+}
+
+async fn dispatch_push_policy_set(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+    body: LocalBusPushPolicySetRequest,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?.to_owned();
+    let account = local_bus_account_mut(state, &account_id)?;
+    let encoded = serde_json::to_string(&(body.device_class, body.muted))?;
+    account.client.set_projection_checkpoint(DEVICE_POLICY_CHECKPOINT, &encoded)?;
+    account.gateway_config.device_policy = Some((body.device_class, body.muted));
+    let mut engine = account.session_client().await?;
+    let outcome = engine.send_device_policy(body.device_class, body.muted).await;
+    account.apply_session_metadata(engine);
+    outcome?;
+    Ok(local_bus_ok(serde_json::json!({
+        "device_class": body.device_class,
+        "muted": body.muted,
+    })))
+}
+
+async fn dispatch_activity_report(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?.to_owned();
+    let account = local_bus_account_mut(state, &account_id)?;
+    let now = wall_clock_ms();
+    if account
+        .last_activity_ms
+        .is_some_and(|last| now.saturating_sub(last) < ACTIVITY_MIN_INTERVAL_MS)
+    {
+        return Ok(local_bus_ok(serde_json::json!({"sent": false, "reason": "rate_limited"})));
+    }
+    account.last_activity_ms = Some(now);
+    let mut engine = account.session_client().await?;
+    let outcome = engine.send_activity().await;
+    account.apply_session_metadata(engine);
+    outcome?;
+    Ok(local_bus_ok(serde_json::json!({"sent": true})))
+}
+
+async fn dispatch_notifications_cleared(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?.to_owned();
+    let account = local_bus_account_mut(state, &account_id)?;
+    let mut engine = account.session_client().await?;
+    let outcome = engine.send_notifications_cleared().await;
+    account.apply_session_metadata(engine);
+    outcome?;
+    Ok(local_bus_ok(serde_json::json!({"sent": true})))
 }
 
 /// Checkpoint holding the last push route control sequence, so a restart never reuses one.

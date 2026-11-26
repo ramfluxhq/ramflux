@@ -23,6 +23,7 @@ pub use node_directory_config::{
 };
 pub use node_push_config::{NodePushConfig, load_node_push_config, load_node_push_config_file};
 pub mod push_handoff;
+pub mod push_policy_stats;
 pub use node_report_config::{
     NodeReportCentreConfig, NodeReportConfig, NodeReportRegionConfig, load_node_report_config,
     load_node_report_config_file,

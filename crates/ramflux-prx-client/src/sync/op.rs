@@ -18,6 +18,10 @@ pub enum MirrorOp {
         channel: Option<String>,
         created_at: Option<String>,
         child: bool,
+        /// Current per-turn child lifecycle status.
+        status: Option<String>,
+        /// Fresh run id for the current child turn.
+        run_id: Option<String>,
         deleted: bool,
         /// Set on a `cron:` or `xin:` session. The id inside `metadata`.
         job_id: Option<String>,
@@ -93,14 +97,28 @@ pub struct TurnCopy {
     pub agent: String,
     /// Agent incarnation. Empty when the payload has none.
     pub incarnation: String,
-    /// `user`, `assistant`, or empty for an oversized marker.
+    /// `user`, `assistant`, private `activity`, or empty for an oversized marker.
     pub role: String,
+    /// Present only for private activity originating in another session or peer.
+    pub origin: Option<TurnOrigin>,
     /// Run id when the journal header carried one.
     pub run_id: Option<String>,
     /// Caller message id when the admission row carried one.
     pub client_message_id: Option<String>,
     /// Text, a deletion, or an oversized marker.
     pub body: TurnBody,
+}
+
+/// Authenticated source labels for private agent activity, never owner input.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnOrigin {
+    /// `session` for local activity; `peer` for another PRX instance.
+    pub provenance: String,
+    /// Source PRX session key.
+    pub session_key: String,
+    /// Source agent name.
+    pub agent: String,
 }
 
 /// The part of a turn the mirror keeps.
@@ -134,8 +152,8 @@ pub(super) fn op_from_snapshot(
 ) -> Result<MirrorOp, PrxError> {
     check_payload(payload)?;
     match kind {
-        "session" => session_op(key, payload, false),
-        "child_session" => session_op(key, payload, true),
+        "session" => session_op(key, payload, false, None),
+        "child_session" => session_op(key, payload, true, None),
         "agent" => agent_op(key, payload),
         "erase_receipt" => erase_op(payload),
         "turn" => turn_op(payload, "", "", "", None),
@@ -154,8 +172,8 @@ pub(super) fn op_from_kind(
 ) -> Result<MirrorOp, PrxError> {
     check_payload(payload)?;
     match kind {
-        "session.upsert" => session_op(session, payload, false),
-        "child_session.upsert" => session_op(session, payload, true),
+        "session.upsert" => session_op(session, payload, false, run_id),
+        "child_session.upsert" => session_op(session, payload, true, run_id),
         "agent.config_changed" => agent_op(agent, payload),
         "history.erased" => erase_op(payload),
         "turn.appended" => turn_op(payload, session, agent, incarnation, run_id),
@@ -270,7 +288,12 @@ fn check_payload(payload: &Value) -> Result<(), PrxError> {
     }
 }
 
-fn session_op(key: &str, payload: &Value, child: bool) -> Result<MirrorOp, PrxError> {
+fn session_op(
+    key: &str,
+    payload: &Value,
+    child: bool,
+    run_id: Option<String>,
+) -> Result<MirrorOp, PrxError> {
     let session_key = if nonempty(key) { key.to_owned() } else { req_id(payload, "session_key")? };
     let created_at = match opt_id(payload, "created_at")? {
         Some(value) => Some(value),
@@ -285,6 +308,8 @@ fn session_op(key: &str, payload: &Value, child: bool) -> Result<MirrorOp, PrxEr
         channel,
         created_at,
         child,
+        status: opt_id(payload, "status")?,
+        run_id: opt_id(payload, "run_id")?.or(run_id),
         deleted: flag(payload, "deleted")?.unwrap_or(false),
         job_id,
         job_version,
@@ -349,6 +374,7 @@ fn turn_op(
     let incarnation = required_label(payload, "incarnation", incarnation)?;
     let run_id = opt_id(payload, "run_id")?.or(run_id);
     let client_message_id = opt_id(payload, "client_message_id")?;
+    let origin = turn_origin(payload)?;
     if flag(payload, "oversized")? == Some(true) {
         let bytes = payload
             .get("bytes")
@@ -360,6 +386,7 @@ fn turn_op(
             agent,
             incarnation,
             role: String::new(),
+            origin,
             run_id,
             client_message_id,
             body: TurnBody::Oversized { bytes },
@@ -380,10 +407,31 @@ fn turn_op(
         session,
         agent,
         incarnation,
-        role,
+        role: if origin.is_some() { "activity".to_owned() } else { role },
+        origin,
         run_id,
         client_message_id,
         body: TurnBody::Text { content, final_reply },
+    }))
+}
+
+fn turn_origin(payload: &Value) -> Result<Option<TurnOrigin>, PrxError> {
+    let Some(value) = payload.get("provenance") else {
+        if payload.get("from").is_some() {
+            return Err(protocol("activity provenance is missing"));
+        }
+        return Ok(None);
+    };
+    let provenance = value
+        .as_str()
+        .filter(|text| matches!(*text, "session" | "peer"))
+        .ok_or(protocol("activity provenance is invalid"))?;
+    let from = payload.get("from").ok_or(protocol("activity source is missing"))?;
+    check_payload(from)?;
+    Ok(Some(TurnOrigin {
+        provenance: provenance.to_owned(),
+        session_key: req_id(from, "session_key")?,
+        agent: req_id(from, "agent")?,
     }))
 }
 

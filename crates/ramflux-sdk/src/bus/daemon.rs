@@ -229,6 +229,7 @@ async fn restore_local_bus_account_impl(
     gateway.push_route_clear_pending = stored_push.clear_pending;
     // Next sequence = max(saved + 1, now in ms): a reset clock never reuses one.
     gateway.push_route_last_seq = crate::bus::dispatch::device::stored_push_route_seq(&client)?;
+    gateway.device_policy = crate::bus::dispatch::device::stored_device_policy(&client)?;
     let mut account =
         LocalBusAccountState::disconnected(client, gateway, manifest.principal_commitment.clone());
     account.activation_pending = manifest.activation_pending;
