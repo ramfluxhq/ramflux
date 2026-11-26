@@ -85,6 +85,7 @@ struct Change {
     tools: Option<Vec<String>>,
     enabled: Option<bool>,
     /// `Some(None)` clears the limits.
+    #[allow(clippy::option_option)]
     limits: Option<Option<AgentLimits>>,
     confirm_high_risk: bool,
 }
@@ -106,24 +107,21 @@ async fn change(
     let record = load_active(request, state, &parsed.anchor)?;
     let caps = client.capabilities().await.map_err(|error| map_prx(&error))?;
     let current = read(&client, &caps, &name).await?;
-    let (base, reviewed) = match &current {
-        Some(readback) => {
-            if readback.status == AgentStatus::Retired {
-                return Err(refused("agent_retired", "retired in PRX"));
-            }
-            let seen = parsed.revision.as_ref() == Some(&readback.revision)
-                || fields::mirror_matches(&record, &readback.config);
-            if !seen {
-                return Err(conflict(Some(readback)));
-            }
-            (readback.config.clone(), Some(readback.config.clone()))
+    let (base, reviewed) = if let Some(readback) = &current {
+        if readback.status == AgentStatus::Retired {
+            return Err(refused("agent_retired", "retired in PRX"));
         }
-        None => {
-            if parsed.revision.is_some() {
-                return Err(field_invalid("revision"));
-            }
-            (base_from_record(&record, &parsed.change)?, None)
+        let seen = parsed.revision.as_ref() == Some(&readback.revision)
+            || fields::mirror_matches(&record, &readback.config);
+        if !seen {
+            return Err(conflict(Some(readback)));
         }
+        (readback.config.clone(), Some(readback.config.clone()))
+    } else {
+        if parsed.revision.is_some() {
+            return Err(field_invalid("revision"));
+        }
+        (base_from_record(&record, &parsed.change)?, None)
     };
     let new = overlay(base, &parsed.change)?;
     let (readback, applied) =
@@ -375,6 +373,7 @@ fn tools_of(body: &Value) -> Result<Option<Vec<String>>, SdkError> {
 }
 
 /// `limits` replaces the whole limit pair. A key left out or null is unset; both unset clears.
+#[allow(clippy::option_option)]
 fn limits_of(body: &Value) -> Result<Option<Option<AgentLimits>>, SdkError> {
     let Some(value) = body.get("limits") else {
         return Ok(None);

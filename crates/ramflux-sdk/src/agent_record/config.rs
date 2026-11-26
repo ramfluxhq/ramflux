@@ -141,6 +141,7 @@ pub(crate) fn config_of_record(record: &StoredAgentRecord) -> Option<AgentConfig
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build(
     provider: &str,
     model: &str,

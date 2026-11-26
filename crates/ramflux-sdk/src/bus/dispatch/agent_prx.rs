@@ -73,6 +73,9 @@ pub(super) fn refused_with(code: &str, details: Value) -> SdkError {
     SdkError::LocalBusRefused {
         code: code.to_owned(),
         message: code.to_owned(),
-        body: Box::new(json!({"reason_code": code, "details": details})),
+        body: Box::new(Value::Object(serde_json::Map::from_iter([
+            ("reason_code".to_owned(), Value::String(code.to_owned())),
+            ("details".to_owned(), details),
+        ]))),
     }
 }
