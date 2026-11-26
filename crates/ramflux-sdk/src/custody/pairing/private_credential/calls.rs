@@ -23,8 +23,12 @@ type Key = (PathBuf, String);
 pub enum PrivateCredentialCallKind {
     Join,
     Unlock,
-    Prepare { operation_id: String },
-    Resume { operation_id: String },
+    Prepare {
+        operation_id: String,
+    },
+    Resume {
+        operation_id: String,
+    },
     /// Re-authentication before the app lock is weakened; asks the same `unlock` credential.
     Reauth,
 }
