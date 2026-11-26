@@ -7,7 +7,9 @@
 use super::state::{HostKeyFn, Shared};
 use crate::SdkError;
 use crate::custody::pairing::CredentialOutcome;
-use crate::custody::pairing::private_credential::{encode_reply, host_outcome, host_prompt_generation};
+use crate::custody::pairing::private_credential::{
+    encode_reply, host_outcome, host_prompt_generation,
+};
 use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc;
