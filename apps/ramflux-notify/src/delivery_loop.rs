@@ -138,7 +138,14 @@ pub(crate) fn notify_async_claim_entries(
 
 /// Node-originated clears (`x`): central mode sends them; direct mode drops and counts them
 /// (`x_direct_unsupported`). Returns when the centre asked for a later look.
+/// Single-flight guard: every delivery worker wakes on the same change, and a clear must be
+/// handed to the centre once, so only one worker runs the clear pass at a time.
+static CLEAR_PASS: Mutex<()> = Mutex::new(());
+
 fn clear_pass(store: &Arc<ramflux_node_core::NotifyRedbStore>) -> Option<Instant> {
+    let Ok(_pass) = CLEAR_PASS.try_lock() else {
+        return None;
+    };
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
