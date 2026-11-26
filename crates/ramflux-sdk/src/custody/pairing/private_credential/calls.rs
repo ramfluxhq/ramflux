@@ -25,6 +25,8 @@ pub enum PrivateCredentialCallKind {
     Unlock,
     Prepare { operation_id: String },
     Resume { operation_id: String },
+    /// Re-authentication before the app lock is weakened; asks the same `unlock` credential.
+    Reauth,
 }
 struct Call {
     active: AtomicBool,
@@ -169,7 +171,7 @@ impl Call {
                 matches!(scope.request().action.as_str(), "setup" | "unlock")
                     && scope.operation_id().is_some()
             }
-            PrivateCredentialCallKind::Unlock => {
+            PrivateCredentialCallKind::Unlock | PrivateCredentialCallKind::Reauth => {
                 scope.request().action == "unlock" && scope.operation_id().is_none()
             }
             PrivateCredentialCallKind::Resume { operation_id } => {
