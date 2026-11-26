@@ -607,7 +607,7 @@ impl AccountRuntime {
             },
             () = std::future::ready(()), if head_demand::demand_active() && !self.head_rx.is_empty() => {
                 if let Ok(work) = self.head_rx.try_recv() {
-                    *checkpoints += 1;
+                    *checkpoints = checkpoints.saturating_add(1);
                     return Box::pin(self.drive_connection_work(work, checkpoints)).await;
                 }
                 return Ok(false);
@@ -623,9 +623,9 @@ impl AccountRuntime {
                 tokio::task::yield_now().await;
                 return Ok(false);
             },
-            checkpoint=self.transfers.receive.recv()=>{*checkpoints += 1;if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}return Ok(false);},
+            checkpoint=self.transfers.receive.recv()=>{*checkpoints = checkpoints.saturating_add(1);if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}return Ok(false);},
             work = recv(&mut self.deferred, &mut self.head_rx, &mut self.connection_work) => {
-                *checkpoints += 1;
+                *checkpoints = checkpoints.saturating_add(1);
                 if let Some(work)=work {
                     return Box::pin(self.drive_connection_work(work, checkpoints)).await;
                 }

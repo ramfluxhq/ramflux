@@ -78,7 +78,7 @@ fn keyset_seq(doc: &KeysetDoc) -> Option<u64> {
     if body.len() > MAX_BODY_BYTES {
         return None;
     }
-    let value: Value = serde_json::from_slice(&body).ok()?;
+    let value: Value = ramflux_protocol::parse_i_json(&body).ok()?;
     let seq = value.get("seq")?.as_u64()?;
     (1..=MAX_SEQ).contains(&seq).then_some(seq)
 }

@@ -120,7 +120,7 @@ async fn read_request(stream: &mut UnixStream) -> Result<HandoffRequest, &'stati
     }
     let mut body = vec![0_u8; len];
     stream.read_exact(&mut body).await.map_err(|_| "malformed")?;
-    let request: HandoffRequest = serde_json::from_slice(&body).map_err(|_| "malformed")?;
+    let request: HandoffRequest = ramflux_protocol::parse_i_json(&body).map_err(|_| "malformed")?;
     if request.v != HANDOFF_VERSION {
         return Err("unsupported");
     }

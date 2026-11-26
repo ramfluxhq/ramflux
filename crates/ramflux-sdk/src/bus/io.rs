@@ -43,9 +43,25 @@ pub(crate) fn local_bus_response(
     }
 }
 
+/// Builds the error reply and records it as `abi.failed`.
 pub(crate) fn local_bus_error(request: &LocalBusFrame, error: &SdkError) -> LocalBusFrame {
+    let source = lifecycle_source(error);
+    crate::diag::events::bus_failure(&request.method, request.trace_id.as_deref(), source);
+    local_bus_error_unlogged(request, source)
+}
+
+fn lifecycle_source(error: &SdkError) -> &SdkError {
+    match error {
+        SdkError::LifecycleShared(source) => lifecycle_source(source),
+        other => other,
+    }
+}
+
+/// Builds the error reply without a diagnostic record, for replies prepared before it is known
+/// that they will be sent.
+pub(crate) fn local_bus_error_unlogged(request: &LocalBusFrame, error: &SdkError) -> LocalBusFrame {
     if let SdkError::LifecycleShared(source) = error {
-        return local_bus_error(request, source);
+        return local_bus_error_unlogged(request, source);
     }
     LocalBusFrame {
         bus_protocol: "ramflux.local_bus.v1".to_owned(),

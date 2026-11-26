@@ -18,6 +18,17 @@ pub(crate) struct DiagCommand {
 pub(crate) enum DiagAction {
     /// Scan an unlocked account for a plaintext marker read from a file.
     Residue(ResidueArgs),
+    /// Flush the SDK diagnostics sink and list its files, errors and manifest.
+    Export(ExportArgs),
+    /// Print the diagnostics sink counters of the running daemon.
+    Snapshot,
+}
+
+#[derive(Args)]
+pub(crate) struct ExportArgs {
+    /// Only files modified at or after this Unix time in milliseconds.
+    #[arg(long)]
+    pub(crate) since_ms: Option<u64>,
 }
 
 #[derive(Args)]
@@ -75,6 +86,7 @@ mod tests {
                     assert_eq!(residue.account, "acct");
                     assert_eq!(residue.marker_file, PathBuf::from("marker.bin"));
                 }
+                _ => panic!("test: residue command"),
             },
             _ => panic!("test: residue command"),
         }

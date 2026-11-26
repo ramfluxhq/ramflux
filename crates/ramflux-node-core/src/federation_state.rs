@@ -208,6 +208,20 @@ impl FederationTrustState {
         self.discovery_pins_by_node.get(node_id)
     }
 
+    /// Drops the discovery pin and route of `node_id` when the pin still holds `pinned_key`
+    /// (a key the directory has revoked). Returns whether a pin was dropped.
+    pub fn drop_discovery_pin(&mut self, node_id: &str, pinned_key: &str) -> bool {
+        let matches = self
+            .discovery_pins_by_node
+            .get(node_id)
+            .is_some_and(|pin| pin.pinned_node_public_key == pinned_key);
+        if matches {
+            self.discovery_pins_by_node.remove(node_id);
+            self.routes_by_node.remove(node_id);
+        }
+        matches
+    }
+
     #[must_use]
     pub fn pinned_node_public_key(&self, node_id: &str) -> Option<String> {
         self.discovery_pins_by_node

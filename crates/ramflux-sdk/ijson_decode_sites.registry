@@ -420,3 +420,6 @@ crates/ramflux-sdk/src/bus/username_directory/reach.rs | prepare_set | 1 | E | e
 crates/ramflux-sdk/src/c_abi/v2/native_error.rs | details | 1 | E | excluded=typed public reach-conflict error projection after authenticated SDK validation; no signed message Envelope/Ack/Nack ingress
 crates/ramflux-sdk/src/bus/attachment_plane.rs | upload_status | 1 | A | strict=parse_i_json; admission=A ingress boundary: attachment upload-status reply from the home relay (untrusted peer bytes)
 crates/ramflux-sdk/src/client/layer_renewal.rs | receive_own_layer_renewal | 1 | A | admission=strict parse_i_json, then canonical re-encode equality, then verify_enrollment_layer against the current roster certificate and endorsed sequence before any write
+crates/ramflux-sdk/src/c_abi/v2/diag.rs | ramflux_v2_diag_init | 1 | E | excluded=local host diagnostics config, size-capped, no message Envelope/Ack/Nack ingress; only registered keys survive
+crates/ramflux-sdk/src/c_abi/v2/diag.rs | ramflux_v2_diag_init | 2 | E | excluded=typed projection of the already-sanitized local diagnostics config; no message Envelope/Ack/Nack ingress
+crates/ramflux-sdk/src/c_abi/v2/diag.rs | ramflux_v2_diag_write | 1 | E | excluded=local host diagnostics record, size-capped and validated against the field registry; no message Envelope/Ack/Nack ingress
