@@ -55,9 +55,15 @@ async fn admit_and_send(
     runtime: &GatewaySessionRuntime,
     frame: &PushRouteTestFrame,
 ) -> anyhow::Result<PushRouteTestAnswer> {
-    if bind_session(context, runtime, PUSH_ROUTE_TEST_SIGNED_PATH, &frame.signed_request, &frame.body)
-        .await
-        .is_err()
+    if bind_session(
+        context,
+        runtime,
+        PUSH_ROUTE_TEST_SIGNED_PATH,
+        &frame.signed_request,
+        &frame.body,
+    )
+    .await
+    .is_err()
         || !push_route_tag_valid(&frame.body.route_tag)
     {
         return Ok(PushRouteTestAnswer::refused("rejected", None));

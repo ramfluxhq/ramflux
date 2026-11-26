@@ -309,7 +309,7 @@ impl WakeV2 {
 
     fn validate_class_rules(&self) -> Result<(), ProtocolError> {
         match (self.class, self.action, self.call_intent_digest.as_deref()) {
-            (WakeClass::Message, WakeAction::Enqueue, None) => Ok(()),
+            (WakeClass::Message | WakeClass::Test, WakeAction::Enqueue, None) => Ok(()),
             (WakeClass::Message, WakeAction::Cancel, _)
             | (WakeClass::Message, WakeAction::Enqueue, Some(_)) => {
                 Err(contract("message_forbids_cancel_and_digest"))
@@ -318,8 +318,8 @@ impl WakeV2 {
                 validate_fixed("call_intent_digest", digest, DIGEST_BYTES)
             }
             (WakeClass::CallWake, _, None) => Err(contract("call_intent_digest")),
-            (WakeClass::Test, WakeAction::Enqueue, None) => Ok(()),
-            (WakeClass::Test, WakeAction::Cancel, _) | (WakeClass::Test, WakeAction::Enqueue, Some(_)) => {
+            (WakeClass::Test, WakeAction::Cancel, _)
+            | (WakeClass::Test, WakeAction::Enqueue, Some(_)) => {
                 Err(contract("test_forbids_cancel_and_digest"))
             }
         }
