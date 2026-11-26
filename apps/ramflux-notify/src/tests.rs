@@ -41,8 +41,8 @@ fn provider_common_headers_follow_s13_contract() -> Result<(), Box<dyn std::erro
     assert!(message.get("notification").is_none());
     assert!(message.get("data").and_then(|data| data.get("encrypted_hint")).is_none());
     assert_eq!(
-        message.get("data").and_then(|data| data.get("class")).and_then(|value| value.as_str()),
-        Some("message")
+        message.get("data").and_then(|data| data.as_object()).map(serde_json::Map::len),
+        Some(1)
     );
     Ok(())
 }

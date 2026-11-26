@@ -175,7 +175,7 @@ pub fn build_provider_parts(
             (body, headers)
         }
         ProviderWireMode::Fcm => {
-            let body = fcm_body(input, class_name, collapse, remaining)?;
+            let body = fcm_body(input, collapse, remaining)?;
             (body, Vec::new())
         }
         ProviderWireMode::WebPush => {
@@ -338,7 +338,6 @@ fn apns_voip_body(wake_id: &str, route_tag: &str) -> Result<Vec<u8>, ProviderBui
 
 fn fcm_body(
     input: &ProviderBuildInput<'_>,
-    class_name: &'static str,
     collapse: Option<&str>,
     remaining: u64,
 ) -> Result<Vec<u8>, ProviderBuildError> {
@@ -347,12 +346,7 @@ fn fcm_body(
     serde_json::to_vec(&FcmEnvelope {
         message: FcmMessage {
             token: input.token,
-            data: FcmData {
-                wake_id: input.wake_id,
-                class: class_name,
-                collapse_key: collapse,
-                rf: &rf,
-            },
+            data: FcmData { rf: &rf },
             android: FcmAndroid { priority: "HIGH", ttl, collapse_key: collapse },
         },
     })
@@ -409,11 +403,7 @@ struct WebPlain<'a> {
 
 #[derive(Serialize)]
 struct FcmData<'a> {
-    wake_id: &'a str,
-    class: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    collapse_key: Option<&'a str>,
-    /// JSON object. FCM data values are strings.
+    /// The only data member. JSON object as a string (FCM data values are strings).
     rf: &'a str,
 }
 
@@ -529,7 +519,7 @@ mod tests {
         })?;
         let parsed = json_of(&fcm)?;
         assert!(parsed["message"].get("notification").is_none());
-        assert_eq!(parsed["message"]["data"]["class"], "message");
+        assert_eq!(parsed["message"]["data"].as_object().map(serde_json::Map::len), Some(1));
         assert_eq!(parsed["message"]["android"]["priority"], "HIGH");
         assert_eq!(parsed["message"]["android"]["ttl"], "86400s");
         assert_eq!(parsed["message"]["android"]["collapse_key"], key);
