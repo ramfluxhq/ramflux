@@ -7,8 +7,8 @@
 //! public creation records only.
 use super::conversation_ops::commit_write;
 use super::{
-    AgentAccessArgs, AgentAction, AgentCommand, AgentJobAction, AgentPersonaArgs, LocalBusClient,
-    PathBuf, RfError,
+    AgentAccessArgs, AgentAction, AgentCommand, AgentJobAction, AgentPersonaArgs, AgentUpdateArgs,
+    LocalBusClient, PathBuf, RfError,
 };
 use ramflux_sdk::LocalBusFrame;
 use serde_json::{Value, json};
@@ -64,6 +64,15 @@ pub(crate) fn request_of(action: AgentAction) -> Result<(&'static str, Value), R
             let mut config = serde_json::Map::new();
             config.insert("provider".into(), json!(model.provider));
             config.insert("model".into(), json!(model.model));
+            if let Some(autonomy) = &model.autonomy {
+                config.insert("autonomy".into(), json!(autonomy));
+            }
+            if let Some(prompt) = &model.prompt {
+                config.insert("prompt".into(), json!(prompt));
+            }
+            if let Some(tools) = &model.tools {
+                config.insert("tools".into(), json!(tools));
+            }
             if model.max_concurrent_turns.is_some() || model.max_cost_per_day_cents.is_some() {
                 config.insert(
                     "limits".into(),
@@ -119,6 +128,16 @@ pub(crate) fn request_of(action: AgentAction) -> Result<(&'static str, Value), R
             confirmed(&mut body, confirm);
             ("agent.retire", body)
         }
+        AgentAction::Update { agent, revision, update } => {
+            ("agent.update", update_body(&agent, revision.as_deref(), &update))
+        }
+        AgentAction::Pause { agent, revision } => {
+            ("agent.pause", anchor_body(&agent, revision.as_deref()))
+        }
+        AgentAction::Resume { agent, revision } => {
+            ("agent.resume", anchor_body(&agent, revision.as_deref()))
+        }
+        AgentAction::Catalog => ("agent.catalog", json!({})),
         AgentAction::Status { operation_id } => {
             ("agent.operation.get", json!({"operation_id": operation_id}))
         }
@@ -126,6 +145,55 @@ pub(crate) fn request_of(action: AgentAction) -> Result<(&'static str, Value), R
         AgentAction::Pending => ("agent.operation.get", json!({"operation_id": ""})),
         AgentAction::Job(command) => job_request(command.action),
     })
+}
+
+fn anchor_body(agent: &str, revision: Option<&str>) -> Value {
+    let mut body = json!({"agent_anchor": agent});
+    if let (Some(revision), Some(object)) = (revision, body.as_object_mut()) {
+        object.insert("revision".into(), json!(revision));
+    }
+    body
+}
+
+/// The `agent.update` body: only the flags that were given.
+fn update_body(agent: &str, revision: Option<&str>, update: &AgentUpdateArgs) -> Value {
+    let mut body = anchor_body(agent, revision);
+    let Some(object) = body.as_object_mut() else {
+        return body;
+    };
+    if let Some(provider) = &update.provider {
+        object.insert("provider".into(), json!(provider));
+    }
+    if let Some(model) = &update.model {
+        object.insert("model".into(), json!(model));
+    }
+    if let Some(autonomy) = &update.autonomy {
+        object.insert("autonomy".into(), json!(autonomy));
+    }
+    if let Some(prompt) = &update.prompt {
+        object.insert("prompt".into(), json!(prompt));
+    }
+    if let Some(tools) = &update.tools {
+        object.insert("tools".into(), json!(tools));
+    }
+    if let Some(enabled) = update.enabled {
+        object.insert("enabled".into(), json!(enabled));
+    }
+    if update.clear_limits {
+        object.insert("limits".into(), json!({}));
+    } else if update.max_concurrent_turns.is_some() || update.max_cost_per_day_cents.is_some() {
+        object.insert(
+            "limits".into(),
+            json!({
+                "max_concurrent_turns": update.max_concurrent_turns,
+                "max_cost_per_day_cents": update.max_cost_per_day_cents,
+            }),
+        );
+    }
+    if update.confirm_high_risk {
+        object.insert("confirm_high_risk".into(), Value::Bool(true));
+    }
+    body
 }
 
 fn job_request(action: AgentJobAction) -> (&'static str, Value) {

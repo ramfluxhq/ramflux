@@ -177,7 +177,7 @@ impl AccountRuntime {
                 let head = account.client.agent_record_head()?;
                 g::AgentConfigResult {
                     value: Some(g::agent_config_result::Value::Page(g::AgentPage {
-                        records: records.iter().map(crate::agent_record::to_wire).collect(),
+                        records: records.iter().map(crate::agent_record::to_wire_listed).collect(),
                         next,
                         journal_cursor: head.to_string(),
                     })),

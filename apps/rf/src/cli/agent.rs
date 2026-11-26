@@ -41,6 +41,45 @@ pub(crate) struct AgentModelArgs {
     /// Admission limit: daily cost in cents (`1..=1000000000`).
     #[arg(long)]
     pub(crate) max_cost_per_day_cents: Option<u64>,
+    /// `full`, `supervised` or `readonly`. PRX's default is `full`.
+    #[arg(long)]
+    pub(crate) autonomy: Option<String>,
+    /// The agent's system prompt (at most 32768 bytes). PRX composes one when omitted.
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) prompt: Option<String>,
+    /// Tool names, comma separated. `*` or no flag means all of Main's tools.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) tools: Option<Vec<String>>,
+}
+
+/// What `rf agent update` may change. Every field is optional; a field left out stays as it is.
+#[derive(Args)]
+pub(crate) struct AgentUpdateArgs {
+    #[arg(long)]
+    pub(crate) provider: Option<String>,
+    #[arg(long)]
+    pub(crate) model: Option<String>,
+    /// `full`, `supervised` or `readonly`.
+    #[arg(long)]
+    pub(crate) autonomy: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) prompt: Option<String>,
+    /// Tool names, comma separated; `*` is all of Main's tools.
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) tools: Option<Vec<String>>,
+    /// `true` or `false`.
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub(crate) enabled: Option<bool>,
+    #[arg(long)]
+    pub(crate) max_concurrent_turns: Option<u32>,
+    #[arg(long)]
+    pub(crate) max_cost_per_day_cents: Option<u64>,
+    /// Remove both admission limits.
+    #[arg(long, conflicts_with_all = ["max_concurrent_turns", "max_cost_per_day_cents"])]
+    pub(crate) clear_limits: bool,
+    /// Confirm a change PRX marks high risk.
+    #[arg(long)]
+    pub(crate) confirm_high_risk: bool,
 }
 
 /// The access policy of an agent (contract 1 `AgentAccessPolicy`).
@@ -133,6 +172,32 @@ pub(crate) enum AgentAction {
         #[arg(long)]
         confirm: bool,
     },
+    /// Change the PRX config of an agent (AGENT-MGMT-01A). `--revision` is the `revision` of the
+    /// record shown last; PRX refuses a stale view with `revision_conflict`.
+    Update {
+        #[arg(long, allow_hyphen_values = true)]
+        agent: String,
+        #[arg(long, allow_hyphen_values = true)]
+        revision: Option<String>,
+        #[command(flatten)]
+        update: AgentUpdateArgs,
+    },
+    /// Turn an agent off in PRX. PRX refuses its turns until `resume`.
+    Pause {
+        #[arg(long, allow_hyphen_values = true)]
+        agent: String,
+        #[arg(long, allow_hyphen_values = true)]
+        revision: Option<String>,
+    },
+    /// Turn a paused agent on again.
+    Resume {
+        #[arg(long, allow_hyphen_values = true)]
+        agent: String,
+        #[arg(long, allow_hyphen_values = true)]
+        revision: Option<String>,
+    },
+    /// The models (with credential readiness), tools and defaults PRX offers.
+    Catalog,
     /// Show the state of one creation operation.
     Status {
         #[arg(long, allow_hyphen_values = true)]

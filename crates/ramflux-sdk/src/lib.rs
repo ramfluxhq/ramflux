@@ -120,7 +120,7 @@ pub use bus::shared_snapshot::{
     shared_root_refusal, shared_root_vault,
 };
 pub use bus::{
-    AccountNetworkingReason, LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest,
+    AccountNetworkingReason, HostKeyProvider, LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest,
     LocalBusAccountBackupExportRequest, LocalBusAccountBackupImportRequest,
     LocalBusAccountCreateRequest, LocalBusAccountCreateResponse,
     LocalBusAccountPassphraseRotateRequest, LocalBusAccountUnlockRequest,

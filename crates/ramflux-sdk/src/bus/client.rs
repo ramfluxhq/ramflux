@@ -11,17 +11,27 @@ use tokio::sync::oneshot;
 type Pending =
     Arc<PendingMutex<BTreeMap<String, oneshot::Sender<Result<LocalBusFrame, SdkError>>>>>;
 
+/// Answers a provider-key prompt of the daemon (`agent.host.credential`): given the provider id it
+/// returns the key, or `None` to refuse. It runs on a blocking thread, so it may read a terminal
+/// or a keychain. The key goes straight into the private 0xC1 reply and never into a JSON frame.
+pub type HostKeyProvider =
+    Arc<dyn Fn(&str) -> Option<zeroize::Zeroizing<String>> + Send + Sync + 'static>;
+
+type HostKeySlot = Arc<PendingMutex<Option<HostKeyProvider>>>;
+
 #[derive(Clone)]
 pub struct LocalBusClient {
     inner: Arc<ClientConnection>,
 }
+/// One queued write. `frame` is `None` for a private raw reply, which is already length-prefixed.
 struct OutboundFrame {
-    frame: LocalBusFrame,
+    frame: Option<LocalBusFrame>,
     encoded: zeroize::Zeroizing<Vec<u8>>,
 }
 
 struct ClientConnection {
     outbound: mpsc::Sender<OutboundFrame>,
+    host_key: HostKeySlot,
     pending: Pending,
     next: AtomicU64,
     connected: Arc<AtomicBool>,
@@ -51,6 +61,9 @@ impl LocalBusClient {
         let writer_connected = Arc::clone(&connected);
         let (disconnected, mut writer_disconnect) = watch::channel(false);
         let reader_pending = Arc::clone(&pending);
+        let host_key: HostKeySlot = Arc::new(PendingMutex::new(None));
+        let reader_host_key = Arc::clone(&host_key);
+        let reader_outbound = outbound.clone();
         let reader_task = tokio::spawn(async move {
             let mut last_seq = 0;
             loop {
@@ -69,6 +82,10 @@ impl LocalBusClient {
                         frame.kind, frame.method, frame.request_id
                     ),
                 );
+                if let Some(prompt) = host_key_prompt(&frame) {
+                    answer_host_key_prompt(prompt, &reader_host_key, &reader_outbound);
+                    continue;
+                }
                 if !route_received(
                     frame,
                     &events,
@@ -93,21 +110,23 @@ impl LocalBusClient {
                     break;
                 };
                 let OutboundFrame { frame, encoded } = frame;
-                local_bus_trace(
-                    "BUS-CLIENT-TX-IN",
-                    format!("method={} request_id={}", frame.method, frame.request_id),
+                let label = frame.as_ref().map_or_else(
+                    || "private credential reply".to_owned(),
+                    |frame| format!("method={} request_id={}", frame.method, frame.request_id),
                 );
-                if let Err(error) =
-                    super::io::write_encoded_local_bus_frame(&mut writer, &encoded).await
-                {
+                local_bus_trace("BUS-CLIENT-TX-IN", label.clone());
+                let written = match &frame {
+                    Some(_) => {
+                        super::io::write_encoded_local_bus_frame(&mut writer, &encoded).await
+                    }
+                    None => write_private_reply(&mut writer, &encoded).await,
+                };
+                if let Err(error) = written {
                     writer_connected.store(false, Ordering::Release);
                     fail_pending(&writer_pending, &error.to_string());
                     break;
                 }
-                local_bus_trace(
-                    "BUS-CLIENT-TX-OUT",
-                    format!("method={} request_id={}", frame.method, frame.request_id),
-                );
+                local_bus_trace("BUS-CLIENT-TX-OUT", label);
             }
             writer_connected.store(false, Ordering::Release);
             fail_pending(&writer_pending, "local bus writer stopped");
@@ -115,6 +134,7 @@ impl LocalBusClient {
         Ok(Self {
             inner: Arc::new(ClientConnection {
                 outbound,
+                host_key,
                 pending,
                 connected,
                 next: AtomicU64::new(1),
@@ -123,6 +143,15 @@ impl LocalBusClient {
                 writer: writer_task,
             }),
         })
+    }
+
+    /// Installs, or with `None` removes, the answer to the daemon's provider-key prompts
+    /// (`agent.host.manage` install). Without one every prompt is refused: the daemon reports
+    /// `credential_unavailable` and the connection stays up.
+    pub fn set_host_key_provider(&self, provider: Option<HostKeyProvider>) {
+        let mut slot =
+            self.inner.host_key.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = provider;
     }
 
     /// # Errors
@@ -255,7 +284,7 @@ impl LocalBusClient {
         let wait = async {
             self.inner
                 .outbound
-                .send(OutboundFrame { frame, encoded })
+                .send(OutboundFrame { frame: Some(frame), encoded })
                 .await
                 .map_err(|_| closed())?;
             receiver.await.map_err(|_| closed())?
@@ -309,6 +338,59 @@ fn fail_pending(pending: &Pending, message: &str) {
 }
 fn closed() -> SdkError {
     SdkError::LocalBus("local bus connection closed".to_owned())
+}
+
+/// The generation and provider id of an `agent.host.credential` prompt, when `frame` is one. A
+/// prompt frame without a valid generation is not answered here and stays a fatal request frame.
+fn host_key_prompt(frame: &LocalBusFrame) -> Option<(u64, String)> {
+    if frame.kind != LocalBusFrameKind::Request || frame.method != "agent.host.credential" {
+        return None;
+    }
+    let generation =
+        crate::custody::pairing::private_credential::host_prompt_generation(&frame.frame_id)?;
+    let provider =
+        frame.body.get("provider").and_then(serde_json::Value::as_str).unwrap_or("").to_owned();
+    Some((generation, provider))
+}
+
+/// Answers a provider-key prompt with a private reply. The provider runs on a blocking thread and
+/// the reader keeps reading meanwhile. No provider, an empty id, or no key is a refusal.
+fn answer_host_key_prompt(
+    prompt: (u64, String),
+    slot: &HostKeySlot,
+    outbound: &mpsc::Sender<OutboundFrame>,
+) {
+    use crate::custody::pairing::CredentialOutcome;
+    use crate::custody::pairing::private_credential::{encode_reply, host_outcome};
+    let (generation, provider) = prompt;
+    let callback = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    let outbound = outbound.clone();
+    tokio::spawn(async move {
+        let key = match callback {
+            Some(callback) if !provider.is_empty() => {
+                tokio::task::spawn_blocking(move || callback(&provider)).await.ok().flatten()
+            }
+            _ => None,
+        };
+        let outcome = host_outcome(key.as_ref().map(|key| key.as_bytes()));
+        drop(key);
+        let Ok(encoded) = encode_reply(generation, "provider", &outcome)
+            .or_else(|_| encode_reply(generation, "provider", &CredentialOutcome::Refused))
+        else {
+            return;
+        };
+        let _ = outbound.send(OutboundFrame { frame: None, encoded }).await;
+    });
+}
+
+async fn write_private_reply<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    encoded: &[u8],
+) -> Result<(), SdkError> {
+    use tokio::io::AsyncWriteExt;
+    writer.write_all(encoded).await?;
+    writer.flush().await?;
+    Ok(())
 }
 
 fn route_received(

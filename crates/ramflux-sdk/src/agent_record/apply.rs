@@ -59,6 +59,11 @@ pub(crate) fn apply_metadata(
         change_seq: 0,
         provider: None,
         model: None,
+        autonomy: None,
+        prompt: None,
+        tools: None,
+        enabled: None,
+        revision: None,
         max_concurrent_turns: None,
         max_cost_per_day_cents: None,
     };
@@ -74,6 +79,16 @@ pub(crate) fn apply_metadata(
     if incoming <= stored {
         return Ok(false);
     }
+    // The metadata carries no config: the desktop's mirror of the PRX config stays.
+    candidate.provider = current.provider;
+    candidate.model = current.model;
+    candidate.autonomy = current.autonomy;
+    candidate.prompt = current.prompt;
+    candidate.tools = current.tools;
+    candidate.enabled = current.enabled;
+    candidate.revision = current.revision;
+    candidate.max_concurrent_turns = current.max_concurrent_turns;
+    candidate.max_cost_per_day_cents = current.max_cost_per_day_cents;
     store.save(&mut candidate)?;
     Ok(true)
 }

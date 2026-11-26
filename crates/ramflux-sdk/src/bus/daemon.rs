@@ -279,6 +279,9 @@ async fn dispatch_agent_methods(
         | "agent.job.session" | "agent.job.sessions" => {
             crate::bus::dispatch::agent_jobs::dispatch(request, state).await
         }
+        "agent.catalog" | "agent.update" | "agent.pause" | "agent.resume" => {
+            crate::bus::dispatch::agent_manage::dispatch(request, state).await
+        }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
 }

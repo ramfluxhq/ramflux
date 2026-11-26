@@ -29,27 +29,38 @@ fn refuse(token: &'static str) -> SdkError {
     SdkError::AgentCreationRefused(token)
 }
 
-fn refuse_bad_limits(config: &g::AgentConfigData) -> Result<(), SdkError> {
-    let Some(limits) = &config.limits else {
-        return Ok(());
-    };
-    let turns_bad = limits.max_concurrent_turns.is_some_and(|value| !(1..=1024).contains(&value));
-    let cost_bad =
-        limits.max_cost_per_day_cents.is_some_and(|value| !(1..=1_000_000_000).contains(&value));
-    if turns_bad || cost_bad { Err(refuse("field_invalid")) } else { Ok(()) }
+/// Refuses a config outside the closed shapes before any effect (AGENT-MGMT-01A).
+fn refuse_bad_config(config: &g::AgentConfigData) -> Result<(), SdkError> {
+    use crate::agent_record::config as fields;
+    let (turns, cost) = config.limits.as_ref().map_or((None, None), |limits| {
+        (limits.max_concurrent_turns, limits.max_cost_per_day_cents)
+    });
+    let autonomy = Some(config.autonomy.as_str()).filter(|text| !text.is_empty());
+    let ok = fields::fields_ok(
+        Some(config.provider.as_str()),
+        Some(config.model.as_str()),
+        autonomy,
+        config.prompt.as_deref(),
+        Some(config.tools.as_slice()),
+    ) && fields::limits_ok(turns, cost);
+    if ok { Ok(()) } else { Err(refuse("field_invalid")) }
 }
 
-fn copy_limits(intent: &mut crate::agent_record::AgentIntent, config: &g::AgentConfigData) {
-    let Some(limits) = &config.limits else {
-        return;
-    };
-    if limits.max_concurrent_turns.is_none() && limits.max_cost_per_day_cents.is_none() {
-        return;
-    }
+/// Keeps the requested config on the intent. An empty autonomy is `full`, an empty tool list is
+/// all of Main's tools, and an absent `enabled` is true; PRX composes an absent prompt.
+fn copy_config(intent: &mut crate::agent_record::AgentIntent, config: &g::AgentConfigData) {
     intent.provider = Some(config.provider.clone());
     intent.model = Some(config.model.clone());
-    intent.max_concurrent_turns = limits.max_concurrent_turns;
-    intent.max_cost_per_day_cents = limits.max_cost_per_day_cents;
+    intent.autonomy =
+        Some(if config.autonomy.is_empty() { "full".to_owned() } else { config.autonomy.clone() });
+    intent.prompt.clone_from(&config.prompt);
+    intent.tools =
+        Some(if config.tools.is_empty() { vec!["*".to_owned()] } else { config.tools.clone() });
+    intent.enabled = Some(config.enabled.unwrap_or(true));
+    if let Some(limits) = &config.limits {
+        intent.max_concurrent_turns = limits.max_concurrent_turns;
+        intent.max_cost_per_day_cents = limits.max_cost_per_day_cents;
+    }
 }
 
 /// The human authority read at one instant, with this device named in it.
@@ -192,7 +203,7 @@ impl RamfluxClient {
         {
             return Err(refuse("metadata_pending"));
         }
-        refuse_bad_limits(config)?;
+        refuse_bad_config(config)?;
         crate::agent_record::check_access(access)?;
         let persona_bytes = serde_json::to_vec(&serde_json::json!({
             "avatar": persona.avatar,
@@ -229,7 +240,7 @@ impl RamfluxClient {
         // Stage E2: the persona and access are kept on the creation record for the agent record.
         let mut intent_record = store.load(&request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
         let mut intent = crate::agent_record::AgentIntent::new(persona.clone(), access.clone());
-        copy_limits(&mut intent, config);
+        copy_config(&mut intent, config);
         intent_record.intent_b64 = Some(encode_base64url(serde_json::to_vec(&intent)?));
         store.save(&intent_record)?;
         let plan =

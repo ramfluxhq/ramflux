@@ -26,7 +26,6 @@ mod job;
 mod message;
 mod name;
 mod owner;
-mod publish;
 mod purge;
 mod revision;
 mod run;
@@ -68,7 +67,6 @@ pub use message::{
 };
 pub use name::AgentName;
 pub use owner::OwnerId;
-pub use publish::{NamedLimits, publish_named_limits};
 pub use purge::{PURGE_STORES, PurgeReceipt};
 pub use revision::{CatalogRevision, ConfigRevision};
 pub use run::{JobCancel, RunCancel, RunCode, RunState};

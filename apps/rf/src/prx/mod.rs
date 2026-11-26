@@ -6,7 +6,7 @@
 mod keys;
 
 use crate::RfError;
-use keys::provider_key;
+use keys::{provider_key, stdin_provider_key};
 use ramflux_sdk::SdkError;
 use ramflux_sdk::prx_host::{self, Action, Request};
 use serde_json::json;
@@ -31,6 +31,45 @@ pub(crate) async fn bootstrap(opts: Options) -> Result<(), RfError> {
         prx_host::manage(request(Action::Install, opts, true), sdk_key).await.map_err(from_sdk)?;
     print_status(&status);
     Ok(())
+}
+
+/// Installs PRX through the running daemon. The key is read from stdin only if the daemon asks
+/// for it (no `prx` config yet), and goes back as a private reply; nothing is written to the
+/// keychain on this path.
+pub(crate) async fn bootstrap_via_bus(
+    socket: PathBuf,
+    provider: Option<String>,
+    model: Option<String>,
+    native_tools: bool,
+    no_native_tools: bool,
+) -> Result<(), RfError> {
+    let provider = provider.ok_or_else(|| refused("provider_missing", "pass --provider"))?;
+    let bus = ramflux_sdk::LocalBusClient::connect(socket).await?;
+    let wanted = provider.clone();
+    bus.set_host_key_provider(Some(std::sync::Arc::new(move |asked: &str| {
+        (asked == wanted).then(|| stdin_provider_key(asked).ok()).flatten()
+    })));
+    let mut body = json!({"action": "install", "provider": provider, "confirmed": true});
+    if let Some(object) = body.as_object_mut() {
+        if let Some(model) = model {
+            object.insert("model".into(), json!(model));
+        }
+        if native_tools {
+            object.insert("native_tools".into(), json!(true));
+        }
+        if no_native_tools {
+            object.insert("no_native_tools".into(), json!(true));
+        }
+    }
+    let frame = ramflux_sdk::LocalBusFrame::request(
+        "rf-prx-bootstrap",
+        None,
+        "agent",
+        "agent.host.manage",
+        body,
+    );
+    let response = bus.request_frame_response(frame).await?;
+    crate::handlers::conversation_ops::commit_write("agent.host.manage", &response)
 }
 
 pub(crate) async fn status(state_dir: Option<PathBuf>) -> Result<(), RfError> {

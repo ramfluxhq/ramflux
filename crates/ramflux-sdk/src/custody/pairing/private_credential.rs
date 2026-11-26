@@ -90,6 +90,22 @@ pub fn encode_reply(
     bytes.extend_from_slice(confirm);
     Ok(bytes)
 }
+/// Generation of the `host-credential-<n>` id of a provider-key prompt frame. Zero and anything
+/// that is not a plain number is `None`.
+#[must_use]
+pub fn host_prompt_generation(frame_id: &str) -> Option<u64> {
+    let generation: u64 = frame_id.strip_prefix("host-credential-")?.parse().ok()?;
+    (generation != 0).then_some(generation)
+}
+/// The outcome of a provider-key prompt: a key that fits the frame is provided, anything else
+/// (no key, empty, too long, not UTF-8) is a refusal. The bytes are not kept.
+#[must_use]
+pub fn host_outcome(secret: Option<&[u8]>) -> CredentialOutcome {
+    match secret.map(SecretUtf8::from_bytes) {
+        Some(Ok(secret)) => CredentialOutcome::Provided { passphrase: secret, confirmation: None },
+        _ => CredentialOutcome::Refused,
+    }
+}
 /// Read a raw private frame, checking the tag and passphrase length before payload allocation.
 /// The caller owns this connection's private outstanding slot; no JSON reader is involved.
 /// # Errors

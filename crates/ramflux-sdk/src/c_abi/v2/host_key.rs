@@ -6,8 +6,8 @@
 
 use super::state::{HostKeyFn, Shared};
 use crate::SdkError;
-use crate::custody::pairing::private_credential::encode_reply;
-use crate::custody::pairing::{CredentialOutcome, SecretUtf8};
+use crate::custody::pairing::CredentialOutcome;
+use crate::custody::pairing::private_credential::{encode_reply, host_outcome, host_prompt_generation};
 use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -40,10 +40,7 @@ pub(super) async fn answer(
 }
 
 fn generation(frame: &Value) -> Option<u64> {
-    let id = frame.get("frame_id").and_then(Value::as_str)?;
-    let text = id.strip_prefix("host-credential-")?;
-    let generation = text.parse().ok()?;
-    (generation != 0).then_some(generation)
+    host_prompt_generation(frame.get("frame_id").and_then(Value::as_str)?)
 }
 
 fn encode(
@@ -76,10 +73,7 @@ fn callback_outcome(callback: HostKeyFn, provider: &str) -> CredentialOutcome {
         callback.user as *mut std::ffi::c_void,
     );
     let outcome = if code == 0 && (1..=out.len()).contains(&len) {
-        match SecretUtf8::from_bytes(&out[..len]) {
-            Ok(secret) => CredentialOutcome::Provided { passphrase: secret, confirmation: None },
-            Err(_) => CredentialOutcome::Refused,
-        }
+        host_outcome(out.get(..len))
     } else {
         CredentialOutcome::Refused
     };

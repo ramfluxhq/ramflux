@@ -105,7 +105,8 @@ async fn apply(
         AgentCall::Get(id) => Some(id.clone()),
         _ => None,
     };
-    let publish = limit_publish(&call);
+    let reads_record = matches!(call, AgentCall::Record(_));
+    let publish = config_publish(&call);
     let purge = purge_anchor(&call);
     if let AgentCall::Delete(mutation) = &call {
         // The running session of the agent goes first (decision r23 F1 a).
@@ -125,6 +126,11 @@ async fn apply(
     )
     .await?;
     let result = super::agent_directory::attach_hosted(&actor, list_limit, result).await?;
+    let result = if reads_record {
+        crate::prx_owner::fill_revision(supervisor.config.prx.as_deref(), result).await
+    } else {
+        result
+    };
     match read_id {
         Some(id) if advances_on_read(&result) => {
             // A failed advance leaves the request where it was; the reread reports that state.
@@ -136,22 +142,11 @@ async fn apply(
     }
 }
 
-fn limit_publish(call: &AgentCall) -> Option<crate::prx_owner::LimitPublish> {
+fn config_publish(call: &AgentCall) -> Option<crate::prx_owner::ConfigPublish> {
     let AgentCall::Create(body) = call else {
         return None;
     };
-    let config = body.config.as_ref()?;
-    let limits = config.limits.as_ref()?;
-    if limits.max_concurrent_turns.is_none() && limits.max_cost_per_day_cents.is_none() {
-        return None;
-    }
-    Some(crate::prx_owner::LimitPublish {
-        provider: config.provider.clone(),
-        model: config.model.clone(),
-        tools: config.tools.clone(),
-        turns: limits.max_concurrent_turns,
-        cost: limits.max_cost_per_day_cents,
-    })
+    crate::prx_owner::ConfigPublish::of(body)
 }
 
 fn purge_anchor(call: &AgentCall) -> Option<String> {
