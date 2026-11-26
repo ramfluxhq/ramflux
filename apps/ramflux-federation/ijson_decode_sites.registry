@@ -27,11 +27,6 @@ apps/ramflux-federation/src/mesh.rs | handle_home_submit_forward | 1 | A | stric
 apps/ramflux-federation/src/mesh.rs | serve_retention_sweep | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-federation/src/username_directory/wire.rs | decode | 1 | B | strict=parse_i_json; admission=bounded canonical documents on peer-UID or pinned-TLS channels before closed identity and account admission
 apps/ramflux-federation/src/node_report.rs | parse_reply | 1 | A | strict=parse_i_json; admission=A ingress boundary: central node-report reply frame (untrusted peer bytes)
-apps/ramflux-federation/src/admin_http.rs | handle_admin_directory_request | 1 | E | excluded=operator admin request body carrying only the admin token; target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-federation/src/node_directory.rs | parse_body | 1 | A | strict=parse_i_json; admission=centre-signed directory snapshot body, verified before use
-apps/ramflux-federation/src/node_directory.rs | parse_reply | 1 | A | strict=parse_i_json; admission=centre reply after length framing and REPLY_LIMIT bound
-apps/ramflux-federation/src/node_directory.rs | parse_reply | 2 | C | admission=apps/ramflux-federation/src/node_directory.rs#parse_reply#1
-apps/ramflux-federation/src/node_directory.rs | start | 1 | E | excluded=node-owned persisted directory state file, re-verified by verify_doc before use
 apps/ramflux-federation/src/node_push/frame.rs | decode_reply | 1 | A | strict=parse_i_json; admission=centre reply after length framing and bounded size
 apps/ramflux-federation/src/node_push/handoff.rs | read_request | 1 | A | strict=parse_i_json; admission=local push handoff socket, size-bounded frame
 apps/ramflux-federation/src/node_push/session.rs | map_wake_reply | 1 | C | admission=apps/ramflux-federation/src/node_push/frame.rs#decode_reply#1
