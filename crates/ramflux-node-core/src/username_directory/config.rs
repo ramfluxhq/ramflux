@@ -25,7 +25,13 @@ const INPUTS: &[&str] = &[
     "WITNESS_SOCKET",
     "CENTER_UID",
     "WITNESS_UID",
+    "REGISTERED_NODES_FILE",
+    "AUTH_NODE_RATE_PER_MIN",
 ];
+
+/// Per-node-key admissions per 60 s at the witness: 10x the per-prefix lookup limit (120).
+pub const DEFAULT_AUTH_NODE_RATE_PER_MIN: u64 = 1200;
+const MAX_AUTH_NODE_RATE_PER_MIN: u64 = 1_000_000;
 
 /// Independently provisioned centre identity; TLS identity and signing identity are separate.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,7 +80,13 @@ impl CenterPin {
 pub enum DirectoryRole {
     Home { database: PathBuf, service: HomeServiceConfig },
     Center { primary: PathBuf, witness: WitnessPeer },
-    Witness { database: PathBuf, peer: WitnessPeer, listen: std::net::SocketAddr },
+    Witness {
+        database: PathBuf,
+        peer: WitnessPeer,
+        listen: std::net::SocketAddr,
+        registered_nodes: PathBuf,
+        node_rate_per_min: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -161,6 +173,8 @@ impl DirectoryConfig {
         if let Some(path) = &private_peers_file {
             validate_path(path)?;
         }
+        let registered_nodes = values.remove("REGISTERED_NODES_FILE").map(PathBuf::from);
+        let node_rate = values.remove("AUTH_NODE_RATE_PER_MIN");
         let mut take =
             |key| values.remove(key).ok_or(CheckpointError::Refused("config_incomplete"));
         let role = take("ROLE")?;
@@ -212,12 +226,25 @@ impl DirectoryConfig {
                         witness: peer,
                     }
                 } else {
+                    let registered_nodes =
+                        registered_nodes.clone().ok_or(CheckpointError::Refused("config_incomplete"))?;
+                    validate_path(&registered_nodes)?;
+                    let node_rate_per_min = match &node_rate {
+                        Some(value) => decimal(value)?,
+                        None => DEFAULT_AUTH_NODE_RATE_PER_MIN,
+                    };
+                    require(
+                        (1..=MAX_AUTH_NODE_RATE_PER_MIN).contains(&node_rate_per_min),
+                        "auth_node_rate",
+                    )?;
                     DirectoryRole::Witness {
                         database: PathBuf::from(take("WITNESS_DB")?),
                         peer,
                         listen: take("LISTEN_ADDR")?
                             .parse()
                             .map_err(|_| CheckpointError::Refused("listen"))?,
+                        registered_nodes,
+                        node_rate_per_min,
                     }
                 }
             }
@@ -226,6 +253,11 @@ impl DirectoryConfig {
         require(values.is_empty(), "config_foreign_role")?;
         require(
             private_peers_file.is_none() || matches!(role, DirectoryRole::Home { .. }),
+            "config_foreign_role",
+        )?;
+        require(
+            (registered_nodes.is_none() && node_rate.is_none())
+                || matches!(role, DirectoryRole::Witness { .. }),
             "config_foreign_role",
         )?;
         let database = match &role {

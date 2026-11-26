@@ -3,7 +3,8 @@
 
 //! Single protected authority actor. No positive bytes leave via the private primary daemon.
 use super::{
-    Result, directory, error, flag, ipc, quic, refuse, source::Sources, tcp, tls, warn_drop, wire,
+    Result, directory, error, flag, ipc, quic, refuse, registered_nodes::RegisteredNodes,
+    source::Sources, tcp, tls, warn_drop, wire,
 };
 use std::{
     io::Write,
@@ -37,9 +38,18 @@ pub fn run(
     node: &ramflux_node_core::NodeServiceConfig,
     config: &directory::DirectoryConfig,
 ) -> Result<()> {
-    let directory::DirectoryRole::Witness { database, peer: pins, listen } = &config.role else {
+    let directory::DirectoryRole::Witness {
+        database,
+        peer: pins,
+        listen,
+        registered_nodes,
+        node_rate_per_min,
+    } = &config.role
+    else {
         return refuse("witness role");
     };
+    // Before any socket is bound: a missing or invalid list refuses to start.
+    let nodes = RegisteredNodes::load(registered_nodes)?;
     let witness = open_checkpoint(database, pins, &config.center)?;
     // Only after acquiring the exclusive protected DB lock can this UID replace its stale socket.
     if pins.socket.exists() {
@@ -70,7 +80,14 @@ pub fn run(
         quic::Admission { slots: Arc::clone(&slots), sources: Arc::clone(&sources) },
     )?;
     let mut state =
-        WitnessState { authority, signer, workers: Vec::new(), peer: None, pending: Vec::new() };
+        WitnessState {
+            authority,
+            signer,
+            nodes,
+            workers: Vec::new(),
+            peer: None,
+            pending: Vec::new(),
+        };
     let recovery = flag("--username-initialize") || flag("--username-recovery");
     let io = WitnessIo {
         node,
@@ -85,9 +102,11 @@ pub fn run(
         sources,
         pins,
         recovery,
+        node_rate_per_min: *node_rate_per_min,
     };
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         state.workers.retain(|worker| !worker.is_finished());
+        state.nodes.poll();
         state.poll_primary(&io)?;
         state.accept_public(&io)?;
         state.serve_pending(&io)?;
@@ -108,6 +127,7 @@ pub fn run(
 struct WitnessState {
     authority: directory::DirectoryAuthority,
     signer: directory::DirectorySigner,
+    nodes: RegisteredNodes,
     workers: Vec<std::thread::JoinHandle<()>>,
     peer: Option<Peer>,
     pending: Vec<Pending>,
@@ -125,6 +145,7 @@ struct WitnessIo<'a> {
     sources: Arc<Sources>,
     pins: &'a directory::WitnessPeer,
     recovery: bool,
+    node_rate_per_min: u64,
 }
 impl WitnessState {
     fn poll_primary(&mut self, io: &WitnessIo<'_>) -> Result<()> {
@@ -228,13 +249,20 @@ impl WitnessState {
         Ok(())
     }
     fn serve_pending(&mut self, io: &WitnessIo<'_>) -> Result<()> {
-        let WitnessIo { receiver, config, .. } = io;
+        let WitnessIo { receiver, config, node_rate_per_min, .. } = io;
         if let Some(current) = &mut self.peer {
             if current.ready
                 && let Ok(incoming) = receiver.try_recv()
                 && self.pending.len() < 64
             {
-                match admit(&mut self.authority, &current.writer, incoming, &config.center) {
+                match admit(
+                    &mut self.authority,
+                    &mut self.nodes,
+                    *node_rate_per_min,
+                    &current.writer,
+                    incoming,
+                    &config.center,
+                ) {
                     Ok(call) => {
                         current.ready = self.authority.head() == call.1;
                         if !current.ready {
@@ -358,11 +386,13 @@ fn poll_peer(
 
 fn admit(
     authority: &mut directory::DirectoryAuthority,
+    nodes: &mut RegisteredNodes,
+    node_rate_per_min: u64,
     writer: &directory::WriterIdentity,
     incoming: tcp::Incoming,
     pin: &directory::CenterPin,
 ) -> Result<(Pending, directory::CheckpointHead)> {
-    let (report, reporter) = match authenticate(authority, &incoming, pin) {
+    let (report, reporter) = match authenticate(authority, nodes, node_rate_per_min, &incoming, pin) {
         Ok(value) => value,
         Err(error) => {
             use ramflux_protocol::username_directory::DirectoryCode as Code;
@@ -411,6 +441,8 @@ fn admit(
 
 fn authenticate(
     authority: &mut directory::DirectoryAuthority,
+    nodes: &mut RegisteredNodes,
+    node_rate_per_min: u64,
     incoming: &tcp::Incoming,
     pin: &directory::CenterPin,
 ) -> Result<(directory::ReportingRequest, directory::VerifiedReporter)> {
@@ -419,11 +451,18 @@ fn authenticate(
         return refuse("reporting HTTP path mismatch");
     }
     let chain = incoming.certificates().ok_or_else(|| error("reporting TLS certificate"))?;
-    tls::verify_reporter(chain, &report.evidence, crate::now_unix_seconds()?)?;
+    let now = crate::now_unix_seconds()?;
+    tls::verify_reporter(chain, &report.evidence, now)?;
+    // Refused before nonce and rate charges. The key is authenticated by the node-signed proof
+    // bound to this TLS channel's exporter, which `admit_reporting` verifies before any charge.
+    if !nodes.authorize(&report.evidence.discovery.node_public_key, now) {
+        return refuse("reporting node is not registered");
+    }
     let channel = directory::ReportingChannel {
         node_id: &report.evidence.discovery.node_id,
         node_key: &report.evidence.discovery.node_public_key,
         exporter: &incoming.exporter,
+        node_rate_per_min,
     };
     Ok(authority.admit_reporting(&incoming.body, &channel, pin, incoming.source)?)
 }

@@ -165,6 +165,14 @@ impl DirectoryAuthority {
                 rate(&mut meta, "auth_global_rate", 1000, 1, time.wall, false)?;
                 rate(
                     &mut meta,
+                    &format!("auth_node:{}", channel.node_key),
+                    channel.node_rate_per_min,
+                    60,
+                    time.wall,
+                    false,
+                )?;
+                rate(
+                    &mut meta,
                     &format!(
                         "auth_{}_home:{}",
                         if lookup { "lookup" } else { "mutate" },
