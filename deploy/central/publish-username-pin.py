@@ -32,6 +32,8 @@ from pathlib import Path
 TLS_NAME = "ramflux-federation"
 ROOT = "/var/lib/ramflux/username"
 PORT_IN_CONTAINER = 8443
+# Directory mounted read-only into the witness; the centre producer replaces the file in it by rename.
+REGISTERED_NODES_FILE = "/run/ramflux-username/registered-nodes/registered-nodes.v1.json"
 
 
 def b64(raw: bytes) -> str:
@@ -140,6 +142,7 @@ def main() -> None:
                    RAMFLUX_USERNAME_CENTER_CA_FILE=f"{ROOT}/witness/etc/ca.pem",
                    RAMFLUX_USERNAME_LISTEN_ADDR=f"0.0.0.0:{PORT_IN_CONTAINER}",
                    RAMFLUX_USERNAME_WITNESS_DB=f"{ROOT}/witness/checkpoint.redb",
+                   RAMFLUX_USERNAME_REGISTERED_NODES_FILE=REGISTERED_NODES_FILE,
                    RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE=f"{ROOT}/witness/etc/node.key")
     center = dict(common, RAMFLUX_USERNAME_ROLE="center",
                   RAMFLUX_USERNAME_CENTER_CA_FILE=f"{ROOT}/center/etc/ca.pem",

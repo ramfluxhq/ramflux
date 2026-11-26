@@ -59,6 +59,8 @@ query, fragment or path; IPv4 endpoints require a separately provisioned DNS TLS
 | `PRIMARY_DB` | Centre | Serving projection, private to the writer incarnation. |
 | `WITNESS_DB` | Witness | Independently protected authoritative store. |
 | `WITNESS_SOCKET` | Centre/witness | Witness-owned Unix socket path. |
+| `REGISTERED_NODES_FILE` | Witness | Absolute path of the centre-provisioned registered-node list (see below); required, any other role refuses it. |
+| `AUTH_NODE_RATE_PER_MIN` | Witness | Optional positive integer, default 1200: admissions per 60 s per node key. 0 or non-numeric refuses to start. |
 | `CENTER_UID` | Centre/witness | Pinned nonroot centre UID. |
 | `WITNESS_UID` | Centre/witness | Pinned nonroot witness UID, different from centre UID. |
 
@@ -112,6 +114,40 @@ checks request/global quotas and retains verified home floors. A retry preserves
 exact signed account operation and operation ID but obtains a fresh proof/nonce/channel
 binding. Transport proof replay is rejected even when the underlying operation has an
 idempotent result. Account operation expiry is never extended by a fresh node proof.
+
+## Registered home nodes
+
+The witness admits a reporting home only if its node key is listed `active` in the
+centre-provisioned list at `REGISTERED_NODES_FILE`. Document (UTF-8 JSON, strict I-JSON,
+closed members at both levels):
+
+```
+{"v":1,"generated_at":<unix seconds>,"nodes":[{"node_key":"<base64url 32 B>","state":"active"|"suspended"}]}
+```
+
+Limits: file at most 1 MiB; at most 10 000 entries; `v` is 1; `generated_at` is a safe
+integer; `node_key` is canonical (decodes to 32 bytes and re-encodes identically);
+duplicate keys are invalid; an empty `nodes` array is valid and refuses every node;
+`revoked` is not a state. Examples, valid and invalid, are in
+`deploy/central/registered-nodes/` (replace `generated_at` in `valid.example.json` with a
+current value before use).
+
+- **Startup.** The file is read before the socket is bound. Missing, unreadable or invalid
+  (including `generated_at` more than 300 s in the future) refuses to start. A list that is
+  already expired starts, refuses every node and logs ERROR.
+- **Reload.** Polled every 5 s (mtime, size or inode change). The producer must replace the
+  file by writing a temporary file and renaming it, and the witness must see the DIRECTORY
+  (mount the directory, not the single file, or the rename is not followed). An invalid or
+  missing update keeps the last good list and logs one WARN with the reason.
+- **Expiry.** The list expires at `generated_at + 86 400 s`, evaluated on every request; an
+  expired list refuses every node until a fresh one is loaded.
+- **Refusal.** An unlisted, `suspended` or expired-list reporter gets `authentication_required`
+  before any nonce or rate charge.
+- **Readiness.** There is no health endpoint; state changes are logged once: INFO
+  `registered_nodes loaded count=N generated_at=T`, ERROR `registered_nodes expired`, INFO
+  `registered_nodes valid`.
+- **Quota.** After the global limit, each node key is limited to `AUTH_NODE_RATE_PER_MIN`
+  (default 1200 per 60 s, 10x the per-prefix lookup limit) for lookups and mutations alike.
 
 ## Error contract
 

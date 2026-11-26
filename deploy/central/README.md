@@ -19,6 +19,10 @@ the other role), `home.env` for home nodes. Common keys: `RAMFLUX_USERNAME_CENTE
 `_CA_FILE`, `TRUST_GENERATION`, `WITNESS_SOCKET`, `CENTER_UID=10001`, `WITNESS_UID=10002`.
 Witness only: `ROLE=witness`, `LISTEN_ADDR=0.0.0.0:8443`, `WITNESS_DB`, and
 `RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE` (the centre's own Ed25519 key, plan section 1.3).
+Witness also requires `RAMFLUX_USERNAME_REGISTERED_NODES_FILE` (default in `publish-username-pin.py`:
+`/run/ramflux-username/registered-nodes/registered-nodes.v1.json`) and takes optional
+`RAMFLUX_USERNAME_AUTH_NODE_RATE_PER_MIN` (default 1200). Format and behaviour: `docs/username_directory.md`
+"Registered home nodes"; examples: `registered-nodes/`.
 Centre only: `ROLE=center`, `PRIMARY_DB`.
 
 ## (c) Mounted files
@@ -30,6 +34,10 @@ Container, after init (owned by the role UID, mode 0600 inside `<role>/etc`):
 - `/var/lib/ramflux/username/witness` (witness volume), `/var/lib/ramflux/username/center`
   (centre volume), `/var/lib/ramflux/username/socket` (shared volume, group 10003; `witness.sock`).
 - `/run/username-secrets/<role>` read only during init.
+- `/run/ramflux-username/registered-nodes/` (read only, witness only): the DIRECTORY holding
+  `registered-nodes.v1.json`, replaced by the producer with tmp + rename. The quadlet's host path is
+  `<REGISTERED_NODES_HOST_DIR>`: UNRESOLVED, the centre lead decides where the producer writes it.
+  The witness refuses to start without the file.
 
 ## (d) Init command
 `username-start.sh prepare` (root, no network, one shot). It prepares the three volumes, sets
