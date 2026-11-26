@@ -13,7 +13,7 @@ use ramflux_node_core::push_handoff::{
     PushCentralState, WakeOutcome, exchange_handoff, read_push_central_state,
 };
 use ramflux_node_core::{
-    CentralRouteSnapshot, DevicePushRoute, FirstSendState, NodePushConfig, NodeCoreError,
+    CentralRouteSnapshot, DevicePushRoute, FirstSendState, NodeCoreError, NodePushConfig,
     NotifyQueueEntry, NotifyRedbStore, PushProviderKind,
 };
 use ramflux_protocol::NotificationDeliveryClass;
@@ -215,7 +215,8 @@ impl CentralPush {
         let Some(provider) = routes.first().map(|route| route.provider.clone()) else {
             // Every route is paused: wake up when the earliest pause ends, never after the entry's
             // own expiry (plan section 5, unserved).
-            let Some(until_ms) = store.central_next_pause_expiry(&entry.device_delivery_id, now_ms)?
+            let Some(until_ms) =
+                store.central_next_pause_expiry(&entry.device_delivery_id, now_ms)?
             else {
                 return Ok(CentralDue::Idle);
             };
@@ -333,7 +334,9 @@ impl CentralPush {
                         .iter()
                         .all(|result| result.r != WakeOutcome::InvalidRoute || result.at.is_some());
                 if !matched {
-                    tracing::warn!("central handoff reply does not match the batch; treated as transport failure");
+                    tracing::warn!(
+                        "central handoff reply does not match the batch; treated as transport failure"
+                    );
                     self.back_off_transport(now_ms);
                     applied.unsettled = chunk.len();
                     applied.retry = Some(ceil_secs(self.backoff_until()));
@@ -367,7 +370,11 @@ impl CentralPush {
                 // The contract drops the batch: these wakes are never resent on these routes.
                 tracing::warn!(reason = ?reply.reason, "central handoff batch rejected; dropped");
                 for (route, _wake) in chunk {
-                    store.central_settle(&route.device_delivery_id, snapshot(route), &entry.queue_id)?;
+                    store.central_settle(
+                        &route.device_delivery_id,
+                        snapshot(route),
+                        &entry.queue_id,
+                    )?;
                 }
                 return Ok(applied);
             }
@@ -421,12 +428,16 @@ fn settle_result(
         }
         WakeOutcome::InvalidRoute => {
             if let Some(at) = at {
-                result.changed |=
-                    store.central_route_invalidate(&route.device_delivery_id, snapshot(route), at)?;
+                result.changed |= store.central_route_invalidate(
+                    &route.device_delivery_id,
+                    snapshot(route),
+                    at,
+                )?;
             }
         }
         WakeOutcome::Reseal => {
-            result.changed |= store.central_route_mark_reseal(&route.device_delivery_id, snapshot(route))?;
+            result.changed |=
+                store.central_route_mark_reseal(&route.device_delivery_id, snapshot(route))?;
         }
         WakeOutcome::Unserved => {
             result.changed |= store.central_route_pause(
