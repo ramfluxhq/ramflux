@@ -32,6 +32,10 @@ pub struct SnapshotPage {
     pub rows: Vec<SnapshotRow>,
     /// Opaque token for the next page. `None` means this cut is complete.
     pub next: Option<String>,
+    /// Retention floor PRX reports for this cut; rows older than it that are absent from the cut
+    /// were deleted by retention.
+    /// RFC 3339 UTC string with microseconds; absent when nothing was deleted. The last page's value wins.
+    pub retained_since: Option<String>,
 }
 
 /// One inventory row, already decoded into a mirror change.
@@ -117,6 +121,7 @@ fn decode_page(body: &[u8]) -> Result<SnapshotPage, PrxError> {
         }
         Some(_) => return Err(protocol("sync snapshot page token is invalid")),
     };
+    let retained_since = retained_since_ok(wire.retained_since)?;
     let mut rows = Vec::new();
     for row in wire.rows {
         if !kind_ok(&row.kind) || !key_ok(&row.key) {
@@ -125,7 +130,47 @@ fn decode_page(body: &[u8]) -> Result<SnapshotPage, PrxError> {
         let op = op_from_snapshot(&row.kind, &row.key, &row.payload)?;
         rows.push(SnapshotRow { kind: row.kind, key: row.key, op });
     }
-    Ok(SnapshotPage { epoch: wire.epoch, cursor, snapshot_id: wire.snapshot_id, rows, next })
+    Ok(SnapshotPage {
+        epoch: wire.epoch,
+        cursor,
+        snapshot_id: wire.snapshot_id,
+        rows,
+        next,
+        retained_since,
+    })
+}
+
+fn retained_since_ok(value: Option<String>) -> Result<Option<String>, PrxError> {
+    match value {
+        None => Ok(None),
+        Some(text) if rfc3339_micros_ok(&text) => Ok(Some(text)),
+        Some(_) => Err(protocol("sync snapshot page is invalid")),
+    }
+}
+
+/// Fixed-width `YYYY-MM-DDTHH:MM:SS.ffffffZ` (27 bytes), the shape PRX emits.
+fn rfc3339_micros_ok(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.len() != 27 {
+        return false;
+    }
+    let shape_ok = bytes.iter().enumerate().all(|(index, byte)| match index {
+        4 | 7 => *byte == b'-',
+        10 => *byte == b'T',
+        13 | 16 => *byte == b':',
+        19 => *byte == b'.',
+        26 => *byte == b'Z',
+        _ => byte.is_ascii_digit(),
+    });
+    if !shape_ok {
+        return false;
+    }
+    let field = |from: usize, to: usize| text[from..to].parse::<u32>().unwrap_or(u32::MAX);
+    (1..=12).contains(&field(5, 7))
+        && (1..=31).contains(&field(8, 10))
+        && field(11, 13) <= 23
+        && field(14, 16) <= 59
+        && field(17, 19) <= 60
 }
 
 fn kind_ok(kind: &str) -> bool {
@@ -146,6 +191,8 @@ struct WirePage {
     snapshot_id: String,
     rows: Vec<WireRow>,
     next: Option<String>,
+    #[serde(default)]
+    retained_since: Option<String>,
 }
 
 #[derive(Deserialize)]
