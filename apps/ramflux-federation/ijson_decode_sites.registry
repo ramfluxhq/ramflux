@@ -27,3 +27,13 @@ apps/ramflux-federation/src/mesh.rs | handle_home_submit_forward | 1 | A | stric
 apps/ramflux-federation/src/mesh.rs | serve_retention_sweep | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-federation/src/username_directory/wire.rs | decode | 1 | B | strict=parse_i_json; admission=bounded canonical documents on peer-UID or pinned-TLS channels before closed identity and account admission
 apps/ramflux-federation/src/node_report.rs | parse_reply | 1 | A | strict=parse_i_json; admission=A ingress boundary: central node-report reply frame (untrusted peer bytes)
+apps/ramflux-federation/src/node_push/frame.rs | decode_reply | 1 | A | strict=parse_i_json; admission=centre reply after length framing and bounded size
+apps/ramflux-federation/src/node_push/handoff.rs | read_request | 1 | A | strict=parse_i_json; admission=local push handoff socket, size-bounded frame
+apps/ramflux-federation/src/node_push/session.rs | map_wake_reply | 1 | C | admission=apps/ramflux-federation/src/node_push/frame.rs#decode_reply#1
+apps/ramflux-federation/src/node_push/state.rs | apply_ok | 1 | C | admission=apps/ramflux-federation/src/node_push/frame.rs#decode_reply#1
+apps/ramflux-federation/src/node_push/state.rs | apply_ok | 2 | C | admission=apps/ramflux-federation/src/node_push/frame.rs#decode_reply#1
+apps/ramflux-federation/src/node_push/state.rs | apply_ok | 3 | C | admission=apps/ramflux-federation/src/node_push/frame.rs#decode_reply#1
+apps/ramflux-federation/src/node_push/state.rs | apply_ok | 4 | C | admission=apps/ramflux-federation/src/node_push/frame.rs#decode_reply#1
+apps/ramflux-federation/src/node_push/state.rs | apply_ok | 5 | C | admission=apps/ramflux-federation/src/node_push/frame.rs#decode_reply#1
+apps/ramflux-federation/src/node_push/state.rs | apply_ok | 6 | C | admission=apps/ramflux-federation/src/node_push/frame.rs#decode_reply#1
+apps/ramflux-federation/src/node_push/state.rs | keyset_seq | 1 | C | admission=apps/ramflux-federation/src/node_push/frame.rs#decode_reply#1
