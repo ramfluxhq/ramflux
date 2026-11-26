@@ -49,7 +49,11 @@ pub(super) fn map_prx(error: &PrxError) -> SdkError {
             refused("model_capabilities_unknown", "model_capabilities_unknown")
         }
         PrxError::Api { code: ApiCode::AuthFailed, .. } => refused("auth_failed", "auth_failed"),
-        PrxError::Api { code: ApiCode::FieldInvalid | ApiCode::AgentToolsInvalid, .. } => {
+        PrxError::Api { code: ApiCode::AgentToolsInvalid, .. } => refused_with(
+            "agent_tools_invalid",
+            json!({"field": "tools", "cause": "every tool must be one of the tools of agent.catalog"}),
+        ),
+        PrxError::Api { code: ApiCode::FieldInvalid, .. } => {
             refused("field_invalid", "field_invalid")
         }
         PrxError::Api { code: ApiCode::AgentInvalid, .. } => {

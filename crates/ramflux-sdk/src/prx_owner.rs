@@ -218,9 +218,12 @@ fn map_prx(error: &PrxError) -> SdkError {
         PrxError::Api { code: ApiCode::ModelCapabilitiesUnknown, .. } => {
             SdkError::PrxCall("model_capabilities_unknown")
         }
-        PrxError::Api { code: ApiCode::FieldInvalid | ApiCode::AgentToolsInvalid, .. } => {
-            SdkError::PrxCall("field_invalid")
+        // PRX answers `agent_tools_invalid` when a tool name is not in its catalog; keep the
+        // code so the caller sees which field was refused.
+        PrxError::Api { code: ApiCode::AgentToolsInvalid, .. } => {
+            SdkError::PrxCall("agent_tools_invalid")
         }
+        PrxError::Api { code: ApiCode::FieldInvalid, .. } => SdkError::PrxCall("field_invalid"),
         PrxError::Api { code: ApiCode::RevisionConflict, .. } => {
             SdkError::PrxCall("revision_conflict")
         }
