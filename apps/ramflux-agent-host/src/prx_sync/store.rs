@@ -46,6 +46,10 @@ pub(super) struct SessionRow {
     #[serde(default, skip_serializing_if = "is_false")]
     pub child: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_version: Option<u64>,
@@ -87,6 +91,8 @@ pub(super) struct TurnRow {
     pub agent: String,
     pub incarnation: String,
     pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ramflux_prx_client::TurnOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

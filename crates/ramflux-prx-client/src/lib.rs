@@ -76,7 +76,7 @@ pub use session::SessionCreated;
 pub use sync::{
     ApprovalCopy, EraseCopy, JournalEvent, LiveBody, LiveNotice, MirrorOp, PONG_FRAME,
     SNAPSHOT_MAX_BODY, SNAPSHOT_PAGE_LIMIT, ServerFrame, SnapshotPage, SnapshotRow, SyncCursor,
-    SyncDial, TurnBody, TurnCopy, ack_frame, decode_server, format_cursor, hello_frame,
+    SyncDial, TurnBody, TurnCopy, TurnOrigin, ack_frame, decode_server, format_cursor, hello_frame,
     parse_cursor,
 };
 pub use targeted::{ReloadReport, ReloadStatus, TargetedAgents};
