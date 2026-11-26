@@ -244,7 +244,7 @@ pub fn exchange_handoff(
         .set_read_timeout(Some(remaining))
         .map_err(|error| invalid(format!("handoff timeout: {error}")))?;
     let reply_bytes = read_frame(&mut stream)?;
-    serde_json::from_slice(&reply_bytes)
+    ramflux_protocol::parse_i_json(&reply_bytes)
         .map_err(|error| invalid(format!("parse handoff reply: {error}")))
 }
 
