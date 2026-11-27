@@ -24,7 +24,6 @@ pub(crate) struct TaskOwnPacket {
     context: OwnContext,
     history: TaskHistory,
     manifests: Vec<SdkDeviceManifestResponse>,
-    pins: Vec<crate::own_device_sync::SdkOwnDeviceGroupMemberPin>,
     base: usize,
     prefix_hash: String,
 }
@@ -67,13 +66,16 @@ impl TaskOwnPacket {
                 .iter()
                 .map(g::NativeDeviceManifest::try_from)
                 .collect::<Result<_, _>>()?,
-            pins: self.pins.iter().map(g::SdkOwnDeviceGroupMemberPin::from).collect(),
+            pins: Vec::new(),
             base: u64::try_from(self.base).map_err(|_| invalid("task page base overflow"))?,
             prefix_hash: self.prefix_hash.clone(),
         })
     }
     pub(crate) fn from_generated(value: &g::TaskOwnPacket) -> Result<Self, SdkError> {
         let history = value.history.as_ref().ok_or_else(|| invalid("Task history missing"))?;
+        if !value.pins.is_empty() {
+            return Err(invalid("task history group pins are not accepted"));
+        }
         Ok(Self {
             context: OwnContext::try_from(
                 value.context.as_ref().ok_or_else(|| invalid("Task context missing"))?,
@@ -115,11 +117,6 @@ impl TaskOwnPacket {
                 .iter()
                 .map(super::generated::manifest::generated_manifest_fields)
                 .collect::<Result<_, _>>()?,
-            pins: value
-                .pins
-                .iter()
-                .map(crate::own_device_sync::SdkOwnDeviceGroupMemberPin::from)
-                .collect(),
             base: usize::try_from(value.base).map_err(|_| invalid("Task page base overflow"))?,
             prefix_hash: value.prefix_hash.clone(),
         })
@@ -151,37 +148,15 @@ impl TaskOwnPacket {
     }
 }
 impl RamfluxClient {
-    fn check_task_own_group_fence(&self, context: &OwnContext) -> Result<(), SdkError> {
-        if let Some(group) = &context.group
-            && self.group_state(&group.group_id).is_ok()
-        {
-            if !self.local_is_group_member(&group.group_id)? {
-                return Err(invalid("own task snapshot cannot restore removed local membership"));
-            }
-            if self.group_state(&group.group_id)?.group_epoch < group.group_epoch {
-                return Err(SdkError::InboundPending(
-                    "task snapshot awaits authenticated membership changes".into(),
-                ));
-            }
-        }
-        Ok(())
-    }
     pub(crate) fn task_own_packets(&self, carrier: &Carrier) -> Result<Vec<Vec<u8>>, SdkError> {
         let db = self.account_db()?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let thread = db
             .client_record("conversation", &carrier.conversation_id)?
             .ok_or_else(|| invalid("own task conversation missing"))?;
-        let group = if let Some(id) = thread["group_id"].as_str() {
-            Some(
-                self.own_device_group_snapshots(&local.device_id)?
-                    .into_iter()
-                    .find(|g| g.group_id == id)
-                    .ok_or_else(|| invalid("own task group access unavailable"))?,
-            )
-        } else {
-            None
-        };
+        if thread["group_id"].as_str().is_some() {
+            return Err(invalid("own task group conversations are not supported"));
+        }
         let participants = thread["participants"]
             .as_array()
             .into_iter()
@@ -190,9 +165,7 @@ impl RamfluxClient {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let mut friend = None;
-        if group.is_none()
-            && let Some(peer) = participants.iter().find(|id| **id != local.principal_id)
-        {
+        if let Some(peer) = participants.iter().find(|id| **id != local.principal_id) {
             friend = db.friend_link_for_peer(peer)?;
             if friend.is_none()
                 && let Some(commitment) = db
@@ -246,17 +219,15 @@ impl RamfluxClient {
                     .ok_or_else(|| invalid("own task signer manifest missing"))?,
             );
         }
-        let pins = self.own_device_group_member_pins(group.as_slice())?;
         let packet = TaskOwnPacket {
             context: OwnContext {
                 conversation_id: carrier.conversation_id.clone(),
                 participants,
-                group,
+                group: None,
                 friend,
             },
             history,
             manifests,
-            pins,
             base: 0,
             prefix_hash: task_prefix_hash(&[])?,
         };
@@ -284,7 +255,8 @@ impl RamfluxClient {
         }
         self.authorize_owned_surface_source(&source)?;
         if packet.context.conversation_id != conversation
-            || packet.context.group.as_ref().map(|g| g.group_id.as_str()) != group
+            || packet.context.group.is_some()
+            || group.is_some()
             || packet.history.events.len() > 289
             || packet.manifests.len() > 64
         {
@@ -296,7 +268,6 @@ impl RamfluxClient {
         self.validate_own_context_namespace(&packet.context)?;
         let conversation = &packet.context.conversation_id;
         self.account_db()?.write_transaction(|| {
-            self.check_task_own_group_fence(&packet.context)?;
             for manifest in &packet.manifests {
                 let existing =
                     self.account_db()?.client_record("identity", &manifest.principal_id)?;
@@ -319,18 +290,6 @@ impl RamfluxClient {
                 self.persist_identity_directory(manifest)?;
             }
             self.import_surface_context(&packet.context)?;
-            let mut active_pins = Vec::new();
-            for pin in &packet.pins {
-                if let Some(root) = &pin.principal_commitment
-                    && let Ok(identity) = self.device_identity_for_root(root, &pin.device_id)
-                    && self.account_db()?.group_member_role(&pin.group_id, &identity)?.is_some()
-                {
-                    active_pins.push(pin.clone());
-                }
-            }
-            for pin in &active_pins {
-                self.restore_own_member_pin(pin)?;
-            }
             let first =
                 packet.history.events.first().ok_or_else(|| invalid("own task history empty"))?;
             let id = first.carrier.event()?.event().task_id().to_owned();

@@ -4,49 +4,6 @@
 //! No-role group traffic and aggregate capacity preserve unrelated and locally active tasks.
 use super::*;
 
-#[tokio::test]
-async fn r5_no_role_group_updates_from_the_named_assignee_are_dropped_without_holdback()
--> TestResult {
-    let f = Box::pin(native_group::fixture(true, "other")).await?;
-    let other = &f.other;
-    let c = sign(
-        &f.agent,
-        "group-thread",
-        "start",
-        peer_start("unrelated", "group-thread", "agent", "other"),
-    )?;
-    assert!(!project(&f.human, &c)?.accepted);
-    for n in 0..12 {
-        let update = sign(
-            other,
-            "group-thread",
-            &format!("update-{n}"),
-            TaskEventBody::Update(TaskUpdate {
-                task_id: "unrelated".into(),
-                version: 2 + n,
-                state: TaskStatus::Running,
-                steps: Vec::new(),
-                result_ref: None,
-                result_summary: None,
-            }),
-        )?;
-        let outcome = project(&f.human, &update)?;
-        assert!(!outcome.pending, "a named party of a no-role task must not spend holdback");
-    }
-    assert_eq!(f.human.account_db()?.task_state_usage("task/pending/")?.0, 0);
-    let legitimate = sign(
-        other,
-        "group-thread",
-        "legitimate",
-        peer_start("unrelated", "group-thread", "other", "human"),
-    )?;
-    assert!(
-        project(&f.human, &legitimate)?.accepted,
-        "a new signer can start a genuinely local task"
-    );
-    Ok(())
-}
-
 #[test]
 fn r5_aggregate_compaction_prefers_terminal_history_and_never_discards_a_local_active_task()
 -> TestResult {

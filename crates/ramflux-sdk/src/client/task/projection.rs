@@ -227,11 +227,7 @@ impl RamfluxClient {
             if receipt.outcome.accepted
                 && matches!(carrier.event()?.event(), TaskEventBody::Resolve(_))
             {
-                self.require_task_member(
-                    &carrier.conversation_id,
-                    &carrier.principal_id,
-                    Some(&carrier.device_id),
-                )?;
+                self.require_task_member(&carrier.conversation_id, &carrier.principal_id)?;
                 let history = self
                     .task_history(&carrier.conversation_id, carrier.event()?.event().task_id())?;
                 if let Some(certificate) = history
@@ -249,9 +245,8 @@ impl RamfluxClient {
             self.store_task_message_metadata(delivery, &receipt.outcome, &carrier)?;
             return Ok(receipt.outcome);
         }
-        let (conversation, principal, device) =
-            (&carrier.conversation_id, &carrier.principal_id, &carrier.device_id);
-        self.require_task_member(conversation, principal, Some(device))?;
+        let (conversation, principal) = (&carrier.conversation_id, &carrier.principal_id);
+        self.require_task_member(conversation, principal)?;
         self.check_task_pending_collision(&carrier)?;
         let pending_key = self.task_pending_key(&carrier)?;
         let already_pending = db.load_actor_state::<super::pending::Pending>(&pending_key)?;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Hosted-agent admission for group-operation signing.
+//! Hosted-agent admission for operation signing.
 //!
 //! The node fence remains the session and delivery refusal. This check applies the
 //! same active-device test as `agent_fence::require_operable` to the custodian

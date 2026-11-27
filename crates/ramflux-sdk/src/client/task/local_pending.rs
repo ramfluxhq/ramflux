@@ -61,7 +61,7 @@ impl RamfluxClient {
             && matches!(c.event()?.event(), TaskEventBody::Resolve(_)))
     }
     pub(super) fn admit_peer_task_hold(&self, c: &Carrier) -> Result<(), SdkError> {
-        self.require_task_member(&c.conversation_id, &c.principal_id, Some(&c.device_id))?;
+        self.require_task_member(&c.conversation_id, &c.principal_id)?;
         let db = self.account_db()?;
         let rows = db.task_record_page::<Pending>("task/pending/", "task/pending/", 33)?;
         let mut buckets = BTreeMap::new();

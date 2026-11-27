@@ -140,11 +140,7 @@ impl RamfluxClient {
         if body.len() > 2 * 1024 * 1024 {
             return Err(invalid("task control byte budget exceeded"));
         }
-        self.require_task_member(
-            conversation,
-            &entry.envelope.source_principal_id,
-            Some(&entry.envelope.source_device_id),
-        )?;
+        self.require_task_member(conversation, &entry.envelope.source_principal_id)?;
         let thread = self
             .account_db()?
             .client_record("conversation", conversation)?

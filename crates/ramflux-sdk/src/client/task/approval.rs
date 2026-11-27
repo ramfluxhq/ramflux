@@ -257,7 +257,7 @@ impl RamfluxClient {
         {
             return Err(invalid("task approval binding or single-use constraints mismatch"));
         }
-        self.require_task_member(&b.conversation_id, &packet.principal, Some(&packet.device))?;
+        self.require_task_member(&b.conversation_id, &packet.principal)?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let expected = if matches!(packet.payload, Payload::Request { .. }) {
             &b.assignee

@@ -14,7 +14,7 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 mod genesis;
-mod group_participant;
+mod hosted_admission;
 mod networking;
 pub(crate) mod pairing;
 mod publication;
@@ -454,15 +454,15 @@ impl BornAccount {
         &self,
         host: Option<&ramflux_crypto::custody::VerifiedRecord>,
     ) -> Result<(), SdkError> {
-        group_participant::admit(self, host)
+        hosted_admission::admit(self, host)
     }
     /// Account anchor of the custodian when this device hosts the agent.
     pub(crate) fn hosted_human_anchor(&self) -> Result<Option<String>, SdkError> {
-        group_participant::hosted_human_anchor(self)
+        hosted_admission::hosted_human_anchor(self)
     }
     /// Data root that holds this account's custody directory.
     pub(crate) fn data_root(&self) -> Result<&Path, SdkError> {
-        group_participant::data_root(self)
+        hosted_admission::data_root(self)
     }
     /// The signer of this account's contact card and contact consent. A human signs on its
     /// primary device. An agent's record names its custodian's primary phone as primary, and that

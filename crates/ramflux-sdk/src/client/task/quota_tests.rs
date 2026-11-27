@@ -298,39 +298,6 @@ fn thirty_two_single_hold_pairs_cannot_exclude_a_new_honest_sender() -> TestResu
     drop(peers);
     Ok(())
 }
-#[tokio::test]
-async fn rejected_no_role_group_tasks_never_hold_their_followup_events() -> TestResult {
-    let f = Box::pin(native_group::fixture(false, "other")).await?;
-    let c = sign(
-        &f.agent,
-        "group-thread",
-        "unrelated",
-        peer_start("unrelated", "group-thread", "agent", "agent"),
-    )?;
-    assert!(!project(&f.human, &c)?.accepted);
-    for index in 0..40 {
-        let c = sign(
-            &f.agent,
-            "group-thread",
-            &format!("followup-{index}"),
-            TaskEventBody::Update(TaskUpdate {
-                result_summary: None,
-                task_id: "unrelated".into(),
-                version: 2 + index,
-                state: TaskStatus::Running,
-                steps: Vec::new(),
-                result_ref: None,
-            }),
-        )?;
-        let outcome = project(&f.human, &c)?;
-        assert!(!outcome.accepted);
-        assert!(!outcome.pending);
-    }
-    assert_eq!(f.human.account_db()?.task_state_usage("task/pending/")?.0, 0);
-    assert_eq!(f.human.account_db()?.task_state_usage("task/no_role/")?.0, 1);
-    assert!(f.human.task_get(Some("group-thread"), "unrelated")?.is_null());
-    Ok(())
-}
 #[test]
 fn twenty_one_peer_terminal_rounds_compact_only_that_peers_history() -> TestResult {
     let f = Fixture::new()?;

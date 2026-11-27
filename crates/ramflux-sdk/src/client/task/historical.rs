@@ -11,10 +11,19 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub(crate) struct Membership {
     conversation: String,
-    group: Option<String>,
-    epoch: Option<u64>,
     at: i64,
     members: Vec<String>,
+}
+impl Membership {
+    pub(super) fn conversation(&self) -> &str {
+        &self.conversation
+    }
+    pub(super) const fn at(&self) -> i64 {
+        self.at
+    }
+    pub(super) fn members(&self) -> &[String] {
+        &self.members
+    }
 }
 impl RamfluxClient {
     pub(super) fn task_membership_witness(
@@ -23,22 +32,11 @@ impl RamfluxClient {
         task: &Task,
         at: i64,
     ) -> Result<Membership, SdkError> {
-        let thread = self
-            .account_db()?
+        self.account_db()?
             .client_record("conversation", &c.conversation_id)?
             .ok_or_else(|| invalid("task conversation missing"))?;
-        let group = thread["group_id"].as_str().map(str::to_owned);
-        let epoch = group
-            .as_deref()
-            .map(|g| {
-                let state = self.group_state(g)?;
-                Ok::<_, SdkError>(state.group_epoch)
-            })
-            .transpose()?;
         Ok(Membership {
             conversation: c.conversation_id.clone(),
-            group,
-            epoch,
             at,
             members: vec![c.principal_id.clone(), task.assignee.clone()],
         })
@@ -122,32 +120,19 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let c = &accepted.carrier;
         if let Some(witness) = &accepted.membership {
-            let group = context.group.as_ref();
             if witness.conversation != c.conversation_id
                 || witness.at != accepted.received_at
-                || witness.group.as_deref() != group.map(|g| g.group_id.as_str())
-                || witness.epoch.is_some() != group.is_some()
-                || witness.epoch.is_some_and(|epoch| group.is_none_or(|g| epoch > g.group_epoch))
                 || !witness.members.contains(&c.principal_id)
                 || !witness.members.contains(&task.assignee)
+                || !context.participants.contains(&c.principal_id)
+                || !context.participants.contains(&task.assignee)
             {
                 return Err(invalid("historical task membership witness mismatch"));
             }
-            if let (Some(group), Some(epoch)) = (group, witness.epoch) {
-                self.check_verified_task_roster(c, &group.group_id, epoch, &task.assignee)?;
-            }
-            if group.is_none()
-                && (!context.participants.contains(&c.principal_id)
-                    || !context.participants.contains(&task.assignee))
-            {
-                return Err(invalid("historical direct participant mismatch"));
-            }
             return Ok(());
         }
-        // Older direct histories carry the same-root committed participant set. Group
-        // histories without a position witness cannot prove a departed member's epoch.
-        if context.group.is_some()
-            || !context.participants.contains(&c.principal_id)
+        // Older direct histories carry the same-root committed participant set.
+        if !context.participants.contains(&c.principal_id)
             || !context.participants.contains(&task.assignee)
         {
             return Err(invalid("historical task membership witness unavailable"));

@@ -127,19 +127,8 @@ impl RamfluxClient {
         super::super::check_delivery_size(packet.encoded_len())?;
         let context =
             packet.context.as_ref().ok_or_else(|| invalid("task history context missing"))?;
-        // Parse native shared-state documents canonically without importing them.
-        let native_context = crate::client::surface::OwnContext::try_from(context)?;
-        if let Some(group) = &native_context.group
-            && let Some(snapshot) = &group.shared_state
-        {
-            if snapshot.group_id != group.group_id
-                || snapshot.epoch != group.group_epoch
-                || snapshot.genesis.conversation_id != context.conversation_id
-            {
-                return Err(invalid("task history native group binding mismatch"));
-            }
-            ramflux_crypto::verify_group_state_snapshot(snapshot.clone())?;
-        }
+        // Parse the context canonically; group contexts are refused here.
+        crate::client::surface::OwnContext::try_from(context)?;
         let history =
             packet.history.as_ref().ok_or_else(|| invalid("task history events missing"))?;
         identifier(&context.conversation_id)?;
@@ -161,16 +150,8 @@ impl RamfluxClient {
         for manifest in &packet.manifests {
             self.check_generated_task_manifest(manifest, &manifest.principal_id)?;
         }
-        for pin in &packet.pins {
-            if context.group.as_ref().is_none_or(|group| group.group_id != pin.group_id) {
-                return Err(invalid("task history pin group mismatch"));
-            }
-            identifier(&pin.device_id)?;
-            if let Some(principal) = &pin.principal_id
-                && self.task_signer_key(principal, &pin.device_id)? != pin.signing_public_key
-            {
-                return Err(invalid("task history pin key mismatch"));
-            }
+        if !packet.pins.is_empty() {
+            return Err(invalid("task history group pins are not accepted"));
         }
         let mut task_id = None;
         for accepted in &history.events {
@@ -231,30 +212,20 @@ impl RamfluxClient {
         } else if matches!(native.event(), ramflux_protocol::TaskEventBody::Resolve(_)) {
             return Err(invalid("task history resolution certificate missing"));
         }
-        match &accepted.membership {
-            Some(witness) => {
-                let group = context.group.as_ref();
-                if witness.conversation != context.conversation_id
-                    || witness.at != accepted.received_at
-                    || witness.group.as_deref() != group.map(|group| group.group_id.as_str())
-                    || witness.epoch.is_some() != group.is_some()
-                    || witness
-                        .epoch
-                        .is_some_and(|epoch| group.is_none_or(|group| epoch > group.group_epoch))
-                    || !witness.members.contains(&carrier.principal_id)
-                {
-                    return Err(invalid("task history membership witness mismatch"));
-                }
-                for member in &witness.members {
-                    identifier(member)?;
-                }
+        if let Some(witness) = &accepted.membership {
+            if witness.conversation != context.conversation_id
+                || witness.at != accepted.received_at
+                || witness.group.is_some()
+                || witness.epoch.is_some()
+                || !witness.members.contains(&carrier.principal_id)
+            {
+                return Err(invalid("task history membership witness mismatch"));
             }
-            None if context.group.is_some() => {
-                return Err(invalid("task history group witness missing"));
+            for member in &witness.members {
+                identifier(member)?;
             }
-            None => (),
         }
-        if context.group.is_none() && !context.participants.contains(&carrier.principal_id) {
+        if !context.participants.contains(&carrier.principal_id) {
             return Err(invalid("task history direct participant mismatch"));
         }
         Ok(native.event().task_id().to_owned())

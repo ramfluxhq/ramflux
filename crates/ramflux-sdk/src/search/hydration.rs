@@ -79,26 +79,17 @@ pub(super) fn sources(
     {
         return Err(SearchError::IndexUnavailable.into());
     }
-    if let Some(group) = identity.group_id.as_deref() {
-        let viewer = client.read_device_identity()?.ok_or(SearchError::PermissionDenied)?;
-        if !db.search_group_member(activation, group, &viewer, control)? {
-            return Ok(Vec::new());
-        }
+    // Group messages are not searchable until the MLS group track lands.
+    if identity.group_id.is_some() {
+        return Ok(Vec::new());
     }
-    let message = if let Some(projection) = input.group_projection.as_ref() {
-        check_json_budget(projection)?;
-        serde_json::from_slice::<super::projection::DisplayMessage>(projection)
-            .map_err(|_| SearchError::IndexUnavailable)?
-    } else {
-        let Some(display) = super::projection::decode(&input.body)? else {
-            return Ok(Vec::new());
-        };
-        display
+    let Some(message) = super::projection::decode(&input.body)? else {
+        return Ok(Vec::new());
     };
     if message.sealed_group.is_some() {
         return Ok(Vec::new());
     }
-    let mut dependencies = vec![
+    let dependencies = vec![
         dependency("runtime_message_content", key),
         dependency("direct_message_projection", key),
         dependency("conversation_list_state", &input.conversation_id),
@@ -106,14 +97,9 @@ pub(super) fn sources(
         dependency("conversation_disappearing_policy", &input.conversation_id),
         dependency("runtime_actor_state", format!("routed/generated-identity/{key}")),
         dependency("runtime_actor_state", format!("routed/unsupported/{key}")),
-        dependency("runtime_actor_state", format!("routed/group-projection/{key}")),
         dependency("runtime_actor_state", format!("routed/edit-revision/{key}")),
         dependency("object_message_reference", key),
     ];
-    if let Some(group) = identity.group_id.as_ref() {
-        dependencies.push(dependency("shared_group_member_projection", group));
-        dependencies.push(dependency("group_projection", group));
-    }
     if message.entities.len() > 1024 {
         return Err(SearchError::Capacity.into());
     }
@@ -243,13 +229,8 @@ fn conversation(
         dependency("conversation_list_state", key),
         dependency("conversation_projection", key),
     ];
-    if let Some(group) = metadata.get("group_id").and_then(Value::as_str) {
-        let viewer = client.read_device_identity()?.ok_or(SearchError::PermissionDenied)?;
-        if !db.search_group_member(activation, group, &viewer, control)? {
-            return Ok(Vec::new());
-        }
-        dependencies.push(dependency("shared_group_member_projection", group));
-        dependencies.push(dependency("group_projection", group));
+    if metadata.get("group_id").and_then(Value::as_str).is_some() {
+        return Ok(Vec::new());
     }
     let mut text = zeroize::Zeroizing::new(String::new());
     if let Some(title) = metadata.get("title").and_then(Value::as_str)

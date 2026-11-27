@@ -154,34 +154,6 @@ fn terminal_count_retention_compacts_old_bodies_and_fully_prunes_older_projectio
     Ok(())
 }
 
-#[tokio::test]
-async fn a_requester_can_cancel_after_its_assignee_leaves_the_group() -> TestResult {
-    let f = Box::pin(native_group::fixture(false, "other")).await?;
-    assert!(
-        project(
-            &f.human,
-            &sign(&f.human, "group-thread", "start", start("task", "group-thread"))?
-        )?
-        .accepted
-    );
-    f.human.fixture_group_change(
-        "group",
-        "human-device",
-        ramflux_protocol::GroupStateChange::Remove {
-            root_commitment: f.agent.own_account_anchor()?,
-            device_id: "agent-device".into(),
-        },
-    )?;
-    let c = sign(
-        &f.human,
-        "group-thread",
-        "cancel",
-        TaskEventBody::Cancel(TaskCancel { task_id: "task".into(), base_revision: 1 }),
-    )?;
-    assert!(project(&f.human, &c)?.accepted);
-    assert_eq!(f.human.task_get(Some("group-thread"), "task")?["state"], "cancelled");
-    Ok(())
-}
 #[test]
 fn replayed_decision_ids_leave_no_reservation_for_an_otherwise_valid_second_grant() -> TestResult {
     let f = Fixture::new()?;

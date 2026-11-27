@@ -216,48 +216,6 @@ fn later_blocking_a_contact_does_not_reject_its_previously_committed_task_histor
     drop(sibling);
     Ok(())
 }
-#[tokio::test(flavor = "current_thread")]
-async fn departed_group_participants_remain_valid_in_witnessed_history_without_regaining_membership()
--> TestResult {
-    let f = Box::pin(native_group::fixture(false)).await?;
-    let event = sign(&f.human, "group-thread", "start", start("task", "group-thread"))?;
-    assert!(project(&f.agent, &event)?.accepted);
-    let removed = f.agent.fixture_group_change(
-        "group",
-        "agent-device",
-        ramflux_protocol::GroupStateChange::Remove {
-            root_commitment: f.human.own_account_anchor()?,
-            device_id: "human-device".into(),
-        },
-    )?;
-    f.sibling.fixture_accept_group_state(&removed, "agent2-device")?;
-    let packets = f.agent.own_task_packets("agent2-device")?;
-    assert_eq!(packets.len(), 1);
-    let sibling = f.sibling;
-    sibling.import_own_task_packets(&packets)?;
-    assert_eq!(sibling.task_get(Some("group-thread"), "task")?["requester"], "human");
-    assert!(
-        sibling
-            .account_db()?
-            .group_member_role("group", &f.human.owned_device_identity()?)?
-            .is_none()
-    );
-    assert!(
-        sibling
-            .account_db()?
-            .group_member_key_binding("group", &f.human.owned_device_identity()?)?
-            .is_none()
-    );
-    assert!(
-        project(
-            &sibling,
-            &sign(&f.human, "group-thread", "new-task", start("new-task", "group-thread"))?
-        )
-        .is_err()
-    );
-    drop(sibling);
-    Ok(())
-}
 #[test]
 fn a_bad_own_task_item_is_recorded_and_does_not_block_other_histories() -> TestResult {
     let f = Fixture::new()?;
@@ -380,31 +338,7 @@ fn task_export_pages_advance_independently_for_each_target_device() -> TestResul
     assert_ne!(serde_json::to_value(&first_a[0])?, serde_json::to_value(&second_a[0])?);
     Ok(())
 }
-#[tokio::test(flavor = "current_thread")]
-async fn a_bundle_cannot_claim_membership_at_an_epoch_the_receiver_validated_without_that_actor()
--> TestResult {
-    let f = Box::pin(native_group::fixture(true)).await?;
-    assert!(
-        project(
-            &f.agent,
-            &sign(&f.human, "group-thread", "start", start("task", "group-thread"))?
-        )?
-        .accepted
-    );
-    let packets = f.agent.own_task_packets("agent2-device")?;
-    let mut raw = serde_json::to_value(&packets[0])?;
-    raw["history"]["events"][0]["membership"]["epoch"] = json!(3);
-    let packet: own_history::TaskOwnPacket = serde_json::from_value(raw)?;
-    let sibling = f.sibling;
-    sibling.import_own_task_packets(&[packet])?;
-    assert!(sibling.task_get(Some("group-thread"), "task")?.is_null());
-    assert_eq!(sibling.account_db()?.task_state_usage("task/import_skip/")?.0, 1);
-    // The same real signed task is valid at epoch 4; the original unmodified packet still imports.
-    sibling.import_own_task_packets(&packets)?;
-    assert_eq!(sibling.task_get(Some("group-thread"), "task")?["requester"], "human");
-    drop(sibling);
-    Ok(())
-}
 
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 #[path = "own_group_fixture.rs"]
 mod native_group;

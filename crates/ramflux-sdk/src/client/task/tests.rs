@@ -8,6 +8,7 @@ use ramflux_protocol::{
     TaskAccept, TaskEvent, TaskEventBody, TaskProposal, TaskStart, TaskStatus, TaskStep, TaskUpdate,
 };
 use serde_json::json;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 #[path = "group_fixture.rs"]
 mod native_group;
 
@@ -347,36 +348,6 @@ fn an_envelope_clock_or_random_task_ids_cannot_bypass_principal_admission_limits
         .is_err()
     );
     assert!(f.agent.account_db()?.task_state_usage("task/rejected/")?.0 <= 256);
-    Ok(())
-}
-
-#[tokio::test]
-async fn proposal_acceptance_requires_a_member_distinct_from_both_proposer_and_assignee()
--> TestResult {
-    let f = Box::pin(native_group::fixture(true, "third")).await?;
-    let third = &f.other;
-    let TaskEventBody::Proposal(mut proposal) = proposal() else { return Err("proposal".into()) };
-    proposal.conversation_id = "group-thread".into();
-    proposal.assignee = "human".into();
-    let proposed = sign(&f.agent, "group-thread", "proposed", TaskEventBody::Proposal(proposal))?;
-    assert!(project(third, &proposed)?.accepted);
-    for actor in [&f.agent, &f.human] {
-        let accept = sign(
-            actor,
-            "group-thread",
-            &format!("accept-{}", actor.device_branch.as_ref().ok_or("device")?.principal_id),
-            TaskEventBody::Accept(TaskAccept { task_id: "proposal".into(), version: 2 }),
-        )?;
-        assert!(!project(third, &accept)?.accepted);
-    }
-    let accept = sign(
-        third,
-        "group-thread",
-        "third-accept",
-        TaskEventBody::Accept(TaskAccept { task_id: "proposal".into(), version: 2 }),
-    )?;
-    assert!(project(third, &accept)?.accepted);
-    assert_eq!(third.task_get(Some("group-thread"), "proposal")?["requester"], "third");
     Ok(())
 }
 

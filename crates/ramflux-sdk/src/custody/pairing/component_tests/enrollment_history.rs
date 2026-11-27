@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Real SAS enrollment followed by ordinary local history/group restoration, without wire claims.
+//! Real SAS enrollment followed by ordinary local history restoration, without wire claims.
 use super::*;
 #[tokio::test(start_paused = true)]
-async fn pairing_enrollment_restores_existing_history_with_a_fresh_group_sender() -> TestResult {
+async fn pairing_enrollment_restores_existing_history_on_the_enrolled_device() -> TestResult {
     let hold = ClockHold::new();
     let result = crate::bus::credentials::contract_tests::deadline(Box::pin(run())).await;
     hold.finish().await?;

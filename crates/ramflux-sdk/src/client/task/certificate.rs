@@ -146,7 +146,7 @@ impl RamfluxClient {
             return Err(invalid("task certificate external decision identity mismatch"));
         }
         if !historical {
-            self.require_task_member(&task.conversation_id, &task.assignee, Some(&executor))?;
+            self.require_task_member(&task.conversation_id, &task.assignee)?;
         }
         self.check_task_certificate_signature(certificate)
     }

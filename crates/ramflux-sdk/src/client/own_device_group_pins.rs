@@ -5,6 +5,7 @@
 use crate::own_device_sync::{SdkOwnDeviceGroupMemberPin, SdkOwnDeviceGroupSnapshot};
 use crate::prelude::*;
 impl RamfluxClient {
+    #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
     pub(super) fn own_device_group_member_pins(
         &self,
         groups: &[SdkOwnDeviceGroupSnapshot],

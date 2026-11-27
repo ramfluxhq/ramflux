@@ -36,42 +36,13 @@ async fn offline_retention_persists_across_account_reopen() -> TestResult {
     Ok(())
 }
 
-fn prepare_retention_group(
+fn prepare_retention_direct(
     fixture: &Fixture,
     recipient: &Fixture,
 ) -> TestResult<(String, crate::prekey::SdkPrekeyResponse)> {
     fixture.client.persist_observed_identity_directory_now(&recipient.manifest)?;
     recipient.client.persist_observed_identity_directory_now(&fixture.manifest)?;
-    let primary = fixture
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("native owner")?
-        .group_primary(fixture.vault.as_ref())?;
-    fixture.client.shared_group_create_with_primary(
-        "ttl-group",
-        "group-thread",
-        None,
-        &fixture.config.target_delivery_id,
-        Some(&primary),
-    )?;
     let member = recipient.client.owned_device_identity()?;
-    let state = fixture.client.shared_group_change_with_primary(
-        "ttl-group",
-        &fixture.config.target_delivery_id,
-        ramflux_protocol::group_state::GroupStateChange::Add {
-            member: recipient.client.owned_group_actor(member.storage_key())?.identity,
-            role: ramflux_protocol::group_state::SharedGroupRole::Member,
-        },
-        Some(&primary),
-    )?;
-    recipient.client.accept_shared_group_state(&state, &recipient.config.target_delivery_id)?;
-    let distribution = zeroize::Zeroizing::new(
-        fixture
-            .client
-            .export_group_sender_key_distribution("ttl-group", &fixture.config.device_id)?,
-    );
-    recipient.client.import_group_sender_key_distribution(&distribution)?;
     let lookup = fixture.client.root_qualified_device_lookup(member.storage_key())?;
     let prekey = crate::prekey::SdkPrekeyResponse {
         device_id: lookup.clone(),
@@ -83,10 +54,10 @@ fn prepare_retention_group(
 }
 
 #[tokio::test]
-async fn offline_two_hours_dm_and_group_survive_reconnect() -> TestResult {
+async fn offline_two_hours_dm_survives_reconnect() -> TestResult {
     let fixture = Fixture::with_device("ttl-offline", "owner-device").await?;
     let recipient = Fixture::with_device("ttl-recipient", "member-device").await?;
-    let (lookup, prekey) = prepare_retention_group(&fixture, &recipient)?;
+    let (lookup, prekey) = prepare_retention_direct(&fixture, &recipient)?;
     let now = crate::time::now_unix_timestamp();
     let inbox =
         std::sync::Arc::new(std::sync::Mutex::new(ramflux_node_core::OpaqueDeviceInbox::new()));
@@ -122,30 +93,7 @@ async fn offline_two_hours_dm_and_group_survive_reconnect() -> TestResult {
             b"retained encrypted content",
         )
         .await?;
-    let group_send = crate::LocalBusFrame::request(
-        "ttl-group-send",
-        Some("ttl-offline".into()),
-        "ramflux.sdk.v1",
-        "group.send",
-        serde_json::json!({
-            "group_id":"ttl-group", "conversation_id":"group-thread", "message_id":"group-message",
-            "sender_id":fixture.config.device_id,
-            "encrypted_body_base64":"",
-            "plaintext_body_base64":ramflux_protocol::encode_base64url(b"retained group content"),
-            "envelope_id":"group-message", "source_principal_id":fixture.config.principal_id,
-            "target_delivery_id":recipient.config.target_delivery_id, "ttl":3600,
-        }),
-    );
-    let mut account = crate::prelude::LocalBusAccountState::disconnected(
-        fixture.client,
-        fixture.config,
-        fixture.manifest.principal_commitment,
-    );
-    account.install_test_session(engine);
-    let submitted =
-        crate::bus::dispatch::group::dispatch_group_send_request(&group_send, &mut account).await?;
-    assert_eq!(submitted.response_body["submitted"]["envelope"]["envelope_id"], "group-message");
-    drop(account);
+    drop(engine);
     // A fresh recipient engine reconnects after the server clock advances two hours.
     let mut reconnected = crate::GatewaySessionEngine::with_test_transport(
         recipient.config.clone(),
@@ -157,9 +105,8 @@ async fn offline_two_hours_dm_and_group_survive_reconnect() -> TestResult {
         }),
     );
     let received = reconnected.resume_after(0, 10).await?;
-    assert_eq!(received.len(), 2, "both content envelopes must survive two offline hours");
+    assert_eq!(received.len(), 1, "the content envelope must survive two offline hours");
     assert_eq!(received[0].envelope.envelope_id, "dm-message");
-    assert_eq!(received[1].envelope.envelope_id, "group-message");
     assert_eq!(
         inbox
             .lock()

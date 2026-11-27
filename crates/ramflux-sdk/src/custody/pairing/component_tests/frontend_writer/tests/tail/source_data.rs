@@ -184,19 +184,11 @@ async fn primary_operations(rig: &Rig, target: &mut crate::RamfluxClient) -> Tes
         &rig.participant_b.account_id,
         crate::custody::network_now()?,
     )?;
-    let key = b.group_primary(rig.participant_b.vault.as_ref())?;
+    assert!(
+        b.group_primary(rig.participant_b.vault.as_ref()).is_ok(),
+        "test: new primary lacks its management permission"
+    );
     target.initialize_born_v3_branch(b.local_device_id()?, rig.participant_b.vault.clone()).await?;
-    let delivery = ramflux_protocol::qualified_device_id(
-        &b.record().body.account_anchor,
-        b.local_device_id()?,
-    )?;
-    target.shared_group_create_with_primary(
-        "after-primary-handoff",
-        "after-primary-handoff-thread",
-        Some("New primary".into()),
-        &delivery,
-        Some(&key),
-    )?;
     assert!(
         target.account_db()?.next_pairing_own_sync()?.is_none(),
         "test: full transfer scheduled redundant enrollment history export"

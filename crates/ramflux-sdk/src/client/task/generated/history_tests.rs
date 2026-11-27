@@ -74,65 +74,6 @@ pub(super) fn fixture(
     })
 }
 
-fn group_fixture(
-    client: &RamfluxClient,
-) -> Result<g::TaskHistoryExport, Box<dyn std::error::Error>> {
-    let mut group_history = fixture(client)?;
-    let root = client.identity_root.as_ref().ok_or("root")?;
-    let branch = client.device_branch.as_ref().ok_or("device")?;
-    let actor = ramflux_crypto::certify_group_state_actor(root, branch, "delivery")?;
-    let snapshot = ramflux_crypto::create_group_state(
-        root,
-        branch,
-        &actor,
-        ramflux_crypto::GroupStateCreateInput {
-            group_id: "group",
-            conversation_id: "thread",
-            max_members: 40,
-            new_member_history: "all_history",
-            name: Some("group".into()),
-            now: 19,
-        },
-    )?;
-    let packet = group_history.packets.first_mut().ok_or("packet")?;
-    packet.context.as_mut().ok_or("context")?.group = Some(g::SdkOwnDeviceGroupSnapshot {
-        group_id: "group".into(),
-        group_epoch: 1,
-        max_members: 40,
-        new_member_history: "all_history".into(),
-        local_role: "member".into(),
-        local_joined_epoch: 1,
-        members: vec![g::SdkOwnDeviceGroupMemberSnapshot {
-            member_id: "human".into(),
-            role: "member".into(),
-            joined_epoch: 1,
-        }],
-        routes: vec![g::LocalBusGroupMemberRoute {
-            member_id: "device".into(),
-            member_principal_commitment: Some("root".into()),
-            device_signing_public_key: Some(client.task_signer_key("human", "device")?),
-            target_delivery_id: Some("delivery".into()),
-            federation: None,
-        }],
-        shared_state: Some(g::NativeGroupSnapshot {
-            canonical: ramflux_protocol::canonical_json_bytes(snapshot.snapshot())?,
-        }),
-    });
-    packet.pins = vec![g::SdkOwnDeviceGroupMemberPin {
-        group_id: "group".into(),
-        device_id: "device".into(),
-        signing_public_key: client.task_signer_key("human", "device")?,
-        principal_id: Some("human".into()),
-        principal_commitment: None,
-    }];
-    for event in &mut packet.history.as_mut().ok_or("history")?.events {
-        let witness = event.membership.as_mut().ok_or("witness")?;
-        witness.group = Some("group".into());
-        witness.epoch = Some(1);
-    }
-    Ok(group_history)
-}
-
 fn wire(history: g::TaskHistoryExport) -> Vec<u8> {
     g::Task { payload: Some(g::task::Payload::OwnHistory(history)) }.encode_to_vec()
 }
@@ -145,10 +86,6 @@ fn native_fields(history: &g::TaskHistoryExport) -> TestResult {
         let context = packet.context.as_ref().ok_or("context")?;
         let native = crate::client::surface::OwnContext::try_from(context)?;
         assert_eq!(g::OwnContext::try_from(&native)?, *context);
-        for pin in &packet.pins {
-            let native = crate::own_device_sync::SdkOwnDeviceGroupMemberPin::from(pin);
-            assert_eq!(g::SdkOwnDeviceGroupMemberPin::from(&native), *pin);
-        }
         for event in &packet.history.as_ref().ok_or("history")?.events {
             if let Some(witness) = &event.membership {
                 let native = super::super::historical::Membership::try_from(witness)?;
@@ -216,14 +153,6 @@ fn every_task_event_approval_control_and_history_round_trips() -> TestResult {
         ),
         Err(SdkError::TaskRefused { reason: crate::TaskRefusalCode::InvalidRequest, .. })
     ));
-    let group_history = group_fixture(&client)?;
-    native_fields(&group_history)?;
-    assert_eq!(
-        client.decode_generated_task_history_export(
-            &client.encode_generated_task_history_export(&group_history)?
-        )?,
-        group_history
-    );
     Ok(())
 }
 
@@ -300,7 +229,7 @@ fn generated_history_received_fields_and_cross_bindings_reject_exactly() -> Test
             }
             _ => {
                 packet.pins = vec![g::SdkOwnDeviceGroupMemberPin::default()];
-                "task history pin group mismatch"
+                "task history group pins are not accepted"
             }
         };
         exact(client.decode_generated_task_history_export(&wire(changed)), expected);
@@ -436,112 +365,6 @@ fn generated_history_bounds_signatures_and_committed_page_bindings_are_exact() -
     assert!(
         matches!(client.decode_generated_task_history_export(&wire(changed)), Err(SdkError::TaskDeliveryTooLarge { limit, .. }) if limit == super::super::MAX_DELIVERY_BYTES)
     );
-    Ok(())
-}
-
-#[test]
-fn generated_group_history_witness_epoch_and_pin_bindings_reject_exactly() -> TestResult {
-    let client = client();
-    let original = group_fixture(&client)?;
-    for field in 0..7 {
-        let mut changed = original.clone();
-        let packet = changed.packets.first_mut().ok_or("packet")?;
-        let expected = match field {
-            0 => {
-                packet.pins[0].group_id = "other".into();
-                "task history pin group mismatch"
-            }
-            1 => {
-                packet.pins[0].signing_public_key = "other".into();
-                "task history pin key mismatch"
-            }
-            2 => {
-                packet.pins[0].device_id.clear();
-                "invalid task history identifier"
-            }
-            3 => {
-                packet.history.as_mut().ok_or("history")?.events[0].membership = None;
-                "task history group witness missing"
-            }
-            _ => {
-                let witness = packet.history.as_mut().ok_or("history")?.events[0]
-                    .membership
-                    .as_mut()
-                    .ok_or("witness")?;
-                match field {
-                    4 => witness.epoch = None,
-                    5 => witness.epoch = Some(13),
-                    _ => witness.group = Some("other".into()),
-                }
-                "task history membership witness mismatch"
-            }
-        };
-        exact(client.decode_generated_task_history_export(&wire(changed)), expected);
-    }
-    Ok(())
-}
-
-#[test]
-fn generated_history_native_group_documents_keep_canonical_signatures_and_bounds() -> TestResult {
-    let client = client();
-    let original = group_fixture(&client)?;
-    for field in 0..3 {
-        let mut changed = original.clone();
-        let context = changed.packets[0].context.as_mut().ok_or("context")?;
-        match field {
-            0 => context.group.as_mut().ok_or("group")?.group_id = "other".into(),
-            1 => context.group.as_mut().ok_or("group")?.group_epoch += 1,
-            _ => context.conversation_id = "other".into(),
-        }
-        exact(
-            client.decode_generated_task_history_export(&wire(changed)),
-            "task history native group binding mismatch",
-        );
-    }
-    let mut changed = original.clone();
-    let document = changed.packets[0]
-        .context
-        .as_mut()
-        .ok_or("context")?
-        .group
-        .as_mut()
-        .ok_or("group")?
-        .shared_state
-        .as_mut()
-        .ok_or("document")?;
-    document.canonical.push(b' ');
-    exact(
-        client.decode_generated_task_history_export(&wire(changed)),
-        "noncanonical task group snapshot",
-    );
-    let mut changed = original.clone();
-    let document = changed.packets[0]
-        .context
-        .as_mut()
-        .ok_or("context")?
-        .group
-        .as_mut()
-        .ok_or("group")?
-        .shared_state
-        .as_mut()
-        .ok_or("document")?;
-    let mut snapshot =
-        ramflux_protocol::group_state::GroupStateSnapshot::from_wire_bytes(&document.canonical)?;
-    snapshot.signature = ramflux_protocol::encode_base64url([0; 64]);
-    document.canonical = ramflux_protocol::canonical_json_bytes(&snapshot)?;
-    assert!(matches!(
-        client.decode_generated_task_history_export(&wire(changed)),
-        Err(SdkError::Crypto(ramflux_crypto::CryptoError::VerifyFailed))
-    ));
-    let mut context = original.packets[0].context.clone().ok_or("context")?;
-    context.group.as_mut().ok_or("group")?.shared_state.as_mut().ok_or("document")?.canonical =
-        vec![0; ramflux_protocol::group_state::MAX_GROUP_STATE_BYTES + 1];
-    assert!(matches!(
-        crate::client::surface::OwnContext::try_from(&context),
-        Err(SdkError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(
-            ramflux_protocol::group_state::GroupStateLimit::Bytes
-        )))
-    ));
     Ok(())
 }
 
