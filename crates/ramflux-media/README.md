@@ -11,7 +11,7 @@ the send, receive and playout threads.
 
 The path is PCM, Opus, a 12-byte RTP header, SFrame (the RTP header is
 authenticated metadata), then the relay's length-prefixed token framing.
-The receive replay window is `ramflux_crypto::SFRAME_REPLAY_WINDOW`.
+The receive replay window is `ramflux_media::sframe::REPLAY_WINDOW` (128 counters).
 
 Platform audio I/O stays in each client. A client implements `Capture` and
 `Playback` and keeps the device streams alive for the life of the engine.
