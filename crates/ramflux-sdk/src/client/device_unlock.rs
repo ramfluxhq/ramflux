@@ -256,38 +256,70 @@ pub(crate) fn guard_code_attempt(index: &AccountIndex, account_id: &str) -> Resu
     Ok(())
 }
 
+/// How the wrong-code throttle stands now: the one source for the refusal and the state report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CodeThrottle {
+    /// [`MAX_CODE_FAILURES`] reached: no code is accepted until the account is restored.
+    pub(crate) exhausted: bool,
+    /// Whole seconds until a code is accepted; 0 when accepted now or when exhausted.
+    pub(crate) retry_after_secs: u64,
+}
+
+impl CodeThrottle {
+    /// Milliseconds until a code is accepted; 0 when accepted now or when exhausted.
+    pub(crate) fn retry_after_ms(self) -> u64 {
+        self.retry_after_secs.saturating_mul(1_000)
+    }
+}
+
+/// Reads the throttle without writing anything.
+///
+/// # Errors
+/// Returns index errors.
+pub(crate) fn code_throttle(
+    index: &AccountIndex,
+    account_id: &str,
+) -> Result<CodeThrottle, SdkError> {
+    let now = ramflux_storage::unix_now();
+    let attempts = index.code_attempts(account_id)?;
+    if attempts.failures >= MAX_CODE_FAILURES {
+        return Ok(CodeThrottle { exhausted: true, retry_after_secs: 0 });
+    }
+    let mut retry_after_secs = 0;
+    if attempts.failures >= FREE_CODE_FAILURES {
+        let doublings = attempts.failures.saturating_sub(FREE_CODE_FAILURES).min(16);
+        let wait = FIRST_WAIT_SECS.checked_shl(doublings).unwrap_or(i64::MAX);
+        let ready_at = attempts.last_attempt_at.unwrap_or(0).saturating_add(wait);
+        if now < ready_at {
+            retry_after_secs = u64::try_from(ready_at.saturating_sub(now)).unwrap_or(0);
+        }
+    }
+    Ok(CodeThrottle { exhausted: false, retry_after_secs })
+}
+
 /// Read-only throttle check: refuses while the account is exhausted or waiting, writes nothing.
 ///
 /// # Errors
 /// `UnlockAttemptsExhausted` after [`MAX_CODE_FAILURES`]; `UnlockRetryLater` during a wait.
 pub(crate) fn code_attempt_wait(index: &AccountIndex, account_id: &str) -> Result<(), SdkError> {
-    let now = ramflux_storage::unix_now();
-    let attempts = index.code_attempts(account_id)?;
-    if attempts.failures >= MAX_CODE_FAILURES {
+    let throttle = code_throttle(index, account_id)?;
+    if throttle.exhausted {
         return Err(refusal(
             "UnlockAttemptsExhausted",
             "too many wrong account codes; restore the account from its recovery phrase",
             serde_json::json!({"reason_code": "unlock_attempts_exhausted"}),
         ));
     }
-    if attempts.failures >= FREE_CODE_FAILURES {
-        let doublings = attempts.failures.saturating_sub(FREE_CODE_FAILURES).min(16);
-        let wait = FIRST_WAIT_SECS.checked_shl(doublings).unwrap_or(i64::MAX);
-        let ready_at = attempts.last_attempt_at.unwrap_or(0).saturating_add(wait);
-        if now < ready_at {
-            let retry_after_secs = ready_at.saturating_sub(now);
-            let retry_after_ms =
-                u64::try_from(retry_after_secs).map_or(0, |wait| wait.saturating_mul(1_000));
-            return Err(refusal(
-                "UnlockRetryLater",
-                "too many wrong account codes; wait before the next try",
-                serde_json::json!({
-                    "reason_code": "unlock_retry_later",
-                    "retry_after_secs": retry_after_secs,
-                    "retry_after_ms": retry_after_ms,
-                }),
-            ));
-        }
+    if throttle.retry_after_secs > 0 {
+        return Err(refusal(
+            "UnlockRetryLater",
+            "too many wrong account codes; wait before the next try",
+            serde_json::json!({
+                "reason_code": "unlock_retry_later",
+                "retry_after_secs": throttle.retry_after_secs,
+                "retry_after_ms": throttle.retry_after_ms(),
+            }),
+        ));
     }
     Ok(())
 }

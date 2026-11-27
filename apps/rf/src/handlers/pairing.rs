@@ -382,7 +382,7 @@ fn read_invitation(path: &Path) -> Result<InviteToken, RfError> {
 mod tests;
 
 /// Secrets come exclusively from the controlling terminal, including phone-primary phrase input.
-struct TerminalProvider;
+pub(super) struct TerminalProvider;
 impl ramflux_sdk::custody::pairing::LocalCredentialProvider for TerminalProvider {
     fn provide(
         &self,

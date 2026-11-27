@@ -19,6 +19,7 @@ pub use calls::{
 };
 mod frontend;
 pub use frontend::PairingBusClient;
+pub(crate) use frontend::prompt as validate_prompt;
 mod channel;
 pub use channel::{
     PrivateCredentialChannel, PrivateCredentialPrompt, PrivateCredentialScopeResolver,
