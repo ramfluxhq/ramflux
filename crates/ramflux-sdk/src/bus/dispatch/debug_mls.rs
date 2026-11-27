@@ -41,7 +41,10 @@ mod enabled {
     };
     use serde_json::{Value, json};
 
-    use super::*;
+    use super::{
+        LocalBusDaemonState, LocalBusDispatchResult, LocalBusFrame, SdkError,
+        local_bus_account_mut, local_bus_ok, request_account_id,
+    };
 
     const MAX_EXPORT_LEN: usize = 1024;
     const MAX_KAT_BYTES: usize = 8 * 1024 * 1024;
@@ -57,11 +60,11 @@ mod enabled {
         let method = request.method.as_str();
         let runtime = account.client.mls_runtime(&mut account.mls)?;
         let mls = runtime.mls();
-        let value = run(mls, method, body).map_err(refused)?;
+        let value = run(mls, method, body).map_err(|error| refused(&error))?;
         Ok(local_bus_ok(value))
     }
 
-    fn refused(error: MlsError) -> SdkError {
+    fn refused(error: &MlsError) -> SdkError {
         let code = error.code();
         SdkError::LocalBusRefused {
             code: code.to_owned(),
@@ -114,7 +117,7 @@ mod enabled {
     }
 
     fn from_hex(text: &str) -> Result<Vec<u8>, MlsError> {
-        if text.len() % 2 != 0 || text.len() > 2 * 1024 * 1024 {
+        if !text.len().is_multiple_of(2) || text.len() > 2 * 1024 * 1024 {
             return Err(bad("hex value has an invalid length"));
         }
         text.as_bytes()

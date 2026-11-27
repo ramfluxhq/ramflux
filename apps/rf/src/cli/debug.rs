@@ -31,12 +31,12 @@ pub(crate) struct MlsCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum MlsAction {
-    /// Write a fresh KeyPackage (`device` for a dm, `pseudonym` for a group).
+    /// Write a fresh key package (`device` for a dm, `pseudonym` for a group).
     #[command(name = "key-package")]
     KeyPackage(MlsKeyPackageArgs),
     /// Create a `dm` or a `group` (tier 1000 or 5000).
     Create(MlsCreateArgs),
-    /// Add members from KeyPackage files; writes a commit and a Welcome file.
+    /// Add members from key package files; writes a commit and a Welcome file.
     Add(MlsAddArgs),
     /// Add synthetic pseudonym members in batches (group kind, measurement only).
     #[command(name = "bulk-add")]
@@ -91,7 +91,7 @@ pub(crate) struct MlsCreateArgs {
 pub(crate) struct MlsAddArgs {
     #[arg(long)]
     pub(crate) group_id: String,
-    /// KeyPackage file (repeatable).
+    /// Key package file (repeatable).
     #[arg(long = "key-package", required = true)]
     pub(crate) key_packages: Vec<PathBuf>,
     #[arg(long)]
