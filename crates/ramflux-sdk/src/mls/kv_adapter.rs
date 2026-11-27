@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! `ramflux_mls::MlsKv` on the SQLCipher account database (table `mls_kv`).
+//! `ramflux_mls::MlsKv` on the `SQLCipher` account database (table `mls_kv`).
 use ramflux_mls::{MlsKv, MlsKvError, RowStats, WriteBatch, WriteOp};
 use ramflux_storage::{MlsKvCommitError, MlsKvStore, MlsKvTx, MlsKvWrite};
 use zeroize::Zeroizing;

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! The MLS runtime of the SDK: one process-wide crypto provider and one `Mls` per account, over
-//! the SQLCipher account database. The bus surface (`debug.mls.*`) is MLS-0 part 0c.
+//! the `SQLCipher` account database. The bus surface (`debug.mls.*`) is MLS-0 part 0c.
 mod device_identity;
 mod kv_adapter;
 

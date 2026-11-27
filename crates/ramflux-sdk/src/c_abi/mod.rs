@@ -942,6 +942,7 @@ macro_rules! sdk_invalid_argument {
             | SdkError::AccountRestoreFailed { .. }
             | SdkError::AccountManifestUnreadable
             | SdkError::LocalBus(_)
+            | SdkError::Mls { .. }
             | SdkError::LocalBusRefused { .. }
             | SdkError::InboundRejected(_)
             | SdkError::PayloadTooLarge
