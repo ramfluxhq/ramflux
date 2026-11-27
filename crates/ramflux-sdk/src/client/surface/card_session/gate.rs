@@ -29,7 +29,7 @@ pub(super) fn refused(reason: &str, fallback: &str) -> serde_json::Value {
     super::respond::refused(reason, fallback)
 }
 
-/// Map an open failure: the resident-VM cap is the typed `card_limit_exceeded`.
+/// Map an open or resume failure: the resident-VM cap is the typed `card_limit_exceeded`.
 #[cfg(feature = "card-runtime")]
 pub(super) fn open_err(error: ramflux_card::CardError) -> SdkError {
     match error {

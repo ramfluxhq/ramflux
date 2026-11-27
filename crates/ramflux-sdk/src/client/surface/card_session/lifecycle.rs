@@ -3,7 +3,7 @@
 
 //! Publication refresh and host presentation. Suspend drops an unsent action.
 use super::body::{self, PresentBody, SessionBody};
-use super::gate::card_err;
+use super::gate::{card_err, open_err};
 use super::guard::{Kept, keep};
 use super::respond::{self, Shown, shown, stale};
 use super::spec_build;
@@ -146,7 +146,7 @@ fn pause(
             held.clear_consumed();
             held.session().suspend().map_err(card_err)?
         } else {
-            held.session().resume().map_err(card_err)?
+            held.session().resume().map_err(open_err)?
         };
         let id = held.session().id();
         let result = if suspending { "suspended" } else { "resumed" };

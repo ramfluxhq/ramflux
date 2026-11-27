@@ -97,7 +97,8 @@ to the prompt.
 
 `account.app_lock.state` reports the code throttle in its ready body:
 `code_retry_after_ms` (milliseconds until a code is accepted; 0 when accepted
-now or when attempts are exhausted) and `code_attempts_exhausted` (boolean).
+now or when attempts are exhausted), `code_retry_after_secs` (the same wait in
+whole seconds, integer; 0 when no wait applies) and `code_attempts_exhausted` (boolean).
 
 ### App lock and recovery
 
