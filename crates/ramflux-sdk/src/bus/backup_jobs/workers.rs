@@ -477,8 +477,7 @@ impl BackupJobs {
         let checks = self.verify_files_mode(job, &db, &cancel, &counts, true)?;
         let original_input = db.original_input().clone();
         drop(db);
-        let preview =
-            self.archive_preview(&metadata, &path, &key, context.created_at, &job.job_id)?;
+        let preview = self.archive_preview(&metadata, context.created_at, &job.job_id)?;
         format::save_metadata(&directory.join("identity.sealed"), &master, &metadata)
             .map_err(|_| failure(BackupFailureCode::NotWritable))?;
         std::fs::File::open(&directory)
@@ -501,32 +500,21 @@ impl BackupJobs {
     pub(super) fn archive_preview(
         &self,
         metadata: &Metadata,
-        incoming: &std::path::Path,
-        key: &AccountDbKey,
         created_at: u64,
         job_id: &str,
     ) -> Result<BackupArchivePreview, BackupFailure> {
-        let (id, merge) = if let format::Identity::Native { native } = &metadata.identity {
-            let target = self.check_existing_native_identity(native)?;
-            let merge = target.is_some();
-            (
-                target.unwrap_or_else(|| {
-                    format!(
-                        "restore-{}",
-                        ramflux_protocol::hash_base64url(
-                            "ramflux.local.restore_install.v1",
-                            job_id.as_bytes()
-                        )
-                    )
-                }),
-                merge,
+        let format::Identity::Native { native } = &metadata.identity;
+        let target = self.check_existing_native_identity(native)?;
+        let merge = target.is_some();
+        let id = target.unwrap_or_else(|| {
+            format!(
+                "restore-{}",
+                ramflux_protocol::hash_base64url(
+                    "ramflux.local.restore_install.v1",
+                    job_id.as_bytes()
+                )
             )
-        } else {
-            (
-                metadata.identity.account_id().to_owned(),
-                self.check_existing_identity(metadata, incoming, key)?,
-            )
-        };
+        });
         Ok(BackupArchivePreview {
             local_account_id: id,
             account_label: metadata.identity.label(),
@@ -534,60 +522,6 @@ impl BackupJobs {
             merge,
         })
     }
-    pub(super) fn check_existing_identity(
-        &self,
-        metadata: &Metadata,
-        incoming: &std::path::Path,
-        key: &AccountDbKey,
-    ) -> Result<bool, BackupFailure> {
-        let manifest =
-            metadata.identity.legacy().map_err(|_| failure(BackupFailureCode::RootConflict))?;
-        let id = &manifest.local_account_id;
-        match self.index.account(id) {
-            Err(ramflux_storage::StorageError::AccountNotFound(_)) => Ok(false),
-            Err(_) => Err(failure(BackupFailureCode::Unreadable)),
-            Ok(_) => {
-                let _writer = self
-                    .index
-                    .acquire_account_writer(id)
-                    .map_err(|error| restore_storage_error(&error))?;
-                let record =
-                    self.index.account(id).map_err(|error| restore_storage_error(&error))?;
-                if record.principal_commitment != manifest.principal_commitment {
-                    return Err(failure(BackupFailureCode::RootConflict));
-                }
-                if crate::custody::account_exists(&self.data_root, id)
-                    .map_err(|_| failure(BackupFailureCode::RootConflict))?
-                {
-                    return Err(failure(BackupFailureCode::RootConflict));
-                }
-                let local = crate::bus::daemon::read_local_bus_account_manifest(
-                    &crate::bus::daemon::local_bus_account_manifest_path(&self.data_root, id),
-                )
-                .map_err(|_| failure(BackupFailureCode::Unreadable))?;
-                if local.root_seed != manifest.root_seed {
-                    return Err(failure(BackupFailureCode::RootConflict));
-                }
-                let path = self.data_root.join(record.db_relative_path);
-                let local_key = super::install::existing_key(
-                    &self.index,
-                    &self.data_root,
-                    id,
-                    local.account_secret.as_bytes(),
-                )
-                .map_err(|error| match error {
-                    crate::SdkError::Storage(error) => restore_storage_error(&error),
-                    _ => failure(BackupFailureCode::Unreadable),
-                })?;
-                super::install::open_live_stage(&path, &local_key)
-                    .map_err(|error| restore_storage_error(&error))?
-                    .check_backup_pins(incoming, key)
-                    .map_err(|_| failure(BackupFailureCode::RootConflict))?;
-                Ok(true)
-            }
-        }
-    }
-
     fn check_existing_native_identity(
         &self,
         native: &super::native::DataIdentity,
@@ -635,18 +569,11 @@ fn archive_metadata(
     path: &std::path::Path,
     key: &AccountDbKey,
 ) -> Result<Metadata, BackupFailure> {
-    let ca_pem = match &identity {
-        format::Identity::Legacy { manifest } => std::fs::read(&manifest.gateway.ca_cert)
-            .map_err(|_| failure(BackupFailureCode::Unreadable))?,
-        format::Identity::Native { .. } => {
-            BackupDatabase::open(path, key)
-                .map_err(|error| storage_error(&error))?
-                .sanitize_native_backup()
-                .map_err(|error| storage_error(&error))?;
-            Vec::new()
-        }
-    };
-    let metadata = Metadata { identity, database_key: *key.bytes(), ca_pem };
+    BackupDatabase::open(path, key)
+        .map_err(|error| storage_error(&error))?
+        .sanitize_native_backup()
+        .map_err(|error| storage_error(&error))?;
+    let metadata = Metadata { identity, database_key: *key.bytes(), ca_pem: Vec::new() };
     metadata
         .validate(metadata.identity.account_id())
         .map_err(|_| failure(BackupFailureCode::RootConflict))?;

@@ -87,6 +87,7 @@ impl Fixture {
         Ok(client)
     }
 
+    #[cfg(feature = "c-abi")]
     pub(crate) fn error(&self) -> TestResult<StorageError> {
         match self.client()?.unlock_account("acct", b"account-secret") {
             Err(SdkError::Storage(error)) => Ok(error),

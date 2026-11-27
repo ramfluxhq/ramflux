@@ -1098,17 +1098,6 @@ impl Supervisor {
             .borrow_mut()
             .insert(id.to_owned(), RestoreState::Failed(reason.to_owned()));
     }
-    pub(super) fn new_backup_actor(&self, id: &str) -> Result<AccountActor, SdkError> {
-        let actor = AccountActor::start(
-            id.into(),
-            self.config.clone(),
-            self.nodes.borrow().clone(),
-            self.index.clone(),
-            self.events.clone(),
-        )?;
-        self.accounts.borrow_mut().insert(id.into(), actor.clone());
-        Ok(actor)
-    }
     pub(super) fn account_actor(&self, id: &str) -> Option<AccountActor> {
         self.accounts.borrow().get(id).cloned()
     }
