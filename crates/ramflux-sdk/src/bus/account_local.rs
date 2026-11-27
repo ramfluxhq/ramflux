@@ -236,6 +236,18 @@ fn delete_secrets(
     id: &str,
 ) -> Result<(), SdkError> {
     crate::client::device_unlock::delete_device_secret(vault, id)?;
+    // An account stuck mid-recovery still owns the refs the recovery replaces; only its journal
+    // records them. A malformed journal must not block the erase.
+    match crate::custody::previous_vault_refs(root, id) {
+        Ok(Some((primary, branch))) => {
+            delete_ref(vault, &primary)?;
+            delete_ref(vault, &branch)?;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(%error, account_id = %id, "recovery journal unreadable during erase");
+        }
+    }
     let Ok(account) = crate::custody::load_data_account(root, id, super::custody_setup::now()?)
     else {
         return Ok(());

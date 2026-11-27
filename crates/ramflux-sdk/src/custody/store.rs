@@ -29,7 +29,7 @@ mod recovery;
 pub(crate) mod sibling_fixture;
 pub(crate) use publication::{accept_publication, pending_head_fence_blocks};
 pub use recovery::RecoveryCeremony;
-pub(crate) use recovery::{finish_recovery, pending_restore};
+pub(crate) use recovery::{finish_recovery, pending_restore, previous_vault_refs};
 const MAX_STORED_AUTHORITY_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

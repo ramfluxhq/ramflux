@@ -10,6 +10,9 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
+/// Upper bound for the push-route clear that `account.remove_local` sends before erasing.
+const REMOVE_PUSH_CLEAR_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[path = "supervisor_app_lifecycle.rs"]
 mod app_lifecycle;
 #[path = "supervisor_app_lock.rs"]
@@ -538,23 +541,11 @@ impl Supervisor {
         let secret =
             super::credentials::unlock_secret(self.config.data_root.clone(), id.to_owned()).await?;
         call.require_live()?;
-        let existing = self.accounts.borrow().get(id).cloned();
-        let actor = if let Some(actor) = existing {
-            actor
-        } else {
-            let actor = AccountActor::start(
-                id.to_owned(),
-                self.config.clone(),
-                self.nodes.borrow().clone(),
-                self.index.clone(),
-                self.events.clone(),
-            )?;
-            self.accounts.borrow_mut().insert(id.to_owned(), actor.clone());
-            actor
-        };
+        let (actor, started) = self.actor_for_unlock(id)?;
         let result = actor
             .unlock_native(super::native_account::NativeUnlockSecret::Code(secret), None)
-            .await?;
+            .await;
+        let result = self.discard_on_failure(id, &actor, started, result).await?;
         self.restore_states.borrow_mut().remove(id);
         self.set_active(id).await?;
         self.set_unlocked(id, true).await?;
@@ -757,6 +748,7 @@ impl Supervisor {
         let creating = opens_account(&request.method);
         let creating_pairing = super::pairing::creates_recipient(&self.config, &request)?;
         self.require_restore_ready(&id, creating)?;
+        let mut started = false;
         let actor = if let Some(actor) = actor {
             actor
         } else if creating || creating_pairing {
@@ -770,6 +762,7 @@ impl Supervisor {
                 self.events.clone(),
             )?;
             self.accounts.borrow_mut().insert(id.clone(), actor.clone());
+            started = true;
             actor
         } else {
             return Err(self.account_unavailable(&id));
@@ -805,7 +798,12 @@ impl Supervisor {
                 }
                 Ok(response)
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                if unlocking {
+                    self.discard_started_actor(&id, &actor, started).await;
+                }
+                Err(error)
+            }
         };
         if creating && response.is_ok() {
             self.restore_states.borrow_mut().remove(&id);
@@ -916,26 +914,14 @@ impl Supervisor {
         // activated or unlocked; the rebind publication owns its connection.
         self.refuse_unusable_agent(id)?;
         self.start_event_router();
-        let existing = self.accounts.borrow().get(id).cloned();
-        let actor = if let Some(actor) = existing {
-            actor
-        } else {
-            let actor = AccountActor::start(
-                id.into(),
-                self.config.clone(),
-                self.nodes.borrow().clone(),
-                self.index.clone(),
-                self.events.clone(),
-            )?;
-            self.accounts.borrow_mut().insert(id.into(), actor.clone());
-            actor
-        };
+        let (actor, started) = self.actor_for_unlock(id)?;
         let result = actor
             .unlock_native(
                 super::native_account::NativeUnlockSecret::Code(passphrase),
                 home_node_id,
             )
-            .await?;
+            .await;
+        let result = self.discard_on_failure(id, &actor, started, result).await?;
         self.set_active(id).await?;
         self.set_unlocked(id, true).await?;
         Ok(result)
@@ -961,7 +947,13 @@ impl Supervisor {
         if !present && !self.accounts.borrow().contains_key(&id) {
             return Err(super::account_local::missing());
         }
-        if self.accounts.borrow().contains_key(&id) {
+        let actor = self.accounts.borrow().get(&id).cloned();
+        if let Some(actor) = actor {
+            // Only an account that is open already holds its keys; a locked one is never opened
+            // here, and then no network call is made.
+            if actor.is_open() {
+                self.clear_push_route_for_remove(&id, &actor).await;
+            }
             self.lock_account_session(&id).await?;
             self.clear_device_wrap(&id).await?;
         }
@@ -978,6 +970,37 @@ impl Supervisor {
             accounts.remove(&id);
         });
         Ok(reply(serde_json::json!({"local_account_id": id, "removed": true})))
+    }
+
+    /// Asks the node to drop every push route of the account before it is erased. Best effort:
+    /// a failure or the 5 s limit never blocks the erase; the node route then lapses at expiry.
+    async fn clear_push_route_for_remove(&self, id: &str, actor: &AccountActor) {
+        let (outbound, _receiver) = mpsc::channel(1);
+        let connection = LocalBusConnectionState::new(0, outbound);
+        let clear = LocalBusFrame::request(
+            "remove-local-push-clear",
+            Some(id.to_owned()),
+            "device",
+            "device.push_route.set",
+            serde_json::json!({"registration": null}),
+        );
+        let outcome = tokio::time::timeout(
+            REMOVE_PUSH_CLEAR_LIMIT,
+            actor.request(command(clear, &connection)),
+        )
+        .await;
+        match outcome {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(reason_code = "push_clear_failed", %error, "push route clear failed before erase");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    reason_code = "push_clear_failed",
+                    "push route clear timed out before erase"
+                );
+            }
+        }
     }
 
     async fn account_list(&self) -> Result<ActorResponse, SdkError> {
@@ -1067,6 +1090,74 @@ impl Supervisor {
         Ok(())
     }
 
+    /// The registered actor for `id`, or a newly started one. The flag says this call started it.
+    pub(super) fn actor_for_unlock(&self, id: &str) -> Result<(AccountActor, bool), SdkError> {
+        if let Some(actor) = self.accounts.borrow().get(id).cloned() {
+            return Ok((actor, false));
+        }
+        let actor = AccountActor::start(
+            id.to_owned(),
+            self.config.clone(),
+            self.nodes.borrow().clone(),
+            self.index.clone(),
+            self.events.clone(),
+        )?;
+        self.accounts.borrow_mut().insert(id.to_owned(), actor.clone());
+        Ok((actor, true))
+    }
+
+    /// Passes `result` through; on an error discards the actor this call started.
+    pub(super) async fn discard_on_failure<T>(
+        &self,
+        id: &str,
+        actor: &AccountActor,
+        started: bool,
+        result: Result<T, SdkError>,
+    ) -> Result<T, SdkError> {
+        if result.is_err() {
+            self.discard_started_actor(id, actor, started).await;
+        }
+        result
+    }
+
+    /// Removes `actor` from the account, subscriber and attended maps once it has been stopped.
+    pub(super) fn forget_stopped_actor(&self, id: &str, actor: &AccountActor) {
+        let mut accounts = self.accounts.borrow_mut();
+        if accounts.get(id).is_some_and(|current| current.same(actor)) {
+            accounts.remove(id);
+        }
+        drop(accounts);
+        self.subscribers.borrow_mut().retain(|_, subscriber| subscriber.account_id != id);
+        self.attended.borrow_mut().retain(|_, account| account != id);
+    }
+
+    /// Reclaims the shell of a failed unlock so the next attempt starts a fresh actor. Only an
+    /// actor this call started, still the registered entry and not open, is touched; the checks
+    /// and the removal run with no await between them. A concurrent waiter that joined the
+    /// discarded actor gets the retryable `account actor stopped` error with no attempt counted.
+    pub(super) async fn discard_started_actor(
+        &self,
+        id: &str,
+        actor: &AccountActor,
+        started: bool,
+    ) {
+        if !started || actor.is_open() {
+            return;
+        }
+        {
+            let mut accounts = self.accounts.borrow_mut();
+            if !accounts.get(id).is_some_and(|current| current.same(actor)) {
+                return;
+            }
+            accounts.remove(id);
+        }
+        self.subscribers.borrow_mut().retain(|_, subscriber| subscriber.account_id != id);
+        self.attended.borrow_mut().retain(|_, account| account != id);
+        if let Err(stop) = actor.stop().await {
+            tracing::warn!(%stop, "failed unlock actor did not stop cleanly");
+        }
+    }
+
     /// Closes an open account session the way the `account.lock` route does: the lock request, then
     /// stop, the index unlock flag, and the removal from the account, subscriber and attended maps.
     /// Does nothing when the account is not open. Stage D3 pauses an agent through it.
@@ -1083,7 +1174,14 @@ impl Supervisor {
             "account.lock",
             serde_json::json!({}),
         );
-        actor.request(command(lock, &connection)).await?;
+        // A shell actor left by a failed counted attempt was never opened: the lock then finds
+        // nothing to close, which is the state a lock asks for. An open actor still fails.
+        let was_closed = !actor.is_open();
+        match actor.request(command(lock, &connection)).await {
+            Ok(_) => {}
+            Err(SdkError::AccountNotOpen(_)) if was_closed => {}
+            Err(error) => return Err(error),
+        }
         actor.stop().await?;
         self.set_unlocked(id, false).await?;
         self.accounts.borrow_mut().remove(id);

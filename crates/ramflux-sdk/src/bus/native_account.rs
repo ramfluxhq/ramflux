@@ -85,6 +85,7 @@ pub(super) fn unlock(
         id,
         repair_vault.as_ref(),
     )?;
+    refresh_after_recovery(&mut client, &root, id, repair_vault.as_ref())?;
     if !crate::custody::pairing::recipient::ordinary_session_admitted(&client, id)? {
         return Err(SdkError::PairingCode("PublicationPending"));
     }
@@ -117,6 +118,74 @@ pub(super) fn unlock(
         )?;
     }
     admit_native_account(state, id, client, anchor, device, delivery)
+}
+
+/// A recovery replaces the device id and vault refs, so the installed marker and adoption row the
+/// account carried before still name the old owners and admission would refuse for good. The
+/// recovered record is the proof: refresh the authority owners from it through the ordinary
+/// verified refresh (keys checked before any write, ordered and crash-resumable).
+fn refresh_after_recovery(
+    client: &mut RamfluxClient,
+    root: &std::path::Path,
+    id: &str,
+    vault: &dyn crate::custody::PrimaryVault,
+) -> Result<(), SdkError> {
+    use crate::custody::pairing::{activate, install_store};
+    let account = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    if !account.recovery_publication_pending(root)? {
+        return Ok(());
+    }
+    let Some(installed) = install_store::read_installed(root, id)? else { return Ok(()) };
+    if installed.state != "installed"
+        || install_store::list_pending(root, id)?.iter().any(|row| row.full_transfer.is_some())
+        || crate::custody::matches_install(account, &installed)?
+        || crate::custody::matches_generation_install(account, &installed)?
+    {
+        return Ok(());
+    }
+    if installed.account_id != account.local_account_id()
+        || installed.account_anchor != account.record().body.account_anchor
+    {
+        return Err(SdkError::PairingCode("PublicationPending"));
+    }
+    let hash = ramflux_protocol::custody::object_hash(account.record())?;
+    let now = crate::custody::network_now()?;
+    let authority = ramflux_protocol::custody::CustodyAuthority {
+        publication: account.publication(),
+        custodian_publication: account.custodian_publication(root, now)?,
+    };
+    {
+        // Only the stale non-generation rows go; the lock is never held around the refresh.
+        let _lock = activate::authority_lock(root, id)?;
+        for row in install_store::list_pending(root, id)? {
+            let own_refresh = row.install_purpose == "authority_refresh"
+                && row.record_hash.as_deref() == Some(hash.as_str());
+            if row.full_transfer.is_none() && !own_refresh {
+                install_store::remove_pending(root, id, &row.operation_id)?;
+            }
+        }
+    }
+    custody_refresh(client, root, id, vault, &authority, now)
+}
+
+fn custody_refresh(
+    client: &mut RamfluxClient,
+    root: &std::path::Path,
+    id: &str,
+    vault: &dyn crate::custody::PrimaryVault,
+    authority: &ramflux_protocol::custody::CustodyAuthority,
+    now: u64,
+) -> Result<(), SdkError> {
+    crate::custody::pairing::refresh_authority(
+        root,
+        client.account_db()?,
+        vault,
+        id,
+        authority,
+        now,
+    )?;
+    client.born_v3_account = Some(Box::new(crate::custody::load_account(root, id, now)?));
+    Ok(())
 }
 
 fn admit_native_account(
