@@ -11,6 +11,7 @@ mod central_handoff;
 mod delivery_loop;
 mod provider_payload;
 mod push_registration;
+mod push_test;
 mod retention;
 mod send_authority;
 
@@ -631,6 +632,19 @@ fn handle_notify_mesh_quic_request(
     match (request.method.as_str(), request.path.as_str()) {
         ("POST", ramflux_node_core::PUSH_ROUTE_PATH) => {
             let answer = push_registration::register(ingress, request.body.clone())?;
+            Ok(ramflux_transport::GatewayQuicResponse {
+                status: 200,
+                body: serde_json::to_value(answer).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?,
+            })
+        }
+        ("POST", ramflux_node_core::PUSH_ROUTE_TEST_PATH) => {
+            let body: ramflux_node_core::PushRouteTestMeshRequest =
+                serde_json::from_value(request.body.clone()).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?;
+            let answer = push_test::handle(ingress, body)?;
             Ok(ramflux_transport::GatewayQuicResponse {
                 status: 200,
                 body: serde_json::to_value(answer).map_err(|source| {

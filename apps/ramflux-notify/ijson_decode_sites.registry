@@ -9,6 +9,7 @@ apps/ramflux-notify/src/main.rs | handle_mvp10_notify_deliver_value_async | 1 | 
 apps/ramflux-notify/src/main.rs | handle_mvp10_notify_wake | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-notify/src/main.rs | handle_mvp10_notify_wake_value_async | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-notify/src/main.rs | handle_notify_mesh_quic_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | handle_notify_mesh_quic_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-notify/src/main.rs | handle_s13_policy | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-notify/src/main.rs | handle_s13_policy | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-notify/src/main.rs | handle_s13_policy | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

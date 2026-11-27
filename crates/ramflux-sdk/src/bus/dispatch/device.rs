@@ -21,6 +21,7 @@ pub(crate) async fn dispatch_device_bus_request(
             dispatch_device_revoke(request, state, body).await
         }
         "device.push_route.set" => Box::pin(dispatch_push_route_set(request, state)).await,
+        "device.push_route.test" => dispatch_push_route_test(request, state).await,
         "device.push_policy.set" => {
             let body: LocalBusPushPolicySetRequest = serde_json::from_value(request.body.clone())?;
             dispatch_push_policy_set(request, state, body).await
@@ -76,6 +77,12 @@ const ACTIVITY_MIN_INTERVAL_MS: u64 = 60_000;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct LocalBusPushRouteTestRequest {
+    route_tag: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LocalBusPushPolicySetRequest {
     device_class: crate::gateway::protocol::GatewayDeviceClass,
     muted: bool,
@@ -89,6 +96,23 @@ pub(crate) fn stored_device_policy(
         Some(value) => Ok(Some(serde_json::from_str(&value)?)),
         None => Ok(None),
     }
+}
+
+/// Own-device push test: the node queues one test wake on the named own route. A refusal is the
+/// same typed `push_route_refused` bus error as `device.push_route.set`, with `details.refusal`
+/// and, for `rate_limited`, `retry_after_ms`.
+async fn dispatch_push_route_test(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusPushRouteTestRequest = serde_json::from_value(request.body.clone())?;
+    let account_id = request_account_id(request)?.to_owned();
+    let account = local_bus_account_mut(state, &account_id)?;
+    let mut engine = account.session_client().await?;
+    let outcome = engine.test_push_route(body.route_tag).await;
+    account.apply_session_metadata(engine);
+    outcome?;
+    Ok(local_bus_ok(serde_json::json!({"status": "queued"})))
 }
 
 async fn dispatch_push_policy_set(

@@ -307,6 +307,13 @@ impl GatewaySessionAccess for SessionClient {
             self.generation,
         ))
     }
+    fn test_push_route(&mut self, route_tag: String) -> GatewayCallFuture<'_, ()> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.test_push_route(route_tag).await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
     fn send_device_policy(
         &mut self,
         device_class: GatewayDeviceClass,

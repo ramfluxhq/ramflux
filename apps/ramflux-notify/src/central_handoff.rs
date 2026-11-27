@@ -105,6 +105,7 @@ fn central_class(class: &NotificationDeliveryClass) -> Option<CentralClass> {
     match class {
         NotificationDeliveryClass::UserContentNotification => Some(CentralClass::M),
         NotificationDeliveryClass::CallWakeNotification => Some(CentralClass::Call),
+        NotificationDeliveryClass::PushTestNotification => Some(CentralClass::T),
         _ => None,
     }
 }
@@ -162,6 +163,27 @@ impl CentralPush {
         }))
     }
 
+    /// Whether the centre advertises class `t` and serves `provider` (push test admission).
+    /// `false` also covers a missing state file: nothing may be admitted then.
+    ///
+    /// # Errors
+    /// Returns an error when the state file exists but cannot be read.
+    pub(crate) fn test_class_ready(
+        &self,
+        provider: &PushProviderKind,
+    ) -> Result<bool, NodeCoreError> {
+        let Some(state) = read_push_central_state(&self.state_file)? else {
+            return Ok(false);
+        };
+        let served = match provider {
+            PushProviderKind::Apns => state.served.apns,
+            PushProviderKind::ApnsVoip => state.served.apns_voip,
+            PushProviderKind::Fcm => state.served.fcm,
+            PushProviderKind::WebPush => false,
+        };
+        Ok(served && state.classes.contains(&CentralClass::T))
+    }
+
     /// Delivers one wake through the centre and says when to look again.
     ///
     /// # Errors
@@ -216,12 +238,16 @@ impl CentralPush {
         state: &PushCentralState,
         now_ms: u64,
     ) -> Result<CentralDue, NodeCoreError> {
-        let routes = store.central_candidate_routes(
+        let mut routes = store.central_candidate_routes(
             &entry.device_delivery_id,
             class,
             state.served,
             now_ms,
         )?;
+        // A push test is bound to exactly one of the caller's routes (never a fan-out).
+        if let Some(tag) = ramflux_node_core::test_target_route_tag(&entry.wake) {
+            routes.retain(|route| route.route_tag == tag);
+        }
         let Some(provider) = routes.first().map(|route| route.provider.clone()) else {
             // Every route is paused: wake up when the earliest pause ends, never after the entry's
             // own expiry (plan section 5, unserved).

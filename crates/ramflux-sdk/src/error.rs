@@ -379,6 +379,9 @@ pub enum SdkError {
     /// The node refused push route control with its typed refusal (not a session fault).
     #[error("push route refused: {0:?}")]
     PushRouteRefused(crate::GatewayPushRouteRefusal),
+    /// The node refused `device.push_route.test`; same bus code as [`Self::PushRouteRefused`].
+    #[error("push test refused: {refusal:?}")]
+    PushTestRefused { refusal: crate::GatewayPushRouteRefusal, retry_after_ms: Option<u64> },
     #[error("own-device authorization refresh failed: {0}")]
     OwnDeviceAuthorizationRefreshFailed(String),
     #[error("gateway session is not established")]

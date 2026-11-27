@@ -173,6 +173,9 @@ pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
         route: Option<GatewayPushRouteRegistration>,
     ) -> GatewayCallFuture<'_, Option<u64>>;
     /// # Errors
+    /// Returns an error if the session exchange fails or the node refuses the test.
+    fn test_push_route(&mut self, route_tag: String) -> GatewayCallFuture<'_, ()>;
+    /// # Errors
     /// Returns an error if the frame cannot be written.
     fn send_device_policy(
         &mut self,
@@ -312,6 +315,9 @@ impl GatewaySessionAccess for GatewaySessionEngine {
         route: Option<GatewayPushRouteRegistration>,
     ) -> GatewayCallFuture<'_, Option<u64>> {
         Box::pin(GatewaySessionEngine::set_push_route(self, route))
+    }
+    fn test_push_route(&mut self, route_tag: String) -> GatewayCallFuture<'_, ()> {
+        Box::pin(GatewaySessionEngine::test_push_route(self, route_tag))
     }
     fn send_device_policy(
         &mut self,
@@ -511,6 +517,9 @@ impl GatewaySessionAccess for CountingGateway {
         _route: Option<GatewayPushRouteRegistration>,
     ) -> GatewayCallFuture<'_, Option<u64>> {
         unused("set_push_route")
+    }
+    fn test_push_route(&mut self, _route_tag: String) -> GatewayCallFuture<'_, ()> {
+        unused("test_push_route")
     }
     fn send_device_policy(
         &mut self,
