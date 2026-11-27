@@ -11,13 +11,17 @@
 //!   must accept the presented record as an advance (no rollback, no fork, no key regression, no
 //!   revocation rollback), then it replaces the stored one (in the same flush);
 //! * equal epoch: the canonical bytes must be identical;
-//! * lower epoch: allowed only when the device is present, active and has the same signing
-//!   commitment in the stored record.
+//! * lower epoch: allowed only when the STORED record still authorizes the device: present,
+//!   active, same signing commitment, a live `message` lease at its stored device epoch and a
+//!   leased branch key equal to the credential's device key (a replayed older record cannot
+//!   bypass a dropped capability, a shortened lease or a bumped device epoch).
 
 use ramflux_crypto::custody::{AuthorityPins, PinOutcome, VerifiedRecord, verify_record};
 use ramflux_protocol::DeviceSetStatus;
-use ramflux_protocol::custody::{DeviceSet, Envelope};
+use ramflux_protocol::custody::{DeviceRef, DeviceSet, Envelope};
+use ramflux_protocol::decode_base64url;
 
+use crate::credential::device::DEVICE_CAPABILITY;
 use crate::group::unix_now;
 use crate::storage::MlsStorage;
 use crate::storage::kv::MlsKv;
@@ -39,6 +43,15 @@ fn load<K: MlsKv>(storage: &MlsStorage<'_, K>, anchor: &str) -> Result<Option<St
     Ok(Some((record, raw.to_vec())))
 }
 
+/// Re-verify the stored record. A stored record that no longer verifies is a typed rejection of
+/// the presented credential (never an internal error); `issued_at` guards against clock skew.
+fn verify_stored(stored: &Envelope<DeviceSet>) -> Result<(VerifiedRecord, u64), MlsError> {
+    let at = unix_now()?.max(stored.body.issued_at);
+    let verified = verify_record(stored, at, None, None)
+        .map_err(|error| reject(&format!("stored device set no longer verifies: {error}")))?;
+    Ok((verified, at))
+}
+
 fn canonical(record: &Envelope<DeviceSet>) -> Result<Vec<u8>, MlsError> {
     ramflux_protocol::canonical_json_bytes(record)
         .map_err(|error| MlsError::Internal(format!("device set encoding: {error}")))
@@ -53,6 +66,7 @@ pub(crate) fn authorize<K: MlsKv>(
     presented: &VerifiedRecord,
     device_id: &str,
     signing_key_commitment: &str,
+    device_signing_pk: &[u8; 32],
 ) -> Result<(), MlsError> {
     let record = presented.envelope();
     let anchor = record.body.account_anchor.as_str();
@@ -62,11 +76,10 @@ pub(crate) fn authorize<K: MlsKv>(
         return Ok(());
     };
     if record.body.device_set_epoch > stored.body.device_set_epoch {
-        let stored_verified = verify_record(&stored, unix_now()?, None, None)
-            .map_err(|error| MlsError::Internal(format!("stored device set: {error}")))?;
+        let (stored_verified, _) = verify_stored(&stored)?;
         let mut pins = AuthorityPins::default();
         pins.observe(&stored_verified)
-            .map_err(|error| MlsError::Internal(format!("stored device set pin: {error}")))?;
+            .map_err(|error| reject(&format!("stored device set pin: {error}")))?;
         match pins.observe(presented) {
             Ok(PinOutcome::Advanced) => {}
             Ok(_) => return Err(reject("device set transition is a fork")),
@@ -91,6 +104,20 @@ pub(crate) fn authorize<K: MlsKv>(
         || entry.signing_key_commitment != signing_key_commitment
     {
         return Err(reject("device is revoked or re-keyed in the highest accepted device set"));
+    }
+    let (stored_verified, at) = verify_stored(&stored)?;
+    let reference = DeviceRef {
+        account_anchor: stored.body.account_anchor.clone(),
+        device_id: entry.device_id.clone(),
+        device_epoch: entry.device_epoch,
+    };
+    let lease = stored_verified
+        .authorize(&reference, DEVICE_CAPABILITY, at)
+        .map_err(|error| reject(&format!("stored device set no longer authorizes: {error}")))?;
+    if decode_base64url(&lease.branch_signing_public_key).ok().as_deref()
+        != Some(device_signing_pk.as_slice())
+    {
+        return Err(reject("stored device set leases another branch key"));
     }
     Ok(())
 }

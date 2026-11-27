@@ -51,6 +51,16 @@ pub fn process_crypto() -> Result<CryptoHandle, SdkError> {
 pub struct MlsRuntime {
     mls: Mls<SqlMlsKv>,
     kv: SqlMlsKv,
+    custody: Option<(u64, u64, bool)>,
+}
+
+/// What the own credential was built from: the custody record's epoch and issue time and whether
+/// the branch key is unlocked. A change means the credential must be rebuilt.
+fn custody_stamp(client: &RamfluxClient) -> Option<(u64, u64, bool)> {
+    client.born_v3_account.as_ref().map(|account| {
+        let body = &account.record().body;
+        (body.device_set_epoch, body.issued_at, client.device_branch.is_some())
+    })
 }
 
 impl MlsRuntime {
@@ -65,7 +75,11 @@ impl MlsRuntime {
         if let Some(identity) = client.mls_device_identity()? {
             mls = mls.with_device_identity(identity);
         }
-        Ok(Self { mls, kv })
+        #[cfg(feature = "itest-mls-debug")]
+        {
+            mls = mls.with_pinned_roster();
+        }
+        Ok(Self { mls, kv, custody: custody_stamp(client) })
     }
 
     /// The facade (every operation returns a `Staged` that the caller commits).
@@ -74,10 +88,11 @@ impl MlsRuntime {
         &self.mls
     }
 
-    /// Whether this runtime is bound to the client's current account database.
+    /// Whether this runtime is bound to the client's current account database and custody record.
     #[must_use]
     pub fn is_open_on(&self, client: &RamfluxClient) -> bool {
-        client.account_db().is_ok_and(|db| self.kv.is_on(&db.mls_kv()))
+        self.custody == custody_stamp(client)
+            && client.account_db().is_ok_and(|db| self.kv.is_on(&db.mls_kv()))
     }
 }
 

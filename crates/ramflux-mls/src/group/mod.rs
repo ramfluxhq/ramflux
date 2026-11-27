@@ -102,6 +102,8 @@ pub struct CreateOutput {
     pub epoch: u64,
     /// Leaf cap of the group for own adds.
     pub leaf_cap: usize,
+    /// Signature public key of the creator's own leaf (a joiner of a pseudonym group pins it).
+    pub leaf_sig_pk: [u8; 32],
 }
 
 /// Result of adding members.
@@ -174,6 +176,8 @@ pub struct StatusOutput {
     pub leaf_cap: usize,
     /// Own leaf index.
     pub own_leaf: u32,
+    /// Signature public key of the own leaf.
+    pub own_sig_pk: Vec<u8>,
     /// Number of leaves.
     pub leaves: usize,
     /// Members, truncated to [`STATUS_MEMBER_LIMIT`].
@@ -514,7 +518,7 @@ impl<K: MlsKv> Mls<K> {
             )?;
         }
         let epoch = group.epoch().as_u64();
-        op.finish(CreateOutput { group_id, epoch, leaf_cap })
+        op.finish(CreateOutput { group_id, epoch, leaf_cap, leaf_sig_pk: *signer.public() })
     }
 
     /// Add the members behind the `KeyPackage` messages: verify, stage, check, merge.
@@ -735,6 +739,11 @@ impl<K: MlsKv> Mls<K> {
             tier,
             leaf_cap: loaded.leaf_cap,
             own_leaf: loaded.group.own_leaf_index().u32(),
+            own_sig_pk: loaded
+                .group
+                .own_leaf_node()
+                .map(|leaf| leaf.signature_key().as_slice().to_vec())
+                .unwrap_or_default(),
             leaves: gate::leaf_count(&loaded.group),
             members: Self::summarize(&op, loaded.kind, &loaded.group)?,
             rows: self.kv.row_stats()?,

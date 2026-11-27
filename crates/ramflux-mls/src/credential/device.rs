@@ -60,7 +60,7 @@ pub(crate) struct DeviceCredential {
 }
 
 /// The branch capability a device credential needs (the leased `message` capability).
-const DEVICE_CAPABILITY: &str = "message";
+pub(crate) const DEVICE_CAPABILITY: &str = "message";
 
 fn reject(what: &str) -> MlsError {
     MlsError::CredentialRejected(what.to_owned())
@@ -216,6 +216,7 @@ pub(crate) fn verify<K: MlsKv>(
         &verified,
         &credential.device_id,
         &entry.signing_key_commitment,
+        &credential.device_signing_pk,
     )?;
     Ok(VerifiedMember {
         root_commitment: body.account_anchor.clone(),
