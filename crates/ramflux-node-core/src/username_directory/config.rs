@@ -25,7 +25,13 @@ const INPUTS: &[&str] = &[
     "WITNESS_SOCKET",
     "CENTER_UID",
     "WITNESS_UID",
+    "REGISTERED_NODES_FILE",
+    "AUTH_NODE_RATE_PER_MIN",
 ];
+
+/// Per-node-key admissions per 60 s at the witness: 10x the per-prefix lookup limit (120).
+pub const DEFAULT_AUTH_NODE_RATE_PER_MIN: u64 = 1200;
+const MAX_AUTH_NODE_RATE_PER_MIN: u64 = 1_000_000;
 
 /// Independently provisioned centre identity; TLS identity and signing identity are separate.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,9 +78,21 @@ impl CenterPin {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirectoryRole {
-    Home { database: PathBuf, service: HomeServiceConfig },
-    Center { primary: PathBuf, witness: WitnessPeer },
-    Witness { database: PathBuf, peer: WitnessPeer, listen: std::net::SocketAddr },
+    Home {
+        database: PathBuf,
+        service: HomeServiceConfig,
+    },
+    Center {
+        primary: PathBuf,
+        witness: WitnessPeer,
+    },
+    Witness {
+        database: PathBuf,
+        peer: WitnessPeer,
+        listen: std::net::SocketAddr,
+        registered_nodes: PathBuf,
+        node_rate_per_min: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,12 +149,12 @@ impl DirectoryConfig {
             match crate::environment::var(&name) {
                 Ok(value) => {
                     crate::environment::validate_input(&name, std::ffi::OsStr::new(&value))
-                        .map_err(|_| CheckpointError::Refused("config_expression"))?;
+                        .map_err(|_| named(suffix, None, "config_expression"))?;
                     values.insert(name, value);
                 }
                 Err(std::env::VarError::NotPresent) => {}
                 Err(std::env::VarError::NotUnicode(_)) => {
-                    return Err(CheckpointError::Refused("config_encoding"));
+                    return Err(named(suffix, None, "config_encoding"));
                 }
             }
         }
@@ -150,7 +168,9 @@ impl DirectoryConfig {
         let mut values = std::collections::BTreeMap::new();
         for suffix in INPUTS {
             if let Some(value) = lookup(&format!("{PREFIX}{suffix}")) {
-                require(!value.is_empty() && value.trim() == value, "config_value")?;
+                if value.is_empty() || value.trim() != value {
+                    return Err(named(suffix, None, "config_value"));
+                }
                 values.insert(*suffix, value);
             }
         }
@@ -159,10 +179,12 @@ impl DirectoryConfig {
         }
         let private_peers_file = values.remove("PRIVATE_PEERS_FILE").map(PathBuf::from);
         if let Some(path) = &private_peers_file {
-            validate_path(path)?;
+            validate_path(path).map_err(|_| named("PRIVATE_PEERS_FILE", None, "config_path"))?;
         }
+        let registered_nodes = values.remove("REGISTERED_NODES_FILE").map(PathBuf::from);
+        let node_rate = values.remove("AUTH_NODE_RATE_PER_MIN");
         let mut take =
-            |key| values.remove(key).ok_or(CheckpointError::Refused("config_incomplete"));
+            |key| values.remove(key).ok_or_else(|| named(key, None, "config_incomplete"));
         let role = take("ROLE")?;
         let center = CenterPin {
             url: take("CENTER_URL")?,
@@ -170,7 +192,7 @@ impl DirectoryConfig {
             public_key: take("CENTER_PUBLIC_KEY")?,
             tls_server_name: take("CENTER_TLS_SERVER_NAME")?,
             ca_file: PathBuf::from(take("CENTER_CA_FILE")?),
-            generation: decimal(&take("TRUST_GENERATION")?)?,
+            generation: decimal("TRUST_GENERATION", &take("TRUST_GENERATION")?)?,
         };
         center.validate()?;
         let role = match role.as_str() {
@@ -179,8 +201,7 @@ impl DirectoryConfig {
                 let tls_server_name = take("HOME_TLS_SERVER_NAME")?;
                 validate_origin(&origin)?;
                 validate_node(&tls_server_name)?;
-                let listen =
-                    take("LISTEN_ADDR")?.parse().map_err(|_| CheckpointError::Refused("listen"))?;
+                let listen = listen_addr(&take("LISTEN_ADDR")?)?;
                 DirectoryRole::Home {
                     database: PathBuf::from(take("HOME_DB")?),
                     service: HomeServiceConfig {
@@ -192,19 +213,10 @@ impl DirectoryConfig {
                 }
             }
             "center" | "witness" => {
-                let peer = WitnessPeer {
-                    socket: PathBuf::from(take("WITNESS_SOCKET")?),
-                    center_uid: u32::try_from(decimal(&take("CENTER_UID")?)?)
-                        .map_err(|_| CheckpointError::Refused("uid"))?,
-                    witness_uid: u32::try_from(decimal(&take("WITNESS_UID")?)?)
-                        .map_err(|_| CheckpointError::Refused("uid"))?,
-                };
-                validate_path(&peer.socket)?;
-                require(
-                    peer.center_uid != 0
-                        && peer.witness_uid != 0
-                        && peer.center_uid != peer.witness_uid,
-                    "uid_separation",
+                let peer = witness_peer(
+                    take("WITNESS_SOCKET")?,
+                    &take("CENTER_UID")?,
+                    &take("WITNESS_UID")?,
                 )?;
                 if role == "center" {
                     DirectoryRole::Center {
@@ -212,20 +224,27 @@ impl DirectoryConfig {
                         witness: peer,
                     }
                 } else {
+                    let (registered_nodes, node_rate_per_min) =
+                        witness_inputs(registered_nodes.clone(), node_rate.as_deref())?;
                     DirectoryRole::Witness {
                         database: PathBuf::from(take("WITNESS_DB")?),
                         peer,
-                        listen: take("LISTEN_ADDR")?
-                            .parse()
-                            .map_err(|_| CheckpointError::Refused("listen"))?,
+                        listen: listen_addr(&take("LISTEN_ADDR")?)?,
+                        registered_nodes,
+                        node_rate_per_min,
                     }
                 }
             }
-            _ => return Err(CheckpointError::Refused("role")),
+            _ => return Err(named("ROLE", shown(&role), "role")),
         };
         require(values.is_empty(), "config_foreign_role")?;
         require(
             private_peers_file.is_none() || matches!(role, DirectoryRole::Home { .. }),
+            "config_foreign_role",
+        )?;
+        require(
+            (registered_nodes.is_none() && node_rate.is_none())
+                || matches!(role, DirectoryRole::Witness { .. }),
             "config_foreign_role",
         )?;
         let database = match &role {
@@ -243,6 +262,41 @@ impl DirectoryConfig {
         }
         Ok(Some(Self { center, role }))
     }
+}
+
+fn witness_peer(socket: String, center_uid: &str, witness_uid: &str) -> Result<WitnessPeer> {
+    let uid = |name: &str, value: &str| {
+        u32::try_from(decimal(name, value)?).map_err(|_| named(name, shown(value), "uid"))
+    };
+    let peer = WitnessPeer {
+        socket: PathBuf::from(socket),
+        center_uid: uid("CENTER_UID", center_uid)?,
+        witness_uid: uid("WITNESS_UID", witness_uid)?,
+    };
+    validate_path(&peer.socket).map_err(|_| named("WITNESS_SOCKET", None, "config_path"))?;
+    require(
+        peer.center_uid != 0 && peer.witness_uid != 0 && peer.center_uid != peer.witness_uid,
+        "uid_separation",
+    )?;
+    Ok(peer)
+}
+
+/// Required list path and the per-node quota (default when absent; zero or unparsable refuses).
+fn witness_inputs(file: Option<PathBuf>, rate: Option<&str>) -> Result<(PathBuf, u64)> {
+    let file = file.ok_or_else(|| named("REGISTERED_NODES_FILE", None, "config_incomplete"))?;
+    validate_path(&file).map_err(|_| named("REGISTERED_NODES_FILE", None, "config_path"))?;
+    let rate = match rate {
+        Some(value) => decimal("AUTH_NODE_RATE_PER_MIN", value)?,
+        None => DEFAULT_AUTH_NODE_RATE_PER_MIN,
+    };
+    if !(1..=MAX_AUTH_NODE_RATE_PER_MIN).contains(&rate) {
+        return Err(named(
+            "AUTH_NODE_RATE_PER_MIN",
+            Some(rate.to_string()),
+            "auth_node_rate_range_1_to_1000000",
+        ));
+    }
+    Ok((file, rate))
 }
 
 pub type HttpsOrigin = ramflux_protocol::username_directory::DirectoryOrigin;
@@ -285,8 +339,29 @@ fn validate_path(value: &Path) -> Result<()> {
     )
 }
 
-fn decimal(value: &str) -> Result<u64> {
-    let number = value.parse::<u64>().map_err(|_| CheckpointError::Refused("config_integer"))?;
-    require(number.to_string() == value, "config_integer")?;
+fn decimal(name: &str, value: &str) -> Result<u64> {
+    let invalid = || named(name, shown(value), "config_integer");
+    let number = value.parse::<u64>().map_err(|_| invalid())?;
+    if number.to_string() != value {
+        return Err(invalid());
+    }
     Ok(number)
+}
+
+fn listen_addr(value: &str) -> Result<std::net::SocketAddr> {
+    value.parse().map_err(|_| named("LISTEN_ADDR", shown(value), "listen"))
+}
+
+/// Refusal that names the environment variable (`RAMFLUX_USERNAME_<suffix>`).
+fn named(suffix: &str, value: Option<String>, reason: &'static str) -> CheckpointError {
+    CheckpointError::Input { name: format!("{PREFIX}{suffix}"), value, reason }
+}
+
+/// The value only when it is a short plain token (number, address, role); never free text.
+fn shown(value: &str) -> Option<String> {
+    let plain = value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b':' | b'[' | b']' | b'-'));
+    plain.then(|| value.to_owned())
 }

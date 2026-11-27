@@ -42,3 +42,4 @@ apps/ramflux-federation/src/node_push/state.rs | apply_ok | 4 | C | admission=ap
 apps/ramflux-federation/src/node_push/state.rs | apply_ok | 5 | C | admission=apps/ramflux-federation/src/node_push/frame.rs#decode_reply#1
 apps/ramflux-federation/src/node_push/state.rs | apply_ok | 6 | C | admission=apps/ramflux-federation/src/node_push/frame.rs#decode_reply#1
 apps/ramflux-federation/src/node_push/state.rs | keyset_seq | 1 | C | admission=apps/ramflux-federation/src/node_push/frame.rs#decode_reply#1
+apps/ramflux-federation/src/username_directory/registered_nodes.rs | parse | 1 | A | strict=parse_i_json; admission=operator-provisioned registered-node list file bounded by MAX_BYTES, closed members, canonical keys

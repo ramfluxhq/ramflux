@@ -17,6 +17,16 @@ case "$role" in
     marker=$root/home/.initialize
     if [ -f "$marker" ]; then rm "$marker"; set -- "$@" --username-home-initialize; fi ;;
   witness)
+    # Demo only: the registered-node list holds this demo node's own key and is rewritten hourly
+    # so it never expires (a real centre produces the list; see deploy/central/README.md).
+    list=$RAMFLUX_USERNAME_REGISTERED_NODES_FILE
+    write_list() {
+      printf '{"v":1,"generated_at":%s,"nodes":[{"node_key":"%s","state":"active"}]}\n' \
+        "$(date +%s)" "${DEMO_REGISTERED_NODE_KEY:?}" > "$list.tmp"
+      mv "$list.tmp" "$list"
+    }
+    write_list
+    ( while sleep 3600; do write_list; done ) &
     marker=$root/witness/.initialize
     if [ -f "$marker" ]; then rm "$marker"; set -- "$@" --username-initialize; fi ;;
   center)

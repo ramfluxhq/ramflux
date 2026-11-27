@@ -24,6 +24,10 @@ pub enum CheckpointError {
     Directory(wire::DirectoryCode),
     #[error("checkpoint refused: {0}")]
     Refused(&'static str),
+    /// A refused provisioning input: names the environment variable (and its value when it is a
+    /// short non-secret token such as a number or address).
+    #[error("checkpoint refused: {}", input_text(.name, .value.as_deref(), .reason))]
+    Input { name: String, value: Option<String>, reason: &'static str },
     #[error("checkpoint storage: {0}")]
     Storage(String),
     #[error(transparent)]
@@ -34,6 +38,12 @@ pub enum CheckpointError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+fn input_text(name: &str, value: Option<&str>, reason: &str) -> String {
+    match value {
+        Some(value) => format!("{name}={value}: {reason}"),
+        None => format!("{name}: {reason}"),
+    }
 }
 pub type Result<T> = std::result::Result<T, CheckpointError>;
 pub(crate) fn storage(error: impl std::fmt::Display) -> CheckpointError {

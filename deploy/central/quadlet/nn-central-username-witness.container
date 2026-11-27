@@ -19,6 +19,9 @@ Network=pasta
 PublishPort=127.0.0.1:8443:8443
 Volume=nn-central-username-witness.volume:/var/lib/ramflux/username/witness
 Volume=nn-central-username-socket.volume:/var/lib/ramflux/username/socket
+# Registered-node list: the DIRECTORY is mounted (the producer replaces the file by rename, which a
+# single-file mount would not follow). Host path is the centre producer's; UNRESOLVED, see README.
+Volume=<REGISTERED_NODES_HOST_DIR>:/run/ramflux-username/registered-nodes:ro
 [Service]
 Restart=on-failure
 [Install]
