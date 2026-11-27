@@ -300,6 +300,29 @@ int32_t ramflux_client_put_object(struct RamfluxClient *client,
                                   struct RamfluxBuffer **out_error_json);
 
 /*
+ Starts the process sink. The config carries the C-1 keys plus `dir`, the data root
+ that holds `diag/`. Idempotent for the same policy.
+ */
+int32_t ramflux_v2_diag_init(const uint8_t *config_json, size_t len);
+
+/*
+ Writes one host record (`ui` or `bridge` layer) through the sink. With no sink open the
+ record is dropped and the call succeeds: diagnostics never fail the application.
+ */
+int32_t ramflux_v2_diag_write(const uint8_t *record_json, size_t len);
+
+/*
+ Flushes the process sink to disk. Blocks at most five seconds (see `Session::flush`).
+ */
+int32_t ramflux_v2_diag_flush(void);
+
+/*
+ Sets the verbose window. `debug` and `trace` need `until_ms` within the next 24 hours;
+ `error`, `warn` and `info` return to the configured level.
+ */
+int32_t ramflux_v2_diag_set_level(const char *level, uint64_t until_ms);
+
+/*
  Return ABI v2 metadata, descriptor fingerprint, limits and the operation inventory.
  Pass major=2 and a minimum minor supported by the host. Does not open a data root.
  */
