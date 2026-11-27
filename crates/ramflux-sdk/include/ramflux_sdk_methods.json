@@ -437,6 +437,15 @@
       "bridge_allowed": true,
       "capability": "agent",
       "key_export": false,
+      "name": "agent.catalog",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
       "name": "agent.job.list",
       "secret_input": false,
       "secret_output": false,
@@ -546,6 +555,33 @@
       "capability": "agent",
       "key_export": false,
       "name": "agent.operation.get",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
+      "name": "agent.pause",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
+      "name": "agent.resume",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
+      "name": "agent.update",
       "secret_input": false,
       "secret_output": false,
       "show_once": false

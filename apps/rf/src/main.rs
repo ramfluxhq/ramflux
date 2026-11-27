@@ -88,7 +88,7 @@ async fn run() -> Result<(), RfError> {
         Command::Device(command) => handlers::device::handle_device(socket, command).await,
         Command::Pairing(command) => handlers::pairing::handle(socket, command).await,
         Command::Agent(command) => handlers::agent::handle_agent(socket, command).await,
-        Command::Prx(command) => handlers::prx::handle(command).await,
+        Command::Prx(command) => handlers::prx::handle(socket, command).await,
         Command::Transfer(command) => handlers::pairing::handle_transfer(socket, command).await,
         Command::Dm(command) => handlers::dm::handle_dm(socket, command).await,
         Command::Conversation(command) => handlers::conversation_ops::handle(socket, command).await,
