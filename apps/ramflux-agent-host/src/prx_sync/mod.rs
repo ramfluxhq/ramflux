@@ -208,11 +208,17 @@ fn on_page(
     cuts: &mut u8,
 ) -> PageStep {
     match mirror.apply_page(store, page) {
-        Ok(()) if mirror.ready() => {
+        Ok(removed) if mirror.ready() => {
+            if removed > 0 {
+                eprintln!(
+                    "prx sync retention removed turns={removed} retained_since={}",
+                    page.retained_since.as_deref().unwrap_or("-")
+                );
+            }
             log_ready(mirror);
             PageStep::Ready
         }
-        Ok(()) => {
+        Ok(_) => {
             *cuts = 0;
             PageStep::Continue
         }
