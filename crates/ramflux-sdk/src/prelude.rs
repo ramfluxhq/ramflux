@@ -58,8 +58,6 @@ pub(crate) use crate::bus::io::{
     read_local_bus_frame, request_account_id, write_local_bus_frame,
 };
 pub(crate) use crate::bus::protocol::LocalBusPersistedAccount;
-#[cfg(test)]
-pub(crate) use crate::bus::protocol::default_device_capability_scope;
 pub(crate) use crate::bus::state::{
     LocalBusAccountState, LocalBusConnectionState, LocalBusDaemonState, LocalBusSubscriber,
 };

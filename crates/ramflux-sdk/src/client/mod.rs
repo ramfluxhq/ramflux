@@ -8,8 +8,6 @@ mod app_lock;
 pub(crate) mod attachment_diagnostics;
 pub(crate) mod attachment_roster;
 mod backup_activation;
-#[cfg(test)]
-mod backup_contacts;
 pub(crate) mod call;
 pub mod contact;
 pub(crate) mod contact_requests;

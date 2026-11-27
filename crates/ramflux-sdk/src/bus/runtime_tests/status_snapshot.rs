@@ -99,50 +99,6 @@ async fn r2_a_head_subscriber_and_status_reader_get_idle_samples_across_restart_
         .await
 }
 #[tokio::test(flavor = "current_thread")]
-async fn r2_an_unparsable_optional_manifest_keeps_readers_available_and_clears_the_node_binding()
--> Result<(), SdkError> {
-    LocalSet::new()
-        .run_until(async {
-            let root = root("optional-bad-manifest");
-            let data = root.clone();
-            let (tx, rx) = oneshot::channel();
-            let init: AccountInitializer = Box::new(move |index| {
-                let account = initialized(&data, index)?;
-                account
-                    .client
-                    .account_db()?
-                    .persist_actor_state("sync/node-id", &Some("stale-node"))?;
-                std::fs::write(local_bus_account_manifest_path(&data, "bob"), b"{invalid")?;
-                tx.send(account.client.account_db()?.open_reader()?)
-                    .map_err(|_| failure("observer gone"))?;
-                Ok(account)
-            });
-            let supervisor = supervisor(&root, BTreeMap::from([("bob".into(), init)]))?;
-            let db = rx.await.map_err(|_| failure("observer missing"))?;
-            let (bus, server) = client(Rc::clone(&supervisor), 1).await?;
-            let response =
-                bus.request_frame(request("read", "bob", "conversation.list", json!({}))).await?;
-            assert_eq!(response["conversations"], json!([]));
-            assert_eq!(db.load_actor_state::<Option<String>>("sync/node-id")?, Some(None));
-            let status =
-                bus.request_frame(request("status", "bob", "sync.status.get", json!({}))).await?;
-            assert!(
-                status["node_health"].is_null()
-                    || status["node_health"]["body"]["node_id"].is_null()
-            );
-            supervisor.shutdown().await?;
-            drop(bus);
-            server.abort();
-            let _ = server.await;
-            drop(supervisor);
-            drop(db);
-            std::fs::remove_dir_all(root)?;
-            Ok(())
-        })
-        .await
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn r2_older_samples_reuse_retained_coordinates_without_allocating_events()
 -> Result<(), SdkError> {
     let root = root("older-status-coordinates");

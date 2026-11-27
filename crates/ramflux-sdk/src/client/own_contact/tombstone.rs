@@ -2,9 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Same-root contact restrictions are sticky against delayed sibling acceptance copies.
-use super::{
-    OwnContactReceiveMode, OwnContactReceiveOutcome, RamfluxClient, SdkError, contact_peer,
-};
+use super::{OwnContactReceiveOutcome, RamfluxClient, SdkError, contact_peer};
 use prost::Message as _;
 use ramflux_protocol::message as g;
 #[cfg(test)]
@@ -14,8 +12,6 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 struct Tombstone {
     link: ramflux_storage::FriendLinkRecord,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    decided_at: Option<i64>,
 }
 #[cfg(test)]
 pub(super) fn is_packet(body: &[u8]) -> bool {
@@ -58,22 +54,18 @@ fn decode(body: &[u8]) -> Result<Option<Tombstone>, SdkError> {
     let Some(g::control::Payload::OwnContactTombstone(value)) = control.payload else {
         return Ok(None);
     };
-    Ok(Some(Tombstone {
-        link: super::generated::link(value.link.as_ref())?,
-        decided_at: value.decided_at,
-    }))
+    Ok(Some(Tombstone { link: super::generated::link(value.link.as_ref())? }))
 }
 impl RamfluxClient {
     #[cfg(test)]
     pub(super) fn receive_own_contact_tombstone(
         &self,
         body: &[u8],
-        mode: OwnContactReceiveMode,
     ) -> Result<Option<OwnContactReceiveOutcome>, SdkError> {
-        let Some(Tombstone { link, decided_at }) = decode(body)? else {
+        let Some(Tombstone { link }) = decode(body)? else {
             return Ok(None);
         };
-        self.apply_own_contact_tombstone(&link, decided_at, mode).map(Some)
+        self.apply_own_contact_tombstone(&link).map(Some)
     }
 
     pub(super) fn validate_own_contact_tombstone(
@@ -103,18 +95,9 @@ impl RamfluxClient {
     pub(super) fn apply_own_contact_tombstone(
         &self,
         link: &ramflux_storage::FriendLinkRecord,
-        decided_at: Option<i64>,
-        mode: OwnContactReceiveMode,
     ) -> Result<OwnContactReceiveOutcome, SdkError> {
         let existing = self.validate_own_contact_tombstone(link)?;
         let db = self.account_db()?;
-        if mode == OwnContactReceiveMode::BackupRestore
-            && db
-                .contact_link_decision(&link.link_id)?
-                .is_some_and(|local| decided_at.is_none_or(|source| source < local.decided_at))
-        {
-            return Ok(OwnContactReceiveOutcome::TombstoneSkippedOlder);
-        }
         if existing.as_ref().is_some_and(|existing| {
             existing.blocked == link.blocked
                 && (link.blocked || existing.state == "removed" && link.state == "removed")

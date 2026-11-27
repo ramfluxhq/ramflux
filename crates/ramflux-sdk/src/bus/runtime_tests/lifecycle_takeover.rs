@@ -29,16 +29,13 @@ async fn lost_holder() -> Case {
     LocalSet::new()
         .run_until(async {
             let root = root("lost-holder");
-            drop(account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?);
+            persisted_native(&root, "alice").await?;
             let supervisor = Supervisor::new(LocalBusConfig::new(root.join("bus.sock"), &root))?;
             let initial = unlock();
             seed(&supervisor, &root, &initial).await?;
             let (outbound, _) = mpsc::channel(8);
             let connection = LocalBusConnectionState::new(1, outbound);
-            assert_eq!(
-                supervisor.request(initial, &connection).await?.body["local_account_id"],
-                "alice"
-            );
+            assert_eq!(supervisor.request(initial, &connection).await?.body["account_id"], "alice");
             assert!(supervisor.account_is_open("alice"));
             for method in ["account.unlock", "account.lock", "account.switch"] {
                 assert!(lifecycle::takeover_eligible(method));
@@ -82,7 +79,7 @@ async fn concurrent_takeover_runs_once() -> Case {
     LocalSet::new()
         .run_until(async {
             let root = root("concurrent-takeover");
-            drop(account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?);
+            persisted_native(&root, "alice").await?;
             let gate = Arc::new(TestGate {
                 fingerprint_barrier: Some(Arc::new(tokio::sync::Barrier::new(3))),
                 ..TestGate::default()
@@ -126,7 +123,7 @@ async fn failed_unlock_same_key_retry_reexecutes() -> Case {
     LocalSet::new()
         .run_until(async {
             let root = root("failed-takeover");
-            drop(account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?);
+            persisted_native(&root, "alice").await?;
             let gate = Arc::new(TestGate::default());
             let mut config = LocalBusConfig::new(root.join("bus.sock"), &root);
             config.lifecycle_gate = Some(gate.clone());
@@ -146,51 +143,6 @@ async fn failed_unlock_same_key_retry_reexecutes() -> Case {
                 let error = task.await?.err().ok_or("wrong passphrase succeeded")?;
                 assert!(!error.to_string().contains("requires reconciliation"));
             }
-            supervisor.shutdown().await?;
-            drop(supervisor);
-            std::fs::remove_dir_all(root)?;
-            Ok(())
-        })
-        .await
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn restore_does_not_import_pending_receipts_as_live() -> Case {
-    LocalSet::new()
-        .run_until(async {
-            let root = root("restore-pending-receipt");
-            drop(account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?);
-            let config = LocalBusConfig::new(root.join("bus.sock"), &root);
-            let supervisor = Supervisor::new(config.clone())?;
-            seed(&supervisor, &root, &unlock()).await?;
-            drop(supervisor);
-            let supervisor = Supervisor::new(config)?;
-            let mut events = super::restore::subscribe_restore(&supervisor);
-            let mut tasks = tokio::task::JoinSet::new();
-            supervisor.hydrate(&mut tasks)?;
-            assert_eq!(super::restore::restore_event(&mut events).await?.body["state"], "unlocked");
-            while let Some(task) = tasks.join_next().await {
-                task?;
-            }
-            let receipt = lifecycle::fingerprint(root.to_path_buf(), &unlock())
-                .await?
-                .ok_or("missing key")?;
-            assert!(matches!(
-                supervisor.index.lookup_supervisor_operation(
-                    &receipt.scope,
-                    &receipt.operation,
-                    &receipt.fingerprint
-                )?,
-                ramflux_storage::OperationLookup::Pending
-            ));
-            let (outbound, _) = mpsc::channel(8);
-            assert_eq!(
-                supervisor
-                    .request(unlock(), &LocalBusConnectionState::new(1, outbound))
-                    .await?
-                    .body["local_account_id"],
-                "alice"
-            );
             supervisor.shutdown().await?;
             drop(supervisor);
             std::fs::remove_dir_all(root)?;

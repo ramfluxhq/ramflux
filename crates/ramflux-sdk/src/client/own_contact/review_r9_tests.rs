@@ -148,8 +148,7 @@ async fn every_restricted_contact_is_restored_across_authenticated_authority_pag
     assert_eq!(packets.len(), usize::try_from(CONTACTS)?, "every restriction must be exported");
     for packet in &packets {
         let body = ramflux_protocol::decode_base64url(packet)?;
-        let outcome =
-            target.client.receive_own_contact_outcome(&body, OwnContactReceiveMode::Sibling)?;
+        let outcome = target.client.receive_own_contact_outcome(&body)?;
         assert!(matches!(outcome, OwnContactReceiveOutcome::TombstoneApplied), "{outcome:?}");
     }
     let links = target.client.account_db()?.friend_links()?;

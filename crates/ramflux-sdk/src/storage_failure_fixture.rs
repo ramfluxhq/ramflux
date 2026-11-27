@@ -23,62 +23,35 @@ impl Drop for Holder {
 
 pub(crate) struct Fixture {
     pub(crate) index: AccountIndex,
-    pub(crate) manifest: LocalBusPersistedAccount,
+    pub(crate) anchor: String,
     holder: Option<Holder>,
-    directory: tempfile::TempDir,
+    directory: crate::custody::tests::Root,
 }
 
 impl Fixture {
+    /// A native custody account `acct` sealed under `account-secret`, then faulted.
     pub(crate) fn new(fault: Fault) -> TestResult<Self> {
-        let directory = tempfile::tempdir()?;
-        let root = directory.path();
+        let directory = crate::custody::tests::Root::new()?;
+        let vault = crate::custody::tests::TestVault::default();
+        let account = crate::custody::tests::create(
+            &directory.0,
+            "acct",
+            &vault,
+            crate::custody::network_now()?,
+        )?;
+        let anchor = account.record().body.account_anchor.clone();
         let mut client = RamfluxClient::new();
-        client.open_account_index(root)?;
-        let identity = client.create_identity_root("principal", [41; 32]);
-        let commitment =
-            ramflux_crypto::identity_root_commitment(&identity.signing_key.verifying_key());
-        client.create_device_branch("principal", "device", 1, [42; 32]);
-        client.create_account("acct", &commitment)?;
-        client.unlock_account("acct", b"account-secret")?;
+        client.open_account_index(&directory.0)?;
+        client.seal_new_account_data("acct", &anchor, b"account-secret")?;
+        let index = client.account_index()?.clone();
         drop(client);
-        let index = AccountIndex::open(root)?;
-        let manifest = LocalBusPersistedAccount {
-            schema: "ramflux.local_bus.account_manifest.v1".into(),
-            local_account_id: "acct".into(),
-            principal_id: "principal".into(),
-            principal_commitment: commitment,
-            device_id: "device".into(),
-            target_delivery_id: "target".into(),
-            account_secret: "account-secret".into(),
-            root_seed: [41; 32],
-            device_seed: [42; 32],
-            label: None,
-            kind: None,
-            activation_pending: false,
-            node_id: None,
-            node_tcp_addr: None,
-            node_relay: None,
-            client_mode: LocalBusClientMode::AttendedCli,
-            devices: Vec::new(),
-            gateway: GatewayQuicEndpointConfig {
-                bind_addr: "127.0.0.1:0".parse()?,
-                gateway_addr: "127.0.0.1:1".parse()?,
-                server_name: "unconnected-test-gateway".into(),
-                ca_cert: root.join("unused-ca.pem"),
-                principal_id: "principal".into(),
-                device_id: "device".into(),
-                target_delivery_id: "target".into(),
-                prekey_http_url: None,
-            },
-        };
-        write_local_bus_account_manifest(root, &manifest)?;
-        let mut fixture = Self { index, manifest, holder: None, directory };
+        let mut fixture = Self { index, anchor, holder: None, directory };
         fixture.holder = apply_fault(&fixture.index, fault)?;
         Ok(fixture)
     }
 
     pub(crate) fn root(&self) -> &Path {
-        self.directory.path()
+        &self.directory.0
     }
 
     pub(crate) fn client(&self) -> Result<RamfluxClient, SdkError> {
@@ -96,7 +69,7 @@ impl Fixture {
     }
 }
 
-/// Injects the same real storage faults into either a native or legacy account.
+/// Injects real storage faults into a native account.
 pub(crate) fn apply_fault(index: &AccountIndex, fault: Fault) -> TestResult<Option<Holder>> {
     match fault {
         Fault::Busy => {

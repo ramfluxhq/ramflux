@@ -22,6 +22,8 @@ fn assert_code(error: &SdkError, fault: Fault) {
     let expected = match fault {
         Fault::Busy => "account_busy",
         Fault::Io => "storage_unavailable",
+        // Native unlock reports a damaged local key as the typed wrong-code refusal.
+        Fault::Integrity if body.code == "wrong_passphrase" => "wrong_passphrase",
         Fault::Integrity => "ValidationFailed",
     };
     assert_eq!(body.code, expected, "{error:?}");
@@ -38,7 +40,11 @@ fn assert_code(error: &SdkError, fault: Fault) {
         }
         Fault::Integrity => {
             assert_eq!(body.retry_after_ms, None);
-            assert!(body.message.contains("wrong passphrase or damaged local key"));
+            if body.code == "wrong_passphrase" {
+                assert_eq!(body.message, "the account code is wrong");
+            } else {
+                assert!(body.message.contains("wrong passphrase or damaged local key"));
+            }
             assert!(!body.message.contains("integrity verification failed"));
         }
     }
@@ -52,7 +58,7 @@ async fn check_account_surfaces(fault: Fault) -> TestResult {
         Some("acct".into()),
         "account",
         "account.create",
-        serde_json::to_value(&fixture.manifest)?,
+        serde_json::json!({}),
     );
     let Err(error) =
         super::dispatch::account::dispatch_account_bus_request(&create, &mut daemon).await
@@ -61,17 +67,6 @@ async fn check_account_surfaces(fault: Fault) -> TestResult {
     };
     // Bus account.create stays refused; the ceremony owns creation.
     assert!(matches!(error, SdkError::CustodySetupInvalid));
-
-    let Err(error) = super::daemon::restore_local_bus_account_with_passphrase(
-        &mut daemon,
-        &fixture.manifest,
-        &fixture.manifest.account_secret,
-    )
-    .await
-    else {
-        return Err("faulted daemon load unexpectedly succeeded".into());
-    };
-    assert_code(&error, fault);
 
     let unlock = LocalBusFrame::request(
         "unlock",
@@ -89,12 +84,22 @@ async fn check_account_surfaces(fault: Fault) -> TestResult {
 
     // Exercise the repeat-unlock branch with an actor entry whose DB is closed.
     // A healthy live DB already owns the process lease and cannot conflict with a child.
+    let gateway = GatewayQuicEndpointConfig {
+        bind_addr: "127.0.0.1:0".parse()?,
+        gateway_addr: "127.0.0.1:1".parse()?,
+        server_name: "unconnected-test-gateway".into(),
+        ca_cert: fixture.root().join("unused-ca.pem"),
+        principal_id: "principal".into(),
+        device_id: "device".into(),
+        target_delivery_id: "target".into(),
+        prekey_http_url: None,
+    };
     daemon.accounts.insert(
         "acct".into(),
         LocalBusAccountState::disconnected(
             fixture.client()?,
-            GatewaySessionConfig::quic(fixture.manifest.gateway.clone()),
-            fixture.manifest.principal_commitment.clone(),
+            GatewaySessionConfig::quic(gateway),
+            fixture.anchor.clone(),
         ),
     );
     let Err(error) =

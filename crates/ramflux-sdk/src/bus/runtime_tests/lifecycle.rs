@@ -18,7 +18,7 @@ async fn run(advance_deadlines: bool) -> Case {
     LocalSet::new()
         .run_until(async {
             let root = root("detached-lifecycle");
-            drop(account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?);
+            persisted_native(&root, "alice").await?;
             let gate = Arc::new(TestGate::default());
             let mut config = LocalBusConfig::new(root.join("bus.sock"), &root);
             config.lifecycle_gate = Some(gate.clone());
@@ -75,7 +75,7 @@ async fn run(advance_deadlines: bool) -> Case {
             unlock.deadline_ms = None;
             let replay = supervisor.request(unlock, &retry).await?;
             assert_eq!(replay.body, saved);
-            assert_eq!(replay.body["local_account_id"], "alice");
+            assert_eq!(replay.body["account_id"], "alice");
             assert_eq!(gate.executions.load(Ordering::SeqCst), 1);
             supervisor.shutdown().await?;
             drop(supervisor);
@@ -95,7 +95,7 @@ async fn closed_connection_does_not_cancel_unlock() -> Case {
     LocalSet::new()
         .run_until(async {
             let root = root("disconnected-lifecycle");
-            drop(account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?);
+            persisted_native(&root, "alice").await?;
             let gate = Arc::new(TestGate::default());
             let mut config = LocalBusConfig::new(root.join("bus.sock"), &root);
             config.lifecycle_gate = Some(gate.clone());
@@ -166,7 +166,7 @@ async fn daemon_stop_aborts_a_stuck_lifecycle_task_within_five_seconds() -> Case
             LocalSet::new()
                 .run_until(async {
                     let root = root("lifecycle-stop");
-                    drop(account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?);
+                    persisted_native(&root, "alice").await?;
                     let gate = Arc::new(TestGate { before_creation: true, ..TestGate::default() });
                     let mut config = LocalBusConfig::new(root.join("bus.sock"), &root);
                     config.lifecycle_gate = Some(gate.clone());
@@ -268,7 +268,7 @@ async fn completed_lifecycle_tasks_are_reaped_while_daemon_is_idle() -> Case {
     LocalSet::new()
         .run_until(async {
             let root = root("lifecycle-reap");
-            drop(account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?);
+            persisted_native(&root, "alice").await?;
             let config = LocalBusConfig::new(root.join("bus.sock"), &root);
             let listener = UnixListener::bind(&config.socket_path)?;
             let listener = crate::platform::listener::UnixBusListener::from_bound(

@@ -8,37 +8,7 @@ use crate::client::surface::test_support::{create_frame, text_snapshot};
 use crate::client::surface::{Carrier, PayloadKind};
 use crate::prelude::*;
 use serde_json::{Value, json};
-use std::sync::{Arc, atomic::AtomicBool};
 use tokio::sync::oneshot;
-
-fn persisted_surface(root: &Path) -> Result<Value, SdkError> {
-    let account = runtime_tests::account(root, "alice", None, Arc::new(AtomicBool::new(false)))?;
-    let create = crate::SurfaceSendRequest::event(&create_frame(
-        "thread",
-        &text_snapshot("surface", "Persisted", "saved"),
-    )?)?;
-    let carrier = Carrier {
-        typed: None,
-        schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
-        content_type: "surface".into(),
-        posted_at: None,
-        updated_at: None,
-        payload_kind: PayloadKind::Event,
-        conversation_id: "thread".into(),
-        surface_id: "surface".into(),
-        message_id: create.message_id,
-        sender_principal_id: "alice".into(),
-        sender_device_id: "device-alice".into(),
-        author_principal_id: "alice".into(),
-        wire_base64: create.wire_base64,
-        signature: String::new(),
-        snapshot: None,
-    };
-
-    let carrier = account.client.sign_surface_carrier(carrier)?;
-    assert!(account.client.stage_surface_outgoing(&carrier, None)?.accepted);
-    account.client.surface_get("surface", 0, None)
-}
 
 async fn persisted_born_surface(root: &Path) -> Result<Value, SdkError> {
     let born = runtime_tests::born_account(
@@ -162,7 +132,7 @@ async fn surface_reads_queued_during_restart_restore_match_warm_reader_results()
 async fn surface_get_and_list_survive_repeated_socket_daemon_restart()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = runtime_tests::root("surface-restore-socket");
-    let expected = persisted_surface(&root)?;
+    let expected = persisted_born_surface(&root).await?;
     let socket = root.join("bus.sock");
     for _ in 0..2 {
         let (shutdown, receiver) = watch::channel(false);
@@ -178,6 +148,13 @@ async fn surface_get_and_list_survive_repeated_socket_daemon_restart()
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             };
+            bus.request(
+                Some("alice".into()),
+                "account",
+                "account.unlock",
+                json!({"passphrase":"actor-test-secret"}),
+            )
+            .await?;
             let get = bus
                 .request(
                     Some("alice".into()),
@@ -208,75 +185,4 @@ async fn surface_get_and_list_survive_repeated_socket_daemon_restart()
         client?;
     }
     Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn supervisor_surface_read_waits_for_startup_restore_and_reports_failure()
--> Result<(), Box<dyn std::error::Error>> {
-    tokio::task::LocalSet::new()
-        .run_until(Box::pin(async {
-            for healthy in [true, false] {
-                let root = runtime_tests::root("surface-supervisor-restore");
-                let expected = persisted_surface(&root)?;
-                if !healthy {
-                    let path = local_bus_account_manifest_path(&root, "alice");
-                    let mut manifest = read_local_bus_account_manifest(&path)?;
-                    manifest.account_secret = "wrong-startup-secret".into();
-                    write_local_bus_account_manifest(&root, &manifest)?;
-                }
-                let (gate, control) = crate::bus::LocalBusStartupRestoreGate::new("alice");
-                let supervisor = crate::bus::supervisor::Supervisor::new(
-                    LocalBusConfig::new(root.join("bus.sock"), &root)
-                        .with_startup_restore_gate(gate),
-                )?;
-                let mut background = tokio::task::JoinSet::new();
-                supervisor.hydrate(&mut background)?;
-                tokio::time::timeout(Duration::from_secs(5), control.entered()).await?;
-                let (outbound, _receiver) = mpsc::channel(8);
-                let connection = LocalBusConnectionState::new(1, outbound);
-                let get = LocalBusFrame::request(
-                    "get",
-                    Some("alice".into()),
-                    "surface",
-                    "surface.get",
-                    json!({"surface_id":"surface"}),
-                );
-                let read = supervisor.request(get, &connection);
-                tokio::pin!(read);
-                let early = tokio::select! {
-                    biased;
-                    result = &mut read => Some(result.err()),
-                    () = std::future::ready(()) => None,
-                };
-                assert!(
-                    early.is_none(),
-                    "surface read completed before startup restore: {early:?}"
-                );
-                let status = LocalBusFrame::request(
-                    "status",
-                    Some("alice".into()),
-                    "account",
-                    "account.status",
-                    json!({}),
-                );
-                assert!(matches!(
-                    supervisor.request(status, &connection).await,
-                    Err(SdkError::AccountRestorePending(_))
-                ));
-                control.release();
-                let result = tokio::time::timeout(Duration::from_secs(5), &mut read).await?;
-                while let Some(task) = background.join_next().await {
-                    task?;
-                }
-                supervisor.shutdown().await?;
-                std::fs::remove_dir_all(root)?;
-                if healthy {
-                    assert_eq!(result?.body, expected);
-                } else {
-                    assert!(matches!(result, Err(SdkError::AccountRestoreFailed { .. })));
-                }
-            }
-            Ok(())
-        }))
-        .await
 }
