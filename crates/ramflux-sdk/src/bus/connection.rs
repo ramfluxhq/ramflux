@@ -282,12 +282,19 @@ async fn admit_frame(
         Some(Err(error)) => return Ok(Admit::Done(Err(error))),
     };
     let source = incoming.frame()?;
-    let access = if super::app_lock_fence::control(&source.method) {
+    let access = if state
+        .supervisor
+        .app_fences
+        .open_for(&source.method, source.account_id.as_deref())?
+    {
         None
     } else {
         Some(state.supervisor.app_fences.for_method(&source.method, source.account_id.as_deref())?)
     };
     let refusal = super::io::local_bus_error_unlogged(source, &super::app_lock_fence::locked());
+    // The recovering connection receives `account.app_lock.changed` when recovery reopens the fence.
+    let recovering =
+        (source.method == "account.recover.begin").then(|| source.account_id.clone()).flatten();
     if let Some(bytes) = local_method(
         &mut incoming,
         state.supervisor,
@@ -298,6 +305,9 @@ async fn admit_frame(
     )
     .await?
     {
+        if let Some(id) = &recovering {
+            state.supervisor.attach_app_control(state.connection.connection_id, id);
+        }
         tokio::time::timeout(
             Duration::from_secs(10),
             state.secrets.send(SecretResponse { bytes, access, refusal }),

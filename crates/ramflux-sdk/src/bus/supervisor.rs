@@ -326,7 +326,7 @@ impl Supervisor {
         request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
-        let access = if super::app_lock_fence::control(&request.method) {
+        let access = if self.app_fences.open_for(&request.method, request.account_id.as_deref())? {
             None
         } else {
             Some(self.app_fences.for_method(&request.method, request.account_id.as_deref())?)
@@ -963,6 +963,11 @@ impl Supervisor {
         })
         .await
         .map_err(|error| SdkError::LocalBus(format!("account erase failed: {error}")))??;
+        // The erased account no longer fences other accounts or global methods.
+        self.app_fences.forget(&id)?;
+        self.control_accounts.borrow_mut().values_mut().for_each(|accounts| {
+            accounts.remove(&id);
+        });
         Ok(reply(serde_json::json!({"local_account_id": id, "removed": true})))
     }
 

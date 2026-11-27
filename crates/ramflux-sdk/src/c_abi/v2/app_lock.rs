@@ -49,8 +49,11 @@ pub(super) fn capture_access(
     method: &str,
     account: Option<&str>,
 ) -> Result<Option<crate::bus::app_lock_fence::Token>, crate::SdkError> {
-    if crate::bus::app_lock_fence::control(method) {
+    let Some(fences) = shared.app_fences.get() else {
+        return Ok(None);
+    };
+    if fences.open_for(method, account)? {
         return Ok(None);
     }
-    shared.app_fences.get().map(|fences| fences.for_method(method, account)).transpose()
+    fences.for_method(method, account).map(Some)
 }

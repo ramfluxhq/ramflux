@@ -71,6 +71,10 @@ async fn apply(
             *ceremony = None;
             let input: Begin = serde_json::from_value(std::mem::take(&mut request.body))
                 .map_err(|_| SdkError::CustodySetupInvalid)?;
+            // The header names the account for the app-lock fence; it must be the same one.
+            if request.account_id.as_deref().is_some_and(|header| header != input.account_id) {
+                return Err(SdkError::CustodySetupInvalid);
+            }
             super::custody_setup::primary_provider(&supervisor.config).preflight()?;
             // Reconcile an earlier intent through ordinary unlock before starting another recovery.
             RecoveryCeremony::begin(
@@ -98,6 +102,7 @@ async fn apply(
         }
         "account.recover.confirm" => {
             let pending = ceremony.take().ok_or(SdkError::CustodySetupInvalid)?;
+            header_matches(request, pending.account_id())?;
             // Deserialize from an erasing byte buffer, never clone or journal phrase values.
             let bytes = crate::custody::serialize_secret(&request.body, 8192)?;
             super::secrets::wipe(&mut request.body);
@@ -111,6 +116,9 @@ async fn apply(
             if request.body.as_object().is_none_or(|map| !map.is_empty()) {
                 return Err(SdkError::CustodySetupInvalid);
             }
+            if let Some(pending) = ceremony.as_ref() {
+                header_matches(request, pending.account_id())?;
+            }
             *ceremony = None;
             custody_response::success(
                 request,
@@ -119,6 +127,12 @@ async fn apply(
         }
         _ => Err(SdkError::CustodySetupInvalid),
     }
+}
+fn header_matches(request: &LocalBusFrame, ceremony_account: &str) -> Result<(), SdkError> {
+    if request.account_id.as_deref().is_some_and(|header| header != ceremony_account) {
+        return Err(SdkError::CustodySetupInvalid);
+    }
+    Ok(())
 }
 async fn confirm(
     request: &LocalBusFrame,
@@ -140,6 +154,12 @@ async fn confirm(
     let vault = super::custody_setup::primary_provider(&supervisor.config);
     let secret = tokio::task::spawn_blocking(move || {
         let _root_lease = lease;
+        // A correct phrase earns exactly one more code try on an exhausted account. The
+        // existing wait still applies and a wrong code exhausts it again.
+        crate::client::device_unlock::grant_phrase_code_attempt(
+            &ramflux_storage::AccountIndex::open(&root)?,
+            &verification_id,
+        )?;
         let source = crate::client::device_unlock::DeviceBoundVaultSecret::bind(
             &root,
             vault.as_ref(),
@@ -172,6 +192,10 @@ async fn confirm(
     )
     .await;
     supervisor.installing.borrow_mut().remove(&id);
+    if result.is_ok() {
+        // With app lock on, the code just verified is the authentication: reopen the fence.
+        supervisor.app_unlocked(&id)?;
+    }
     result
 }
 struct Promotion {

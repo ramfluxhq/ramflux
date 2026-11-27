@@ -20,6 +20,8 @@ pub(crate) enum AccountAction {
     Create(Box<AccountCreate>),
     ExportAgentCredentials(AccountExportAgentCredentials),
     Recover(AccountSelector),
+    /// Erase one account's data from this device. The account id is typed at the terminal.
+    RemoveLocal(AccountSelector),
     List,
     Lock(AccountLock),
     Passphrase(AccountPassphraseCommand),

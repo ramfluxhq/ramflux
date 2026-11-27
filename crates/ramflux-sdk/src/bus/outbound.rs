@@ -74,13 +74,11 @@ impl LocalBusOutbound {
         self
     }
     pub fn for_request(mut self, request: &LocalBusFrame) -> Result<Self, SdkError> {
-        self.access = if super::app_lock_fence::control(&request.method) {
-            None
-        } else {
-            self.fences
-                .as_ref()
-                .map(|fences| fences.for_method(&request.method, request.account_id.as_deref()))
-                .transpose()?
+        self.access = match &self.fences {
+            Some(fences) if !fences.open_for(&request.method, request.account_id.as_deref())? => {
+                Some(fences.for_method(&request.method, request.account_id.as_deref())?)
+            }
+            _ => None,
         };
         Ok(self)
     }
@@ -88,7 +86,11 @@ impl LocalBusOutbound {
         &self,
         frame: &LocalBusFrame,
     ) -> Result<Option<super::app_lock_fence::Token>, SdkError> {
-        if super::app_lock_fence::control(&frame.method) {
+        let exempt = match &self.fences {
+            Some(fences) => fences.open_for(&frame.method, frame.account_id.as_deref())?,
+            None => super::app_lock_fence::control(&frame.method),
+        };
+        if exempt {
             return Ok(None);
         }
         if let Some(access) = &self.access {

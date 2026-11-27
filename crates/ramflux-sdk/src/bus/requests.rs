@@ -31,7 +31,11 @@ pub(super) async fn respond(
     context: LocalBusConnectionState,
 ) -> (String, Result<(), SdkError>) {
     let request = OwnedRequest(request);
-    let access = if super::app_lock_fence::control(&request.method) {
+    let open = supervisor
+        .app_fences
+        .open_for(&request.method, request.account_id.as_deref())
+        .unwrap_or(false);
+    let access = if open {
         None
     } else {
         supervisor

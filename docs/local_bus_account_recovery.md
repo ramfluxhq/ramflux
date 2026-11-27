@@ -10,7 +10,14 @@ terminal. It confirms the displayed fingerprint and reads phrase/data-passphrase
 input with terminal echo disabled. There are no phrase command-line or environment
 options, and the public result alone is printed as JSON on standard output.
 
-1. Send `account.recover.begin {"account_id":"…"}`. The daemon checks the primary
+1. Send `account.recover.begin {"account_id":"…"}` with the same id in the envelope
+   `account_id` (`confirm` and `cancel` carry it too). For an app-locked account that
+   header is what admits the ceremony past the app-lock fence; a different id answers
+   `CustodySetupInvalid`. Recovery still needs the current account code: after a
+   correct phrase an exhausted account gets one further code try under the existing
+   wait, and success with app lock on reopens the fence. A forgotten code is not
+   recoverable with data: use `rf account remove-local`, then restore and recover.
+   The daemon checks the primary
    provider, refreshes available independently configured public checkpoints, and
    returns `ceremony_id`, `account_anchor`, `expires_in_ms` and `warning`. Display
    the anchor/fingerprint and warning before requesting phrase entry. A directory
