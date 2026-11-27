@@ -14,10 +14,10 @@ use ramflux_crypto::large_group::{
 use serde_json::{Value, json};
 
 use super::check::{
-    KeyFault, check_body, check_inclusion, owner_of, parse_roll, ratchet_and_kc, roll_record,
-    verify_admin_chain,
+    KeyFault, Position, check_body, check_inclusion, owner_of, parse_roll, ratchet_and_kc,
+    roll_record, verify_admin_chain,
 };
-use super::ops::{Host, decode_chain, join_sk_of, schedule_refill, slot_bad};
+use super::ops::{Host, decode_chain, join_sk_of, schedule_refill, slot_bad, verify_cert};
 use super::state::{Runtime, now_ms, pub_of};
 use super::{lg_err, lg_msg};
 use crate::SdkError;
@@ -230,15 +230,14 @@ fn member_key(rt: &mut Runtime, e: &LogView, pass: &Pass) -> Result<(), KeyFault
     let kd = kd_meta_decode(&e.kd_meta).map_err(|_| KeyFault::Body)?;
     let body = SignedKeyBody::decode(&kd.body_bytes).ok();
     let k_e = rt.st.key_for(rt.st.cur_epoch).ok_or(KeyFault::Body)?;
-    let (next, kc_ok) = ratchet_and_kc(
-        &rt.st.gid,
-        e.header.kind,
-        epoch,
-        rt.st.epoch_seq,
-        &kd.joiners,
-        &k_e,
-        body.as_ref().map(|b| &b.kc),
-    )?;
+    let at = Position {
+        gid: &rt.st.gid,
+        kind: e.header.kind,
+        key_epoch: epoch,
+        prev_key_seq: rt.st.epoch_seq,
+        joiners: &kd.joiners,
+    };
+    let (next, kc_ok) = ratchet_and_kc(&at, &k_e, body.as_ref().map(|b| &b.kc))?;
     let prev_seq = rt.st.epoch_seq;
     rt.st.keys.push((epoch, *next.expose()));
     rt.st.cur_epoch = epoch;
@@ -337,13 +336,18 @@ fn joiner_key(rt: &mut Runtime, e: &LogView, pass: &Pass) -> Result<(), KeyFault
     rt.st.cur_epoch = rt.st.cur_epoch.max(epoch);
     rt.st.epoch_seq = e.seq;
     let writer = opened.signer_pub;
+    let admin_welcomer = verify_cert(&rt.st.gid, &opened.signer_pub, &opened.signer_cert)
+        .is_some_and(|p| admins.contains(&p));
     let confirmed = match &mut rt.prov {
         Some((prov_epoch, prov)) if *prov_epoch == epoch => {
             prov.offer_slot(writer, opened.key) == ProvisionalState::Confirmed
         }
         _ => {
-            rt.prov = Some((epoch, ProvisionalKey::new(writer, opened.key, pass.receipt_ms)));
-            false
+            let mut prov = ProvisionalKey::new(writer, opened.key, pass.receipt_ms);
+            // An admin-signed delivery (admin chaining to the genesis owner) confirms at once.
+            let ok = admin_welcomer && prov.admin_entry_decrypted(0) == ProvisionalState::Confirmed;
+            rt.prov = Some((epoch, prov));
+            ok
         }
     };
     if confirmed

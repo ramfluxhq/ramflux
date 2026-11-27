@@ -83,21 +83,26 @@ pub(crate) fn check_body(
     Ok(())
 }
 
+/// Where a `W`/`W'` sits: the host-visible `W_body` inputs.
+pub(crate) struct Position<'a> {
+    pub gid: &'a [u8; 32],
+    pub kind: u8,
+    pub key_epoch: u64,
+    pub prev_key_seq: u64,
+    pub joiners: &'a [[u8; 32]],
+}
+
 /// Member path: derive `K_{e+1}` from the host-visible `W_body` (advance always), then compare the
 /// signed `kc` with the own derivation.
 pub(crate) fn ratchet_and_kc(
-    gid: &[u8; 32],
-    kind: u8,
-    key_epoch: u64,
-    prev_key_seq: u64,
-    joiners: &[[u8; 32]],
+    at: &Position<'_>,
     k_e: &EpochKey,
     signed_kc: Option<&[u8; 32]>,
 ) -> Result<(EpochKey, bool), KeyFault> {
-    let w_body =
-        w_body_hash(gid, kind, key_epoch, prev_key_seq, joiners).map_err(|_| KeyFault::Body)?;
+    let w_body = w_body_hash(at.gid, at.kind, at.key_epoch, at.prev_key_seq, at.joiners)
+        .map_err(|_| KeyFault::Body)?;
     let next = ratchet_epoch_key(k_e, &w_body).map_err(|_| KeyFault::Body)?;
-    let kc = derive_kc(&next, gid, key_epoch).map_err(|_| KeyFault::Body)?;
+    let kc = derive_kc(&next, at.gid, at.key_epoch).map_err(|_| KeyFault::Body)?;
     Ok((next, signed_kc.is_some_and(|signed| *signed == kc)))
 }
 

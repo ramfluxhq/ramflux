@@ -152,7 +152,7 @@ pub(crate) struct DebugLgCommand {
 pub(crate) enum DebugLgAction {
     /// Shift the client clock and/or the (debug) host clock.
     Clock(DebugClock),
-    /// Inject one host fault: roll, hold, appended, wrong_slot, alt_head, garbage_w.
+    /// Inject one host fault: `roll`, `hold`, `appended`, `wrong_slot`, `alt_head`, `garbage_w`.
     Fault(DebugFault),
     /// Join N synthetic pseudonyms with real keys (state discarded).
     BulkJoin(DebugBulkJoin),

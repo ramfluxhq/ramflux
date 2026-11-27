@@ -51,12 +51,12 @@ fn sign_with(seed: &[u8; 32], message: &[u8]) -> [u8; 64] {
 }
 
 fn new_state(gid: [u8; 32], genesis: Vec<u8>, role: u8) -> Result<(LgState, [u8; 32]), SdkError> {
-    let (recv_sk, recv_pk) = generate_recv_keypair().map_err(lg_err)?;
+    let (secret, public) = generate_recv_keypair().map_err(lg_err)?;
     let state = LgState {
         gid,
         genesis,
         p_seed: random_array().map_err(lg_err)?,
-        recv_sk: *recv_sk,
+        recv_sk: *secret,
         dev_seed: random_array().map_err(lg_err)?,
         role,
         join_sk: None,
@@ -73,7 +73,7 @@ fn new_state(gid: [u8; 32], genesis: Vec<u8>, role: u8) -> Result<(LgState, [u8;
         roll_u_ms: 0,
         warnings: Vec::new(),
     };
-    Ok((state, recv_pk))
+    Ok((state, public))
 }
 
 /// Creates a group: host key preparation, owner-signed genesis, owner keys.
@@ -87,7 +87,7 @@ pub(crate) async fn create(
     let prep_id: [u8; 16] = dec.fixed().map_err(lg_err)?;
     let host_head_pk: [u8; 32] = dec.fixed().map_err(lg_err)?;
     let token_root_pk: [u8; 32] = dec.fixed().map_err(lg_err)?;
-    let (join_sk, join_pk) = generate_recv_keypair().map_err(lg_err)?;
+    let (join_secret, join_public) = generate_recv_keypair().map_err(lg_err)?;
     let (mut state, _) = new_state([0; 32], Vec::new(), ROLE_OWNER)?;
     let genesis = Genesis {
         host_node_id: host_node_id.to_owned(),
@@ -95,7 +95,7 @@ pub(crate) async fn create(
         owner_p_pub: pub_of(&state.p_seed),
         token_root_pk,
         join_policy: if approval_on { JoinPolicy::ApprovalOn } else { JoinPolicy::ApprovalOff },
-        join_pk_0: join_pk,
+        join_pk_0: join_public,
         member_cap: MEMBER_CAP,
         created_at: now_ms(),
         nonce: random_array().map_err(lg_err)?,
@@ -109,7 +109,7 @@ pub(crate) async fn create(
     host.call("create", body.finish()).await?;
     state.gid = genesis.group_id();
     state.genesis = genesis_bytes;
-    state.join_sk = Some(*join_sk);
+    state.join_sk = Some(*join_secret);
     state.keyed = true;
     state.keys.push((0, random_array().map_err(lg_err)?));
     Ok(state)
@@ -155,7 +155,7 @@ pub(crate) async fn join(host: &mut Host<'_>, link: &str) -> Result<(LgState, bo
     let mut proof = Enc::new(JOIN_DOMAIN);
     proof.fixed(&gid).fixed(&p).fixed(&join_pk_id);
     let invite_sig = sign_with(&invite_seed, &proof.finish());
-    let blob = seal_slot(&genesis.join_pk_0, &p, &blob_plain(&recv_pk)?).map_err(lg_err)?;
+    let blob = seal_slot(&genesis.join_pk_0, &p, &blob_plain(&recv_pk)).map_err(lg_err)?;
     let mut body = Enc::default();
     body.fixed(&gid).fixed(&p).fixed(&invite_id).fixed(&invite_sig).fixed(&join_pk_id);
     body.var(&blob);
@@ -163,7 +163,7 @@ pub(crate) async fn join(host: &mut Host<'_>, link: &str) -> Result<(LgState, bo
     Ok((state, reply.first() == Some(&1)))
 }
 
-fn blob_plain(recv_pk: &[u8; 32]) -> Result<SlotOpened, SdkError> {
+fn blob_plain(recv_pk: &[u8; 32]) -> SlotOpened {
     let zero_body = SignedKeyBody {
         group_id: [0; 32],
         kind: 0,
@@ -175,7 +175,7 @@ fn blob_plain(recv_pk: &[u8; 32]) -> Result<SlotOpened, SdkError> {
         admin_chain_head: [0; 32],
         join_pk_new: None,
     };
-    Ok(SlotOpened {
+    SlotOpened {
         key: EpochKey::from_bytes([0; 32]),
         body: zero_body,
         signature: [0; 64],
@@ -183,7 +183,7 @@ fn blob_plain(recv_pk: &[u8; 32]) -> Result<SlotOpened, SdkError> {
         signer_cert: recv_pk.to_vec(),
         roster_head: Vec::new(),
         admin_chain: Vec::new(),
-    })
+    }
 }
 
 /// Admin promote (`1`) or demote (`2`) of a pseudonym.
@@ -239,19 +239,11 @@ pub(crate) async fn refill(
     let proof: [u8; 64] = dec.fixed().map_err(lg_err)?;
     dec.finish().map_err(lg_err)?;
     let genesis = Genesis::decode(&rt.st.genesis).map_err(lg_err)?;
-    let tokens = match finish_token_batch(
-        &request,
-        &evaluated,
-        &proof,
-        &genesis.token_root_pk,
-        &rt.st.gid,
-        te,
-    ) {
-        Ok(tokens) => tokens,
-        Err(_) => {
-            rt.st.warn("token batch proof failed: batch discarded");
-            return Err(lg_msg("token batch discarded (proof verification failed)"));
-        }
+    let Ok(tokens) =
+        finish_token_batch(&request, &evaluated, &proof, &genesis.token_root_pk, &rt.st.gid, te)
+    else {
+        rt.st.warn("token batch proof failed: batch discarded");
+        return Err(lg_msg("token batch discarded (proof verification failed)"));
     };
     let (roll_a, roll_u) = rt.epochs.get(&te).copied().unwrap_or((0, 0));
     if te > 0 && late_reply(roll_a, received) && received > roll_a {
@@ -401,6 +393,7 @@ pub(crate) async fn welcome(rt: &mut Runtime, host: &mut Host<'_>) -> Result<Val
         join_pk_new: None,
     };
     let slot_sig = slot_body.sign(&signer_seed);
+    let cert = admin_cert(&rt.st, rt.st.role >= ROLE_ADMIN);
     let mut slots = Vec::with_capacity(joiners.len());
     for (p, recv_pk) in &joiners {
         let plain = SlotOpened {
@@ -408,7 +401,7 @@ pub(crate) async fn welcome(rt: &mut Runtime, host: &mut Host<'_>) -> Result<Val
             body: slot_body.clone(),
             signature: slot_sig,
             signer_pub: pub_of(&signer_seed),
-            signer_cert: Vec::new(),
+            signer_cert: cert.clone(),
             roster_head: roster.clone(),
             admin_chain: chain_blob.clone(),
         };
@@ -442,6 +435,39 @@ pub(crate) async fn welcome(rt: &mut Runtime, host: &mut Host<'_>) -> Result<Val
     rt.st.cur_epoch = new_epoch;
     rt.st.epoch_seq = seq;
     Ok(json!({"welcomed": ps.len(), "key_epoch": new_epoch, "seq": seq, "kind": kind}))
+}
+
+const CERT_DOMAIN: &[u8] = b"rf-lg-devcert-v1";
+
+fn cert_message(gid: &[u8; 32], dev_pub: &[u8; 32]) -> Vec<u8> {
+    let mut enc = Enc::new(CERT_DOMAIN);
+    enc.fixed(gid).fixed(dev_pub);
+    enc.finish()
+}
+
+/// Device certificate of an admin welcomer: `admin P ‖ signature over (gid, device pub)`.
+fn admin_cert(st: &LgState, is_admin: bool) -> Vec<u8> {
+    if !is_admin {
+        return Vec::new();
+    }
+    let mut out = pub_of(&st.p_seed).to_vec();
+    out.extend_from_slice(&sign_with(&st.p_seed, &cert_message(&st.gid, &pub_of(&st.dev_seed))));
+    out
+}
+
+/// Checks an admin welcomer certificate; returns the admin `P` it names.
+pub(crate) fn verify_cert(gid: &[u8; 32], dev_pub: &[u8; 32], cert: &[u8]) -> Option<[u8; 32]> {
+    let (p, sig) = cert.split_at_checked(32)?;
+    let p = <[u8; 32]>::try_from(p).ok()?;
+    let sig = <[u8; 64]>::try_from(sig).ok()?;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&p).ok()?;
+    ed25519_dalek::Verifier::verify(
+        &key,
+        &cert_message(gid, dev_pub),
+        &ed25519_dalek::Signature::from_bytes(&sig),
+    )
+    .ok()
+    .map(|()| p)
 }
 
 /// Slot plaintext `roster_head` of an OFF delivery: opaque marker plus the join secret key.

@@ -13,6 +13,7 @@ use ramflux_crypto::large_group::LgError;
 
 use crate::SdkError;
 
+#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn lg_err(error: LgError) -> SdkError {
     SdkError::LocalBus(format!("large group: {error}"))
 }
