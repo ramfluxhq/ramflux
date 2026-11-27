@@ -85,21 +85,16 @@ pub(in crate::bus) fn own_targets(account: &LocalBusAccountState) -> Result<Vec<
 }
 pub(in crate::bus) fn peers(
     account: &LocalBusAccountState,
-    conversation: &str,
-    message: &str,
     thread: &Value,
 ) -> Result<Vec<Target>, SdkError> {
-    if let Some(group) = thread["group_id"].as_str() {
-        Ok(super::super::task_group::prepared_plan(account, conversation, message, group)?.targets)
-    } else {
-        let input = super::direct_target_input(account, thread)?;
-        let manifest = account
-            .task_prepared_manifests
-            .get(&input.root)
-            .ok_or(SdkError::TaskManifestWorkerCapacity)?
-            .clone();
-        super::direct_targets_from_manifest(account, thread, manifest)
-    }
+    super::require_direct(thread)?;
+    let input = super::direct_target_input(account, thread)?;
+    let manifest = account
+        .task_prepared_manifests
+        .get(&input.root)
+        .ok_or(SdkError::TaskManifestWorkerCapacity)?
+        .clone();
+    super::direct_targets_from_manifest(account, thread, manifest)
 }
 pub(in crate::bus) fn controls(
     account: &LocalBusAccountState,
@@ -111,11 +106,7 @@ pub(in crate::bus) fn controls(
         return Err(invalid("prepared task transport requires manifest snapshot"));
     }
     let mut targets = own_targets(account)?;
-    let peers = if matches!(mode, Mode::Own) {
-        Vec::new()
-    } else {
-        peers(account, &carrier.conversation_id, &carrier.message_id, thread)?
-    };
+    let peers = if matches!(mode, Mode::Own) { Vec::new() } else { peers(account, thread)? };
     let body = match &mode {
         Mode::Ack(ack) => {
             crate::client::task::control::Control::Ack(Box::new((*ack).clone())).bytes()?
@@ -129,16 +120,11 @@ pub(in crate::bus) fn controls(
         own_payloads(&account.client, carrier, &body, &mode)?
     };
     crate::client::task::check_delivery_size(body.len())?;
-    check_preparation_budget(Some(&pages), targets.len(), 0, peers.len(), body.len())?;
+    check_preparation_budget(Some(&pages), targets.len(), peers.len(), body.len())?;
     targets.extend(peers);
     let mut drafts = Vec::new();
     for target in targets {
-        let route = delivery_route(
-            &target,
-            matches!(mode, Mode::Ack(_)),
-            original,
-            thread["group_id"].as_str(),
-        );
+        let route = delivery_route(&target, matches!(mode, Mode::Ack(_)), original);
         if target.own {
             for page in &pages {
                 drafts.push(Draft::new(

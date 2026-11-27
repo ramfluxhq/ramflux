@@ -213,15 +213,12 @@ fn requests_for(
     let thread = db
         .client_record("conversation", conversation)?
         .ok_or_else(|| SdkError::InboundRejected("task conversation missing".into()))?;
-    if let Some(group) = thread["group_id"].as_str() {
-        for route in super::group_delivery::directory(&account.client, group)? {
-            if let Some(commitment) = route["member_principal_commitment"].as_str()
-                && commitment != account.principal_commitment
-            {
-                requests.push(request(account, commitment)?);
-            }
-        }
-    } else if let Some(participants) = thread["participants"].as_array() {
+    if thread["group_id"].as_str().is_some() {
+        return Err(SdkError::InboundRejected(
+            "group conversations are unavailable until the MLS group track".into(),
+        ));
+    }
+    if let Some(participants) = thread["participants"].as_array() {
         let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         for principal in
             participants.iter().filter_map(Value::as_str).filter(|id| *id != local.principal_id)

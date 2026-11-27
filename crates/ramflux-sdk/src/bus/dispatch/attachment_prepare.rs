@@ -466,7 +466,6 @@ struct Scope {
 
 enum ScopeKind {
     Dm { peer_root: String },
-    Group { group_id: String, members: Vec<(String, String)> },
 }
 
 impl Scope {
@@ -478,47 +477,11 @@ impl Scope {
     ) -> Result<Self, SdkError> {
         let own_root = account.client.own_account_anchor()?;
         let mut homes = BTreeMap::from([(own_root.clone(), pin.home.clone())]);
-        if let Some(group) = thread.get("group_id").and_then(Value::as_str) {
-            let rows = super::super::group_delivery::directory(&account.client, group)?;
-            let mut members = Vec::new();
-            for row in &rows {
-                let root = text(row, "member_principal_commitment")?;
-                let member = text(row, "member_id")?;
-                // The route row carries the principal only once its device set was observed; the
-                // contact commitment record, written when the contact's root was pinned, names it
-                // for every root this account holds a contact for.
-                let member_principal = match text(row, "principal_id") {
-                    Ok(principal) => principal,
-                    Err(_) => account
-                        .client
-                        .account_db()?
-                        .client_record("commitment", &root)?
-                        .as_ref()
-                        .and_then(|record| record.get("principal_id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                        .ok_or_else(|| {
-                            crate::attachment_send::because(
-                                CODE_AUTHORITY_UNAVAILABLE,
-                                "a group member's principal is not known",
-                            )
-                        })?,
-                };
-                // This account's own home is the one its pin names; every other root needs the
-                // home pinned when that contact's card was accepted.
-                if root != own_root {
-                    homes.insert(root.clone(), home_of(&account.client, &member_principal)?);
-                }
-                members.push((root, member));
-            }
-            let mut roots: Vec<_> = members.iter().map(|(root, _)| root.clone()).collect();
-            roots.sort();
-            roots.dedup();
-            return Ok(Self {
-                roots,
-                homes,
-                kind: ScopeKind::Group { group_id: group.to_owned(), members },
-            });
+        if thread.get("group_id").and_then(Value::as_str).is_some() {
+            return Err(crate::attachment_send::because(
+                CODE_AUTHORITY_UNAVAILABLE,
+                "group attachments are unavailable until the MLS group track",
+            ));
         }
         let (peer, root) = super::conversation_send::peer_root(account, thread, principal)?;
         homes.insert(root.clone(), home_of(&account.client, &peer)?);
@@ -556,33 +519,8 @@ impl Scope {
             ScopeKind::Dm { peer_root } => {
                 account.client.plan_media_roster(&RosterScope::Dm { peer_root }, &self.homes, 0)
             }
-            ScopeKind::Group { group_id, members } => {
-                let epoch = account
-                    .client
-                    .account_db()?
-                    .shared_group_state(group_id)?
-                    .map_or(0, |state| state.view().epoch);
-                account.client.plan_media_roster(
-                    &RosterScope::Group { members },
-                    &self.homes,
-                    epoch,
-                )
-            }
         }
     }
-}
-
-fn text(row: &Value, field: &str) -> Result<String, SdkError> {
-    row.get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            crate::attachment_send::because(
-                CODE_AUTHORITY_UNAVAILABLE,
-                &format!("a group member row has no {field}"),
-            )
-        })
 }
 
 /// The home node pinned for a contact when its card was accepted. Nothing else names it: a

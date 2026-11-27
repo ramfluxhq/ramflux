@@ -220,8 +220,6 @@ async fn reads(fixture: &Harness) -> Case<Value> {
         ("message.read", json!({"conversation_id":"healthy"})),
         ("message.read", json!({"conversation_id":"healthy"})),
         ("conversation.list", json!({})),
-        ("group.list", json!({})),
-        ("group.members", json!({"group_id":"busy-group"})),
         ("grant.list", json!({})),
         ("object.list", json!({})),
         ("device.list", json!({})),

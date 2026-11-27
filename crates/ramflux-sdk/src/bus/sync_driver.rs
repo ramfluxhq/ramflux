@@ -99,36 +99,6 @@ async fn run_with_receive_clock(
     };
     #[cfg(not(test))]
     let contacts = 0;
-    #[cfg(test)]
-    let group_staged = match super::shared_group_sync::stage(account) {
-        Ok(count) => count,
-        Err(error) => {
-            tracing::warn!(%error, "group state recovery staging deferred");
-            0
-        }
-    };
-    #[cfg(not(test))]
-    let group_staged = 0;
-    #[cfg(test)]
-    let group_controls = match Box::pin(super::shared_group_sync::flush_requests(account)).await {
-        Ok(count) => count,
-        Err(error) => {
-            tracing::warn!(%error,"group request courier deferred");
-            0
-        }
-    };
-    #[cfg(not(test))]
-    let group_controls = 0;
-    #[cfg(test)]
-    let group_sent = match Box::pin(super::shared_group_sync::flush(account)).await {
-        Ok(count) => count,
-        Err(error) => {
-            tracing::warn!(%error, "group state delivery deferred");
-            0
-        }
-    };
-    #[cfg(not(test))]
-    let group_sent = 0;
     account.signal_task_courier();
     #[cfg(test)]
     let voice = match super::dispatch::call::drive(account).await {
@@ -140,7 +110,7 @@ async fn run_with_receive_clock(
     };
     #[cfg(not(test))]
     let voice = 0;
-    Ok(received + tasks_applied + voice + contacts + group_staged + group_sent + group_controls)
+    Ok(received + tasks_applied + voice + contacts)
 }
 
 pub(crate) async fn apply_prepared_receive(

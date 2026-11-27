@@ -3,7 +3,7 @@
 
 //! SDK-owned mutation intents, durable event identity and exact retry payloads.
 use crate::bindings::{AdapterError, GeneratedErrorCode as Code};
-use crate::client::message_mutations::{ConversationKind, MutationActor, StoredTarget};
+use crate::client::message_mutations::{ConversationKind, StoredTarget};
 use crate::prelude::*;
 use ramflux_protocol::message as g;
 use serde::{Deserialize, Serialize};
@@ -266,26 +266,21 @@ fn encode_intent(
     intent: &Intent,
     owner: &str,
 ) -> Result<(g::EventIdentity, Vec<u8>, Vec<u8>), SdkError> {
-    let Target { reference: target, stored, group } = target(client, intent)?;
+    let Target { reference: target, stored } = target(client, intent)?;
     // Reserve before allocating an event id, inside prepare's write transaction
     // and before `submit_envelope`. A second local edit of this base fails here.
     if request.method == "conversation.edit" {
         claim_edit_revision(client, intent, edit_revision(&stored)?, owner)?;
     }
-    let mut content = content(client, &request.method, intent, &target, &stored, group.as_deref())?;
+    let mut content = content(client, &request.method, intent, &target, &stored)?;
     RamfluxClient::prepare_generated_revision(&mut content)?;
     g::validation::validate_content(&content)
         .map_err(|_| refused(Code::InvalidArgument, "invalid generated mutation content"))?;
-    let mut identity = client.allocate_generated_identity(
+    let identity = client.allocate_generated_identity(
         &intent.conversation_id,
         u64::try_from(now_unix_timestamp()).unwrap_or(0).saturating_mul(1000),
         false,
     )?;
-    if let Some(group) = group {
-        let state = client.group_state(&group)?;
-        identity.group_id = Some(group);
-        identity.group_epoch = Some(state.group_epoch);
-    }
     match content.value.as_mut() {
         Some(g::content::Value::Reaction(reaction)) => {
             reaction.operation_id.clone_from(&identity.id);
@@ -300,11 +295,7 @@ fn encode_intent(
     g::validation::validate_content(&content)
         .map_err(|_| refused(Code::InvalidArgument, "invalid finalized mutation content"))?;
     let exact = RamfluxClient::encode_generated_inner(identity.clone(), &content)?;
-    let wire = if identity.group_id.is_some() && request.method == "conversation.reply" {
-        client.wrap_conversation_group_reply(&identity, &exact)?
-    } else {
-        exact.clone()
-    };
+    let wire = exact.clone();
     Ok((identity, exact, wire))
 }
 
@@ -349,7 +340,6 @@ fn validate_intent(method: &str, intent: &Intent) -> Result<(), SdkError> {
 struct Target {
     reference: g::MessageRef,
     stored: Zeroizing<Vec<u8>>,
-    group: Option<String>,
 }
 
 fn target(client: &RamfluxClient, intent: &Intent) -> Result<Target, SdkError> {
@@ -384,6 +374,12 @@ fn target(client: &RamfluxClient, intent: &Intent) -> Result<Target, SdkError> {
     let stored = db
         .message_content(&intent.message_id)?
         .ok_or_else(|| refused(Code::TargetNotFound, "target content unavailable"))?;
+    if original.group_id.is_some() {
+        return Err(refused(
+            Code::NotAuthorized,
+            "group conversations are unavailable until the MLS group track",
+        ));
+    }
     Ok(Target {
         reference: g::MessageRef {
             id: original.id,
@@ -391,7 +387,6 @@ fn target(client: &RamfluxClient, intent: &Intent) -> Result<Target, SdkError> {
             author_anchor: author.account_anchor.clone(),
         },
         stored: Zeroizing::new(stored),
-        group: original.group_id,
     })
 }
 
@@ -401,7 +396,6 @@ fn content(
     intent: &Intent,
     target: &g::MessageRef,
     stored: &[u8],
-    group: Option<&str>,
 ) -> Result<g::Content, SdkError> {
     let own = client.owned_device_identity()?;
     let revision = edit_revision(stored)?;
@@ -409,20 +403,8 @@ fn content(
         author_root: target.author_anchor.clone(),
         revision,
         tombstoned: false,
-        conversation: if group.is_some() {
-            ConversationKind::Group
-        } else {
-            ConversationKind::Direct
-        },
+        conversation: ConversationKind::Direct,
     };
-    if let Some(group) = group {
-        client.require_generated_group_epoch(
-            group,
-            &own,
-            client.group_state(group)?.group_epoch,
-            false,
-        )?;
-    }
     let text =
         || g::Message { text: intent.text.clone().unwrap_or_default(), ..Default::default() };
     let value = match method {
@@ -467,19 +449,7 @@ fn content(
             } else {
                 g::DeleteScope::Everyone
             };
-            let moderator = group.is_some_and(|group| {
-                client
-                    .require_generated_group_epoch(
-                        group,
-                        &own,
-                        client.group_state(group).map_or(0, |state| state.group_epoch),
-                        true,
-                    )
-                    .is_ok()
-            });
-            let actor =
-                if moderator { MutationActor::GroupModerator } else { MutationActor::Recipient };
-            RamfluxClient::authorize_generated_delete(own.root_commitment(), actor, &state, scope)
+            RamfluxClient::authorize_generated_delete(own.root_commitment(), &state, scope)
                 .map_err(|_| refused(Code::NotAuthorized, "delete scope is not authorized"))?;
             g::content::Value::Delete(g::Delete {
                 targets: vec![target.clone()],

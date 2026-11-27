@@ -6,19 +6,14 @@
 mod native_tests;
 mod outbox;
 mod recovery;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod requests;
 use crate::prelude::*;
 pub(crate) use outbox::background::pass as deliver_pass;
 pub(crate) use outbox::enqueue;
-#[cfg(test)]
-pub(super) use outbox::flush;
 use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateChange};
 pub(super) use recovery::stage;
 pub(crate) use requests::background::pass as request_pass;
-#[cfg(test)]
-pub(super) use requests::flush as flush_requests;
-#[cfg(test)]
-pub(in crate::bus) use requests::flush_with_clock as flush_requests_with_clock;
 use serde_json::{Value, json};
 
 fn required<'a>(body: &'a Value, key: &str) -> Result<&'a str, SdkError> {

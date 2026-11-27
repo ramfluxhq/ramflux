@@ -22,6 +22,7 @@ pub(crate) mod debug_mls;
 pub(crate) mod deferred_attachment;
 pub mod device;
 pub mod grant_mcp;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 pub mod group;
 #[cfg(all(
     feature = "itest-memory-vault",
@@ -54,7 +55,6 @@ pub(crate) use contact::*;
 pub(crate) use daemon::*;
 pub(crate) use device::*;
 pub(crate) use grant_mcp::*;
-pub(crate) use group::*;
 pub(crate) use message::*;
 pub(crate) use object::*;
 
@@ -64,5 +64,6 @@ pub(crate) mod surface_transport;
 pub(crate) mod task;
 pub(crate) mod task_approval;
 pub(in crate::bus) mod task_approval_transport;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod task_group;
 pub(crate) mod task_transport;

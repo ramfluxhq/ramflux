@@ -10,6 +10,10 @@ fn invalid(message: &str) -> SdkError {
     SdkError::LocalBus(message.into())
 }
 
+fn group_unavailable() -> SdkError {
+    invalid("group conversations are unavailable until the MLS group track")
+}
+
 pub(crate) async fn send(
     account: &mut LocalBusAccountState,
     carrier: &Carrier,
@@ -27,10 +31,9 @@ pub(crate) async fn send(
         .account_db()?
         .client_record("conversation", &carrier.conversation_id)?
         .ok_or_else(|| invalid("surface conversation absent"))?;
-    let group = thread["group_id"].as_str();
-    let group_epoch = group
-        .map(|group| account.client.group_state(group).map(|state| state.group_epoch))
-        .transpose()?;
+    if thread["group_id"].as_str().is_some() {
+        return Err(group_unavailable());
+    }
     let mut authored = crate::GatewayDirectMessage {
         conversation_id: carrier.conversation_id.clone(),
         message_id: RamfluxClient::surface_timeline_id(carrier)?,
@@ -44,17 +47,12 @@ pub(crate) async fn send(
         created_at: now_unix_timestamp(),
         ttl: account.client.content_ttl()?,
     };
-    if group.is_none() {
-        Box::pin(prepare_direct_target(account, carrier, &thread, &mut authored)).await?;
-    }
-    let prepared = account.client.prepare_authored_content(
-        &mut authored,
-        group,
-        &surface_content(carrier, group_epoch)?,
-    )?;
+    Box::pin(prepare_direct_target(account, carrier, &thread, &mut authored)).await?;
+    let prepared =
+        account.client.prepare_authored_content(&mut authored, None, &surface_content(carrier)?)?;
     let outcome = account.client.account_db()?.surface_transaction(|| {
         let outcome =
-            account.client.stage_surface_outgoing_as(carrier, group_epoch, &authored.message_id)?;
+            account.client.stage_surface_outgoing_as(carrier, None, &authored.message_id)?;
         if outcome.accepted {
             account.client.project_authored_message(&authored, &prepared.exact, &[])?;
             account.client.account_db()?.persist_message_actor_state(
@@ -71,31 +69,14 @@ pub(crate) async fn send(
     if !outcome.accepted {
         return Ok(serde_json::to_value(outcome)?);
     }
-    let mut devices = Vec::new();
-    let mut failure = None;
-    if let Some(group) = group {
-        let request = LocalBusFrame::request(
-            "surface-group",
-            None,
-            "ramflux.sdk.v1",
-            "group.send",
-            json!({"group_id":group,"conversation_id":carrier.conversation_id,"message_id":RamfluxClient::surface_timeline_id(carrier)?,"sender_id":carrier.sender_device_id,"content":surface_content(carrier, group_epoch)?,"encrypted_body_base64":""}),
-        );
-        if let Err(error) =
-            Box::pin(super::group::dispatch_group_send_request(&request, account)).await
-        {
-            failure = Some(error);
-        }
-    } else {
-        (devices, failure) = Box::pin(send_direct(account, carrier, &thread, &bytes)).await?;
-    }
+    let (devices, failure) = Box::pin(send_direct(account, carrier, &thread, &bytes)).await?;
     let delivery = if failure.is_some() { "failed" } else { "submitted" };
     account.client.set_surface_outgoing_state(carrier, delivery)?;
     account.client.set_surface_delivery_devices(carrier, &devices)?;
     #[cfg(test)]
-    let own = copy_own_for_test(account, carrier, group_epoch).await;
+    let own = copy_own_for_test(account, carrier).await;
     #[cfg(not(test))]
-    let own = copy_own(account, carrier, group_epoch);
+    let own = copy_own(account, carrier);
     let own_state = finish_own(account, carrier, own)?;
     if let Some(error) = failure {
         return Err(error);
@@ -150,7 +131,7 @@ async fn send_direct(
         for device in manifest.devices {
             let id = device.device_id.clone();
             let body: LocalBusMessageSubmitRequest = serde_json::from_value(
-                json!({"conversation_id":carrier.conversation_id,"message_id":RamfluxClient::surface_timeline_id(carrier)?,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":carrier.sender_principal_id,"sender_id":carrier.sender_device_id,"recipient_device_id":id,"recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,"content":surface_content(carrier, None)?,"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":account.client.content_ttl()?}),
+                json!({"conversation_id":carrier.conversation_id,"message_id":RamfluxClient::surface_timeline_id(carrier)?,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":carrier.sender_principal_id,"sender_id":carrier.sender_device_id,"recipient_device_id":id,"recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,"content":surface_content(carrier)?,"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":account.client.content_ttl()?}),
             )?;
             match super::message::submit_message(account, body).await {
                 Ok(_) => devices.push(json!({"root":root,"device_id":id,"state":"submitted"})),
@@ -188,12 +169,8 @@ async fn prepare_direct_target(
     Ok(())
 }
 
-fn copy_own(
-    account: &mut LocalBusAccountState,
-    carrier: &Carrier,
-    epoch: Option<u64>,
-) -> Result<String, SdkError> {
-    if !account.client.queue_surface_own_copy(carrier, epoch)? {
+fn copy_own(account: &mut LocalBusAccountState, carrier: &Carrier) -> Result<String, SdkError> {
+    if !account.client.queue_surface_own_copy(carrier, None)? {
         return Ok("failed".into());
     }
     if let Some(handle) = &account.connection {
@@ -211,7 +188,6 @@ pub(super) async fn submit_pair_control(
     engine: &mut impl GatewaySessionAccess,
     mut message: GatewayDirectMessage,
     body: &[u8],
-    group: Option<&str>,
 ) -> Result<(), SdkError> {
     use prost::Message as _;
     use ramflux_protocol::message as g;
@@ -222,7 +198,7 @@ pub(super) async fn submit_pair_control(
         Some(g::surface::Payload::ResyncRequest(request)) => request.group.clone(),
         _ => None,
     };
-    let group = group.or(requested_group.as_deref());
+    let group = requested_group.as_deref();
     let prepared = client.prepare_authored_content(
         &mut message,
         group,
@@ -282,15 +258,11 @@ fn peer_commitments(
 }
 
 #[cfg(test)]
-#[path = "surface_text_fixture.rs"]
-pub(crate) mod fixture;
-#[cfg(test)]
-#[path = "surface_text_tests.rs"]
-pub(super) mod tests;
-
-#[cfg(test)]
 #[path = "surface_dm_tests.rs"]
 mod dm_tests;
+#[cfg(test)]
+#[path = "surface_text_fixture.rs"]
+pub(crate) mod fixture;
 
 #[cfg(test)]
 #[path = "surface_own_tests.rs"]
@@ -305,41 +277,6 @@ mod resync_tests;
 mod history_import_tests;
 
 #[cfg(test)]
-#[path = "surface_group_membership_tests.rs"]
-mod membership_tests;
-
-#[cfg(test)]
-#[path = "shared_group_transport_tests.rs"]
-mod shared_group_transport_tests;
-
-#[cfg(test)]
-#[path = "shared_group_federation_tests.rs"]
-mod shared_group_federation_tests;
-
-#[cfg(test)]
-#[path = "shared_group_sibling_tests.rs"]
-mod shared_group_sibling_tests;
-
-#[cfg(test)]
-#[path = "shared_group_beacon_tests.rs"]
-mod shared_group_beacon_tests;
-
-#[cfg(test)]
-#[path = "shared_group_refusal_tests.rs"]
-mod shared_group_refusal_tests;
-#[cfg(test)]
-#[path = "shared_group_request_tests.rs"]
-mod shared_group_request_tests;
-
-#[cfg(test)]
-#[path = "shared_group_consent_tests.rs"]
-mod shared_group_consent_tests;
-
-#[cfg(test)]
-#[path = "group/route_tests.rs"]
-mod group_route_tests;
-
-#[cfg(test)]
 #[path = "own_sent_message_tests.rs"]
 mod own_sent_message_tests;
 
@@ -351,9 +288,8 @@ mod own_sent_availability_tests;
 async fn copy_own_for_test(
     account: &mut LocalBusAccountState,
     carrier: &Carrier,
-    epoch: Option<u64>,
 ) -> Result<String, SdkError> {
-    copy_own(account, carrier, epoch)?;
+    copy_own(account, carrier)?;
     super::super::own_device_copy::flush(account).await?;
     super::super::own_device_copy::status(
         &account.client,
@@ -365,21 +301,11 @@ fn function_call_root(
     account: &LocalBusAccountState,
     carrier: &Carrier,
     thread: &Value,
-    group: Option<&str>,
 ) -> Result<String, SdkError> {
-    if group.is_none() {
-        return peer_commitments(account, carrier, thread)?
-            .into_keys()
-            .next()
-            .ok_or_else(|| invalid("surface direct peer missing"));
-    }
-    account
-        .client
-        .born_v3_account
-        .as_ref()
-        .and_then(|born| born.record().body.profile.custodian.as_ref())
-        .map(|custodian| custodian.account_anchor.clone())
-        .ok_or_else(|| invalid("agent RPC requires its verified human custodian"))
+    peer_commitments(account, carrier, thread)?
+        .into_keys()
+        .next()
+        .ok_or_else(|| invalid("surface direct peer missing"))
 }
 
 async fn send_private(
@@ -391,14 +317,15 @@ async fn send_private(
         .account_db()?
         .client_record("conversation", &carrier.conversation_id)?
         .ok_or_else(|| invalid("surface conversation missing"))?;
-    let group = thread.get("group_id").and_then(Value::as_str);
-    let epoch = group.map(|g| account.client.group_state(g).map(|s| s.group_epoch)).transpose()?;
-    let outcome = account.client.stage_surface_outgoing_as(carrier, epoch, &carrier.message_id)?;
+    if thread.get("group_id").and_then(Value::as_str).is_some() {
+        return Err(group_unavailable());
+    }
+    let outcome = account.client.stage_surface_outgoing_as(carrier, None, &carrier.message_id)?;
     if !outcome.accepted {
         return Ok(serde_json::to_value(outcome)?);
     }
     let root = if carrier.payload_kind == PayloadKind::FunctionCall {
-        function_call_root(account, carrier, &thread, group)?
+        function_call_root(account, carrier, &thread)?
     } else {
         account
             .client
@@ -410,8 +337,7 @@ async fn send_private(
             .ok_or_else(|| invalid("surface author identity missing"))?
     };
     let mut engine = account.session_client().await?;
-    let result =
-        send_private_to_manifest(&account.client, &mut engine, carrier, &root, group).await;
+    let result = send_private_to_manifest(&account.client, &mut engine, carrier, &root).await;
     account.apply_session_metadata(engine);
     let delivery = if result.is_ok() { "submitted" } else { "failed" };
     if carrier.payload_kind == PayloadKind::Action {
@@ -431,24 +357,16 @@ async fn send_private_to_manifest(
     engine: &mut impl GatewaySessionAccess,
     carrier: &Carrier,
     root: &str,
-    group: Option<&str>,
 ) -> Result<(), SdkError> {
     crate::client::surface::check_delivery_size(carrier.bytes()?.len())?;
-    let epoch = group.map(|g| client.group_state(g).map(|s| s.group_epoch)).transpose()?;
     let manifest =
         client.cache_verified_device_manifest(engine.config(), root, "surface_peer").await?;
     let control = client
-        .surface_control_packet(carrier, crate::client::surface::ControlKind::Peer, epoch)?
+        .surface_control_packet(carrier, crate::client::surface::ControlKind::Peer, None)?
         .bytes()?;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let mut sent = 0usize;
     for device in manifest.devices {
-        if let Some(group) = group {
-            let identity = client.device_identity_for_root(root, &device.device_id)?;
-            if !client.surface_group_device_allowed(group, &identity)? {
-                return Err(invalid("surface private destination is outside the group"));
-            }
-        }
         let message = GatewayDirectMessage {
             conversation_id: carrier.conversation_id.clone(),
             message_id: carrier.message_id.clone(),
@@ -462,7 +380,7 @@ async fn send_private_to_manifest(
             created_at: now_unix_timestamp(),
             ttl: client.content_ttl()?,
         };
-        submit_pair_control(client, engine, message, &control, group).await?;
+        submit_pair_control(client, engine, message, &control).await?;
         sent += 1;
     }
     if sent == 0 {
@@ -471,10 +389,7 @@ async fn send_private_to_manifest(
     Ok(())
 }
 
-fn surface_content(
-    carrier: &Carrier,
-    epoch: Option<u64>,
-) -> Result<ramflux_protocol::message::Content, SdkError> {
+fn surface_content(carrier: &Carrier) -> Result<ramflux_protocol::message::Content, SdkError> {
     use ramflux_protocol::message as g;
     Ok(g::Content {
         value: Some(g::content::Value::Surface(g::Surface {
@@ -483,7 +398,7 @@ fn surface_content(
                     value: Some(g::surface_control_kind::Value::Peer(g::SurfaceControlKindPeer {})),
                 }),
                 carrier: Some(carrier.to_generated()?),
-                group_epoch: epoch,
+                group_epoch: None,
                 context: None,
                 manifests: Vec::new(),
             })),

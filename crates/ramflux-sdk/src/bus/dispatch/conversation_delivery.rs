@@ -69,25 +69,11 @@ async fn routes(
     prepared: &Prepared,
 ) -> Result<Vec<LocalBusGroupMemberRoute>, SdkError> {
     let identity = &prepared.identity;
-    if let Some(group) = identity.group_id.as_deref() {
-        account
-            .client
-            .assert_shared_group_send_capacity(group, &account.gateway_config.device_id)?;
-        let body = LocalBusGroupSendRequest {
-            group_id: group.into(),
-            conversation_id: identity.conversation_id.clone(),
-            message_id: ramflux_protocol::encode_base64url(&identity.id),
-            sender_id: account.gateway_config.device_id.clone(),
-            encrypted_body_base64: String::new(),
-            plaintext_body_base64: None,
-            content: None,
-            envelope_id: None,
-            source_principal_id: None,
-            target_delivery_id: None,
-            federation: None,
-            ttl: Some(prepared.ttl),
-        };
-        return super::super::group_delivery::resolve_current(account, &body).await;
+    if identity.group_id.is_some() {
+        return Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "group conversations are unavailable until the MLS group track".into(),
+        });
     }
     let thread = account
         .client

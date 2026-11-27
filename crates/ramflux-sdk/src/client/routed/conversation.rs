@@ -242,12 +242,4 @@ impl RamfluxClient {
         )?;
         Ok(())
     }
-
-    pub(crate) fn wrap_conversation_group_reply(
-        &self,
-        _identity: &g::EventIdentity,
-        _exact: &[u8],
-    ) -> Result<Vec<u8>, SdkError> {
-        Err(invalid("group conversation replies are unavailable"))
-    }
 }

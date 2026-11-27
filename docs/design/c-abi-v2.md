@@ -186,7 +186,6 @@ methods are rejected. Operations currently cover:
 | Nodes | `node.list/add/probe/confirm/remove/set_default/set_enabled` |
 | Conversations/messages | `conversation.list/directory/mute/disappearing.*`, `message.read/submit/delete/receipt.*`, `message.franking_evidence` |
 | Contacts/requests | `contact.list/add/request/accept/block/unblock/remove`, `contact.requests.*`, `contact.request.*`, verification/card methods |
-| Groups | `group.list/create/history/members/role.set/owner.transfer`, invitations and membership methods |
 | Voice | `call.invite/answer/reject/hangup/list/media.session` |
 | Agents and permissions | `bot.list/install/revoke/trust.add`, `mcp.*`, `grant.*`, `task.*` |
 | Devices/backup/settings | `device.list/pair.*/activate/authorize/revoke/refresh/sync.*`, `account.backup.*`, `account.config.get/set` |
@@ -647,7 +646,7 @@ when adopting this SDK commit; ABI majors remain SDK 2 and Card 4.
 ### Receipt capacity and key exports (policy version 2)
 
 The export permission applies only to `account.export_agent_credentials`,
-`account.backup.export`, `group.sender_key.export`, `device.sync.export`,
+`account.backup.export`, `device.sync.export`,
 `account.create.show_once` and `account.custody.show_once`. Ordinary reads and
 conversation operations work with the default configuration; `secret_output`
 remains confidential-data handling metadata.

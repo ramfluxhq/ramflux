@@ -410,22 +410,10 @@ impl RamfluxClient {
     }
 }
 
-/// Who is applying a mutation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MutationActor {
-    /// Authenticated author of the target message.
-    Author,
-    /// Recipient of a DM or group member without moderator proof.
-    Recipient,
-    /// Current group moderator with signed group authorization.
-    GroupModerator,
-}
-
 /// Conversation that holds the target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversationKind {
     Direct,
-    Group,
     OwnCopy,
 }
 
@@ -491,7 +479,6 @@ fn edit_conflict(target: &str, stored: u64, received: u64) -> SdkError {
 /// Refuses a recipient EVERYONE delete of a peer DM, unspecified scope, or missing proof.
 pub fn authorize_delete(
     actor_root: &str,
-    actor: MutationActor,
     target: &StoredTarget,
     scope: DeleteScope,
 ) -> Result<(), SdkError> {
@@ -503,13 +490,6 @@ pub fn authorize_delete(
                     Ok(())
                 } else {
                     Err(refused("recipient cannot delete a peer DM for everyone"))
-                }
-            }
-            ConversationKind::Group => {
-                if actor_root == target.author_root || actor == MutationActor::GroupModerator {
-                    Ok(())
-                } else {
-                    Err(refused("group everyone-delete requires author or moderator"))
                 }
             }
         },
@@ -578,11 +558,10 @@ impl RamfluxClient {
     /// Refuses a recipient EVERYONE delete of a peer DM or unspecified scope.
     pub fn authorize_generated_delete(
         actor_root: &str,
-        actor: MutationActor,
         target: &StoredTarget,
         scope: DeleteScope,
     ) -> Result<(), SdkError> {
-        authorize_delete(actor_root, actor, target, scope)
+        authorize_delete(actor_root, target, scope)
     }
 
     /// Candidate Reaction authorization. Does not send or persist.

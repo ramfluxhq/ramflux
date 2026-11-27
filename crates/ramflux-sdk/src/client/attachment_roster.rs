@@ -16,8 +16,13 @@ use crate::attachment_send::{CODE_AUTHORITY_UNAVAILABLE, MediaDevice, MediaScope
 /// What the roster is for. Group members are `(root commitment, device id)` pairs taken from
 /// the verified group state.
 pub(crate) enum RosterScope<'a> {
-    Dm { peer_root: &'a str },
-    Group { members: &'a [(String, String)] },
+    Dm {
+        peer_root: &'a str,
+    },
+    #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
+    Group {
+        members: &'a [(String, String)],
+    },
 }
 
 /// A frozen set of media targets plus the membership generation it was read at.

@@ -116,9 +116,9 @@ pub(in crate::bus) async fn send_account(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    let mut intent: Intent = serde_json::from_value(request.body.clone())?;
+    let intent: Intent = serde_json::from_value(request.body.clone())?;
     admit_prepares(&intent)?;
-    canonicalize_group_conversation(account, &mut intent)?;
+    refuse_group_conversation(&intent)?;
     let account_id = request_account_id(request)?;
     let operation = request
         .operation_id
@@ -137,7 +137,7 @@ pub(in crate::bus) async fn send_account(
         .client_record("conversation", &intent.conversation_id)?
     {
         Some(thread) => thread,
-        None => group_thread(account, &intent)?,
+        None => return Err(invalid("conversation absent", "conversation_absent")),
     };
     let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let principal = local.principal_id.clone();
@@ -205,47 +205,18 @@ pub(in crate::bus) async fn send_account(
     Ok(local_bus_ok(body))
 }
 
-fn canonicalize_group_conversation(
-    account: &LocalBusAccountState,
-    intent: &mut Intent,
-) -> Result<(), SdkError> {
-    let group = if let Some(group) = intent.group_id.clone() {
-        group
-    } else if account.client.born_v3_account.is_some()
-        && account.client.account_db()?.shared_group_state(&intent.conversation_id)?.is_some()
-    {
-        intent.conversation_id.clone()
-    } else {
-        return Ok(());
-    };
-    intent.conversation_id =
-        crate::bus::group_conversation::resolve(&account.client, &group, &intent.conversation_id)?;
-    if intent.group_id.is_none() {
-        intent.group_id = Some(group);
+fn refuse_group_conversation(intent: &Intent) -> Result<(), SdkError> {
+    if intent.group_id.is_some() {
+        return Err(group_unavailable());
     }
     Ok(())
 }
 
-/// A group that exists but has not sent yet has no conversation record. It is created from the
-/// verified group, never from the caller's word alone.
-fn group_thread(account: &LocalBusAccountState, intent: &Intent) -> Result<Value, SdkError> {
-    let group = intent
-        .group_id
-        .as_deref()
-        .ok_or_else(|| invalid("conversation absent", "conversation_absent"))?;
-    if super::super::group_delivery::directory(&account.client, group)?.is_empty() {
-        return Err(invalid("group absent", "group_absent"));
+fn group_unavailable() -> SdkError {
+    SdkError::GeneratedRefused {
+        code: crate::GeneratedRefusalCode::Content,
+        reason: "group conversations are unavailable until the MLS group track".into(),
     }
-    let record = json!({
-        "title": null, "direct_route": null, "kind": "group",
-        "group_id": group, "participants": [],
-    });
-    account.client.account_db()?.persist_client_record(
-        "conversation",
-        &intent.conversation_id,
-        &record,
-    )?;
-    Ok(record)
 }
 
 fn admit_prepares(intent: &Intent) -> Result<(), SdkError> {
@@ -270,38 +241,11 @@ async fn deliver(
     intent: &Intent,
     send: &DirectSend<'_>,
 ) -> Result<Vec<Value>, SdkError> {
-    let DirectSend { message: message_id, sender, thread, content, .. } = *send;
-    if let Some(group) = thread.get("group_id").and_then(Value::as_str) {
-        send_group(account, intent, message_id, sender, group, content).await
+    if send.thread.get("group_id").and_then(Value::as_str).is_some() {
+        Err(group_unavailable())
     } else {
         Box::pin(send_direct(account, intent, send)).await
     }
-}
-
-async fn send_group(
-    account: &mut LocalBusAccountState,
-    intent: &Intent,
-    message: &str,
-    sender: &str,
-    group: &str,
-    content: &ramflux_protocol::message::Content,
-) -> Result<Vec<Value>, SdkError> {
-    let request = LocalBusFrame::request(
-        "conversation-send-group",
-        None,
-        "group",
-        "group.send",
-        json!({"group_id":group,"conversation_id":intent.conversation_id,"message_id":message,
-            "sender_id":sender,"content":content,
-            "encrypted_body_base64":""}),
-    );
-    // A group send has one outcome for the whole group: a refusal is the command's result, with
-    // its own code, never an ok reply carrying a failed row.
-    let native = account.client.born_v3_account.is_some();
-    let outcome = super::group::dispatch_group_send_request(&request, account)
-        .await
-        .map_err(|error| super::group::group_operation_error("group.send", error, native))?;
-    Ok(vec![delivery(group, Ok(outcome))])
 }
 
 pub(in crate::bus) fn peer_root(

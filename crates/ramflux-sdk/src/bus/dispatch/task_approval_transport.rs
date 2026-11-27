@@ -64,24 +64,13 @@ async fn prepare(
         .account_db()?
         .client_record("conversation", conversation)?
         .ok_or_else(|| invalid("task approval conversation missing"))?;
-    let group = thread["group_id"].as_str();
+    super::task_transport::require_direct(&thread)?;
     diagnostic(account, "own_targets begin");
     let mut targets = own_targets(account, engine.config()).await?;
     diagnostic(account, "own_targets complete");
     diagnostic(account, "peer_targets begin");
-    let candidates = if let Some(group) = group {
-        super::task_group::plan(
-            account,
-            conversation,
-            &crate::new_surface_message_id()?,
-            group,
-            engine.config(),
-        )
-        .await?
-        .targets
-    } else {
-        super::task_transport::task_direct_targets(account, engine.config(), &thread).await?
-    };
+    let candidates =
+        super::task_transport::task_direct_targets(account, engine.config(), &thread).await?;
     diagnostic(account, "peer_targets complete");
     let peers = endpoint_targets(client, candidates, recipient)?;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
@@ -96,7 +85,7 @@ async fn prepare(
     }
     let route = crate::client::routed::Route {
         kind: crate::client::routed::Kind::Control,
-        group_id: group.map(str::to_owned),
+        group_id: None,
         attachments: false,
     };
     let mut deliveries = Vec::new();
@@ -141,11 +130,7 @@ pub(in crate::bus) fn prepared_drafts(
         .client_record("conversation", conversation)?
         .ok_or_else(|| invalid("task approval conversation missing"))?;
     let mut targets = prepared::own_targets(account)?;
-    let peers = endpoint_targets(
-        &account.client,
-        prepared::peers(account, conversation, &crate::new_surface_message_id()?, &thread)?,
-        recipient,
-    )?;
+    let peers = endpoint_targets(&account.client, prepared::peers(account, &thread)?, recipient)?;
     let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     if peers.is_empty() && recipient != local.principal_id {
         return Err(invalid("task approval endpoint has no active route"));
@@ -158,7 +143,7 @@ pub(in crate::bus) fn prepared_drafts(
     }
     let route = crate::client::routed::Route {
         kind: crate::client::routed::Kind::Control,
-        group_id: thread["group_id"].as_str().map(str::to_owned),
+        group_id: None,
         attachments: false,
     };
     targets

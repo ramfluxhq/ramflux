@@ -81,7 +81,7 @@ impl Fixture {
     }
 }
 #[tokio::test]
-async fn a_full_copy_queue_does_not_fail_the_real_dm_or_group_send() -> TestResult {
+async fn a_full_copy_queue_does_not_fail_the_real_dm_send() -> TestResult {
     let mut f = Fixture::new("own-copy-capacity").await?;
     let captured = Arc::default();
     let mut engine = GatewaySessionEngine::with_test_transport(
@@ -136,32 +136,6 @@ async fn a_full_copy_queue_does_not_fail_the_real_dm_or_group_send() -> TestResu
         Some("primary body")
     );
     f.source.install_test_session(engine);
-    f.source.client.fixture_group_create(
-        "capacity-group",
-        "capacity-thread",
-        None,
-        "device-sender",
-    )?;
-    let request = LocalBusFrame::request(
-        "group",
-        Some("sender".into()),
-        "group",
-        "group.send",
-        json!({
-            "group_id":"capacity-group", "conversation_id":"capacity-thread", "message_id":"group-primary", "sender_id":"device-sender", "encrypted_body_base64":"", "plaintext_body_base64":ramflux_protocol::encode_base64url(b"group body")
-        }),
-    );
-    let result = super::super::group::dispatch_group_send_request(&request, &mut f.source).await?;
-    let group_id = result.response_body["message_id"].as_str().ok_or("allocated group id")?;
-    assert_eq!(
-        f.source
-            .client
-            .generated_message_detail("capacity-thread", group_id)?
-            .message
-            .text
-            .as_deref(),
-        Some("group body")
-    );
     f.source.client.stage_authored_history()?;
     assert_eq!(
         f.source.client.account_db()?.actor_state_usage("own-history/pending/")?.0,
@@ -385,109 +359,6 @@ async fn a_rejected_primary_dm_discards_its_staged_copy() -> TestResult {
     f.source.install_test_session(engine);
     assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
     assert_eq!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 0);
-    f.cleanup();
-    Ok(())
-}
-fn refused_group_event(client: &crate::RamfluxClient, conversation: &str) -> TestResult<String> {
-    let rows = client.direct_messages(conversation)?;
-    let mut authored = None;
-    let mut service_rows = 0_u32;
-    for row in &rows {
-        let detail = client.generated_message_detail(conversation, &row.message_id)?;
-        if detail.message.kind == "service" {
-            service_rows = service_rows.saturating_add(1);
-            continue;
-        }
-        if detail.message.text.as_deref() == Some("not accepted") {
-            authored = Some(row.message_id.clone());
-        }
-    }
-    assert!(service_rows >= 1, "accepted group changes stay beside the refused send");
-    authored.ok_or("allocated rejected group message".into())
-}
-#[tokio::test]
-async fn a_rejected_primary_group_preserves_its_allocated_event_for_retry() -> TestResult {
-    let mut f = Fixture::new("own-copy-group-reject").await?;
-    f.source.client.fixture_group_create(
-        "group-reject",
-        "rejected-group-thread",
-        None,
-        "device-sender",
-    )?;
-    let peer = f.source.client.account_db()?.client_record("identity", "peer")?.ok_or("peer")?;
-    f.source
-        .client
-        .cache_verified_device_manifest(
-            &f.config,
-            peer["contact_identity_commitment"].as_str().ok_or("peer root")?,
-            "rejected_group_fixture",
-        )
-        .await?;
-    let peer_ref = f.source.client.device_identity_for_root(
-        peer["contact_identity_commitment"].as_str().ok_or("peer root")?,
-        "device-peer-one",
-    )?;
-    let record = f
-        .source
-        .client
-        .trusted_device(crate::client::identity_authority::HeadUse::NewAuthorization, &peer_ref)?;
-    f.source.client.fixture_group_change(
-        "group-reject",
-        "device-sender",
-        ramflux_protocol::GroupStateChange::Add {
-            member: ramflux_protocol::group_state::GroupMemberIdentity {
-                principal_id: "peer".into(),
-                root_commitment: peer_ref.root_commitment().into(),
-                device_id: peer_ref.device_id().into(),
-                signing_public_key: record["signing_public_key"]
-                    .as_str()
-                    .ok_or("peer signing key")?
-                    .into(),
-                target_delivery_id: record["target_delivery_id"]
-                    .as_str()
-                    .ok_or("peer target")?
-                    .into(),
-            },
-            role: ramflux_protocol::SharedGroupRole::Member,
-        },
-    )?;
-    let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
-    gateway.fail_after = Some(0);
-    let own = Arc::clone(&gateway.own);
-    f.source.install_test_session(GatewaySessionEngine::with_test_transport(
-        f.config.clone(),
-        Box::new(gateway),
-    ));
-    let request = LocalBusFrame::request(
-        "reject-group",
-        Some("sender".into()),
-        "group",
-        "group.send",
-        json!({"group_id":"group-reject","conversation_id":"rejected-group-thread",
-            "message_id":"rejected-group","sender_id":"device-sender",
-            "encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(b"not accepted")}),
-    );
-    let result = super::super::group::dispatch_group_send_request(&request, &mut f.source).await;
-    let error = result.err().ok_or("group send unexpectedly succeeded")?;
-    assert!(error.to_string().contains("injected submit failure"), "{error}");
-    let id = refused_group_event(&f.source.client, "rejected-group-thread")?;
-    assert_eq!(
-        f.source
-            .client
-            .generated_message_detail("rejected-group-thread", &id)?
-            .message
-            .text
-            .as_deref(),
-        Some("not accepted"),
-        "primary failure preserves the exact authored event for retry"
-    );
-    assert_eq!(
-        f.source.client.account_db()?.load_actor_state::<u64>("own-device/sent-failures")?,
-        None
-    );
-    assert_eq!(f.source.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
-    assert_eq!(crate::bus::own_device_copy::flush(&mut f.source).await?, 0);
-    assert!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
     f.cleanup();
     Ok(())
 }

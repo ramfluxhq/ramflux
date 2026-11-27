@@ -4,7 +4,7 @@
 //! Local erasure stays offline; EVERYONE uses one generated Delete across native recipients.
 use super::daemon::local_bus_ok;
 use crate::bus::daemon::LocalBusDispatchResult;
-use crate::bus::protocol::{LocalBusFrame, LocalBusGroupSendRequest, LocalBusMessageDeleteRequest};
+use crate::bus::protocol::{LocalBusFrame, LocalBusMessageDeleteRequest};
 use crate::bus::state::LocalBusAccountState;
 use crate::{GatewayDirectMessage, RamfluxClient, SdkError};
 use ramflux_protocol::message as g;
@@ -42,35 +42,11 @@ pub(super) async fn dispatch(
         &body.message_id,
         body.operation_id.as_deref(),
     )?;
-    let (event, count) = if let Some(group) = draft.original.group_id.as_ref() {
-        let send = LocalBusGroupSendRequest {
-            content: Some(draft.content),
-            group_id: group.clone(),
-            conversation_id: body.conversation_id.clone(),
-            message_id: draft.operation,
-            sender_id: account.gateway_config.device_id.clone(),
-            encrypted_body_base64: String::new(),
-            plaintext_body_base64: None,
-            envelope_id: None,
-            source_principal_id: None,
-            target_delivery_id: None,
-            federation: None,
-            ttl: Some(account.client.content_ttl()?),
-        };
-        let mut routed = request.clone();
-        routed.method = "group.send".into();
-        routed.body = serde_json::to_value(send)?;
-        let result = Box::pin(super::group::dispatch_group_send_request(&routed, account)).await?;
-        let event = result.response_body["message_id"]
-            .as_str()
-            .ok_or_else(|| refused("group Delete event identifier missing"))?
-            .to_owned();
-        let count = result.response_body["submitted"].as_array().map_or(0, Vec::len)
-            + result.response_body["federated_submitted"].as_array().map_or(0, Vec::len);
-        (event, count)
-    } else {
-        send_direct(account, &body.conversation_id, &draft.operation, &draft.content).await?
-    };
+    if draft.original.group_id.is_some() {
+        return Err(refused("group conversations are unavailable until the MLS group track"));
+    }
+    let (event, count) =
+        send_direct(account, &body.conversation_id, &draft.operation, &draft.content).await?;
     let identity = ramflux_protocol::decode_base64url(&event)
         .map_err(|_| refused("Delete event identifier invalid"))?;
     let tombstone = g::identity::delete_tombstone(&identity)

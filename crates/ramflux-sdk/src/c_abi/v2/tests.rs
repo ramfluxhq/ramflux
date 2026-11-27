@@ -111,7 +111,7 @@ fn negotiation_preserves_v1_and_publishes_supervisor_inventory() {
         "message.submit",
         "call.invite",
         "device.pair.begin",
-        "group.role.set",
+        "grant.approve",
         "surface.action",
         "account.config.set",
         "conversation.edit",

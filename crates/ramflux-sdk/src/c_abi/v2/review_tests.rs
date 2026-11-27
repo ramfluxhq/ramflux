@@ -251,7 +251,6 @@ fn default_config_allows_ordinary_methods_and_refuses_every_key_export() {
         std::collections::BTreeSet::from([
             "account.export_agent_credentials",
             "account.backup.export",
-            "group.sender_key.export",
             "device.sync.export",
             "account.create.show_once",
             "account.custody.show_once",

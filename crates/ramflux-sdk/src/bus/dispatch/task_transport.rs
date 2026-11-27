@@ -116,8 +116,7 @@ pub(crate) async fn send(
             target_delivery_id: account.target_delivery_id.clone(), encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(), ttl: account.client.content_ttl()?,
         };
-        let group = thread["group_id"].as_str();
-        let route = group.map_or_else(crate::client::routed::Route::direct, crate::client::routed::Route::group_message);
+        let route = crate::client::routed::Route::direct();
         let exact = prepare_task_inner(&account.client, &mut authored, &c.bytes()?, &route)?;
         let timeline = &authored.message_id;
         let outcome = account.client.project_task_message(&Delivery {
@@ -169,23 +168,10 @@ pub(super) async fn prepare(
     let client = &account.client;
     let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let mut own_targets = own_targets(account, engine.config()).await?;
-    let mut group_plan = None;
+    require_direct(thread)?;
     let mut peers = Vec::new();
     if !matches!(mode, Mode::Own) {
-        if let Some(group) = thread["group_id"].as_str() {
-            group_plan = Some(
-                super::task_group::plan(
-                    account,
-                    &c.conversation_id,
-                    &c.message_id,
-                    group,
-                    engine.config(),
-                )
-                .await?,
-            );
-        } else {
-            peers = task_direct_targets(account, engine.config(), thread).await?;
-        }
+        peers = task_direct_targets(account, engine.config(), thread).await?;
     }
     let intent = matches!(mode, Mode::Event)
         && matches!(c.event()?.event(), ramflux_protocol::TaskEventBody::Resolve(_));
@@ -204,9 +190,6 @@ pub(super) async fn prepare(
     };
     let control = intent || matches!(mode, Mode::Ack(_));
     if control {
-        if let Some(plan) = group_plan.take() {
-            peers.extend(plan.targets);
-        }
         if intent {
             let state =
                 client.task_history(&c.conversation_id, c.event()?.event().task_id())?.state()?;
@@ -234,18 +217,13 @@ pub(super) async fn prepare(
     check_preparation_budget(
         own_packet.as_deref(),
         own_targets.len(),
-        group_plan.as_ref().map_or(0, |p| p.targets.len().saturating_mul(2)),
         peers.len(),
         task_body.len(),
     )?;
     let mut deliveries = Vec::new();
-    if let Some(plan) = group_plan {
-        peers.extend(plan.targets);
-    }
     own_targets.append(&mut peers);
     for target in own_targets {
-        let route =
-            delivery_route(&target, control, original_own_event, thread["group_id"].as_str());
+        let route = delivery_route(&target, control, original_own_event);
         if target.own {
             for page in own_packet.as_ref().ok_or_else(|| invalid("own task pages missing"))? {
                 deliveries.push(
@@ -262,36 +240,33 @@ pub(super) async fn prepare(
 fn check_preparation_budget(
     own: Option<&[Vec<u8>]>,
     own_targets: usize,
-    group_targets: usize,
     peers: usize,
     body: usize,
 ) -> Result<(), SdkError> {
     let own_bytes = own.map_or(0, |pages| pages.iter().map(Vec::len).sum::<usize>());
     let budget = own_bytes
         .saturating_mul(own_targets)
-        .saturating_add(
-            body.saturating_add(4096).saturating_mul(peers.saturating_add(group_targets)),
-        )
+        .saturating_add(body.saturating_add(4096).saturating_mul(peers))
         .saturating_mul(32);
     if budget > 32 * 1024 * 1024 {
         return Err(invalid("task fanout preparation byte budget exceeded"));
     }
     Ok(())
 }
-fn delivery_route(
-    target: &Target,
-    control: bool,
-    original: bool,
-    group: Option<&str>,
-) -> crate::client::routed::Route {
+fn delivery_route(target: &Target, control: bool, original: bool) -> crate::client::routed::Route {
     let _ = (control, original);
     if target.own {
         return crate::client::routed::Route::control();
     }
-    group.map_or_else(
-        crate::client::routed::Route::direct,
-        crate::client::routed::Route::group_message,
-    )
+    crate::client::routed::Route::direct()
+}
+
+/// Group threads have no task transport until the MLS group track.
+pub(in crate::bus) fn require_direct(thread: &Value) -> Result<(), SdkError> {
+    if thread["group_id"].as_str().is_some() {
+        return Err(invalid("group conversations are unavailable until the MLS group track"));
+    }
+    Ok(())
 }
 // A compacted local checkpoint is never sent as signed history. An original local
 // event still travels to existing siblings through ordinary authenticated ingress.

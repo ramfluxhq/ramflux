@@ -371,69 +371,6 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
 }
 
 #[tokio::test]
-async fn own_copy_node_payload_hides_private_group_root_principal_and_dates() -> TestResult {
-    let root = runtime_tests::root("own-private-metadata");
-    let mut source = runtime_tests::account(
-        &root.join("source"),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    let (mut sibling, config, receiver, directory) = sibling_fixture(&root, &mut source).await?;
-    let group = "private-group-marker";
-    let state =
-        source.client.fixture_group_create(group, "private-thread", None, "device-sender")?;
-    sibling.client.fixture_accept_group_state(&state, "device-sibling")?;
-    let distribution =
-        source.client.export_group_sender_key_distribution(group, "device-sender")?;
-    sibling.client.import_group_sender_key_distribution(&distribution)?;
-    for client in [&source.client, &sibling.client] {
-        client
-            .account_db()?
-            .persist_actor_state("fixture/direct-conversation", &"private-thread")?;
-    }
-    let create = super::dm_tests::create_carrier(&source.client)?;
-    let own = Arc::default();
-    let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
-    gateway.own = Arc::clone(&own);
-    source
-        .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
-    assert!(source.client.queue_surface_own_copy(&create, Some(1))?);
-    assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
-    let envelope = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[0].clone();
-    let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)?;
-    let secret_values = ["private-thread", group, "sender"];
-    for value in secret_values {
-        let value = serde_json::to_vec(value)?;
-        assert!(
-            !bytes.windows(value.len()).any(|window| window == value.as_slice()),
-            "private field escaped pair encryption"
-        );
-    }
-    assert!(
-        ramflux_protocol::message::outer::decode_candidate_outer_ijson(
-            &ramflux_protocol::canonical_json_bytes(&envelope)?
-        )
-        .is_ok()
-    );
-    assert!(
-        crate::client::native_test_support::bus::receive_copy(
-            &mut sibling.client,
-            &receiver,
-            &entry(envelope, 1)
-        )
-        .await?
-    );
-    assert_eq!(sibling.client.surface_get("surface", 0, None)?["version"], 1);
-    assert_eq!(sibling.client.account_db()?.actor_state_usage("dm-pair/object-slot/")?.0, 0);
-    assert_eq!(sibling.client.account_db()?.actor_state_usage("routed/slot-watermark/")?.0, 0);
-    directory.abort();
-    drop(sibling);
-    drop(source);
-    Ok(())
-}
-
-#[tokio::test]
 async fn a_backed_off_copy_allows_newer_copies_and_preserves_each_immutable_retry() -> TestResult {
     use crate::client::own_device_copy::OwnMessageInput;
     let root = runtime_tests::root("own-copy-order");
@@ -1357,12 +1294,6 @@ impl ramflux_transport::GatewaySessionFrameSource for RejectFirstAck {
 
 #[path = "surface_own_sibling_consent_tests.rs"]
 mod sibling_consent;
-
-#[path = "shared_group_own_consent_tests.rs"]
-mod group_consent;
-
-#[path = "shared_group_transfer_tests.rs"]
-mod ownership;
 
 #[path = "surface_own_tests/contact_backfill_tests.rs"]
 mod contact_backfill_tests;

@@ -1258,7 +1258,6 @@ async fn client_directories_progress_while_gateway_is_blocked() -> Result<(), Sd
             "conversation.directory",
             "identity.directory",
             "object.directory",
-            "group.list",
             "mcp.server.list",
             "mcp.approval.list",
         ] {
@@ -1351,63 +1350,6 @@ async fn approval_directory_and_events_preserve_origin_context() -> Result<(), S
         assert_eq!(approvals["approvals"][0]["conversation_id"],"thread");assert_eq!(approvals["approvals"][0]["context_id"],"context");
         drop(socket);let _=server.await;supervisor.shutdown().await?;std::fs::remove_dir_all(root)?;Ok(())
     }).await
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn group_send_lists_every_missing_member_before_writing_a_message() -> Result<(), SdkError> {
-    LocalSet::new().run_until(async {
-        let root=root("group-routes");let initialize=actor_account(&root,"alice",None,Arc::new(AtomicBool::new(false)));
-        let initialize:AccountInitializer=Box::new(move |index| {
-            let mut account=initialize(index)?;account.client.create_group("group","device-alice")?;
-            account.client.account_db()?.add_group_member("group","device-bob","member")?;account.client.account_db()?.add_group_member("group","device-charlie","member")?;graft_explicit_native_root(&mut account.client,"alice")?;Ok(account)
-        });
-        let supervisor=supervisor(&root,BTreeMap::from([("alice".to_owned(),initialize)]))?;let (socket,server)=client(Rc::clone(&supervisor),1).await?;
-        let response=socket.request_frame(request("send","alice","group.send",serde_json::json!({"group_id":"group","conversation_id":"thread","message_id":"message","sender_id":"device-alice","encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(b"group message")}))).await;
-        let error=response.err().ok_or_else(||failure("group send silently omitted members"))?.to_string();
-        assert!(error.contains("device-bob"));assert!(error.contains("device-charlie"));assert!(error.contains("unreachable_members"));
-        let messages=socket.request_frame(request("read","alice","message.read",serde_json::json!({"conversation_id":"thread"}))).await?;assert_eq!(messages["messages"],serde_json::json!([]));
-        drop(socket);let _=server.await;supervisor.shutdown().await?;std::fs::remove_dir_all(root)?;Ok(())
-    }).await
-}
-
-#[test]
-fn group_routes_resolve_from_verified_directory_for_all_current_members() -> Result<(), SdkError> {
-    let root = root("group-directory-routes");
-    let account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
-    account.client.create_group("group", "device-alice")?;
-    account.client.account_db()?.add_group_member("group", "device-bob", "member")?;
-    let mut manifest = crate::client::identity_authority::test_support::remote_manifest(
-        "bob",
-        "device-bob",
-        [81; 32],
-    )?;
-    manifest.devices[0].target_delivery_id = "delivery-bob".into();
-    account.client.observe_device_manifest_json(
-        serde_json::to_value(&manifest)?,
-        &manifest.principal_commitment,
-    )?;
-    account.client.persist_group_member_route(
-        "group",
-        &LocalBusGroupMemberRoute {
-            member_id: "device-bob".into(),
-            member_principal_commitment: Some(manifest.principal_commitment.clone()),
-            device_signing_public_key: None,
-            target_delivery_id: None,
-            federation: None,
-        },
-    )?;
-    let body: LocalBusGroupSendRequest = serde_json::from_value(
-        serde_json::json!({"group_id":"group","conversation_id":"thread","message_id":"message","sender_id":"device-alice","encrypted_body_base64":""}),
-    )?;
-    let routes = super::group_delivery::resolve(&account, &body)?;
-    assert_eq!(routes.len(), 1);
-    assert_eq!(routes[0].target_delivery_id.as_deref(), Some("delivery-bob"));
-    assert_eq!(
-        routes[0].member_principal_commitment.as_deref(),
-        Some(manifest.principal_commitment.as_str())
-    );
-    drop(account);
-    Ok(())
 }
 
 mod metadata;

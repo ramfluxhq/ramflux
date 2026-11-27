@@ -92,23 +92,15 @@ fn edit_reaction_delete_authorization() -> TestResult {
         }
         other => panic!("test: stale revision must be edit_conflict, got {other:?}"),
     }
-    authorize_delete("root-a", MutationActor::Author, &dm, DeleteScope::Everyone)?;
+    authorize_delete("root-a", &dm, DeleteScope::Everyone)?;
     assert!(
-        authorize_delete("root-b", MutationActor::Recipient, &dm, DeleteScope::Everyone).is_err(),
+        authorize_delete("root-b", &dm, DeleteScope::Everyone).is_err(),
         "recipient EVERYONE delete of a peer DM must fail"
     );
-    authorize_delete("root-b", MutationActor::Recipient, &dm, DeleteScope::Local)?;
+    authorize_delete("root-b", &dm, DeleteScope::Local)?;
     let own = stored(ConversationKind::OwnCopy, false);
-    authorize_delete("root-a", MutationActor::Author, &own, DeleteScope::Everyone)?;
-    assert!(
-        authorize_delete("root-b", MutationActor::Recipient, &own, DeleteScope::Everyone).is_err()
-    );
-    let group = stored(ConversationKind::Group, false);
-    authorize_delete("root-b", MutationActor::GroupModerator, &group, DeleteScope::Everyone)?;
-    assert!(
-        authorize_delete("root-b", MutationActor::Recipient, &group, DeleteScope::Everyone)
-            .is_err()
-    );
+    authorize_delete("root-a", &own, DeleteScope::Everyone)?;
+    assert!(authorize_delete("root-b", &own, DeleteScope::Everyone).is_err());
     let live = stored(ConversationKind::Direct, false);
     authorize_reaction(&live)?;
     let dead = stored(ConversationKind::Direct, true);

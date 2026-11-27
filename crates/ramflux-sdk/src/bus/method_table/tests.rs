@@ -15,15 +15,22 @@ fn method_table_covers_every_dispatch_arm_and_routes_local_reads()
     for entry in std::fs::read_dir(dispatch)? {
         let path = entry?.path();
         if path.extension().is_some_and(|extension| extension == "rs")
-            && !path.file_stem().is_some_and(|name| name.to_string_lossy().contains("test"))
+            && !path.file_stem().is_some_and(|name| {
+                // `group.rs` still holds the removed `group.*` arms until P1-g deletes it.
+                name == "group" || name.to_string_lossy().contains("test")
+            })
         {
             collect(&std::fs::read_to_string(path)?, &mut methods);
         }
     }
-    for path in ["daemon.rs", "read_model/mod.rs", "shared_group_sync/mod.rs"] {
+    for path in ["daemon.rs", "read_model/mod.rs"] {
         collect(&std::fs::read_to_string(bus.join(path))?, &mut methods);
     }
     for method in methods {
+        // `read_model` still names the removed `group.*` methods until P1-f deletes those arms.
+        if method.starts_with("group.") {
+            continue;
+        }
         assert!(classify(&method).is_some(), "unclassified dispatch method: {method}");
     }
     let mut names = BTreeSet::new();

@@ -172,9 +172,6 @@ Current request methods include:
   `contact.list`, `contact.safety_number`, `contact.verify`,
   `contact.verification.status`, `contact.remove`, `contact.block`,
   `contact.unblock`, `contact.rejected`
-- groups: `group.create`, `group.member.add`, `group.member.remove`,
-  `group.members`, `group.list`, `group.send`, `group.read`,
-  `group.sender_key.export`, `group.sender_key.import`
 - objects: `object.put`, `object.get`, `object.list`, `object.share`,
   `object.import`, `object.delete`
 - calls and bots: `call.invite`, `call.answer`, `call.hangup`,
