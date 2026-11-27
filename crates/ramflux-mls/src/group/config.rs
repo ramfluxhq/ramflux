@@ -18,10 +18,9 @@ use crate::{
 
 /// Sender ratchet tolerance of a group: five out-of-order messages.
 const RATCHET_OUT_OF_ORDER_GROUP: u32 = 5;
-/// Sender ratchet tolerance of `dm` and `self`: every facade call seals one message per target
-/// device, so a receiver skips the generations sealed for other targets (the leaf bound is 2 x 50
-/// = 100 targets, plus headroom).
-const RATCHET_OUT_OF_ORDER_DEVICE: u32 = 128;
+/// Sender ratchet tolerance of `dm` and `self`: sixteen out-of-order messages (a message is
+/// sealed once per conversation, so a receiver skips no generation sealed for other targets).
+const RATCHET_OUT_OF_ORDER_DEVICE: u32 = 16;
 const RATCHET_FORWARD_DISTANCE: u32 = 1_000;
 
 fn ratchet(kind: GroupKind) -> SenderRatchetConfiguration {
@@ -98,7 +97,7 @@ pub fn key_package_lifetime() -> Lifetime {
 
 /// Join configuration (also stored with every group): pure ciphertext, padding 32, three past
 /// epochs, ratchet tree inside the Welcome. The sender ratchet tolerance depends on the kind
-/// (`dm`/`self` 128, group 5).
+/// (`dm`/`self` 16, group 5).
 #[must_use]
 pub fn join_config(kind: GroupKind) -> MlsGroupJoinConfig {
     MlsGroupJoinConfig::builder()

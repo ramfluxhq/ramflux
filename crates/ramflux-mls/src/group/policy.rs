@@ -11,8 +11,7 @@ use crate::credential::MemberIdentity;
 
 /// Who may add and remove members. MLS-LG and MLS-DM fill this without a second merge site.
 ///
-/// Every check returns a typed refusal. [`MlsError::ProofInputUnavailable`] is not a refusal: the
-/// caller holds the commit and retries.
+/// Every check returns a typed refusal.
 pub trait CommitPolicy: Send + Sync {
     /// May `committer` add `added`?
     ///

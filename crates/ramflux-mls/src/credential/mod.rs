@@ -105,6 +105,8 @@ pub struct VerifiedMember {
     pub device_signing_pk: [u8; 32],
     /// The leaf signature key the credential is bound to.
     pub leaf_sig_pk: [u8; 32],
+    /// `principal_kind` of the device chain's master certificate (the AI marker).
+    pub principal_kind: ramflux_protocol::PrincipalKind,
     /// Hash of the `KeyPackage` the leaf entered through (set by the gate for added members).
     pub kp_hash: Option<[u8; 32]>,
     /// Leaf index in the group (set by the gate for members already in the tree).
@@ -221,15 +223,16 @@ impl CredentialPolicy {
         self.pinned.lock().is_ok_and(|keys| keys.contains(signature_key))
     }
 
-    /// Check order: size, credential type against the kind, then the pair (and for devices the
-    /// directory authority).
+    /// Check order: size, credential type against the kind, then the pair. A device credential
+    /// is always checked purely (V1: certificate signature and device chain); the directory
+    /// authority (clock and lease) is consulted only when `authority` is `Some`.
     ///
     /// # Errors
     /// [`MlsError::PolicyRejected`] for a wrong type, [`MlsError::CredentialRejected`] for a bad
-    /// pair, size, device set or revocation.
+    /// pair, size, device chain or (directory path) revocation.
     pub fn verify_pair(
         &self,
-        authority: &dyn DeviceAuthority,
+        authority: Option<&dyn DeviceAuthority>,
         kind: GroupKind,
         credential: &Credential,
         leaf_sig_pk: &[u8],

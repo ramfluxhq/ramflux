@@ -22,8 +22,13 @@ pub use pins::{
     AuthorityPins, CustodyConflictAlert, CustodyConflictEvidence, CustodyConflictKind, PinOutcome,
 };
 mod anchor;
+mod device_chain;
 mod validate;
 pub use anchor::validate_native_account_anchor;
+pub use device_chain::{
+    DeviceChain, DeviceChainCapability, MAX_DEVICE_CHAIN_BYTES, VerifiedDeviceChain,
+    device_chain_principal_kind, encode_device_chain, verify_device_chain,
+};
 mod verify;
 pub use agent_master::{
     AgentMasterItem, AgentMasterPurpose, AgentMasterRequest, certify_agent_master, master_anchor,

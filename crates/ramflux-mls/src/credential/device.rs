@@ -4,16 +4,23 @@
 //! `0xF0D1` device credential, version 2.
 //!
 //! TLS-style encoding `{version = 2, account_anchor<V>, device_id<V>, device_epoch u64,
-//! device_set_epoch u64, device_signing_pk[32], cert_sig[64]}` (about 200 bytes). The device
-//! record is not in the credential: it is looked up through the directory-path
-//! [`DeviceAuthority`] (`authority.rs`), and every commit decision uses the records the commit
-//! carries (the pure path). `cert_sig` is the device (branch) signing key's Ed25519 signature
+//! device_set_epoch u64, device_signing_pk[32], cert_sig[64], device_chain<V>}`. The
+//! `device_chain` (rule V1, at most 4 KiB) is the master and branch certificate pair that ties
+//! the device key to the account anchor; it is verified purely (`ramflux_crypto::custody::
+//! verify_device_chain`: no clock, no directory). The device record itself is not in the
+//! credential: freshness (lease, revocation) is looked up through the directory-path
+//! [`DeviceAuthority`] (`authority.rs`), only where rule V allows a local check. `cert_sig` is
+//! the device (branch) signing key's Ed25519 signature
 //! over `MLS_LEAF_CERT_V2 || u16 suite || leaf_signature_key || u16 len || anchor || u16 len ||
 //! device_id || u64 device_epoch` (the two variable fields are length-prefixed so the message is
 //! unambiguous), which binds the credential to exactly one leaf key and one device.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use openmls::prelude::{Credential, CredentialType};
+use ramflux_crypto::custody::{
+    DeviceChainCapability, device_chain_principal_kind, verify_device_chain,
+};
+use ramflux_protocol::PrincipalKind;
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::decode_base64url;
 use ramflux_protocol::domain::{DEVICE_SIGNING_KEY_COMMITMENT, MLS_LEAF_CERT_V2};
@@ -22,6 +29,8 @@ use tls_codec::{DeserializeBytes, Serialize, VLBytes};
 use super::VerifiedMember;
 use super::authority::DeviceAuthority;
 use crate::group::unix_now;
+use ramflux_crypto::custody::MAX_DEVICE_CHAIN_BYTES;
+
 use crate::{
     CREDENTIAL_TYPE_DEVICE, CREDENTIAL_VERSION, MAX_CREDENTIAL_BYTES, MLS_SUITE_CODE, MlsError,
 };
@@ -47,6 +56,8 @@ pub struct DeviceIdentity {
     pub device_set_epoch: u64,
     /// Device (branch) signing public key.
     pub device_signing_pk: [u8; 32],
+    /// Encoded V1 device chain (`ramflux_crypto::custody::encode_device_chain`).
+    pub device_chain: Vec<u8>,
     /// Signer for the leaf certificate.
     pub signer: Box<dyn DeviceCertSigner>,
 }
@@ -59,6 +70,7 @@ pub(crate) struct DeviceCredential {
     pub(crate) device_set_epoch: u64,
     pub(crate) device_signing_pk: [u8; 32],
     pub(crate) cert_sig: [u8; 64],
+    pub(crate) device_chain: Vec<u8>,
 }
 
 /// The branch capability a device credential needs (the leased `message` capability).
@@ -101,6 +113,7 @@ impl DeviceCredential {
         out.extend_from_slice(&self.device_set_epoch.to_be_bytes());
         out.extend_from_slice(&self.device_signing_pk);
         out.extend_from_slice(&self.cert_sig);
+        out.extend_from_slice(&vl(&self.device_chain)?);
         Ok(out)
     }
 
@@ -116,6 +129,10 @@ impl DeviceCredential {
         let (device_set_epoch, rest) = take_array::<8>(rest)?;
         let (device_signing_pk, rest) = take_array::<32>(rest)?;
         let (cert_sig, rest) = take_array::<64>(rest)?;
+        let (device_chain, rest) = take_vl(rest)?;
+        if device_chain.len() > MAX_DEVICE_CHAIN_BYTES {
+            return Err(reject("device chain exceeds its byte budget"));
+        }
         if !rest.is_empty() {
             return Err(reject("trailing bytes in device credential"));
         }
@@ -132,10 +149,15 @@ impl DeviceCredential {
             device_set_epoch: u64::from_be_bytes(device_set_epoch),
             device_signing_pk,
             cert_sig,
+            device_chain,
         })
     }
 
-    fn member(&self, leaf_signature_key: &[u8; 32]) -> VerifiedMember {
+    fn member(
+        &self,
+        leaf_signature_key: &[u8; 32],
+        principal_kind: PrincipalKind,
+    ) -> VerifiedMember {
         VerifiedMember {
             root_commitment: self.account_anchor.clone(),
             device_id: self.device_id.clone(),
@@ -143,6 +165,7 @@ impl DeviceCredential {
             device_set_epoch: self.device_set_epoch,
             device_signing_pk: self.device_signing_pk,
             leaf_sig_pk: *leaf_signature_key,
+            principal_kind,
             kp_hash: None,
             leaf_index: None,
         }
@@ -189,6 +212,7 @@ pub fn issue(
         device_set_epoch: identity.device_set_epoch,
         device_signing_pk: identity.device_signing_pk,
         cert_sig,
+        device_chain: identity.device_chain.clone(),
     }
     .encode()?;
     if content.len() > MAX_CREDENTIAL_BYTES {
@@ -200,15 +224,21 @@ pub fn issue(
     Ok(Credential::new(CredentialType::Other(CREDENTIAL_TYPE_DEVICE), content))
 }
 
-/// Verify a received device credential against the leaf signature key: the certificate signature
-/// first (pure), then the directory path.
+/// Verify a device credential against the leaf signature key.
 ///
-/// Directory path: the head of the anchor must be known and at least as new as the credential's
+/// Pure part (always, rule V1): the certificate signature over the leaf key, then the device
+/// chain (`verify_device_chain`: master and branch certificates, anchor, device id, epoch and key
+/// binding, capability `message`). It reads no clock and no directory, so every receiver decides
+/// a commit or Welcome identically.
+///
+/// Directory part (only when `authority` is given, rule V: the adding device's own
+/// `KeyPackage` check, the sender's pre-seal check, the receiver's application-message check,
+/// display): the head of the anchor must be known and at least as new as the credential's
 /// `device_set_epoch` (else `authority_needed`: the caller fetches the custody record and
 /// retries once); the device entry must be Active and not revoked, its signing-key commitment must
 /// match, and its leased `message` branch key must be the credential's device key.
 pub(crate) fn verify(
-    authority: &dyn DeviceAuthority,
+    authority: Option<&dyn DeviceAuthority>,
     content: &[u8],
     leaf_signature_key: &[u8; 32],
 ) -> Result<VerifiedMember, MlsError> {
@@ -231,6 +261,26 @@ pub(crate) fn verify(
             &signature,
         )
         .map_err(|_| reject("leaf certificate signature"))?;
+    let chain = verify_device_chain(
+        &credential.device_chain,
+        &credential.account_anchor,
+        &credential.device_id,
+        credential.device_epoch,
+        &credential.device_signing_pk,
+        DeviceChainCapability::Message,
+    )
+    .map_err(|error| reject(&format!("device chain: {error}")))?;
+    if let Some(authority) = authority {
+        verify_directory(authority, &credential)?;
+    }
+    Ok(credential.member(leaf_signature_key, chain.principal_kind))
+}
+
+/// The directory path of [`verify`]: the local, clock-dependent freshness check.
+fn verify_directory(
+    authority: &dyn DeviceAuthority,
+    credential: &DeviceCredential,
+) -> Result<(), MlsError> {
     let now = unix_now()?;
     let head = authority
         .current(credential.account_anchor.as_bytes())
@@ -273,7 +323,7 @@ pub(crate) fn verify(
     {
         return Err(reject("device signing key is not the leased branch key"));
     }
-    Ok(credential.member(leaf_signature_key))
+    Ok(())
 }
 
 /// Read the identity of an already admitted leaf without re-running the authority checks (the
@@ -282,5 +332,8 @@ pub(crate) fn describe(
     content: &[u8],
     leaf_signature_key: &[u8; 32],
 ) -> Result<VerifiedMember, MlsError> {
-    Ok(DeviceCredential::decode(content)?.member(leaf_signature_key))
+    let credential = DeviceCredential::decode(content)?;
+    let principal_kind = device_chain_principal_kind(&credential.device_chain)
+        .map_err(|error| reject(&format!("device chain: {error}")))?;
+    Ok(credential.member(leaf_signature_key, principal_kind))
 }

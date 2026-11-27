@@ -2,10 +2,12 @@
 // Copyright (c) 2026 Span Brain
 
 //! The own device identity for MLS device credentials (v2): account anchor, device id and epoch,
-//! the device-set epoch and the device signing key of the account. The credential carries no
-//! record; peers look the record up through the custody directory.
+//! the device-set epoch and the device signing key of the account, plus the V1 device chain
+//! (master and branch certificates). The credential carries no device-set record; freshness is
+//! looked up locally through the custody directory.
 use ed25519_dalek::Signer;
 use ramflux_crypto::DeviceBranch;
+use ramflux_crypto::custody::encode_device_chain;
 use ramflux_mls::{DeviceCertSigner, DeviceIdentity, MlsError};
 use ramflux_protocol::{DeviceSetStatus, decode_base64url};
 
@@ -63,12 +65,18 @@ impl RamfluxClient {
         }) else {
             return Ok(None);
         };
+        let Some(branch_certificate) = entry.branch_certificate.as_ref() else {
+            return Ok(None);
+        };
+        let device_chain = encode_device_chain(&record.body.master_certificate, branch_certificate)
+            .map_err(|error| SdkError::Mls { code: "device_chain", detail: error.to_string() })?;
         Ok(Some(DeviceIdentity {
             account_anchor: record.body.account_anchor.clone(),
             device_id: device_id.to_owned(),
             device_epoch: entry.device_epoch,
             device_set_epoch: record.body.device_set_epoch,
             device_signing_pk,
+            device_chain,
             signer: Box::new(BranchCertSigner { branch: branch.clone() }),
         }))
     }

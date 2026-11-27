@@ -26,10 +26,6 @@ pub enum MlsError {
     /// presented: fetch the custody record, then retry once (`authority_needed`).
     #[error("authority needed: {0}")]
     AuthorityNeeded(String),
-    /// A hash-bound proof input (the compacted revocation list or the custodian record) is not
-    /// available yet. A receiver HOLDS the commit and retries; it never rejects (`proof_input_unavailable`).
-    #[error("proof input unavailable: {0}")]
-    ProofInputUnavailable(String),
     /// The group, key or row does not exist.
     #[error("not found: {0}")]
     NotFound(String),
@@ -69,7 +65,6 @@ impl MlsError {
             Self::WrongEpoch => "wrong_epoch",
             Self::DecryptFailed => "decrypt_failed",
             Self::AuthorityNeeded(_) => "authority_needed",
-            Self::ProofInputUnavailable(_) => "proof_input_unavailable",
             Self::NotFound(_) => "not_found",
             Self::DeviceSetTooLarge { .. } => "device_set_too_large",
             Self::DebugDisabled => "debug_disabled",

@@ -539,7 +539,6 @@ impl<K: MlsKv> Mls<K> {
             }
         };
         let op = self.begin()?;
-        unix_now()?;
         let signer = LeafSigner::generate(self.crypto.crypto())?;
         let credential_with_key = self.credential_for(kind, &signer)?;
         Self::store_signer(&op, &signer)?;
@@ -580,7 +579,7 @@ impl<K: MlsKv> Mls<K> {
         self.add_with(group_id, key_packages, CommitMeta::default())
     }
 
-    /// [`Self::add`] with the commit authenticated data and the commit time the policies see.
+    /// [`Self::add`] with the commit authenticated data the policies see.
     ///
     /// # Errors
     /// As [`Self::add`].
@@ -702,19 +701,6 @@ impl<K: MlsKv> Mls<K> {
     /// `too_large`, `wrong_epoch`, `decrypt_failed`, `policy_rejected`, `credential_rejected`,
     /// `not_found`.
     pub fn receive(&self, message: &[u8]) -> Result<Staged<'_, K, ReceivedMessage>, MlsError> {
-        self.receive_at(message, None)
-    }
-
-    /// [`Self::receive`] with the orderer-signed `accepted_at` every lease check of a received
-    /// commit uses.
-    ///
-    /// # Errors
-    /// As [`Self::receive`].
-    pub fn receive_at(
-        &self,
-        message: &[u8],
-        accepted_at: Option<u64>,
-    ) -> Result<Staged<'_, K, ReceivedMessage>, MlsError> {
         let protocol = match parse_message(message, MAX_MLS_MESSAGE_BYTES)?.extract() {
             MlsMessageBodyIn::PrivateMessage(private) => ProtocolMessage::from(private),
             MlsMessageBodyIn::PublicMessage(_) => {
@@ -727,8 +713,24 @@ impl<K: MlsKv> Mls<K> {
         let group_id = protocol.group_id().to_vec();
         let op = self.begin()?;
         let mut loaded = Self::load(&op, &group_id)?;
-        let received = op.gate(loaded.kind).process(&mut loaded.group, protocol, accepted_at)?;
+        let received = op.gate(loaded.kind).process(&mut loaded.group, protocol)?;
         op.finish(received)
+    }
+
+    /// Directory-path freshness of the member at `leaf` (rule V: local knowledge, may read the
+    /// clock): the sender's pre-seal check of its own leaf and the receiver's check of an
+    /// application message's sender. Never used to accept or reject a received commit or Welcome.
+    ///
+    /// # Errors
+    /// `not_found`, `authority_needed`, `credential_rejected` (revoked, lease, key mismatch).
+    pub fn check_leaf_directory(
+        &self,
+        group_id: &[u8],
+        leaf: u32,
+    ) -> Result<MemberIdentity, MlsError> {
+        let op = self.begin()?;
+        let loaded = Self::load(&op, group_id)?;
+        op.gate(loaded.kind).check_leaf_directory(&loaded.group, LeafNodeIndex::new(leaf))
     }
 
     /// Rotate the own leaf keys with an update commit (merged at once).
@@ -739,7 +741,7 @@ impl<K: MlsKv> Mls<K> {
         self.own_commit(group_id, OwnOp::Update, CommitMeta::default())
     }
 
-    /// [`Self::update`] with the commit authenticated data and the commit time.
+    /// [`Self::update`] with the commit authenticated data.
     ///
     /// # Errors
     /// As [`Self::update`].
@@ -771,8 +773,7 @@ impl<K: MlsKv> Mls<K> {
         self.own_commit(group_id, OwnOp::Remove(leaf), CommitMeta::default())
     }
 
-    /// [`Self::remove`] with the commit authenticated data (the removal proof) and the commit
-    /// time.
+    /// [`Self::remove`] with the commit authenticated data.
     ///
     /// # Errors
     /// As [`Self::remove`].

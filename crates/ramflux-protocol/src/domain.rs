@@ -204,13 +204,22 @@ pub const MLS_LEAF_CERT_V1: &str = "rf-mls-leaf-v1";
 /// MLS leaf certificate tag v2: the device signing key signs
 /// `tag || u16 suite || leaf signature key || anchor || device_id || u64 device_epoch`.
 pub const MLS_LEAF_CERT_V2: &str = "rf-mls-leaf-v2";
-/// MLS rejoin tag: the device signing key signs
-/// `tag || group_id || kp_hash || u64 epoch || u64 issued_at`.
-pub const MLS_REJOIN_V1: &str = "rf-mls-rejoin-v1";
 /// MLS self-conversation scope tag: `blake3(tag || anchor)` is the self conversation id.
 pub const MLS_SELF_SCOPE_V1: &str = "rf-mls-self-scope-v1";
+/// MLS group id derivation tag (domain-separates group ids from other hashes).
+pub const MLS_GROUP_ID_V1: &str = "rf-mls-group-id-v1";
+/// Federation `dm.order` request signature tag.
+pub const FEDERATION_DM_ORDER_V1: &str = "ramflux.federation_dm_order.v1";
+/// Large-group commit authenticated-data (`rf-lg-aad-v1`) tag.
+pub const LG_AAD_V1: &str = "rf-lg-aad-v1";
+/// Large-group join (`rf-lg-join-v1`) tag.
+pub const LG_JOIN_V1: &str = "rf-lg-join-v1";
+/// Large-group commit election (`rf-lg-elect-v1`) rank tag.
+pub const LG_ELECT_V1: &str = "rf-lg-elect-v1";
+/// Large-group session open (`rf-lg-open-v1`) tag.
+pub const LG_OPEN_V1: &str = "rf-lg-open-v1";
 
-pub const ALL: [&str; 171] = [
+pub const ALL: [&str; 176] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -380,8 +389,13 @@ pub const ALL: [&str; 171] = [
     NOTIFICATION_DEVICE_COLLAPSE_V1,
     MLS_LEAF_CERT_V1,
     MLS_LEAF_CERT_V2,
-    MLS_REJOIN_V1,
     MLS_SELF_SCOPE_V1,
+    MLS_GROUP_ID_V1,
+    FEDERATION_DM_ORDER_V1,
+    LG_AAD_V1,
+    LG_JOIN_V1,
+    LG_ELECT_V1,
+    LG_OPEN_V1,
 ];
 
 pub const USERNAME_BINDING: &str = "ramflux.identity.username_binding.v1";

@@ -93,6 +93,8 @@ pub use inbox_page::{
 };
 mod lifecycle;
 mod mesh_identity;
+#[allow(dead_code, reason = "MLS: allowance removed in D1")]
+mod mls_header;
 mod mvp1_registry;
 mod registration_receipts;
 mod router_identity_authority;

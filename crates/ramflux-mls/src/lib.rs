@@ -9,9 +9,9 @@
 //!   [`RfMlsProvider`] (crypto plus the overlay storage).
 //! * `storage`: the 74-method storage surface over a caller-supplied [`MlsKv`], with an in-memory
 //!   overlay that reaches the database only through [`Staged::commit`] (one transaction).
-//! * `credential`: the two private-use credential types (`0xF0D1` device v2, `0xF0D2` pseudonym),
-//!   the (credential, leaf signature key) pair verification, the directory-path
-//!   [`DeviceAuthority`] and the pure removal-proof checks (`credential::authority`).
+//! * `credential`: the two private-use credential types (`0xF0D1` device v2 with its pure V1
+//!   device chain, `0xF0D2` pseudonym), the (credential, leaf signature key) pair verification
+//!   and the directory-path [`DeviceAuthority`] (`credential::authority`).
 //! * `group`: group configuration, the facade and the single gate that owns every merge.
 //!
 //! Suite: only `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` (0x0001). The provider also accepts
@@ -22,9 +22,9 @@
 //! the not-yet-used message keys of up to three epochs (RFC 9420 sections 15.3 and 16.6). Higher
 //! layers may lower the number.
 //!
-//! Leaf lifetime: a leaf that entered through a `KeyPackage` (every creator and every member that
-//! never updated) carries that `KeyPackage`'s 30 day lifetime, and a joiner verifies lifetimes, so a
-//! group must be refreshed by update commits before a leaf expires.
+//! Leaf lifetime (rule V, no clock in commit validity): received commits and Welcomes are
+//! processed with the openmls leaf-node lifetime validation skipped; only the device that adds a
+//! `KeyPackage` checks its 30 day lifetime, locally, when it fetches or uses it.
 
 pub mod credential;
 mod error;
@@ -37,7 +37,7 @@ pub mod storage;
 #[cfg(feature = "itest-mls-debug")]
 pub mod debug;
 
-pub use credential::authority::{DeviceAuthority, NoAuthority, VerifiedRecord, verify_record};
+pub use credential::authority::{DeviceAuthority, NoAuthority, VerifiedRecord};
 pub use credential::{DeviceCertSigner, DeviceIdentity, GroupKind, MemberIdentity, VerifiedMember};
 pub use error::MlsError;
 pub use group::context::{CommitCtx, CommitMeta, WelcomeCtx};

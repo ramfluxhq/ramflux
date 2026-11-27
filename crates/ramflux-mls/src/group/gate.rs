@@ -6,18 +6,20 @@
 //!
 //! Every decision is made on (credential, leaf signature key) pairs, never on a credential alone.
 //! Check order, so rejections are unambiguous: input size (before parsing, in the facade), suite,
-//! credential type against the group kind, the pair plus the device-set authority, successor and
-//! one-leaf-per-device, proposal and sender allowlist, kind limits, then [`CommitPolicy`] and
-//! [`RosterPolicy`]. A rejected commit, Welcome or proposal is discarded: nothing is flushed and
-//! the epoch stays.
+//! credential type against the group kind, the pair (pure V1 device chain only: received commits
+//! and Welcomes read no clock and no directory, and openmls leaf-node lifetime validation is
+//! skipped), successor and one-leaf-per-device, proposal and sender allowlist, kind limits, then
+//! [`CommitPolicy`] and [`RosterPolicy`]. The directory-path freshness check runs only where rule
+//! V allows it: the adding device's own `KeyPackage` check and [`Gate::check_leaf_directory`].
+//! A rejected commit, Welcome or proposal is discarded: nothing is flushed and the epoch stays.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use openmls::prelude::Extensions;
 use openmls::prelude::{
-    CredentialType, KeyPackage, LeafNodeIndex, LeafNodeParameters, Member, MlsGroup, MlsMessageOut,
-    ProcessMessageError, ProcessedMessageContent, ProtocolMessage, Sender, StagedCommit,
-    StagedWelcome, ValidationError, Welcome,
+    CredentialType, KeyPackage, LeafNodeIndex, LeafNodeLifetimePolicy, LeafNodeParameters, Member,
+    MlsGroup, MlsMessageOut, ProcessMessageError, ProcessedMessageContent, ProtocolMessage, Sender,
+    StagedCommit, StagedWelcome, ValidationError, Welcome,
 };
 use openmls_traits::OpenMlsProvider as _;
 use zeroize::Zeroizing;
@@ -84,12 +86,37 @@ pub(crate) fn leaf_count(group: &MlsGroup) -> usize {
 }
 
 impl<'k, K: MlsKv> Gate<'_, 'k, K> {
+    /// Pure pair check (V1): no clock, no directory. Used for every received commit and Welcome.
     fn verify(
         &self,
         credential: &openmls::prelude::Credential,
         signature_key: &[u8],
     ) -> Result<MemberIdentity, MlsError> {
-        self.creds.verify_pair(self.authority, self.kind, credential, signature_key)
+        self.creds.verify_pair(None, self.kind, credential, signature_key)
+    }
+
+    /// Pair check plus the directory path (clock, lease, revocation): local freshness only.
+    fn verify_directory(
+        &self,
+        credential: &openmls::prelude::Credential,
+        signature_key: &[u8],
+    ) -> Result<MemberIdentity, MlsError> {
+        self.creds.verify_pair(Some(self.authority), self.kind, credential, signature_key)
+    }
+
+    /// Directory-path freshness of the member at `index` (the sender's pre-seal check on its own
+    /// leaf, the receiver's check of an application message's sender).
+    pub(crate) fn check_leaf_directory(
+        &self,
+        group: &MlsGroup,
+        index: LeafNodeIndex,
+    ) -> Result<MemberIdentity, MlsError> {
+        let member = group.member_at(index).ok_or_else(|| MlsError::NotFound("leaf".to_owned()))?;
+        let mut identity = self.verify_directory(&member.credential, &member.signature_key)?;
+        if let MemberIdentity::Device(device) = &mut identity {
+            device.leaf_index = Some(member.index.u32());
+        }
+        Ok(identity)
     }
 
     fn describe(&self, member: &Member) -> Result<MemberIdentity, MlsError> {
@@ -111,16 +138,23 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         self.describe(&member)
     }
 
-    /// (a) A `KeyPackage` before it may be added: suite, credential type and pair.
+    /// (a) A `KeyPackage` before it may be added: suite, credential type and pair. `directory`
+    /// adds the directory path (the adding device's own check before it commits); a received
+    /// commit passes `false` (V1 only).
     pub(crate) fn check_key_package(
         &self,
         key_package: &KeyPackage,
+        directory: bool,
     ) -> Result<MemberIdentity, MlsError> {
         if key_package.ciphersuite() != MLS_SUITE {
             return Err(policy("key package ciphersuite is not 0x0001"));
         }
         let leaf = key_package.leaf_node();
-        let mut identity = self.verify(leaf.credential(), leaf.signature_key().as_slice())?;
+        let mut identity = if directory {
+            self.verify_directory(leaf.credential(), leaf.signature_key().as_slice())?
+        } else {
+            self.verify(leaf.credential(), leaf.signature_key().as_slice())?
+        };
         if let MemberIdentity::Device(device) = &mut identity {
             let hash = key_package.hash_ref(self.provider.crypto()).map_err(MlsError::mls)?;
             device.kp_hash = hash.as_slice().try_into().ok();
@@ -154,7 +188,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
 
         let mut added = Vec::new();
         for add in staged.add_proposals() {
-            added.push(self.check_key_package(add.add_proposal().key_package())?);
+            added.push(self.check_key_package(add.add_proposal().key_package(), false)?);
         }
         let mut replaced: BTreeMap<u32, MemberIdentity> = BTreeMap::new();
         for update in staged.update_proposals() {
@@ -296,12 +330,8 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
                 .pending_commit()
                 .ok_or_else(|| MlsError::internal("no pending commit to merge"))?;
             let group_id = group.group_id().to_vec();
-            let ctx = CommitCtx {
-                group_id: &group_id,
-                epoch: group.epoch().as_u64(),
-                accepted_at: meta.accepted_at,
-                meta: meta.aad,
-            };
+            let ctx =
+                CommitCtx { group_id: &group_id, epoch: group.epoch().as_u64(), meta: meta.aad };
             self.check_commit(group, pending, own, leaf_cap, &ctx)?;
         }
         group.merge_pending_commit(self.provider).map_err(MlsError::mls)
@@ -324,17 +354,13 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         }
         let own = self.describe_at(group, group.own_leaf_index())?;
         {
-            // Pre-check each KeyPackage on its own; the staged commit is judged as a whole in
-            // `merge_own` (the proof entries are checked there, against the whole delta).
+            // Pre-check each KeyPackage on its own (the adding device's directory path); the
+            // staged commit is judged as a whole in `merge_own` (V1 only).
             let group_id = group.group_id().to_vec();
-            let ctx = CommitCtx {
-                group_id: &group_id,
-                epoch: group.epoch().as_u64(),
-                accepted_at: meta.accepted_at,
-                meta: meta.aad,
-            };
+            let ctx =
+                CommitCtx { group_id: &group_id, epoch: group.epoch().as_u64(), meta: meta.aad };
             for key_package in key_packages {
-                let added = self.check_key_package(key_package)?;
+                let added = self.check_key_package(key_package, true)?;
                 self.commit_policy.may_add(&ctx, &own, &added)?;
             }
         }
@@ -399,12 +425,15 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         welcome: Welcome,
         expected: Option<&ExpectedPrincipals>,
     ) -> Result<JoinedGroup, MlsError> {
-        let staged = StagedWelcome::new_from_welcome(
+        // Rule V (W2): leaf-node lifetime validation is skipped; members are checked by V1 only.
+        let staged = StagedWelcome::build_from_welcome(
             self.provider,
             &config::join_config(self.kind),
             welcome,
-            None,
         )
+        .map_err(MlsError::mls)?
+        .skip_lifetime_validation()
+        .build()
         .map_err(MlsError::mls)?;
         let context = staged.group_context();
         if context.ciphersuite() != MLS_SUITE {
@@ -472,12 +501,18 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         &self,
         group: &mut MlsGroup,
         message: ProtocolMessage,
-        accepted_at: Option<u64>,
     ) -> Result<ReceivedMessage, MlsError> {
         if group.ciphersuite() != MLS_SUITE {
             return Err(policy("group ciphersuite is not 0x0001"));
         }
-        let processed = group.process_message(self.provider, message).map_err(map_process_error)?;
+        // Rule V (W1): no wall clock in commit validity, so the lifetime check is skipped.
+        let processed = group
+            .process_message_with_lifetime_policy(
+                self.provider,
+                message,
+                LeafNodeLifetimePolicy::Skip,
+            )
+            .map_err(map_process_error)?;
         let sender = check_sender(processed.sender())?;
         let epoch = processed.epoch().as_u64();
         let aad = processed.aad().to_vec();
@@ -500,7 +535,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
             }
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 let group_id = group.group_id().to_vec();
-                let ctx = CommitCtx { group_id: &group_id, epoch, accepted_at, meta: &aad };
+                let ctx = CommitCtx { group_id: &group_id, epoch, meta: &aad };
                 self.check_commit(group, &staged, sender, ABSOLUTE_LEAF_CAP, &ctx)?;
                 let removed = staged.self_removed();
                 group.merge_staged_commit(self.provider, *staged).map_err(MlsError::mls)?;
