@@ -18,6 +18,7 @@ pub(crate) mod conversation_journal;
 pub(crate) mod conversation_mutation;
 pub(in crate::bus) mod conversation_send;
 pub mod daemon;
+pub(crate) mod debug_mls;
 pub(crate) mod deferred_attachment;
 pub mod device;
 pub mod grant_mcp;

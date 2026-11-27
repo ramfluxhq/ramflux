@@ -322,6 +322,7 @@ pub(super) fn requires_key_export(name: &str) -> bool {
 pub(super) fn allowed(name: &str) -> bool {
     !DENIED_METHODS.contains(&name)
         && !name.contains("itest")
+        && !name.starts_with("debug.mls.")
         && METHOD_POLICIES.iter().any(|row| row.name == name)
 }
 

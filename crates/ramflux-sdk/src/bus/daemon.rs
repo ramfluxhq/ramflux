@@ -368,6 +368,9 @@ async fn dispatch_routed_request(
         "itest.agent.approve_once" => {
             crate::bus::dispatch::itest_agent::approve_once(request, state)
         }
+        method if method.starts_with("debug.mls.") => {
+            crate::bus::dispatch::debug_mls::dispatch(request, state)
+        }
         "username.mutate"
         | "username.status"
         | "username.resolve"

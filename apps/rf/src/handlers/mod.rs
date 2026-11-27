@@ -17,6 +17,8 @@ pub(crate) mod centre;
 pub(crate) mod contact;
 pub(crate) mod conversation_ops;
 pub(crate) mod daemon;
+#[cfg(feature = "itest-mls-debug")]
+pub(crate) mod debug;
 pub(crate) mod device;
 pub(crate) mod diag;
 pub(crate) mod dm;

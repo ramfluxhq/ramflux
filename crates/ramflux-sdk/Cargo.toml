@@ -17,6 +17,9 @@ http-connect-proxy = ["ramflux-transport/http-connect-proxy"]
 default = []
 # Integration fixture only; production provenance forbids this feature.
 itest-memory-vault = []
+# MLS-0c: hidden `debug.mls.*` bus methods (scratch store, tamper builders, pinned roster, bulk
+# members). Never enabled by production builds (scripts/check-production-features.py).
+itest-mls-debug = ["ramflux-mls/itest-mls-debug"]
 test-support = []
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = []

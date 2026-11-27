@@ -422,6 +422,7 @@ pub(super) fn register_test_client(client: Arc<Client>) -> u64 {
 
 fn reject_request_shape(request: &Request) -> Result<(), CAbiError> {
     if request.method.contains("itest")
+        || request.method.starts_with("debug.")
         || request.method.is_empty()
         || request.method.len() > 128
         || request.sdk_api.len() > 128

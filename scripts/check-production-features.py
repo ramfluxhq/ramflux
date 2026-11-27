@@ -18,9 +18,13 @@ def check(metadata):
     if not nodes:
         raise ValueError("production graph has no resolved SDK node")
     for node in nodes:
-        for feature in ("itest-memory-vault", "test-support"):
+        for feature in ("itest-memory-vault", "test-support", "itest-mls-debug"):
             if feature in node["features"]:
                 raise ValueError(f"production graph enables forbidden SDK {feature}")
+    for node in metadata["resolve"]["nodes"]:
+        if node["id"].split("#")[-1].startswith("ramflux-mls") or "ramflux-mls" in node["id"]:
+            if "itest-mls-debug" in node["features"]:
+                raise ValueError("production graph enables forbidden ramflux-mls itest-mls-debug")
 
 
 def check_tree(graph):
@@ -32,7 +36,8 @@ def check_tree(graph):
         # cargo tree puts optional source paths before the feature list.
         features = set(fields[-1].split(","))
         forbidden = {
-            "ramflux-sdk": ("itest-memory-vault", "test-support"),
+            "ramflux-sdk": ("itest-memory-vault", "test-support", "itest-mls-debug"),
+            "ramflux-mls": ("itest-mls-debug",),
             "ramflux-node-core": ("durability-test-hooks", "itest-http"),
             "ramflux-gateway": ("itest-http",),
             "ramflux-storage": ("durability-test-hooks",),
@@ -148,6 +153,12 @@ def main():
     ):
         if guard not in sdk_root:
             raise ValueError(f"memory-vault build guard absent: {guard}")
+    for guard in (
+        'all(feature = "itest-mls-debug", ramflux_production)',
+        'all(feature = "itest-mls-debug", ramflux_release_profile)',
+    ):
+        if guard not in sdk_root:
+            raise ValueError(f"MLS debug build guard absent: {guard}")
     for file in (
         root / "crates/ramflux-sdk/src/bus/dispatch/mod.rs",
         root / "crates/ramflux-sdk/src/bus/daemon.rs",
