@@ -22,30 +22,6 @@ pub(super) fn attach_conversation(
     Ok(())
 }
 
-pub(super) fn attach_group(client: &RamfluxClient, group: &mut Value) -> Result<(), SdkError> {
-    let members = group.get("members").and_then(Value::as_array).map_or(0, Vec::len);
-    group["member_count"] = json!(u64::try_from(members).unwrap_or(u64::MAX));
-    let title = group.get("name").filter(|name| name.is_string()).cloned().unwrap_or(Value::Null);
-    let conversation = group.get("conversation_id").and_then(Value::as_str);
-    let (last_activity, row_preview) = match conversation {
-        Some(conversation) => group_activity(client, conversation)?,
-        None => (Value::Null, Value::Null),
-    };
-    group["summary"] = json!({
-        "title": title,
-        "last_activity": last_activity,
-        "preview": row_preview,
-    });
-    Ok(())
-}
-
-fn group_activity(client: &RamfluxClient, conversation: &str) -> Result<(Value, Value), SdkError> {
-    let viewer = client.read_device_identity()?;
-    let meta = client.account_db()?.client_conversation_metadata(conversation, viewer.as_ref())?;
-    let activity = meta.get("last_activity").cloned().unwrap_or(Value::Null);
-    Ok((activity, preview(client, conversation)?))
-}
-
 /// Avatar kind. Closed values are `person`, `group` and `agent`.
 /// The stored `kind` field stays `direct` or `group`.
 fn peer_kind(client: &RamfluxClient, row: &Value) -> Result<String, SdkError> {

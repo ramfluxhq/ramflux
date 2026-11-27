@@ -5,11 +5,10 @@
 
 use crate::prelude::{
     LocalBusContactSafetyRequest, LocalBusConversationRequest, LocalBusDaemonState,
-    LocalBusDeviceListResponse, LocalBusFrame, LocalBusGroupRequest,
-    LocalBusMessageFrankingEvidenceRequest, LocalBusObjectGetStatusRequest,
-    LocalBusObjectPutStatusRequest, LocalBusObjectTransferStatusRequest, LocalMcpAuditRecord,
-    RamfluxClient, SdkError, local_bus_account, local_bus_account_manifest_path,
-    read_local_bus_account_manifest,
+    LocalBusDeviceListResponse, LocalBusFrame, LocalBusMessageFrankingEvidenceRequest,
+    LocalBusObjectGetStatusRequest, LocalBusObjectPutStatusRequest,
+    LocalBusObjectTransferStatusRequest, LocalMcpAuditRecord, RamfluxClient, SdkError,
+    local_bus_account, local_bus_account_manifest_path, read_local_bus_account_manifest,
 };
 use serde_json::{Value, json};
 use std::{
@@ -135,16 +134,6 @@ pub(super) fn read(
             let body: LocalBusConversationRequest = serde_json::from_value(request.body.clone())?;
             json!({"rejected":client.rejected_inbox(&body.conversation_id)?})
         }
-        "group.history" => super::super::dispatch::group::history::read(client, request)?,
-        "group.members" => {
-            let body: LocalBusGroupRequest = serde_json::from_value(request.body.clone())?;
-            match client.shared_group_metadata(&body.group_id)? {
-                Some(metadata) => metadata,
-                None => serde_json::to_value(client.group_state(&body.group_id)?)?,
-            }
-        }
-        "group.requests.list" => client.group_change_statuses(request.body["group_id"].as_str())?,
-        "group.invitations.list" => client.group_invitations()?,
         "object.list" => {
             super::super::dispatch::object::object_list_response(request, client)?.response_body
         }

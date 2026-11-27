@@ -184,21 +184,6 @@ fn pending_refresh_is_bounded_and_deduplicated() {
 #[tokio::test]
 async fn eligibility_storage_reads_are_independent_of_pending_root_count() -> TestResult {
     let native = Fixture::new("eligibility-reads").await?;
-    let primary = native
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("native")?
-        .group_primary(native.vault.as_ref())?;
-    for index in 0..4 {
-        native.client.shared_group_create_with_primary(
-            &format!("group-{index}"),
-            &format!("thread-{index}"),
-            None,
-            &native.config.target_delivery_id,
-            Some(&primary),
-        )?;
-    }
     for index in 0..32 {
         native.client.establish_friend_link(
             &format!("link-{index}"),
@@ -220,7 +205,7 @@ async fn eligibility_storage_reads_are_independent_of_pending_root_count() -> Te
     let plan = prepare(&mut account, requested.clone())?.ok_or("small plan")?;
     let small = probe.snapshot().read_statements;
     assert!(small > 0, "counter must observe real roster reads");
-    assert!(small <= 2 + 5 * 4 + 4, "contact, group, and four pinned-origin reads: {small}");
+    assert!(small <= 2 + 5 * 4 + 4, "contact and four pinned-origin reads: {small}");
     drop(plan);
     for index in 0..MAX_PENDING - 1 {
         assert!(account.head_refresh.enqueue(format!("absent-{index:04}")));

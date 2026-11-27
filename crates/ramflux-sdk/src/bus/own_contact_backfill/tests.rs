@@ -9,8 +9,7 @@ use std::sync::Arc;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 #[tokio::test]
-async fn slow_own_manifest_refresh_persists_sibling_and_expands_group_without_epoch_change()
--> TestResult {
+async fn slow_own_manifest_refresh_persists_sibling() -> TestResult {
     use crate::client::native_test_support::{
         Fixture as Native, activation_send::tests::publish_layer_four, bus,
     };
@@ -37,12 +36,6 @@ async fn slow_own_manifest_refresh_persists_sibling_and_expands_group_without_ep
         Some(value) => db.persist_actor_state(&manifest_key, value)?,
         None => db.remove_actor_state(&manifest_key)?,
     }
-    let sibling_member = sibling.client.owned_device_identity()?.device_id().to_owned();
-    let own_member = owner.client.owned_device_identity()?.device_id().to_owned();
-    owner.client.fixture_group_create("group", "thread", None, "device-owner")?;
-    let before = owner.client.group_state("group")?;
-    assert_eq!(before.members.len(), 1);
-    assert!(before.members.contains(&own_member));
     let expected_root = updated.principal_commitment.clone();
     let (config, server) = slow_directory(&root, owner.gateway_config.clone(), updated).await?;
     owner.engine = None;
@@ -67,10 +60,6 @@ async fn slow_own_manifest_refresh_persists_sibling_and_expands_group_without_ep
         .load_actor_state(&format!("identity/manifest-root/{expected_root}"))?
         .ok_or("manifest was not persisted")?;
     assert_eq!(persisted.devices.len(), 2);
-    let group = owner.client.group_state("group")?;
-    assert_eq!(group.group_epoch, 1);
-    assert!(group.members.contains(&sibling_member));
-    assert_eq!(group.members.len(), 2);
     drop((owner, sibling));
     Ok(())
 }

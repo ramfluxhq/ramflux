@@ -194,7 +194,6 @@ crates/ramflux-sdk/src/bus/readers/local.rs | read | 1 | E | excluded=target typ
 crates/ramflux-sdk/src/bus/readers/local.rs | read | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/readers/local.rs | read | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/readers/local.rs | read | 4 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/readers/local.rs | read | 5 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/readers/local.rs | upload_status | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/readers/local.rs | verification | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/recovery.rs | apply | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

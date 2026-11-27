@@ -63,7 +63,6 @@ fn empty_directories_and_self_identity_are_readable() -> Result<(), SdkError> {
     for (method, field) in [
         ("conversation.directory", "conversations"),
         ("object.directory", "objects"),
-        ("group.list", "groups"),
         ("mcp.server.list", "servers"),
         ("mcp.approval.list", "approvals"),
     ] {
@@ -77,24 +76,14 @@ fn empty_directories_and_self_identity_are_readable() -> Result<(), SdkError> {
 }
 
 #[test]
-fn direct_and_distinct_group_conversation_ids_join_public_routes() -> Result<(), SdkError> {
+fn direct_conversation_joins_public_routes() -> Result<(), SdkError> {
     let f = Fixture::new()?;
     let db = f.client.account_db()?;
     db.send_direct_message("dm", "message", "alice-phone", b"secret-payload")?;
     db.persist_client_record("conversation","dm",&json!({"kind":"direct","title":"Bob","participants":["alice","bob"],"direct_route":{"recipient_principal_commitment":commitment("bob"),"recipient_device_ids":["bob-phone","bob-laptop"],"target_delivery_id":"deliver-bob"}}))?;
-    f.client.create_group("group", "alice-phone")?;
-    db.persist_client_record("group", "group", &json!({"conversation_id":"group-thread"}))?;
-    db.persist_client_record(
-        "conversation",
-        "group-thread",
-        &json!({"kind":"group","group_id":"group","participants":["alice","bob"]}),
-    )?;
     let value = f.read("conversation.directory", json!({}))?;
     assert_eq!(value["conversations"][0]["direct_route"]["target_delivery_id"], "deliver-bob");
     assert_eq!(value["conversations"][0]["self_principal_id"], "alice");
-    assert_eq!(value["conversations"][1]["id"], "group-thread");
-    assert_eq!(value["conversations"][1]["group_id"], "group");
-    assert_eq!(f.read("group.list", json!({}))?["groups"][0]["conversation_id"], "group-thread");
     assert!(!serde_json::to_string(&value)?.contains("secret-payload"));
     Ok(())
 }
@@ -263,22 +252,6 @@ fn identity_directory_exposes_manual_pair_recovery_without_private_state() -> Re
 }
 
 #[test]
-fn pinned_member_safety_changes_are_visible_in_group_list() -> Result<(), SdkError> {
-    let f = Fixture::new()?;
-    f.client.create_group("group", "alice-phone")?;
-    let change =
-        json!({"state":"key_changed","device_id":"bob","reason":"pinned_group_member_key_changed"});
-    f.client.account_db()?.persist_client_record(
-        "group",
-        "group",
-        &json!({"safety_change":change}),
-    )?;
-    let row = f.read("group.list", json!({}))?;
-    assert_eq!(row["groups"][0]["safety_change"], change);
-    Ok(())
-}
-
-#[test]
 fn ambiguous_legacy_sender_names_do_not_block_directory_reads_or_select_a_root()
 -> Result<(), SdkError> {
     let f = Fixture::new()?;
@@ -293,16 +266,6 @@ fn ambiguous_legacy_sender_names_do_not_block_directory_reads_or_select_a_root()
     db.send_direct_message("legacy", "message", "shared", b"stored history")?;
     let rows = f.read("conversation.directory", json!({}))?;
     assert_eq!(rows["conversations"][0]["participants"], json!(["alice"]));
-    f.client.create_group("unresolved", "alice-phone")?;
-    // Historical memberships can predate root-bound pins. Display them as unresolved.
-    db.add_group_member("unresolved", "shared", "member")?;
-    let group = f.client.group_device_metadata("unresolved", "shared")?;
-    assert!(group.is_none());
-    assert!(
-        crate::bus::group_delivery::directory(&f.client, "unresolved")?
-            .iter()
-            .any(|route| route["member_id"] == "shared" && route["delivery_target_known"] == false)
-    );
     Ok(())
 }
 
@@ -316,86 +279,4 @@ fn historical_sender_with_only_a_foreign_live_name_stays_unattributed() -> Resul
     let rows = f.read("conversation.directory", json!({}))?;
     assert_eq!(rows["conversations"][0]["participants"], json!(["alice"]));
     Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn r5_paginated_and_legacy_group_lists_expose_the_current_signed_name() -> Result<(), SdkError>
-{
-    use crate::client::native_test_support::Fixture as Native;
-    let owner = Box::pin(Native::with_device("owner", "owner-phone"))
-        .await
-        .map_err(|error| invalid(&error.to_string()))?
-        .into_bus();
-    let peer = Box::pin(Native::with_device("peer", "peer-phone"))
-        .await
-        .map_err(|error| invalid(&error.to_string()))?
-        .into_bus();
-    for holder in [&owner, &peer] {
-        for source in [&owner, &peer] {
-            holder.client.persist_observed_identity_directory_now(&native_manifest(source)?)?;
-        }
-    }
-    peer.client.establish_friend_link(
-        "owner-contact",
-        &peer.client.own_account_anchor()?,
-        &owner.client.own_account_anchor()?,
-    )?;
-    owner.client.fixture_group_create(
-        "g",
-        "group-thread",
-        Some("Initial".into()),
-        "owner-phone",
-    )?;
-    let initial = owner.client.fixture_group_change(
-        "g",
-        "owner-phone",
-        ramflux_protocol::GroupStateChange::Add {
-            member: peer.client.fixture_group_actor("peer-phone")?.identity,
-            role: ramflux_protocol::SharedGroupRole::Member,
-        },
-    )?;
-    peer.client.fixture_accept_group_state(&initial, "peer-phone")?;
-    let state = owner.client.fixture_group_change(
-        "g",
-        "owner-phone",
-        ramflux_protocol::GroupStateChange::SetName { name: "Reviewed checklist".into() },
-    )?;
-    peer.client.fixture_accept_group_state(&state, "peer-phone")?;
-    for client in [&owner.client, &peer.client] {
-        for body in [json!({}), json!({"limit":1})] {
-            let listed = read(
-                client,
-                &LocalBusFrame::request("read", Some("acct".into()), "client", "group.list", body),
-            )?;
-            assert_eq!(listed["groups"][0]["name"], "Reviewed checklist");
-            assert_eq!(listed["groups"][0]["name_epoch"], state.view().name_epoch);
-        }
-        let directory = read(
-            client,
-            &LocalBusFrame::request(
-                "read",
-                Some("acct".into()),
-                "client",
-                "conversation.directory",
-                json!({}),
-            ),
-        )?;
-        let row = directory["conversations"]
-            .as_array()
-            .and_then(|rows| rows.iter().find(|row| row["id"] == "group-thread"))
-            .ok_or_else(|| invalid("group conversation absent"))?;
-        assert_eq!(row["title"], "Reviewed checklist");
-    }
-    Ok(())
-}
-/// Manifest that a native fixture account published for itself.
-fn native_manifest(
-    account: &crate::bus::state::LocalBusAccountState,
-) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
-    account
-        .client
-        .native_bus_fixture
-        .as_ref()
-        .map(|material| material.manifest.clone())
-        .ok_or(SdkError::CustodySetupInvalid)
 }

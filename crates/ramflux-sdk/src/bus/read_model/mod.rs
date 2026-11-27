@@ -19,7 +19,6 @@ pub(super) fn handles(method: &str) -> bool {
         "conversation.directory"
             | "identity.directory"
             | "object.directory"
-            | "group.list"
             | "mcp.server.list"
             | "mcp.approval.list"
     )
@@ -40,12 +39,11 @@ fn read_inner(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Value, 
         "conversation.directory" => ("conversation", "conversations"),
         "identity.directory" => ("identity", "identities"),
         "object.directory" => ("object", "objects"),
-        "group.list" => ("group", "groups"),
         "mcp.server.list" => ("server", "server_details"),
         "mcp.approval.list" => ("approval", "approvals"),
         _ => return Err(invalid("unsupported directory")),
     };
-    if matches!(directory, "group" | "server" | "approval")
+    if matches!(directory, "server" | "approval")
         && request.body.get("cursor").is_none()
         && request.body.get("limit").is_none()
     {
@@ -67,16 +65,11 @@ fn read_inner(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Value, 
     let mut next = None;
     let mut budget = budget::Budget::new(request, field, 512 * 1024, 4096)?;
     for id in ids.iter().take(limit as usize) {
-        if directory == "group" && !client.local_device_is_shared_member(id)? {
-            continue;
-        }
         let row = rows::row(client, directory, id)?;
         if !budget.admit(&row)? {
             let Some(last) = result
                 .last()
-                .and_then(|row| {
-                    row.get("id").or_else(|| row.get("group_id")).or_else(|| row.get("approval_id"))
-                })
+                .and_then(|row| row.get("id").or_else(|| row.get("approval_id")))
                 .and_then(Value::as_str)
             else {
                 return Err(invalid("directory row exceeds response budget"));
@@ -177,8 +170,6 @@ fn legacy_list(
         for id in &ids {
             let row = if directory == "approval" && id.starts_with("task_approval_") {
                 client.task_remote_approval_by_id(id)?
-            } else if directory == "group" && !client.local_device_is_shared_member(id)? {
-                None
             } else {
                 Some(rows::row(client, directory, id)?)
             };

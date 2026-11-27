@@ -29,13 +29,7 @@ pub(crate) fn project(
                 enrich_message_origin(client, conversation, message, &mut row)?;
                 let route = client.routed_message_metadata(message)?;
                 let topic = if entry.change_kind == "insert" && route.is_some() {
-                    if route.as_ref().is_some_and(|route| {
-                        route.kind == crate::client::routed::Kind::GroupMessage
-                    }) {
-                        "group.message.received"
-                    } else {
-                        "message.received"
-                    }
+                    "message.received"
                 } else {
                     "message.updated"
                 };
@@ -59,19 +53,6 @@ pub(crate) fn project(
         }
     }
     project_object(client, entry, &mut events);
-    if let Some(group) = field(keys, "group_id")
-        && matches!(
-            entry.table_name.as_str(),
-            "group_projection" | "group_member_projection" | "group_ban_projection"
-        )
-    {
-        events.push((
-            "group.changed".to_owned(),
-            super::super::read_model::row(client, "group", group)
-                .unwrap_or_else(|_| json!({"id":group,"removed":true})),
-            None,
-        ));
-    }
     project_contact(client, entry, &mut events)?;
     if entry.table_name == "runtime_actor_state"
         && let Some(kind) = field(keys, "state_kind")
@@ -145,30 +126,7 @@ fn activity_topic(key: &str) -> Option<&'static str> {
     }
 }
 
-fn group_confirmation(
-    client: &RamfluxClient,
-    encoded: &str,
-    events: &mut Vec<Projection>,
-) -> Result<(), SdkError> {
-    let group = String::from_utf8(
-        ramflux_protocol::decode_base64url(encoded)
-            .map_err(|_| SdkError::InboundRejected("group confirmation key invalid".into()))?,
-    )
-    .map_err(|_| SdkError::InboundRejected("group confirmation key invalid".into()))?;
-    if let Some(metadata) = client.shared_group_metadata(&group)? {
-        events.push(("group.changed".to_owned(), metadata, None));
-    }
-    Ok(())
-}
-
 fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Result<(), SdkError> {
-    if let Some(encoded) = key.strip_prefix(crate::client::shared_group::member_delivery::PREFIX) {
-        return group_confirmation(client, encoded, events);
-    }
-    if let Some(encoded) = key.strip_prefix("group-invitation/") {
-        events.push(("group.invitation".to_owned(), invitation_body(encoded), None));
-        return Ok(());
-    }
     let db = client.account_db()?;
     if let Some(topic) = activity_topic(key)
         && let Some(value) = db.load_actor_state::<Value>(key)?
@@ -204,7 +162,6 @@ fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Res
         ("directory/conversation/", "conversation", "conversation.changed"),
         ("directory/identity/", "identity", "contact.changed"),
         ("directory/object/", "object", "object.changed"),
-        ("directory/group/", "group", "group.changed"),
     ] {
         if let Some(id) = key.strip_prefix(prefix) {
             let row = super::super::read_model::row(client, directory, id)
@@ -259,18 +216,6 @@ fn state(client: &RamfluxClient, key: &str, events: &mut Vec<Projection>) -> Res
         events.push((value.event_type.clone(),json!({"event_id":value.event_id,"source_device_id":value.source_device_id,"target_device_id":value.target_device_id,"action":value.action,"acknowledged":value.acknowledged}),None));
     }
     Ok(())
-}
-
-fn invitation_body(encoded: &str) -> Value {
-    let Ok(bytes) = ramflux_protocol::decode_base64url(encoded) else {
-        return json!({"changed": true});
-    };
-    match String::from_utf8(bytes) {
-        Ok(group_id) if !group_id.is_empty() && group_id.len() <= 256 => {
-            json!({"group_id": group_id})
-        }
-        _ => json!({"changed": true}),
-    }
 }
 
 fn project_object(

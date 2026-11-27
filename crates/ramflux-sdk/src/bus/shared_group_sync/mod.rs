@@ -4,16 +4,15 @@
 //! Shared group mutations and bounded state distribution on the existing account actor.
 #[cfg(test)]
 mod native_tests;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod outbox;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod recovery;
 #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod requests;
 use crate::prelude::*;
-pub(crate) use outbox::background::pass as deliver_pass;
 pub(crate) use outbox::enqueue;
 use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateChange};
-pub(super) use recovery::stage;
-pub(crate) use requests::background::pass as request_pass;
 use serde_json::{Value, json};
 
 fn required<'a>(body: &'a Value, key: &str) -> Result<&'a str, SdkError> {

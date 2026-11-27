@@ -159,14 +159,6 @@ pub(crate) fn eligible_roots(account: &LocalBusAccountState) -> Result<BTreeSet<
             roots.insert(link.target_id);
         }
     }
-    let db = account.client.account_db()?;
-    for group in account.client.groups()? {
-        if let Some(state) = db.shared_group_state(&group.group_id)? {
-            roots.extend(
-                state.view().members.iter().map(|member| member.identity.root_commitment.clone()),
-            );
-        }
-    }
     Ok(roots)
 }
 

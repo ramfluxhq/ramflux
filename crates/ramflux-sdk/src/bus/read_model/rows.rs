@@ -47,7 +47,6 @@ fn row_inner(client: &RamfluxClient, directory: &str, id: &str) -> Result<Value,
             }
             Ok(object)
         }
-        "group" => group_row(client, id, &saved),
         "server" => Ok(
             json!({"id":id,"reachable":saved.get("reachable").cloned().unwrap_or(Value::Null),"last_check":saved.get("last_check").cloned().unwrap_or(Value::Null),"health_source":saved.get("health_source").cloned().unwrap_or(json!("not_checked"))}),
         ),
@@ -70,29 +69,6 @@ fn conversation(
     }
     value["self_principal_id"] = own.get("principal_id").cloned().unwrap_or(Value::Null);
     attach_direct_peer(client, db, &mut value)?;
-    if let Some(group) = value.get("group_id").and_then(Value::as_str) {
-        let routes = super::super::group_delivery::directory(client, group)?;
-        let mut participants = std::collections::BTreeSet::new();
-        if client.born_v3_account.is_some()
-            && let Some(state) = db.shared_group_state(group)?
-        {
-            // Signed historical membership remains display metadata after device revocation.
-            // Current transport authority is resolved separately in the member routes.
-            participants.extend(
-                state.view().members.iter().map(|member| member.identity.principal_id.clone()),
-            );
-        } else {
-            for member in client.group_state(group)?.members {
-                if let Some(peer) = client.group_device_metadata(group, &member)?
-                    && let Some(id) = peer.get("principal_id").and_then(Value::as_str)
-                {
-                    participants.insert(id.to_owned());
-                }
-            }
-        }
-        value["participants"] = json!(participants);
-        value["member_routes"] = json!(routes);
-    }
     if value["participants"].is_null() {
         let mut participants = std::collections::BTreeSet::new();
         if let Some(id) = own.get("principal_id").and_then(Value::as_str) {
@@ -149,23 +125,6 @@ fn attach_direct_peer(
         value["direct_route"] = Value::Null;
     }
     Ok(())
-}
-
-fn group_row(client: &RamfluxClient, id: &str, saved: &Value) -> Result<Value, SdkError> {
-    let mut group = serde_json::to_value(client.group_state(id)?)?;
-    if let Some(state) = client.account_db()?.shared_group_state(id)? {
-        group["name"] = json!(state.view().name);
-        group["name_epoch"] = json!(state.view().name_epoch);
-        group["member_outcomes"] = json!(client.group_member_delivery_outcomes(&state)?);
-    }
-    group["id"] = json!(id);
-    group["safety_changes"] = saved.get("safety_changes").cloned().unwrap_or_else(|| json!([]));
-    group["safety_change"] = saved.get("safety_change").cloned().unwrap_or(Value::Null);
-    group["member_routes"] = json!(super::super::group_delivery::directory(client, id)?);
-    group["conversation_id"] = saved.get("conversation_id").cloned().unwrap_or(Value::Null);
-    group["conversation_ids"] = saved.get("conversation_ids").cloned().unwrap_or_else(|| json!([]));
-    super::list_facts::attach_group(client, &mut group)?;
-    Ok(group)
 }
 
 fn identity(client: &RamfluxClient, id: &str, mut saved: Value) -> Result<Value, SdkError> {

@@ -27,10 +27,6 @@ fn method_table_covers_every_dispatch_arm_and_routes_local_reads()
         collect(&std::fs::read_to_string(bus.join(path))?, &mut methods);
     }
     for method in methods {
-        // `read_model` still names the removed `group.*` methods until P1-f deletes those arms.
-        if method.starts_with("group.") {
-            continue;
-        }
         assert!(classify(&method).is_some(), "unclassified dispatch method: {method}");
     }
     let mut names = BTreeSet::new();

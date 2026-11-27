@@ -97,12 +97,6 @@ impl AccountRuntime {
             return Err(error);
         }
         if roots.is_empty() {
-            if command.request.method == "group.read" {
-                let prepared =
-                    crate::bus::push_receiver::apply_w1::receive_executor_bound(account)?
-                        && account.client.account_db()?.due_inbox_retry_rows(i64::MAX)?.is_empty();
-                let _ = head_refresh::RECEIVE_PREPARED.try_with(|value| value.set(prepared));
-            }
             return Ok(None);
         }
         if Instant::now() >= deadline {

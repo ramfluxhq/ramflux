@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Real routed own/peer DM and group erasure, replay, quarantine and reopen coverage.
+//! Real routed own/peer DM erasure, replay, quarantine and reopen coverage.
 use super::*;
 use crate::bus::sync_driver;
 use crate::client::routed::SendMaterial;
 
 #[tokio::test(flavor = "current_thread")]
-async fn generic_message_copy_scan_covers_own_peer_dm_group_replay_and_restart() -> TestResult {
+async fn generic_message_copy_scan_covers_own_peer_dm_replay_and_restart() -> TestResult {
     for own in [false, true] {
-        for group in [false, true] {
-            Box::pin(case(own, group)).await?;
-        }
+        Box::pin(case(own)).await?;
     }
     Ok(())
 }
@@ -41,29 +39,18 @@ fn own_copy(
     })
 }
 /// What the generated own-sent path needs the enrolled sibling to know about the thread.
-fn seed_sibling(
-    source: &LocalBusAccountState,
-    sibling: &LocalBusAccountState,
-    (a, b, peer): (&Spec, &Spec, &Spec),
-    group: bool,
-) -> TestResult {
-    if group {
-        let state =
-            source.client.account_db()?.shared_group_state("group")?.ok_or("group state")?;
-        sibling.client.accept_shared_group_state(&state, b.identity()?.storage_key())?;
-    } else {
-        // The same direct-thread binding `seed_pair` gives the author and the remote party.
-        sibling.client.account_db()?.persist_client_record(
-            "conversation",
-            &a.conversation(peer)?,
-            &json!({"kind":"direct","group_id":null,"participants":[a.principal,peer.principal],"participant_roots":[a.identity()?.root_commitment(),peer.identity()?.root_commitment()]}),
-        )?;
-    }
+fn seed_sibling(sibling: &LocalBusAccountState, (a, peer): (&Spec, &Spec)) -> TestResult {
+    // The same direct-thread binding `seed_pair` gives the author and the remote party.
+    sibling.client.account_db()?.persist_client_record(
+        "conversation",
+        &a.conversation(peer)?,
+        &json!({"kind":"direct","group_id":null,"participants":[a.principal,peer.principal],"participant_roots":[a.identity()?.root_commitment(),peer.identity()?.root_commitment()]}),
+    )?;
     Ok(())
 }
-async fn case(own: bool, group: bool) -> TestResult {
-    eprintln!("erasure matrix start: own={own} group={group}");
-    let root = runtime_tests::root(&format!("generic-erasure-{own}-{group}"));
+async fn case(own: bool) -> TestResult {
+    eprintln!("erasure matrix start: own={own}");
+    let root = runtime_tests::root(&format!("generic-erasure-{own}"));
     let a = Spec::new(&root, "private-source-principal", 41);
     // The recipient. In the own cases it is a second native device of the author's account.
     let mut b = Spec::new(
@@ -77,11 +64,6 @@ async fn case(own: bool, group: bool) -> TestResult {
     let peer = if own { Spec::new(&root, "recipient-principal", 51) } else { b.clone() };
     let mail: Shared = Arc::new(Mutex::default());
     fixture::seed_pair(&a, &peer)?;
-    if group {
-        let author = a.client(None)?;
-        let member = peer.client(None)?;
-        a.prepare_group(&author, "group", "thread", &[(&peer, &member)])?;
-    }
     let mut source = a.account(None, mail.clone())?;
     let peer_account = peer.account(None, mail.clone())?;
     let merged = if own { Some(b.enroll_sibling_of(&a, &source.client)?) } else { None };
@@ -91,13 +73,11 @@ async fn case(own: bool, group: bool) -> TestResult {
         (peer_account, None)
     };
     if own {
-        seed_sibling(&source, &recipient, (&a, &b, &peer), group)?;
+        seed_sibling(&recipient, (&a, &peer))?;
     }
-    let body = if group { "private-group-content" } else { "private-dm-content" };
-    let conversation = if group { "thread".to_owned() } else { a.conversation(&peer)? };
-    let message = if group {
-        Box::pin(a.send_group_text(&mut source, "group", "kept-projection-id", body)).await?
-    } else {
+    let body = "private-dm-content";
+    let conversation = a.conversation(&peer)?;
+    let message = {
         let mut sender = source.session_client().await?;
         let operation = "kept-projection-id";
         a.send_text(&source.client, &mut sender, a.message(&peer, operation), body.as_bytes())
@@ -107,11 +87,6 @@ async fn case(own: bool, group: bool) -> TestResult {
     let entry = if let Some(merged) = &merged {
         own_copy(&source, &recipient, merged)?
     } else {
-        if group {
-            recipient.client.import_group_sender_key_distribution(
-                &source.client.export_group_sender_key_distribution("group", &a.device)?,
-            )?;
-        }
         mail.lock()
             .map_err(|_| "mailbox")?
             .messages
@@ -149,7 +124,7 @@ async fn case(own: bool, group: bool) -> TestResult {
     assert_eq!(
         recipient.client.account_db()?.direct_message_by_id(&message)?.map(|row| row.is_own),
         Some(own),
-        "own={own} group={group}"
+        "own={own}"
     );
     let erased = Erased {
         spec: &b,
@@ -157,13 +132,13 @@ async fn case(own: bool, group: bool) -> TestResult {
         forbidden: &forbidden,
         identities: &identities,
         message: &message,
-        label: format!("own={own} group={group}"),
+        label: format!("own={own}"),
     };
     Box::pin(replay_erased(&mut recipient, &mut receiver, &pool, &erased)).await?;
     drop(recipient);
     drop(source);
     std::fs::remove_dir_all(root)?;
-    eprintln!("erasure matrix passed: own={own} group={group}");
+    eprintln!("erasure matrix passed: own={own}");
     Ok(())
 }
 

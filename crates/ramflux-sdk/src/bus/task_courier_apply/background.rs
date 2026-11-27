@@ -169,10 +169,7 @@ fn routing_fingerprint(
 ) -> Result<serde_json::Value, SdkError> {
     let db = account.client.account_db()?;
     let thread = db.client_record("conversation", conversation)?;
-    let group = thread.as_ref().and_then(|row| row["group_id"].as_str());
-    let state = group.map(|group| account.client.group_state(group)).transpose()?;
-    let shared = group.map(|group| db.shared_group_state(group)).transpose()?.flatten();
-    Ok(json!({"thread":thread,"group":state,"shared":shared.map(|state|state.snapshot().clone())}))
+    Ok(json!({"thread":thread}))
 }
 fn prepare(
     account: &mut LocalBusAccountState,

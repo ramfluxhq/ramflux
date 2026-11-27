@@ -170,19 +170,6 @@ fn prepare_controls(
         &native.manifest.principal_commitment,
         &peer.manifest.principal_commitment,
     )?;
-    let primary = native
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("native account")?
-        .group_primary(native.vault.as_ref())?;
-    native.client.shared_group_create_with_primary(
-        "busy-group",
-        "busy-thread",
-        None,
-        &native.config.target_delivery_id,
-        Some(&primary),
-    )?;
     for (request, result) in receipts {
         let intent = crate::bus::mutation_intent::MutationIntent::new(&request)?;
         assert!(intent.reserve(native.client.account_db()?)?.is_none());

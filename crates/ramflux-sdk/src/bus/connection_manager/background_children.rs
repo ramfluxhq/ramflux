@@ -45,25 +45,6 @@ pub(super) fn start(
             "call-signaling",
             crate::bus::dispatch::call::signaling_pass,
         );
-        register_courier(
-            handle,
-            &work,
-            "group-requests",
-            crate::bus::shared_group_sync::request_pass,
-        );
-        register_courier(
-            handle,
-            &work,
-            "group-delivery",
-            crate::bus::shared_group_sync::deliver_pass,
-        );
-        register_courier(handle, &work, "group-stage", |_, writer| async move {
-            writer
-                .apply(|account| {
-                    crate::bus::shared_group_sync::stage(account).map(|count| count > 0)
-                })
-                .await
-        });
         let contact_work = work.clone();
         let _ = handle.spawn_session_child("contact-control", move |context| {
             Box::pin(crate::client::contact_requests::run_background(context, contact_work.clone()))

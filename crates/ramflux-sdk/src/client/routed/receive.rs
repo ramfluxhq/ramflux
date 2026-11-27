@@ -250,14 +250,6 @@ impl RamfluxClient {
         apply.await
     }
 
-    #[cfg(test)]
-    pub(crate) fn persist_routed_projection_for_fixture(
-        &self,
-        write: JoinedW1<'_>,
-    ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
-        self.standalone_persist(write)
-    }
-
     fn standalone_persist(
         &self,
         write: JoinedW1<'_>,

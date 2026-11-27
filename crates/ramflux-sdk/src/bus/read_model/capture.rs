@@ -124,7 +124,6 @@ pub(crate) fn capture(
     if request.method == "message.submit" {
         capture_direct_route(db, body)?;
     }
-    capture_group(account, request)?;
     if request.method.starts_with("object.put")
         && let Some(id) = body.get("object_id").and_then(Value::as_str)
     {
@@ -217,71 +216,6 @@ pub(crate) fn capture_mcp_event(
             record["status"] = json!(event_type);
         }
         db.persist_client_record("approval", &id, &record)?;
-    }
-    Ok(())
-}
-
-fn capture_group(account: &LocalBusAccountState, request: &LocalBusFrame) -> Result<(), SdkError> {
-    let db = account.client.account_db()?;
-    let body = &request.body;
-    if matches!(request.method.as_str(), "group.send" | "group.read" | "group.create")
-        && body.get("conversation_id").is_some()
-    {
-        ramflux_protocol::message::dm_scope::validate_group(required(body, "conversation_id")?)
-            .map_err(|_| SdkError::InboundRejected("reserved DM conversation namespace".into()))?;
-        let group = required(body, "group_id")?;
-        let resolved = super::super::group_conversation::resolve(
-            &account.client,
-            group,
-            required(body, "conversation_id")?,
-        )?;
-        let conversation = resolved.as_str();
-        let members = account.client.group_state(group)?.members;
-        let mut principals = std::collections::BTreeSet::new();
-        for device in members {
-            if let Some(peer) = account.client.group_device_metadata(group, &device)?
-                && let Some(principal) = peer.get("principal_id").and_then(Value::as_str)
-            {
-                principals.insert(principal.to_owned());
-            }
-        }
-        if let Some(state) = db.shared_group_state(group)? {
-            principals.extend(
-                state.view().members.iter().map(|member| member.identity.principal_id.clone()),
-            );
-        }
-        let old = db.client_record("group", group)?.unwrap_or_else(|| json!({}));
-        let mut links = old
-            .get("conversation_ids")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect::<std::collections::BTreeSet<_>>();
-        if let Some(id) = old.get("conversation_id").and_then(Value::as_str) {
-            links.insert(id.to_owned());
-        }
-        links.insert(conversation.to_owned());
-        let single = if links.len() == 1 { Some(conversation) } else { None };
-        let mut group_metadata = old;
-        group_metadata["conversation_id"] = json!(single);
-        group_metadata["conversation_ids"] = json!(links);
-        db.persist_client_record("group", group, &group_metadata)?;
-        let mut metadata = db
-            .client_record("conversation", conversation)?
-            .unwrap_or_else(|| json!({"title":null,"direct_route":null}));
-        metadata["kind"] = json!("group");
-        metadata["group_id"] = json!(group);
-        metadata["participants"] = json!(principals);
-        // Signed name updates own the shared group's title; reads and sends only refresh its link.
-        if request.method == "group.create"
-            && db.shared_group_state(group)?.is_none()
-            && let Some(title) = body.get("title").filter(|value| !value.is_null())
-        {
-            metadata["title"] = title.clone();
-        }
-        db.persist_client_record("conversation", conversation, &metadata)?;
     }
     Ok(())
 }

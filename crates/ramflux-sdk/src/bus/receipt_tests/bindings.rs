@@ -1,84 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Deferred group projection and invalid receipt targets preserve delivery integrity.
+//! Invalid receipt targets preserve delivery integrity.
 use super::{
-    fixture::{self, Shared, Spec, TestResult},
+    fixture::{self, Spec, TestResult},
     *,
 };
-#[tokio::test]
-async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arrives() -> TestResult
-{
-    let root = runtime_tests::root("receipt-deferred-group");
-    let a = Spec::new(&root, "alice", 51);
-    let b = Spec::new(&root, "bob", 61);
-    let mail: Shared = Arc::new(Mutex::default());
-    fixture::seed_pair(&a, &b)?;
-    let source = a.client(None)?;
-    let target = b.client(None)?;
-    a.prepare_group(&source, "group", "thread", &[(&b, &target)])?;
-    let mut account = a.account(None, mail.clone())?;
-    let logical = a.send_group_text(&mut account, "group", "held", "held group body").await?;
-    let distribution = account.client.export_group_sender_key_distribution("group", &a.device)?;
-    let entry = mail
-        .lock()
-        .map_err(|_| "mailbox")?
-        .messages
-        .iter()
-        .rev()
-        .find(|entry| {
-            entry.target_delivery_id == b.identity().expect("test: group recipient").storage_key()
-        })
-        .cloned()
-        .ok_or("native group entry")?;
-    let mut receiver = b.account(None, mail)?;
-    let pool = receiver.relay_quic_pool()?;
-    let mut engine = receiver.session_client().await?;
-    let pending = receiver.client.apply_routed_entry(&mut engine, &pool, &entry).await;
-    assert!(
-        matches!(pending, Err(SdkError::InboundPending(_)) | Ok(_)),
-        "missing key remains retryable"
-    );
-    assert!(receiver.client.direct_message_by_id(&logical)?.is_none());
-    assert_eq!(
-        receiver
-            .client
-            .account_db()?
-            .actor_state_usage(crate::client::delivery_receipts::PREFIX)?
-            .0,
-        0
-    );
-    receiver.client.import_group_sender_key_distribution(&distribution)?;
-    receiver.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
-    assert_eq!(
-        receiver.client.generated_message_detail("thread", &logical)?.message.text.as_deref(),
-        Some("held group body")
-    );
-    let keys = receiver
-        .client
-        .account_db()?
-        .actor_state_key_page(crate::client::delivery_receipts::PREFIX, 256)?;
-    assert_eq!(keys.len(), 1);
-    let work = receiver
-        .client
-        .account_db()?
-        .load_actor_state::<crate::client::delivery_receipts::Work>(&keys[0])?
-        .ok_or("receipt")?;
-    assert_eq!(work.sender, a.identity()?.storage_key());
-    assert_eq!(work.wire_message.as_deref(), Some(entry.envelope.envelope_id.as_str()));
-    receiver.client.import_group_sender_key_distribution(&distribution)?;
-    receiver.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
-    assert_eq!(
-        receiver
-            .client
-            .account_db()?
-            .actor_state_usage(crate::client::delivery_receipts::PREFIX)?
-            .0,
-        1
-    );
-    Ok(())
-}
-
 #[test]
 fn unknown_or_inbound_targets_cannot_poison_a_later_valid_delivery_receipt() -> TestResult {
     let root = runtime_tests::root("receipt-unknown-target");

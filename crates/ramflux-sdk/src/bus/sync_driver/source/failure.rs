@@ -62,7 +62,7 @@ impl SourceFailure<'_> {
         })?)
     }
 
-    /// Shared terminal reason vocabulary used by `group_quarantine` and contact expiry.
+    /// Shared terminal reason vocabulary used by contact expiry.
     pub(crate) const fn expired() -> ReceiveFailureReason {
         ReceiveFailureReason::HeldExpired
     }
