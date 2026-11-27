@@ -746,6 +746,20 @@ pub(super) fn failure(status: RamfluxV2Status, effects: &str) -> serde_json::Val
     json!({"code":status as i32,"effects":effects})
 }
 
+/// Typed card session refusals (`card_session_*`) and the resident-VM cap `card_limit_exceeded`.
+fn is_card_code(name: &str) -> bool {
+    matches!(
+        name,
+        "card_session_expired"
+            | "card_session_inactive"
+            | "card_session_limit"
+            | "card_session_refused"
+            | "card_session_stale"
+            | "card_session_busy"
+            | "card_limit_exceeded"
+    )
+}
+
 pub(super) fn error_code(name: &str) -> i32 {
     use RamfluxErrorCode as E;
     match name {
@@ -796,13 +810,8 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "expired"
         | "cancelled"
         | "retirement_pending"
-        | "large_attachments"
-        | "card_session_expired"
-        | "card_session_inactive"
-        | "card_session_limit"
-        | "card_session_refused"
-        | "card_session_stale"
-        | "card_session_busy" => E::InvalidArgument as i32,
+        | "large_attachments" => E::InvalidArgument as i32,
+        name if is_card_code(name) => E::InvalidArgument as i32,
         "InvalidCanonicalJson" => E::InvalidCanonicalJson as i32,
         "UnsupportedVersion"
         | "AccountSchemaTooNew"

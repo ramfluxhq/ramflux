@@ -4,7 +4,7 @@
 //! Open one session from the current publication of a surface reference.
 use super::body::{self, OpenBody};
 use super::codes::typed;
-use super::gate::{Admission, admit, card_err, refused};
+use super::gate::{Admission, admit, open_err, refused};
 use super::package;
 use super::respond::{View, view};
 use super::spec_build;
@@ -29,8 +29,10 @@ pub(super) fn open(
                 state.content().map(|content| content.fallback_text.clone()).unwrap_or_default();
             let spec = spec_build::authorized(&stored, &state, locale, dark)?;
             let spec = super::host_view::stamp(client, spec, &state)?;
+            // A reopen of the same card replaces the held session: free its VM slot first.
+            store::drop_surface(account, &parsed.surface_ref);
             let (session, batch) =
-                CardSession::open(spec, package::bundled()?).map_err(card_err)?;
+                CardSession::open(spec, package::bundled()?).map_err(open_err)?;
             let hash = state.hash().ok_or_else(|| typed("card_session_refused"))?;
             let conversation =
                 state.conversation_id().ok_or_else(|| typed("card_session_refused"))?;

@@ -118,6 +118,11 @@ pub(super) fn drop_account(account: &str, reason: &str) {
     registry::forget_account(account);
 }
 
+/// Drop the held session of `surface_ref`, if any, so its VM slot is free before a reopen.
+pub(super) fn drop_surface(account: &str, surface_ref: &str) {
+    drop_where(account, "reopened", |held| held.surface_ref == surface_ref);
+}
+
 /// Drop the sessions of connections that closed. Runs on the actor thread.
 pub(super) fn sweep_closed(account: &str) {
     let closed = match registry::take_closed(account) {

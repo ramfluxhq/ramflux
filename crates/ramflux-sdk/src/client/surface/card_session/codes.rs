@@ -7,6 +7,7 @@ use crate::SdkError;
 use serde_json::json;
 
 pub(super) const EXPIRED: &str = "card_session_expired";
+pub(super) const LIMIT_EXCEEDED: &str = "card_limit_exceeded";
 
 fn message(code: &str) -> &'static str {
     match code {
@@ -15,6 +16,7 @@ fn message(code: &str) -> &'static str {
         "card_session_limit" => "card session limit reached",
         "card_session_refused" => "card session request refused",
         "card_session_stale" => "card session request is stale",
+        LIMIT_EXCEEDED => "card runtime limit exceeded: resident VMs",
         "card_session_busy" => "card session store is busy",
         _ => "card session error",
     }

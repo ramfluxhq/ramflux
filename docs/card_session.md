@@ -108,6 +108,7 @@ Refusals are typed: the bus error has `error.code` and `error.reason_code` equal
 | `card_session_refused` | Bad body, unsupported slot kind or outcome, or missing authority. |
 | `card_session_stale` | The token or request id does not match a slot of the mounted tree. |
 | `card_session_busy` | The session store was re-entered. Retry. |
+| `card_limit_exceeded` | Two card VMs are already resident in the process (a third open). Closing a session, dropping it, or a connection close frees the slot; reopening the same card reuses its own slot. |
 
 C ABI hosts get `InvalidArgument` for all of them. Other failures keep their usual codes
 (`AccountNotOpen` while locked, `card runtime unavailable` without the feature).
@@ -115,7 +116,7 @@ C ABI hosts get `InvalidArgument` for all of them. Other failures keep their usu
 ## Lifetime
 
 Sessions live in memory on the account's actor thread. At most 32 per account; opening a second
-session for the same `surface_ref` replaces the first. They are dropped when:
+session for the same `surface_ref` replaces the first (the first is dropped before the second opens, so it returns `card_session_expired`). They are dropped when:
 
 - the account locks (`account.lock`, an app-lock timeout, an import) or signs out;
 - the account is removed (`account.remove_local` locks it first);
@@ -123,7 +124,7 @@ session for the same `surface_ref` replaces the first. They are dropped when:
 - the bus connection that opened them closes (a GUI reload or reconnect without a lock).
 
 Each drop of at least one session logs `card sessions dropped` with `account_id`, `reason`
-(`lock`, `sign_out`, `actor_stop`, `connection_closed`) and `sessions`. Every later call with a
+(`lock`, `sign_out`, `actor_stop`, `connection_closed`, `reopened`) and `sessions`. Every later call with a
 dropped id returns `card_session_expired`, including `dispose`; an id above the account's highest
 dropped id is `card_session_inactive`. While the account is locked, calls fail with
 `AccountNotOpen` before reaching the card code, and after `remove_local` the account no longer
