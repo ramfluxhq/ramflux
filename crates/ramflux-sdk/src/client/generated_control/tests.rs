@@ -6,16 +6,11 @@ use ramflux_protocol::message::registry::CONTROLS;
 use ramflux_protocol::message::{
     A2iControlEvent, ContactControl, Control, ControlDomain, ControlDomainA2ui,
     ControlDomainConversation, ControlDomainMcpTool, ControlDomainMessage, ControlOperation,
-    FriendControl, FriendLinkRecord, GroupControlBody, GroupControlBodyDeviceSet,
-    GroupControlBodyRequest, GroupControlBodyResult, GroupControlBodyTransfer, GroupKeyControl,
-    GroupKeyDistribution, GroupStateControl, GuardianInvite, HistoryItem, HistoryPage,
-    HomeMigrationControl, LivePresence, LocalBusFederationRoute, NativeContactConsent,
-    NativeDeviceManifest, NativeGroupActor, NativeGroupChangeRequest, NativeGroupChangeResult,
-    NativeGroupSnapshot, NativeHomeAuthorization, ObjectRevokeAccess, OwnContactSync,
-    OwnContactTombstone, OwnGroupConsent, OwnMessageCopy, OwnSentMessage, PairReset, PairResetAck,
-    QualifiedDevice, RecoveryControl, TransferBody, TransferBodyHead, TransferBodyProbe,
-    TransferControl, TransferHead, TransferProbe, content, control, control_domain,
-    group_control_body, own_message_copy, recovery_control, transfer_body,
+    FriendControl, FriendLinkRecord, GuardianInvite, HistoryItem, HistoryPage,
+    HomeMigrationControl, LivePresence, NativeContactConsent, NativeDeviceManifest,
+    NativeHomeAuthorization, ObjectRevokeAccess, OwnContactSync, OwnContactTombstone,
+    OwnMessageCopy, OwnSentMessage, PairReset, PairResetAck, QualifiedDevice, RecoveryControl,
+    content, control, control_domain, own_message_copy, recovery_control,
 };
 use std::collections::BTreeSet;
 
@@ -41,16 +36,6 @@ fn canonical(label: &str) -> Vec<u8> {
     label.as_bytes().to_vec()
 }
 
-fn route() -> LocalBusFederationRoute {
-    LocalBusFederationRoute {
-        federation_url: "https://fed.example".into(),
-        source_node_id: "n1".into(),
-        target_node_id: "n2".into(),
-        required_capability: "group".into(),
-        ..Default::default()
-    }
-}
-
 fn a2i(domain: control_domain::Value) -> A2iControlEvent {
     A2iControlEvent {
         control_domain: Some(ControlDomain { value: Some(domain) }),
@@ -68,22 +53,6 @@ fn object_revoke() -> ObjectRevokeAccess {
     }
 }
 
-fn group_state(value: group_control_body::Value) -> Result<Control, SdkError> {
-    control_from_payload(control::Payload::GroupState(GroupStateControl {
-        schema: "group.state.v1".into(),
-        body: Some(GroupControlBody { value: Some(value) }),
-    }))
-}
-
-fn transfer(body: transfer_body::Value) -> Result<Control, SdkError> {
-    group_state(group_control_body::Value::Transfer(GroupControlBodyTransfer {
-        control: Some(TransferControl {
-            body: Some(TransferBody { value: Some(body) }),
-            signature: "sig".into(),
-        }),
-    }))
-}
-
 fn pair_reset() -> Result<Control, SdkError> {
     control_from_payload(control::Payload::Reset(PairReset { rejected_bootstrap_floor: 3 }))
 }
@@ -95,13 +64,6 @@ fn pair_reset_ack() -> Result<Control, SdkError> {
 fn contact() -> Result<Control, SdkError> {
     control_from_payload(control::Payload::ContactControl(ContactControl {
         consent: Some(NativeContactConsent { canonical: canonical("consent") }),
-    }))
-}
-
-fn group_request() -> Result<Control, SdkError> {
-    group_state(group_control_body::Value::Request(GroupControlBodyRequest {
-        request: Some(NativeGroupChangeRequest { canonical: canonical("req") }),
-        federation: Some(route()),
     }))
 }
 
@@ -137,8 +99,6 @@ fn samples() -> Result<Vec<Control>, SdkError> {
         pair_reset()?,
         pair_reset_ack()?,
         contact()?,
-        group_request()?,
-        group_key()?,
         own_contact_sync()?,
         own_history()?,
         home_migration()?,
@@ -147,7 +107,6 @@ fn samples() -> Result<Vec<Control>, SdkError> {
         a2i_message()?,
         control_from_payload(control::Payload::ObjectRevoke(object_revoke()))?,
         own_contact_tombstone()?,
-        own_group_consent()?,
         own_message_copy_sent()?,
         friend()?,
         agent_sync()?,
@@ -190,23 +149,6 @@ fn agent_sync() -> Result<Control, SdkError> {
     }))
 }
 
-fn group_key() -> Result<Control, SdkError> {
-    control_from_payload(control::Payload::GroupKeyControl(GroupKeyControl {
-        schema: "group.key.v4".into(),
-        version: 4,
-        distribution: Some(GroupKeyDistribution {
-            schema: "group.key.v4".into(),
-            version: 4,
-            group_id: "g1".into(),
-            sender_id: "s1".into(),
-            group_key_epoch: 9,
-            sender_key_seed: canonical("seed"),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }))
-}
-
 fn own_contact_sync() -> Result<Control, SdkError> {
     control_from_payload(control::Payload::OwnContactSync(OwnContactSync {
         manifest: Some(NativeDeviceManifest {
@@ -241,18 +183,6 @@ fn own_contact_tombstone() -> Result<Control, SdkError> {
     control_from_payload(control::Payload::OwnContactTombstone(OwnContactTombstone {
         link: Some(FriendLinkRecord { link_id: "link".into(), ..Default::default() }),
         decided_at: Some(11),
-    }))
-}
-
-fn own_group_consent() -> Result<Control, SdkError> {
-    control_from_payload(control::Payload::OwnGroupConsent(OwnGroupConsent {
-        actor: Some(NativeGroupActor { canonical: canonical("actor") }),
-        snapshot: Some(NativeGroupSnapshot { canonical: canonical("snap") }),
-        accepted: true,
-        issued_at: 1,
-        expires_at: 2,
-        signature: "sig".into(),
-        ..Default::default()
     }))
 }
 
@@ -328,7 +258,7 @@ fn round_trip_all_operations() -> TestResult {
         );
         RamfluxClient::validate_generated_control(&decoded_control)?;
     }
-    assert_eq!(seen.len(), 18);
+    assert_eq!(seen.len(), 15);
     Ok(())
 }
 
@@ -355,7 +285,7 @@ fn wrong_typed_arm_fails() -> TestResult {
     Ok(())
 }
 
-fn a2i_domains_and_group_native() -> TestResult {
+fn a2i_domains() -> TestResult {
     for domain in [
         control_domain::Value::Message(ControlDomainMessage {}),
         control_domain::Value::Conversation(ControlDomainConversation {}),
@@ -368,83 +298,10 @@ fn a2i_domains_and_group_native() -> TestResult {
     }
     let missing_domain = control_from_payload(control::Payload::A2i(A2iControlEvent::default()))?;
     assert!(RamfluxClient::validate_generated_control(&missing_domain).is_err());
-
-    RamfluxClient::validate_generated_control(&group_state(group_control_body::Value::Request(
-        GroupControlBodyRequest {
-            request: Some(NativeGroupChangeRequest { canonical: canonical("req") }),
-            federation: Some(route()),
-        },
-    ))?)?;
-    let no_route = group_state(group_control_body::Value::Request(GroupControlBodyRequest {
-        request: Some(NativeGroupChangeRequest { canonical: canonical("req") }),
-        federation: None,
-    }))?;
-    RamfluxClient::validate_generated_control(&no_route)?;
-    let empty_url = group_state(group_control_body::Value::Request(GroupControlBodyRequest {
-        request: Some(NativeGroupChangeRequest { canonical: canonical("req") }),
-        federation: Some(LocalBusFederationRoute { federation_url: String::new(), ..route() }),
-    }))?;
-    RamfluxClient::validate_generated_control(&empty_url)?;
-    let missing_source =
-        group_state(group_control_body::Value::Request(GroupControlBodyRequest {
-            request: Some(NativeGroupChangeRequest { canonical: canonical("req") }),
-            federation: Some(LocalBusFederationRoute { source_node_id: String::new(), ..route() }),
-        }))?;
-    assert!(RamfluxClient::validate_generated_control(&missing_source).is_err());
-    let missing_target =
-        group_state(group_control_body::Value::Request(GroupControlBodyRequest {
-            request: Some(NativeGroupChangeRequest { canonical: canonical("req") }),
-            federation: Some(LocalBusFederationRoute { target_node_id: String::new(), ..route() }),
-        }))?;
-    assert!(RamfluxClient::validate_generated_control(&missing_target).is_err());
-    RamfluxClient::validate_generated_control(&group_state(group_control_body::Value::Result(
-        GroupControlBodyResult {
-            result: Some(NativeGroupChangeResult { canonical: canonical("res") }),
-        },
-    ))?)?;
-    RamfluxClient::validate_generated_control(&group_state(
-        group_control_body::Value::DeviceSet(GroupControlBodyDeviceSet {
-            group_id: "g1".into(),
-            actor: Some(NativeGroupActor { canonical: canonical("actor") }),
-            device_set_epoch: 7,
-        }),
-    )?)?;
-    let no_epoch = group_state(group_control_body::Value::DeviceSet(GroupControlBodyDeviceSet {
-        group_id: "g1".into(),
-        device_set_epoch: 0,
-        ..Default::default()
-    }))?;
-    assert!(RamfluxClient::validate_generated_control(&no_epoch).is_err());
     Ok(())
 }
 
 fn transfer_and_object_revoke_native() -> TestResult {
-    RamfluxClient::validate_generated_control(&transfer(transfer_body::Value::Probe(
-        TransferBodyProbe {
-            probe: Some(TransferProbe {
-                id: "probe-1".into(),
-                issued_at: 1,
-                expires_at: 2,
-                ..Default::default()
-            }),
-        },
-    ))?)?;
-    RamfluxClient::validate_generated_control(&transfer(transfer_body::Value::Head(
-        TransferBodyHead {
-            reply: Some(TransferHead {
-                proposal: "prop".into(),
-                issued_at: 1,
-                expires_at: 2,
-                ..Default::default()
-            }),
-        },
-    ))?)?;
-    let no_transfer_body =
-        group_state(group_control_body::Value::Transfer(GroupControlBodyTransfer {
-            control: Some(TransferControl { body: None, signature: "sig".into() }),
-        }))?;
-    assert!(RamfluxClient::validate_generated_control(&no_transfer_body).is_err());
-
     let revoke = object_revoke();
     RamfluxClient::authorize_generated_object_revoke("owner", "owner", &revoke)?;
     assert!(RamfluxClient::authorize_generated_object_revoke("peer", "owner", &revoke).is_err());
@@ -472,7 +329,7 @@ fn transfer_and_object_revoke_native() -> TestResult {
 fn every_control_operation_has_exactly_one_typed_payload() -> TestResult {
     round_trip_all_operations()?;
     wrong_typed_arm_fails()?;
-    a2i_domains_and_group_native()?;
+    a2i_domains()?;
     transfer_and_object_revoke_native()?;
     Ok(())
 }

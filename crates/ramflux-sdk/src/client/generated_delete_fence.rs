@@ -87,18 +87,9 @@ impl RamfluxClient {
         if fence.conversation != identity.conversation_id {
             return Ok(false);
         }
-        if let Some(moderator) = &fence.moderator {
-            if identity.group_id.as_ref() != Some(&moderator.group) {
-                return Ok(false);
-            }
-            let source = self.device_identity(&moderator.device)?;
-            self.require_cached_root_authority(HeadUse::NewAuthorization, &source)?;
-            self.require_native_operation(
-                &source,
-                crate::client::identity_authority::NativeOperation::Group,
-            )?;
-            self.require_generated_group_epoch(&moderator.group, &source, moderator.epoch, true)?;
-            return Ok(true);
+        if fence.moderator.is_some() {
+            // Group moderator authority is unavailable until the MLS group track.
+            return Ok(false);
         }
         if fence.scope == g::DeleteScope::Local as i32 {
             if fence.source_root != self.own_account_anchor()? {
@@ -140,11 +131,7 @@ impl RamfluxClient {
                     break;
                 }
                 Ok(false)
-                | Err(
-                    SdkError::InboundRejected(_)
-                    | SdkError::GeneratedRefused { .. }
-                    | SdkError::Storage(ramflux_storage::StorageError::GroupPermissionDenied),
-                ) => (),
+                | Err(SdkError::InboundRejected(_) | SdkError::GeneratedRefused { .. }) => (),
                 Err(
                     SdkError::InboundPending(_) | SdkError::DirectoryAuthorityUnavailable { .. },
                 ) => {

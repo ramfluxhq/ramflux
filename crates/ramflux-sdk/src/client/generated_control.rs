@@ -92,8 +92,11 @@ pub fn validate_control_native(control: &g::Control) -> Result<(), SdkError> {
             body.consent.as_ref().map(|leaf| leaf.canonical.as_slice()),
             "contact control requires native consent",
         ),
-        Some(g::control::Payload::GroupState(body)) => validate_group_state(body),
-        Some(g::control::Payload::GroupKeyControl(body)) => validate_group_key(body),
+        Some(
+            g::control::Payload::GroupState(_)
+            | g::control::Payload::GroupKeyControl(_)
+            | g::control::Payload::OwnGroupConsent(_),
+        ) => Err(refused("group controls are unavailable until the MLS group track")),
         Some(g::control::Payload::OwnContactSync(body)) => validate_own_contact_sync(body),
         Some(g::control::Payload::OwnHistory(page)) => {
             if page.transfer_id.is_empty() {
@@ -123,7 +126,6 @@ pub fn validate_control_native(control: &g::Control) -> Result<(), SdkError> {
                 Ok(())
             }
         }
-        Some(g::control::Payload::OwnGroupConsent(body)) => validate_own_group_consent(body),
         Some(g::control::Payload::OwnMessageCopy(body)) => validate_own_message_copy(body),
         Some(g::control::Payload::Friend(body)) => validate_friend(body),
         Some(g::control::Payload::AgentSync(body)) => validate_agent_sync(body),
@@ -156,96 +158,6 @@ fn validate_a2i_domain(event: &g::A2iControlEvent) -> Result<(), SdkError> {
         ) => Ok(()),
         None => Err(refused("a2i control requires a typed domain")),
     }
-}
-
-fn validate_group_state(state: &g::GroupStateControl) -> Result<(), SdkError> {
-    match state.body.as_ref().and_then(|body| body.value.as_ref()) {
-        Some(g::group_control_body::Value::Request(request)) => {
-            require_canonical(
-                request.request.as_ref().map(|leaf| leaf.canonical.as_slice()),
-                "group request requires native change bytes",
-            )?;
-            // The node route is source and target. federation_url was removed from the
-            // SDK route and the writer leaves the protobuf field empty.
-            if request.federation.as_ref().is_some_and(|route| {
-                route.source_node_id.is_empty() || route.target_node_id.is_empty()
-            }) {
-                return Err(refused("group request federation route is incomplete"));
-            }
-            Ok(())
-        }
-        Some(g::group_control_body::Value::Result(result)) => require_canonical(
-            result.result.as_ref().map(|leaf| leaf.canonical.as_slice()),
-            "group result requires native change bytes",
-        ),
-        Some(g::group_control_body::Value::DeviceSet(device_set)) => {
-            if device_set.group_id.is_empty() || device_set.device_set_epoch == 0 {
-                Err(refused("group device set requires group_id and beacon epoch"))
-            } else {
-                Ok(())
-            }
-        }
-        Some(g::group_control_body::Value::Transfer(transfer)) => validate_transfer(transfer),
-        Some(g::group_control_body::Value::Snapshot(snapshot)) => {
-            require_canonical(
-                snapshot.snapshot.as_ref().map(|leaf| leaf.canonical.as_slice()),
-                "group snapshot requires native state",
-            )?;
-            if snapshot.distribution.as_ref().is_some_and(|value| {
-                value.sender_key_seed.len() != 32
-                    || value.group_id.is_empty()
-                    || value.sender_id.is_empty()
-                    || value.group_key_epoch == 0
-            }) {
-                return Err(refused("group snapshot distribution incomplete"));
-            }
-            Ok(())
-        }
-        None => Err(refused("group state requires a typed body")),
-    }
-}
-
-fn validate_transfer(transfer: &g::GroupControlBodyTransfer) -> Result<(), SdkError> {
-    let Some(control) = transfer.control.as_ref() else {
-        return Err(refused("group transfer requires TransferControl"));
-    };
-    match control.body.as_ref().and_then(|body| body.value.as_ref()) {
-        Some(g::transfer_body::Value::Probe(wrapper)) => {
-            let Some(probe) = wrapper.probe.as_ref() else {
-                return Err(refused("group transfer probe is missing"));
-            };
-            if probe.id.is_empty() || probe.issued_at == 0 || probe.expires_at == 0 {
-                Err(refused("group transfer probe requires id and lifetime"))
-            } else {
-                Ok(())
-            }
-        }
-        Some(g::transfer_body::Value::Head(wrapper)) => {
-            let Some(head) = wrapper.reply.as_ref() else {
-                return Err(refused("group transfer head is missing"));
-            };
-            if head.proposal.is_empty() || head.issued_at == 0 || head.expires_at == 0 {
-                Err(refused("group transfer head requires proposal and lifetime"))
-            } else {
-                Ok(())
-            }
-        }
-        None => Err(refused("group transfer requires Probe or Head")),
-    }
-}
-
-fn validate_group_key(body: &g::GroupKeyControl) -> Result<(), SdkError> {
-    let Some(distribution) = body.distribution.as_ref() else {
-        return Err(refused("group key requires a distribution"));
-    };
-    if distribution.group_id.is_empty()
-        || distribution.sender_id.is_empty()
-        || distribution.group_key_epoch == 0
-        || distribution.sender_key_seed.is_empty()
-    {
-        return Err(refused("group key distribution requires group, sender, epoch and seed"));
-    }
-    Ok(())
 }
 
 fn validate_own_contact_sync(body: &g::OwnContactSync) -> Result<(), SdkError> {
@@ -314,18 +226,6 @@ fn validate_recovery(body: &g::RecoveryControl) -> Result<(), SdkError> {
         }
         None => Err(refused("recovery control requires Invite or Accept")),
     }
-}
-
-fn validate_own_group_consent(body: &g::OwnGroupConsent) -> Result<(), SdkError> {
-    if body.actor.is_none()
-        || body.snapshot.is_none()
-        || body.signature.is_empty()
-        || body.issued_at == 0
-        || body.expires_at == 0
-    {
-        return Err(refused("own group consent requires actor, snapshot, signature and lifetime"));
-    }
-    Ok(())
 }
 
 fn validate_own_message_copy(body: &g::OwnMessageCopy) -> Result<(), SdkError> {

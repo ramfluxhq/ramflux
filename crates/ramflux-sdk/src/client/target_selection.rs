@@ -362,6 +362,7 @@ fn select_with_current_membership(
 
 /// Source-qualified group event id (OV-P05-L1). Never `group_id`: that key collapses
 /// every message in the group onto one fresh-cohort event.
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 pub(crate) fn group_logical_event_id(
     group_id: &str,
     message_id: Option<&str>,
@@ -463,6 +464,7 @@ impl RamfluxClient {
         })
     }
 
+    #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
     pub(crate) fn group_selection_request(
         &self,
         group_id: &str,
@@ -517,6 +519,7 @@ impl RamfluxClient {
         roster_from_authority_result(self.current_custody_authority(root, unix_now()?))
     }
 
+    #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
     fn shared_group_selection_request(
         &self,
         _group_id: &str,
@@ -560,6 +563,7 @@ impl RamfluxClient {
     }
 }
 
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 fn finish_group_request(
     logical_event_id: &str,
     kind: KindId,

@@ -300,24 +300,6 @@ fn retired_prefix_bytes(body: &serde_json::Value) -> Result<Vec<u8>, SdkError> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn group_copy_envelopes_are_opaque_stable_on_retry_and_distinct_per_message() -> TestResult {
-    let fixture = Box::pin(Fixture::with_device("opaque-envelope", "source_device_sync")).await?;
-    let client = &fixture.client;
-    let first = client.own_group_copy_envelope("group", "conversation", "message", None)?;
-    assert_ne!(first, "message");
-    assert_eq!(client.own_group_copy_envelope("group", "conversation", "message", None)?, first);
-    assert_ne!(
-        client.own_group_copy_envelope("group", "conversation", "other-message", None)?,
-        first
-    );
-    assert_eq!(
-        client.own_group_copy_envelope("group", "conversation", "message", Some("explicit"))?,
-        "explicit"
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn retired_own_sent_prefix_cannot_claim_original_dm_or_group_rows() -> TestResult {
     use crate::client::own_device_copy::{OwnMessageInput, OwnPayloadKind};
     let own = Box::pin(Own::new("original-recipient")).await?;

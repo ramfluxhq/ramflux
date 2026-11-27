@@ -137,7 +137,6 @@ pub(crate) fn verified_failure_policy(
         client.authenticated_device_identity(HeadUse::NewAuthorization, entry).ok();
     let authenticated = verified_source.is_some();
     let opened = if authenticated { client.open_routed(entry, local).ok() } else { None };
-    let group = opened.as_ref().and_then(|opened| opened.routing.group_id.as_deref());
     let db = client.account_db()?;
     let source_record =
         verified_source.as_ref().and_then(|source| db.client_device_record(source).ok().flatten());
@@ -145,24 +144,15 @@ pub(crate) fn verified_failure_policy(
         .as_ref()
         .and_then(|record| record["principal_id"].as_str())
         .filter(|principal| *principal == entry.envelope.source_principal_id);
-    let related = if let Some(group) = group {
-        verified_source.as_ref().is_some_and(|source| {
-            db.has_root_bound_group_membership(group, source).unwrap_or(false)
-        })
-    } else {
-        verified_source.as_ref().is_some_and(|source| {
-            client
-                .local_device_identity(local)
-                .and_then(|local| client.pair_recovery_pending(&local, source))
-                .unwrap_or(false)
-        }) || verified_principal.is_some_and(|principal| {
-            client.friend_link_peer_is_accepted(principal).unwrap_or(false)
-                || client
-                    .device_branch
-                    .as_ref()
-                    .is_some_and(|branch| branch.principal_id == principal)
-        })
-    };
+    let related = verified_source.as_ref().is_some_and(|source| {
+        client
+            .local_device_identity(local)
+            .and_then(|local| client.pair_recovery_pending(&local, source))
+            .unwrap_or(false)
+    }) || verified_principal.is_some_and(|principal| {
+        client.friend_link_peer_is_accepted(principal).unwrap_or(false)
+            || client.device_branch.as_ref().is_some_and(|branch| branch.principal_id == principal)
+    });
     // A failed cache lookup is a dependency miss, not a second failure that wedges the inbox.
     let missing_manifest =
         source_record.as_ref().is_none_or(|record| record.get("x25519_identity_public").is_none());
@@ -181,8 +171,6 @@ pub(crate) fn verified_failure_policy(
         )
     } else if let Some(subject) = target_dependency {
         ("message_target", subject)
-    } else if let Some(group) = group {
-        ("group", group.to_owned())
     } else {
         ("none", String::new())
     };
@@ -294,7 +282,6 @@ mod immutable_crypto_refusal_tests {
         }
         for error in [
             CryptoError::GroupLeaseUnavailable,
-            CryptoError::GroupSenderKeyUnavailable,
             CryptoError::MaxSkipExceeded,
             CryptoError::RandomUnavailable("local".into()),
         ] {

@@ -101,7 +101,10 @@ impl RamfluxClient {
         message: &GatewayDirectMessage,
         group: Option<&str>,
         content: &g::Content,
-    ) -> Result<(ramflux_crypto::RootQualifiedDeviceRef, bool, u32), SdkError> {
+    ) -> Result<(ramflux_crypto::RootQualifiedDeviceRef, bool), SdkError> {
+        if group.is_some() {
+            return Err(refused("group scope is unavailable"));
+        }
         if message.message_id.is_empty() || message.message_id.len() > 256 {
             return Err(refused("operation token must be 1..256 bytes"));
         }
@@ -123,7 +126,7 @@ impl RamfluxClient {
                     &message.conversation_id,
                     &ramflux_protocol::encode_base64url(&target.id),
                 )?;
-                if original.group_id.as_deref() != group {
+                if original.group_id.is_some() {
                     return Err(refused("Delete route differs from original group scope"));
                 }
             }
@@ -131,10 +134,10 @@ impl RamfluxClient {
         self.require_backup_outbound_ready()?;
         self.current_custody_authority(own.root_commitment(), crate::custody::network_now()?)?
             .ok_or(SdkError::NetworkingPending)?;
-        let own_only = group.is_none()
-            && message.recipient_principal_commitment.as_deref() == Some(own.root_commitment())
+        let own_only = message.recipient_principal_commitment.as_deref()
+            == Some(own.root_commitment())
             && !matches!(content.value, Some(g::content::Value::Message(_)));
-        if group.is_none() && !own_only {
+        if !own_only {
             let peer = self.device_identity(&Self::qualified_recipient(message)?)?;
             let expected = self.generated_direct_conversation_id(&peer)?;
             if message.conversation_id != expected {
@@ -143,24 +146,12 @@ impl RamfluxClient {
         }
         let required_layer = Self::required_content_layer(content)?;
         if required_layer > g::registry::PROFILE_FLOOR {
-            if let Some(group) = group {
-                let plan = Self::candidate_target_plan(|| {
-                    self.group_selection_request(
-                        group,
-                        &message.sender_id,
-                        &message.message_id,
-                        g::KindId::KindMessage,
-                    )
-                })?;
-                super::target_selection::require_layer(plan, required_layer)?;
-            } else {
-                let plan = Self::candidate_target_plan(|| {
-                    self.dm_selection_request(message, g::KindId::KindMessage)
-                })?;
-                self.require_dm_layer(message, plan, required_layer)?;
-            }
+            let plan = Self::candidate_target_plan(|| {
+                self.dm_selection_request(message, g::KindId::KindMessage)
+            })?;
+            self.require_dm_layer(message, plan, required_layer)?;
         }
-        Ok((own, own_only, required_layer))
+        Ok((own, own_only))
     }
 
     fn authored_operation_keys(
@@ -274,32 +265,21 @@ impl RamfluxClient {
         group: Option<&str>,
         content: &g::Content,
     ) -> Result<PreparedMessage, SdkError> {
-        let (own, own_only, required_layer) =
-            self.validate_authored_source(message, group, content)?;
+        let (own, own_only) = self.validate_authored_source(message, group, content)?;
         let (operation, transport) = self.authored_operation_keys(message, group, &own)?;
         let db = self.account_db()?;
         db.write_transaction(|| {
-            if group.is_none() {
-                self.ensure_authored_direct_context(message, &own)?;
-            }
+            self.ensure_authored_direct_context(message, &own)?;
             if let Some(id) = db.load_actor_state::<String>(&operation)? {
                 let mut prepared = db
                     .load_actor_state::<PreparedMessage>(&format!("message-send/prepared/{id}"))?
                     .ok_or_else(|| refused("operation content was retired"))?;
-                let (identity, mut retained) = Self::decode_generated_inner(&prepared.exact)?;
+                let (_, mut retained) = Self::decode_generated_inner(&prepared.exact)?;
                 if let Some(g::content::Value::Message(value)) = retained.value.as_mut() {
                     value.erasure_nonce.clear();
                 }
                 if let Some(g::content::Value::Delete(delete)) = retained.value.as_mut() {
                     delete.tombstone_id.clear();
-                }
-                if let Some(group) = group {
-                    let state = db
-                        .shared_group_state(group)?
-                        .ok_or_else(|| refused("group state missing"))?;
-                    if identity.group_epoch != Some(state.view().epoch) {
-                        return Err(refused("group epoch changed; use a fresh operation token"));
-                    }
                 }
                 if &retained != content {
                     return Err(SdkError::ReplayMismatch);
@@ -311,20 +291,11 @@ impl RamfluxClient {
                 message.ttl = prepared.ttl;
                 return Ok(prepared);
             }
-            let mut identity = self.allocate_generated_identity(
+            let identity = self.allocate_generated_identity(
                 &message.conversation_id,
                 super::generated_identity::now_ms(),
                 own_only,
             )?;
-            if let Some(group) = group {
-                let state =
-                    db.shared_group_state(group)?.ok_or_else(|| refused("group state missing"))?;
-                if state.view().conversation_id != message.conversation_id {
-                    return Err(refused("group conversation differs from its verified state"));
-                }
-                identity.group_id = Some(group.into());
-                identity.group_epoch = Some(state.view().epoch);
-            }
             let id = ramflux_protocol::encode_base64url(&identity.id);
             let mut allocated = content.clone();
             if let Some(g::content::Value::Delete(delete)) = allocated.value.as_mut() {
@@ -332,26 +303,9 @@ impl RamfluxClient {
                     .map_err(|_| refused("Delete identity invalid"))?
                     .to_vec();
             }
-            let exact = Self::encode_generated_inner(identity.clone(), &allocated)?;
+            let exact = Self::encode_generated_inner(identity, &allocated)?;
             message.message_id.clone_from(&id);
-            let wire = if let Some(group) = group
-                && matches!(content.value, Some(g::content::Value::Message(_)))
-            {
-                self.capture_own_authored_group(group, &message.sender_id, &exact)?;
-                let (_, content) = Self::decode_generated_inner(&exact)?;
-                let Some(g::content::Value::Message(content)) = content.value else {
-                    return Err(refused("prepared group content is not a Message"));
-                };
-                let sealed =
-                    self.encrypt_generated_group_message(group, &message.sender_id, &content)?;
-                Self::encode_generated_inner_at_layer(
-                    identity,
-                    &g::Content { value: Some(g::content::Value::Message(sealed)) },
-                    required_layer,
-                )?
-            } else {
-                exact.clone()
-            };
+            let wire = exact.clone();
             let prepared = PreparedMessage {
                 exact,
                 wire,

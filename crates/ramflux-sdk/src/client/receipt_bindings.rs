@@ -34,10 +34,7 @@ impl RamfluxClient {
         message: &GatewayDirectMessage,
         kind: &crate::client::routed::Kind,
     ) -> Result<(), SdkError> {
-        if !matches!(
-            kind,
-            crate::client::routed::Kind::Direct | crate::client::routed::Kind::GroupMessage
-        ) {
+        if !matches!(kind, crate::client::routed::Kind::Direct) {
             return Ok(());
         }
         let recipient = self.device_identity(&Self::qualified_recipient(message)?)?;

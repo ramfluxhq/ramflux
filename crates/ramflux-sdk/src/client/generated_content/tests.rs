@@ -3,8 +3,8 @@
 
 use super::*;
 use ramflux_protocol::message::{
-    Forward, GroupSealedContent, MediaRef, Message, MessageRef, QualifiedDevice, Receipt,
-    ReceiptState, Service, ServiceAction, content,
+    Forward, MediaRef, Message, MessageRef, QualifiedDevice, Receipt, ReceiptState, Service,
+    ServiceAction, content,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -124,33 +124,6 @@ fn generated_message_media_group_and_receipt_paths_round_trip() -> TestResult {
             assert_eq!(decoded.text, "pic");
         }
         other => return Err(format!("expected message, got {other:?}").into()),
-    }
-
-    let mut group_stream = GeneratedEventStream::new("c1", author()).with_group("g1", 3);
-    let sealed = GroupSealedContent {
-        group_id: "g1".into(),
-        ciphertext: vec![1, 2, 3],
-        event_id: g::identity::derive(&author(), "c1", 1)?.to_vec(),
-        author: Some(author()),
-        key_epoch: 3,
-        group_state_hash: vec![7; 32],
-        native_authority_proof: Vec::new(),
-        ..Default::default()
-    };
-    let group_bytes = RamfluxClient::encode_generated_message(
-        &mut group_stream,
-        b"group-1".to_vec(),
-        Message { sealed_group: Some(sealed.clone()), ..Default::default() },
-    )?;
-    let (group_identity, group_content) = RamfluxClient::decode_generated_inner(&group_bytes)?;
-    assert_eq!(group_identity.group_id.as_deref(), Some("g1"));
-    assert_eq!(group_identity.group_epoch, Some(3));
-    match group_content.value {
-        Some(content::Value::Message(decoded)) => {
-            assert_eq!(decoded.sealed_group, Some(sealed));
-            assert_eq!(decoded.text, "");
-        }
-        other => return Err(format!("expected sealed group, got {other:?}").into()),
     }
 
     let forward = Forward {

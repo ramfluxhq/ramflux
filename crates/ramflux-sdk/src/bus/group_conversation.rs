@@ -7,6 +7,7 @@ use ramflux_storage::AccountDb;
 
 /// Repair saved links independently; per-group errors warn and leave that group unchanged.
 /// Directory-list errors remain fatal because the remaining groups cannot be enumerated.
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 pub(crate) fn repair_on_open(db: &AccountDb) -> Result<(), SdkError> {
     let mut after = String::new();
     loop {

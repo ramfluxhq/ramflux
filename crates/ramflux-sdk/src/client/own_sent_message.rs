@@ -38,15 +38,13 @@ impl SentMessage {
         conversation: &str,
         group: Option<&str>,
     ) -> Result<(), SdkError> {
-        if self.context.group.is_some() {
-            ramflux_protocol::message::dm_scope::validate_group(&self.context.conversation_id)
-                .map_err(|_| invalid("reserved DM conversation namespace"))?;
+        if self.context.group.is_some() || group.is_some() {
+            return Err(invalid("own sent message group scope is unavailable"));
         }
         if self.envelope_id.is_empty()
             || self.envelope_id.len() > 256
             || self.envelope_id != envelope
             || self.context.conversation_id != conversation
-            || self.context.group.as_ref().map(|g| g.group_id.as_str()) != group
             || self.message_id.is_empty()
             || self.message_id.len() > 256
             || self.sender_id.is_empty()
@@ -208,13 +206,9 @@ impl RamfluxClient {
     fn own_sent_packet(&self, input: OwnSentInput<'_>) -> Result<SentMessage, SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let db = self.account_db()?;
-        let group = input
-            .group
-            .map(|id| {
-                self.own_device_group_snapshot(id, &local.device_id)?
-                    .ok_or_else(|| invalid("own-device group access unavailable"))
-            })
-            .transpose()?;
+        if input.group.is_some() {
+            return Err(invalid("own-device group access unavailable"));
+        }
         let participants = if let Some(peer) = input.peer {
             vec![local.principal_id.clone(), peer.to_owned()]
         } else {
@@ -251,7 +245,7 @@ impl RamfluxClient {
             context: OwnContext {
                 conversation_id: input.conversation.into(),
                 participants,
-                group,
+                group: None,
                 friend,
             },
             body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(input.body)),
@@ -259,35 +253,6 @@ impl RamfluxClient {
         Ok(packet)
     }
 
-    #[allow(dead_code, reason = "MLS: allowance removed in P1-b")]
-    pub(crate) fn own_group_copy_envelope(
-        &self,
-        group: &str,
-        conversation: &str,
-        message: &str,
-        explicit: Option<&str>,
-    ) -> Result<String, SdkError> {
-        if let Some(id) = explicit {
-            return Ok(id.into());
-        }
-        let scope = ramflux_protocol::canonical_json_bytes(&(
-            self.owned_device_identity()?.storage_key(),
-            group,
-            conversation,
-            message,
-        ))?;
-        let key = format!(
-            "own-device/group-envelope/{}",
-            ramflux_crypto::blake3_256_base64url("ramflux.own-group-envelope.v1", &scope)
-        );
-        let db = self.account_db()?;
-        if let Some(id) = db.load_actor_state::<String>(&key)? {
-            return Ok(id);
-        }
-        let id = crate::new_surface_message_id()?;
-        db.persist_message_actor_state(message, &key, &id)?;
-        Ok(id)
-    }
     fn record_own_sent_projection(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -414,9 +379,6 @@ impl RamfluxClient {
             return Err(invalid("structured own message requires signed control projection"));
         }
         self.import_surface_context(&packet.context)?;
-        if let Some(group) = group {
-            self.merge_routed_group_link(group, conversation)?;
-        }
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if packet.original_recipients.contains(&local.device_id) {
             // The original pair/group delivery owns the timeline row. Still consume this

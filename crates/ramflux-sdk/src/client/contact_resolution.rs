@@ -208,9 +208,6 @@ impl RamfluxClient {
                 .await
                 .map_err(manifest_failure)?;
         let db = self.account_db()?;
-        // These safety observations must survive a later ownership/data transaction rejection.
-        db.write_transaction(|| self.record_pinned_group_key_changes(&own_manifest))?;
-        db.write_transaction(|| self.record_pinned_group_key_changes(&manifest))?;
         let replacement = self.contact_replacement(
             &old,
             principal,

@@ -321,8 +321,7 @@ impl RamfluxClient {
                 return Ok(None);
             };
             let envelope = &verified.outer;
-            if route.kind
-                != if identity.group_id.is_some() { Kind::GroupMessage } else { Kind::Direct }
+            if route.kind != Kind::Direct
                 || (scanned.kind == 1
                     && envelope.delivery_class != ramflux_protocol::DeliveryClass::Message)
                 || origin.routing != route
@@ -357,24 +356,10 @@ impl RamfluxClient {
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         identity: &g::EventIdentity,
     ) -> Result<bool, SdkError> {
-        let Some(group) = identity.group_id.as_ref() else {
-            return self.raw_reparse_scope_allowed(source, &identity.conversation_id);
-        };
-        let db = self.account_db()?;
-        let Some(state) = db.shared_group_state(group)? else {
-            return Ok(false);
-        };
-        let local = self.owned_device_identity()?;
-        if state.snapshot().genesis.conversation_id != identity.conversation_id
-            || state.view().effective_role(local.root_commitment(), local.device_id()).is_none()
-            || state.view().effective_role(source.root_commitment(), source.device_id()).is_none()
-        {
+        if identity.group_id.is_some() {
             return Ok(false);
         }
-        let Some(thread) = db.client_record("conversation", &identity.conversation_id)? else {
-            return Ok(false);
-        };
-        Ok(thread["kind"] == "group" && thread["group_id"].as_str() == Some(group.as_str()))
+        self.raw_reparse_scope_allowed(source, &identity.conversation_id)
     }
 
     pub(crate) fn raw_reparse_scope_allowed(

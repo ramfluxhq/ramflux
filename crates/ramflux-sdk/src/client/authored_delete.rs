@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Qualified Delete inputs are checked before allocating one retained authored event.
-use crate::client::identity_authority::{HeadUse, NativeOperation};
+use crate::client::identity_authority::HeadUse;
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::message as g;
 
@@ -108,33 +108,10 @@ impl RamfluxClient {
             {
                 return Err(refused("target author or conversation differs from original"));
             }
-            if let Some(group) = original.group_id.as_deref() {
-                self.require_native_operation(&own, NativeOperation::Group)?;
-                let state = self
-                    .account_db()?
-                    .shared_group_state(group)?
-                    .ok_or_else(|| refused("verified group state missing"))?;
-                if target.author_anchor != own.root_commitment()
-                    && !matches!(
-                        state.view().effective_role(own.root_commitment(), own.device_id()),
-                        Some(
-                            ramflux_protocol::SharedGroupRole::Owner
-                                | ramflux_protocol::SharedGroupRole::Admin
-                        )
-                    )
-                {
-                    return Err(SdkError::GeneratedRefused {
-                        code: crate::GeneratedRefusalCode::Authority,
-                        reason: "only the authenticated author or a current group moderator may delete for everyone".into(),
-                    });
-                }
-                self.require_generated_group_epoch(
-                    group,
-                    &own,
-                    state.view().epoch,
-                    target.author_anchor != own.root_commitment(),
-                )?;
-            } else if target.author_anchor != own.root_commitment() {
+            if original.group_id.is_some() {
+                return Err(refused("group scope is unavailable"));
+            }
+            if target.author_anchor != own.root_commitment() {
                 return Err(SdkError::GeneratedRefused {
                     code: crate::GeneratedRefusalCode::Authority,
                     reason:
@@ -159,23 +136,18 @@ impl RamfluxClient {
             let event_id = ramflux_protocol::encode_base64url(&identity.id);
             let staged = format!("delete-send/own-staged/{event_id}");
             if !db.actor_state_exists(&staged)? {
-                let recipients = if let Some(group) = identity.group_id.as_deref() {
-                    self.group_state(group)?.members.into_iter().collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                };
-                let peer = if identity.group_id.is_none() {
-                    Some(self.own_sent_peer(message)?)
-                } else {
-                    None
-                };
+                if identity.group_id.is_some() {
+                    return Err(refused("group scope is unavailable"));
+                }
+                let recipients: Vec<String> = Vec::new();
+                let peer = Some(self.own_sent_peer(message)?);
                 self.stage_authored_mutation_copy(crate::client::own_sent_message::OwnSentInput {
                     envelope: &message.envelope_id,
                     conversation: &identity.conversation_id,
                     message: &event_id,
                     sender: &message.sender_id,
                     original_recipients: &recipients,
-                    group: identity.group_id.as_deref(),
+                    group: None,
                     peer: peer.as_deref(),
                     body: exact,
                     ciphertext: &[],

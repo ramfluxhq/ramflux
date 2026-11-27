@@ -45,21 +45,19 @@ impl RetainedOrigin {
     ) -> Result<VerifiedOrigin, SdkError> {
         let bad = EvidenceError::OriginCommitmentMismatch;
         g::validation::scan_inner(exact_inner).map_err(|_| bad)?;
-        if self.evidence.report_opening.len() != 32
-            || (identity.group_id.is_some() && self.evidence.group_opening.len() != 64)
-        {
+        if self.evidence.report_opening.len() != 32 {
             return Err(bad.into());
         }
         let decoded = g::Inner::decode(exact_inner).map_err(|_| bad)?;
         if decoded.identity.as_ref() != Some(identity) {
             return Err(bad.into());
         }
-        if identity.group_id.is_none()
-            && (!self.evidence.group_plaintext.is_empty()
-                || !self.evidence.group_opening.is_empty()
-                || self.evidence.group_membership.is_some()
-                || self.routing.group_id.is_some()
-                || identity.group_epoch.is_some())
+        if !self.evidence.group_plaintext.is_empty()
+            || !self.evidence.group_opening.is_empty()
+            || self.evidence.group_membership.is_some()
+            || self.routing.group_id.is_some()
+            || identity.group_id.is_some()
+            || identity.group_epoch.is_some()
         {
             return Err(bad.into());
         }
@@ -87,14 +85,6 @@ impl RetainedOrigin {
             self.evidence.source_authority.as_ref().ok_or(EvidenceError::OriginEvidenceMissing)?,
             identity,
         )?;
-        if identity.group_id.is_some() {
-            if outer["delivery_mode"].as_str() != Some("durable")
-                || outer["delivery_class"].as_str() != Some("message")
-            {
-                return Err(bad.into());
-            }
-            self.verify_group_binding(identity, &decoded, &author)?;
-        }
         let mut a0_outer = outer.clone();
         a0_outer["encrypted_payload"] = serde_json::Value::String(String::new());
         // The placeholder is used for A0/header fields only. Signature verification above
@@ -122,9 +112,6 @@ impl RetainedOrigin {
         let issued = u64::try_from(envelope.created_at).map_err(|_| bad)?;
         let expires = issued.checked_add(u64::from(envelope.ttl)).ok_or(bad)?;
         g::original_header::verify_inner_extension(&envelope.ext, exact_inner, issued, expires)?;
-        if identity.group_id.is_some() {
-            self.verify_group_opening(&decoded)?;
-        }
         Ok(VerifiedOrigin { author, outer: envelope })
     }
 }

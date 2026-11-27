@@ -47,13 +47,8 @@ impl<'de> Visitor<'de> for Scan<'_> {
                         }
                     }
                 }
-                "encrypted_body"
-                | "ciphertext"
-                | "plaintext_base64"
-                | "body_base64"
-                | "contents"
-                | "nonce"
-                | "sender_key_distributions_base64" => {
+                "encrypted_body" | "ciphertext" | "plaintext_base64" | "body_base64"
+                | "contents" | "nonce" => {
                     map.next_value::<IgnoredAny>()?;
                 }
                 _ => map.next_value_seed(Scan(&mut *self.0))?,

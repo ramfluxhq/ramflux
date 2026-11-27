@@ -60,31 +60,10 @@ impl RamfluxClient {
         &self,
         identity: &g::EventIdentity,
     ) -> Result<(), SdkError> {
-        let bad = EvidenceError::OriginCommitmentMismatch;
-        let db = self.account_db()?;
-        if let Some(group) = identity.group_id.as_ref() {
-            g::dm_scope::validate_group(&identity.conversation_id).map_err(|_| bad)?;
-            let local = self.owned_device_identity()?;
-            let state = db.shared_group_state(group)?.ok_or_else(|| {
-                SdkError::InboundPending("history group state is not available".into())
-            })?;
-            let joined = db.group_member_joined_epoch(group, &local)?.ok_or(bad)?;
-            if state.snapshot().genesis.conversation_id != identity.conversation_id
-                || state.view().effective_role(local.root_commitment(), local.device_id()).is_none()
-                || identity.group_epoch.is_none_or(|epoch| epoch < joined)
-            {
-                return Err(bad.into());
-            }
-            if let Some(thread) = db.client_record("conversation", &identity.conversation_id)?
-                && (thread["kind"] != "group"
-                    || thread["group_id"].as_str() != Some(group.as_str()))
-            {
-                return Err(bad.into());
-            }
-        } else {
-            self.authorize_direct_history_scope(identity)?;
+        if identity.group_id.is_some() {
+            return Err(EvidenceError::OriginCommitmentMismatch.into());
         }
-        Ok(())
+        self.authorize_direct_history_scope(identity)
     }
 
     fn authorize_direct_history_scope(&self, identity: &g::EventIdentity) -> Result<(), SdkError> {
@@ -367,13 +346,16 @@ impl RamfluxClient {
         let bad = EvidenceError::OriginCommitmentMismatch;
         let scanned = g::validation::scan_inner(bytes).map_err(|_| bad)?;
         let message = g::Message::decode(scanned.body).map_err(|_| bad)?;
+        if message.sealed_group.is_some() || origin.evidence.group_membership.is_some() {
+            return Err(bad.into());
+        }
         let original = OriginalHeader {
             exact_identity: g::original_header::exact_identity(bytes)?.to_vec(),
             evidence: g::HistoryOriginalMetadataEvidence {
                 canonical_sender_envelope: origin.evidence.canonical_sender_envelope.clone(),
                 source_authority: origin.evidence.source_authority.clone(),
-                group_membership: origin.evidence.group_membership.clone(),
-                group_binding: message.sealed_group.as_ref().map(g::original_header::group_binding),
+                group_membership: None,
+                group_binding: None,
                 layer: scanned.layer,
             },
         };

@@ -21,14 +21,17 @@ impl RamfluxClient {
         }
         let inner = g::Inner::decode(item.exact_inner.as_slice()).map_err(|_| bad)?;
         let identity = inner.identity.ok_or(bad)?;
+        if identity.group_id.is_some() {
+            return Err(bad.into());
+        }
         let origin = RetainedOrigin {
             evidence: item.source_evidence.clone().ok_or(EvidenceError::OriginEvidenceMissing)?,
             reported_inner: Vec::new(),
             routing: Routing {
-                kind: if identity.group_id.is_some() { Kind::GroupMessage } else { Kind::Direct },
+                kind: Kind::Direct,
                 conversation_id: identity.conversation_id.clone(),
                 message_id: ramflux_protocol::encode_base64url(&identity.id),
-                group_id: identity.group_id.clone(),
+                group_id: None,
                 group_message_id: None,
                 attachments: false,
             },

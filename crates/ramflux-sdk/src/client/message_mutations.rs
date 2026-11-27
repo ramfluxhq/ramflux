@@ -116,25 +116,9 @@ impl RamfluxClient {
                 } else {
                     target.author_anchor.clone()
                 };
-                let mut moderator = None;
                 let allowed = match scope {
                     DeleteScope::Local => source.root_commitment() == self.own_account_anchor()?,
-                    DeleteScope::Everyone if source.root_commitment() == author => true,
-                    DeleteScope::Everyone => {
-                        if let (Some(group), Some(epoch)) =
-                            (identity.group_id.as_ref(), identity.group_epoch)
-                        {
-                            self.require_generated_group_epoch(group, source, epoch, true)?;
-                            moderator = Some(crate::client::generated_delete_fence::Moderator {
-                                group: group.clone(),
-                                epoch,
-                                device: source.storage_key().into(),
-                            });
-                            true
-                        } else {
-                            false
-                        }
-                    }
+                    DeleteScope::Everyone => source.root_commitment() == author,
                     DeleteScope::Unspecified => false,
                 };
                 if !allowed {
@@ -150,7 +134,7 @@ impl RamfluxClient {
                     scope: delete.scope,
                     tombstone_id: delete.tombstone_id.clone(),
                     matched: row.is_some(),
-                    moderator,
+                    moderator: None,
                     identity: db.load_actor_state(&format!("routed/generated-identity/{id}"))?,
                 };
                 if scope == DeleteScope::Everyone {
@@ -310,23 +294,10 @@ impl RamfluxClient {
     }
 
     fn authorize_generated_edit_group(
-        &self,
-        source: &ramflux_crypto::RootQualifiedDeviceRef,
         identity: &ramflux_protocol::message::EventIdentity,
     ) -> Result<(), SdkError> {
-        if let Some(group) = identity.group_id.as_deref() {
-            self.require_native_operation(
-                source,
-                crate::client::identity_authority::NativeOperation::Group,
-            )?;
-            self.require_generated_group_epoch(
-                group,
-                source,
-                identity
-                    .group_epoch
-                    .ok_or_else(|| SdkError::InboundRejected("Edit group epoch missing".into()))?,
-                false,
-            )?;
+        if identity.group_id.is_some() {
+            return Err(SdkError::InboundRejected("Edit group scope is unavailable".into()));
         }
         Ok(())
     }
@@ -360,7 +331,7 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("edit requires the original author".into()));
         }
-        self.authorize_generated_edit_group(source, &identity)?;
+        Self::authorize_generated_edit_group(&identity)?;
         let target_id = ramflux_protocol::encode_base64url(&target.id);
         let db = self.account_db()?;
         db.write_transaction(|| {

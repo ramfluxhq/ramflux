@@ -158,63 +158,26 @@ impl RamfluxClient {
         {
             return Err(EvidenceError::EditTargetMismatch.into());
         }
-        self.verify_edited_history_group(
+        Self::refuse_group_history_scope(
             original_evidence,
             &checked.identity,
-            &original,
             &checked.edit_identity,
-            &edit_author,
         )?;
         Ok(checked.identity)
     }
 
-    fn verify_edited_history_group(
-        &self,
+    /// Group history evidence is unavailable until the MLS group track.
+    fn refuse_group_history_scope(
         evidence: &g::HistoryOriginalMetadataEvidence,
         original: &g::EventIdentity,
-        original_author: &Author,
         edit: &g::EventIdentity,
-        edit_author: &Author,
     ) -> Result<(), SdkError> {
-        let bad = EvidenceError::OriginCommitmentMismatch;
-        if let Some(group) = evidence.group_binding.as_ref() {
-            let snapshot = evidence.group_membership.as_ref().ok_or(bad)?;
-            let snapshot = ramflux_protocol::group_state::GroupStateSnapshot::from_wire_bytes(
-                &snapshot.canonical,
-            )
-            .map_err(|_| bad)?;
-            let verified =
-                ramflux_crypto::verify_group_state_snapshot(snapshot).map_err(|_| bad)?;
-            let state = verified.snapshot();
-            if state.group_id != group.group_id
-                || state.epoch != group.key_epoch
-                || state.genesis.conversation_id != original.conversation_id
-                || ramflux_protocol::decode_base64url(&state.state_hash).map_err(|_| bad)?
-                    != group.group_state_hash
-                || verified
-                    .view()
-                    .effective_role(&original_author.root, original_author.device.device_id())
-                    .is_none()
-            {
-                return Err(bad.into());
-            }
-            self.require_generated_group_epoch(
-                &group.group_id,
-                &original_author.device,
-                group.key_epoch,
-                false,
-            )?;
-            self.require_generated_group_epoch(
-                &group.group_id,
-                &edit_author.device,
-                edit.group_epoch.ok_or(bad)?,
-                false,
-            )?;
-        } else if evidence.group_membership.is_some()
+        if evidence.group_binding.is_some()
+            || evidence.group_membership.is_some()
             || original.group_id.is_some()
             || edit.group_id.is_some()
         {
-            return Err(bad.into());
+            return Err(EvidenceError::OriginCommitmentMismatch.into());
         }
         Ok(())
     }
@@ -257,19 +220,9 @@ impl RamfluxClient {
         };
         let message = g::Message::decode(scanned.body)
             .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
-        let group_binding = message.sealed_group.as_ref().map(g::original_header::group_binding);
-        let group_membership = group_binding
-            .as_ref()
-            .map(|group| {
-                let state = self
-                    .account_db()?
-                    .shared_group_state_at_epoch(&group.group_id, group.key_epoch)?
-                    .ok_or(EvidenceError::OriginEvidenceMissing)?;
-                Ok::<_, SdkError>(g::NativeGroupSnapshot {
-                    canonical: ramflux_protocol::canonical_json_bytes(state.snapshot())?,
-                })
-            })
-            .transpose()?;
+        if message.sealed_group.is_some() {
+            return Err(EvidenceError::OriginCommitmentMismatch.into());
+        }
         let canonical_sender_envelope = ramflux_protocol::sender_origin_evidence(&entry.envelope)?;
         if canonical_sender_envelope.len() > g::original_header::MAX_OUTER_BYTES {
             return Err(EvidenceError::OriginCommitmentMismatch.into());
@@ -281,8 +234,8 @@ impl RamfluxClient {
                 source_authority: Some(g::NativeCustodyManifest {
                     canonical: ramflux_protocol::canonical_json_bytes(&manifest)?,
                 }),
-                group_membership,
-                group_binding,
+                group_membership: None,
+                group_binding: None,
                 layer: scanned.layer,
             },
         };
