@@ -410,6 +410,26 @@ fn deadline_passed(record: &AgentCreationRecord, now: u64) -> bool {
     now < record.issued_at || now >= record.expires_at
 }
 
+/// The ids of create requests (not rebinds) still waiting for a decision or a commit whose
+/// deadline has passed. Only the owner's runtime closes them (`AgentStep::Expire`).
+///
+/// # Errors
+/// Refuses a directory that cannot be read and any record that fails to load.
+pub fn overdue_creations(store: &AgentCreationStore, now: u64) -> Result<Vec<String>, SdkError> {
+    Ok(store
+        .records()?
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record.state,
+                AgentCreationState::AuthorizationPending | AgentCreationState::Authorized
+            ) && !super::rebind_plan::is_rebind(record)
+                && deadline_passed(record, now)
+        })
+        .map(|record| record.request_id)
+        .collect())
+}
+
 /// Apply the stored deadline and finish a cleanup that a previous run left pending.
 pub(super) fn resume(
     store: &AgentCreationStore,
