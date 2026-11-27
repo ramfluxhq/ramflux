@@ -42,7 +42,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
     steps:
       - name: Checkout product source
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
           ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
           path: product
@@ -62,7 +62,7 @@ jobs:
               out.write(f'tag={tag}\n')
           PY
       - name: Checkout matching TUI tag
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
           repository: ramfluxhq/ramflux-tui
           ref: refs/tags/${{ steps.version.outputs.tag }}
@@ -74,7 +74,7 @@ jobs:
           sudo apt-get install -y build-essential pkg-config perl libssl-dev zlib1g-dev libzstd-dev
           rustup target add '${{ matrix.target }}'
       - name: Cache native compilation
-        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266
         with:
           key: linux-cli-${{ matrix.target }}
           workspaces: product -> target
@@ -105,7 +105,7 @@ jobs:
           merge-multiple: true
           path: dist
       - name: Attach to the selected release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           fail_on_unmatched_files: true
