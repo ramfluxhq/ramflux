@@ -20,6 +20,10 @@ mod username;
 pub(crate) use username::*;
 mod conversation_ops;
 mod daemon;
+#[cfg(feature = "itest-mls-debug")]
+mod debug;
+#[cfg(feature = "itest-mls-debug")]
+pub(crate) use debug::*;
 mod device;
 mod diag;
 mod dm;
@@ -120,6 +124,10 @@ pub(crate) enum Command {
     /// Shared-root snapshot and one fenced direct-message commit.
     Root(RootCommand),
     Attachment(AttachmentCommand),
+    /// Integration debug drivers (MLS foundation); built only with `itest-mls-debug`.
+    #[cfg(feature = "itest-mls-debug")]
+    #[command(hide = true)]
+    Debug(DebugCommand),
 }
 
 #[cfg(test)]

@@ -14,6 +14,9 @@ path = "src/main.rs"
 default = []
 # Process-local credential vault for native integration fixtures only.
 itest-memory-vault = ["ramflux-sdk/itest-memory-vault"]
+# MLS-0c: hidden `rf debug mls` commands over the SDK's `debug.mls.*` bus methods. Never enabled
+# by production rf.
+itest-mls-debug = ["ramflux-sdk/itest-mls-debug"]
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = ["ramflux-sdk/itest-identity-proof"]
 # SECONDARY-LAYER-01 integration only: short message-layer declaration lease (180 s, renew 60 s early).

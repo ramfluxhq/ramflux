@@ -22,6 +22,14 @@ compile_error!(
 compile_error!("production builds must not enable itest-memory-vault");
 #[cfg(all(feature = "itest-memory-vault", ramflux_release_profile))]
 compile_error!("release profiles must not enable itest-memory-vault");
+#[cfg(all(feature = "itest-mls-debug", not(any(test, ramflux_itest))))]
+compile_error!(
+    "itest-mls-debug requires cfg(test) or an explicit RAMFLUX_ITEST_BUILD=1 fixture build"
+);
+#[cfg(all(feature = "itest-mls-debug", ramflux_production))]
+compile_error!("production builds must not enable itest-mls-debug");
+#[cfg(all(feature = "itest-mls-debug", ramflux_release_profile))]
+compile_error!("release profiles must not enable itest-mls-debug");
 #[cfg(all(feature = "itest-short-layer-lease", not(any(test, ramflux_itest))))]
 compile_error!(
     "itest-short-layer-lease requires cfg(test) or an explicit RAMFLUX_ITEST_BUILD=1 fixture build"
@@ -36,6 +44,7 @@ mod bus;
 #[cfg(feature = "c-abi")]
 pub mod c_abi;
 mod client;
+pub mod mls;
 #[cfg(all(feature = "diag-realrun", ramflux_production))]
 compile_error!("production builds must not enable diag-realrun");
 pub mod diag;

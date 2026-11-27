@@ -106,5 +106,7 @@ async fn run() -> Result<(), RfError> {
         Command::Diag(command) => handlers::diag::handle(socket, command).await,
         Command::Root(command) => handlers::root::handle(&command),
         Command::Attachment(command) => handlers::attachment::handle(socket, command).await,
+        #[cfg(feature = "itest-mls-debug")]
+        Command::Debug(command) => handlers::debug::handle(socket, command).await,
     }
 }
