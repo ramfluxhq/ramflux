@@ -59,7 +59,6 @@ mod prekey;
 pub mod push_keyset;
 pub mod push_token;
 mod recovery;
-mod sframe;
 mod signing;
 mod voice_rebind;
 mod x3dh;
@@ -146,10 +145,6 @@ pub const FIXTURE_SIGNING_KEY_BYTES: [u8; 32] = [
 pub const fn crate_name() -> &'static str {
     CRATE_NAME
 }
-
-pub use sframe::{
-    SFRAME_AES_256_GCM_SHA512_128, SFRAME_REPLAY_WINDOW, SFrameHeader, SFrameReceiver, SFrameSender,
-};
 
 #[cfg(test)]
 mod identity_profile_tests;

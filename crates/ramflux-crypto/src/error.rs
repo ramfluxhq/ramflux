@@ -11,8 +11,6 @@ pub enum CryptoError {
     VoiceRebind(&'static str),
     #[error("identity authority rejected: {0}")]
     IdentityAuthority(&'static str),
-    #[error("SFrame rejected: {0}")]
-    SFrame(&'static str),
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
     #[error("base64url decode failed: {0}")]
