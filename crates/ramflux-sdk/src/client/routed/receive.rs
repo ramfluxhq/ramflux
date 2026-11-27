@@ -618,7 +618,6 @@ impl RamfluxClient {
         })
     }
 
-
     /// A content refusal still consumes its authenticated pair ciphertext. This joins the
     /// terminal receive transaction so a refused first packet cannot strand its successor.
     pub(crate) fn commit_generated_refusal_pair(

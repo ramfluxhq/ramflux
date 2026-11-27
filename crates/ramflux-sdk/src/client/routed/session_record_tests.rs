@@ -262,7 +262,6 @@ fn last_pair_control(sent: &Sent) -> Result<GatewayInboxEntry, SdkError> {
         .ok_or_else(|| invalid("no pair control submitted"))
 }
 
-
 #[tokio::test]
 async fn simultaneous_resets_converge_without_rejecting_either_valid_state() -> Result<(), SdkError>
 {

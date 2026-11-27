@@ -511,7 +511,6 @@ async fn generated_a2i_requires_pinned_signature_and_device_binding() -> Result<
     Ok(())
 }
 
-
 #[tokio::test(flavor = "current_thread")]
 async fn peer_control_author_must_be_the_authenticated_pair_peer() -> Result<(), SdkError> {
     let (a, mut b) = pair(249, 251).await?;

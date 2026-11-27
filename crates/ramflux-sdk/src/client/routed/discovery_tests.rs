@@ -59,7 +59,6 @@ async fn first_use_discovery() -> TestResult {
     .await?
 }
 
-
 #[tokio::test(flavor = "current_thread")]
 async fn signed_root_hint_cannot_override_an_existing_verified_owner() -> TestResult {
     crate::client::native_test_support::watchdog::within(async {
@@ -107,9 +106,6 @@ async fn a_non_string_signed_root_hint_is_rejected_before_manifest_discovery() -
         Ok(())
     }).await?
 }
-
-
-
 
 async fn native_hint_entry() -> crate::client::native_test_support::TestResult<(
     crate::client::native_test_support::Fixture,

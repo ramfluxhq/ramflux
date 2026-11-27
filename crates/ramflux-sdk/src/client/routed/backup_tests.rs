@@ -76,9 +76,6 @@ async fn first_native_post_restore_dm_is_fresh_and_the_live_peer_keeps_delayed_o
     Ok(())
 }
 
-
-
-
 #[tokio::test]
 async fn native_data_merge_rebootstraps_without_reusing_the_archived_outbound_ratchet()
 -> crate::client::native_test_support::TestResult {

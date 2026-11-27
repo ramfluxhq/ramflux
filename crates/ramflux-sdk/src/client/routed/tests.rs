@@ -558,7 +558,6 @@ impl ramflux_transport::GatewaySessionFrameSource for NoNetwork {
     }
 }
 
-
 struct ReceivingGateway {
     queued: VecDeque<GatewayServerFrame>,
     entry: Option<GatewayInboxEntry>,

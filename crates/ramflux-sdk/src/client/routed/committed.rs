@@ -2,9 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Replay receipts retain authenticated attribution and are scoped by sender device and envelope.
-use super::{
-    Deserialize, GatewayInboxEntry, RamfluxClient, Routing, SdkError, Serialize, invalid,
-};
+use super::{Deserialize, GatewayInboxEntry, RamfluxClient, Routing, SdkError, Serialize, invalid};
 use crate::client::identity_authority::HeadUse;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Committed {

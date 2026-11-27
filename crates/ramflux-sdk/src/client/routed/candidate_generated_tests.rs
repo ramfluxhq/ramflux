@@ -694,9 +694,6 @@ fn assert_schema_update_cursor(client: &RamfluxClient, id: &str) -> Result<(), S
     Ok(())
 }
 
-
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn generated_refusals_settle_and_never_stage_locally()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -1179,9 +1176,6 @@ async fn message_logical_id_refuses_changed_body_or_hlc_without_retaining_a_body
     }
     Ok(())
 }
-
-
-
 
 #[tokio::test(flavor = "current_thread")]
 async fn typed_tombstones_preserve_raw_identity_recorded_scope_and_invalidate_actual_cache()

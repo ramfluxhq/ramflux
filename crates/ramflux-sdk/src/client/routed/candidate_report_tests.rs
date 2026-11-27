@@ -494,7 +494,6 @@ async fn gate_on_receipt_route_opens() -> Result<(), SdkError> {
     .expect("scenario deadline")
 }
 
-
 #[tokio::test(flavor = "current_thread")]
 async fn retired_opaque_own_device_body_cannot_build_envelope() -> Result<(), SdkError> {
     Box::pin(tokio::time::timeout(std::time::Duration::from_secs(30), async {

@@ -99,8 +99,6 @@ pub(super) async fn duplicate_attribution() -> TestResult {
     Ok(())
 }
 
-
-
 pub(super) async fn transient_lookup() -> TestResult {
     use crate::client::routed::tests::{native_pair_tests, review::Inbox};
     let alice = Fixture::with_principal("backoff-alice", "alice", "alice").await?;

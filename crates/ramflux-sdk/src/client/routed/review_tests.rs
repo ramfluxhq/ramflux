@@ -117,7 +117,6 @@ async fn a_duplicate_cannot_replace_the_original_authenticated_attribution() -> 
         .map_err(|error| invalid(&format!("native attribution: {error}")))
 }
 
-
 #[test]
 fn decrypted_payload_debug_output_never_discloses_plaintext_or_franking_keys() {
     let output = ramflux_crypto::DmDecryptionOutput {

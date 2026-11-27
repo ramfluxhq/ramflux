@@ -161,8 +161,6 @@ fn friend(receiver: &mut Fixture, sender: &Fixture) -> Result<(), SdkError> {
     Ok(())
 }
 
-
-
 /// Kill before the named W1 commit, reopen equals pre-state; success then reopen equals post-state.
 async fn cut(
     receiver: &mut Fixture,
