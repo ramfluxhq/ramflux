@@ -153,6 +153,17 @@ fn admit_native_account(
     account.native_setup = Some(state.config.clone());
     // The owning runtime starts networking after installing its bounded writer channel.
     let result = response(&account)?;
+    // Restart hydrates: rebuild call, bot, MCP, object and upload-spool state from the unlocked
+    // account DB (no-ops on a fresh create). Errors abort the unlock, fail-closed.
+    super::dispatch::call::recover(&mut account)?;
+    super::dispatch::call_bot::hydrate_local_bot_records(&mut account)?;
+    super::dispatch::grant_mcp::hydrate_local_mcp_state(&mut account)?;
+    super::dispatch::object::hydrate_local_object_state(&mut account)?;
+    super::dispatch::object::rehydrate_object_put_spools(
+        &mut account,
+        &state.config.data_root,
+        id,
+    )?;
     account.client.bind_process_media_ownership(state.config.media_ownership())?;
     state.accounts.insert(id.into(), account);
     state.active_account_id = Some(id.into());
