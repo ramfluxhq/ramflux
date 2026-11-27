@@ -312,7 +312,8 @@ async fn invoke(
         match tokio::task::spawn_blocking(move || provider.provide(&metadata)).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => return Err(error),
-            Err(_) => return Err(SdkError::PairingCode("Retired")),
+            // A provider that stopped mid-prompt refuses; the worker must not exit.
+            Err(_) => CredentialOutcome::Refused,
         }
     } else {
         CredentialOutcome::Refused

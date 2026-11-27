@@ -136,6 +136,23 @@ impl AccountIndex {
         Ok(())
     }
 
+    /// Sets the failure count and keeps the last attempt time. Used once after a correct
+    /// recovery phrase to give an exhausted account a single further code try.
+    ///
+    /// # Errors
+    /// Returns an error when the counter cannot be written.
+    pub fn set_code_failures(
+        &self,
+        local_account_id: &str,
+        failures: u32,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE account_device_unlock SET code_failures = ?2 WHERE local_account_id = ?1",
+            params![local_account_id, i64::from(failures)],
+        )?;
+        Ok(())
+    }
+
     /// Resets the counter after a correct code.
     ///
     /// # Errors

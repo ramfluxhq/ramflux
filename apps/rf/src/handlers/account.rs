@@ -15,6 +15,9 @@ pub(crate) async fn handle_account(
         AccountAction::Recover(selector) => {
             return super::account_ceremony::recover(&socket, &selector.account).await;
         }
+        AccountAction::RemoveLocal(selector) => {
+            return super::account_ceremony::remove_local(&socket, &selector.account).await;
+        }
         AccountAction::Create(create) => {
             return super::account_ceremony::create(&socket, &create.display_name).await;
         }
@@ -71,9 +74,11 @@ pub(crate) async fn handle_account(
         ),
         AccountAction::Unlock(unlock) => handle_account_unlock(&mut bus, unlock, &OsKeychain).await,
         AccountAction::AppLock(command) => handle_app_lock(&mut bus, command).await,
-        AccountAction::Recover(_) | AccountAction::Create(_) => Err(RfError::Message(
-            "Account ceremonies require the exclusive ceremony client.".into(),
-        )),
+        AccountAction::Recover(_) | AccountAction::RemoveLocal(_) | AccountAction::Create(_) => {
+            Err(RfError::Message(
+                "Account ceremonies require the exclusive ceremony client.".into(),
+            ))
+        }
     }
 }
 

@@ -99,6 +99,34 @@ to the prompt.
 `code_retry_after_ms` (milliseconds until a code is accepted; 0 when accepted
 now or when attempts are exhausted) and `code_attempts_exhausted` (boolean).
 
+### App lock and recovery
+
+An app-locked account has one exit besides its code. `account.recover.begin`,
+`.confirm`, `.cancel` and `account.remove_local` are admitted without an access
+token when the envelope `account_id` names an account whose app lock is closed.
+Without that header, or with the id of an account that is not locked while
+another account is, they answer `app_locked` as every other account method does.
+`account.recover.begin` with an envelope id different from the body id, and
+`confirm` or `cancel` with an id different from the ceremony's, answer
+`CustodySetupInvalid`.
+
+- Recovery needs the current account code too. A wrong phrase answers
+  `CustodyConfirmationFailed` before any code check and changes no counter.
+- A correct phrase on an exhausted account grants exactly one more code try, under
+  the existing wait (no counter reset). A wrong code answers `wrong_passphrase` and
+  exhausts the account again; a correct code resets the counter.
+- A successful recovery with app lock on reopens the fence (`account.app_lock.changed`
+  with state `unlocked`, reason `authenticated`). The policy stays on. The
+  recovering connection receives the event.
+- A forgotten code has no cryptographic exit that keeps local data: the phrase does
+  not open the database key. The exit is `account.remove_local` (typed confirmation
+  equal to the account id), then data restore from a backup and recovery. Removal
+  drops the account's lock state so other accounts and global methods such as
+  `account.restore.*` are no longer refused. `rf account remove-local --account ID`
+  asks for the account id on the controlling terminal.
+
+No header, enum or method-manifest change.
+
 Code refusals on `account.unlock`, `account.app_lock.configure` and activation
 use these names. Status values come from the existing enum; the header is
 unchanged.

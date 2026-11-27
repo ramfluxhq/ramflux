@@ -44,12 +44,12 @@ impl Supervisor {
     }
 
     pub(in crate::bus) fn admit_app_access(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
-        if super::super::app_lock_fence::control(&request.method) {
+        if self.app_fences.open_for(&request.method, request.account_id.as_deref())? {
             return Ok(());
         }
         self.app_fences.for_method(&request.method, request.account_id.as_deref())?.check()
     }
-    pub(super) fn app_unlocked(&self, id: &str) -> Result<(), SdkError> {
+    pub(in crate::bus) fn app_unlocked(&self, id: &str) -> Result<(), SdkError> {
         let policy = self.index.app_lock_policy(id)?;
         if policy.enabled {
             self.app_fences.transition(id, true, false, "authenticated")?;

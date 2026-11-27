@@ -297,6 +297,23 @@ pub(crate) fn code_throttle(
     Ok(CodeThrottle { exhausted: false, retry_after_secs })
 }
 
+/// After a correct recovery phrase, lets an exhausted account take one more code check. The
+/// failure count drops to one below the limit and the last attempt time is kept, so the
+/// existing wait still applies and a wrong code exhausts the account again. A count below
+/// the limit is left alone.
+///
+/// # Errors
+/// Returns index errors.
+pub(crate) fn grant_phrase_code_attempt(
+    index: &AccountIndex,
+    account_id: &str,
+) -> Result<(), SdkError> {
+    if index.code_attempts(account_id)?.failures >= MAX_CODE_FAILURES {
+        index.set_code_failures(account_id, MAX_CODE_FAILURES.saturating_sub(1))?;
+    }
+    Ok(())
+}
+
 /// Read-only throttle check: refuses while the account is exhausted or waiting, writes nothing.
 ///
 /// # Errors

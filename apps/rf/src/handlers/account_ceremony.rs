@@ -237,6 +237,40 @@ pub(crate) async fn recover(socket: &Path, account: &str) -> Result<(), RfError>
     finish(&mut terminal, outcome)
 }
 
+/// Erases the account from this device. The confirmation is the account id, typed on the
+/// controlling terminal; there is no flag that supplies it. Works for an app-locked account.
+pub(crate) async fn remove_local(socket: &Path, account: &str) -> Result<(), RfError> {
+    let mut terminal = Terminal::open()?;
+    let outcome = remove_local_with(&mut terminal, socket, account).await;
+    finish(&mut terminal, outcome)
+}
+
+async fn remove_local_with(
+    terminal: &mut Terminal,
+    socket: &Path,
+    account: &str,
+) -> Result<(), RfError> {
+    writeln!(
+        terminal.output,
+        "This erases account {account} and its data from this device. It cannot be undone; \
+         history that is not in a backup is lost."
+    )?;
+    let typed = terminal.line("Type the account id to confirm: ", false)?;
+    if *typed != account {
+        return Err(RfError::Message("Account id confirmation did not match.".into()));
+    }
+    let mut bus = ramflux_sdk::LocalBusClient::connect(socket).await?;
+    let response = bus
+        .request(
+            Some(account.to_owned()),
+            "account",
+            "account.remove_local",
+            serde_json::json!({ "confirmation": account }),
+        )
+        .await?;
+    crate::utils::print_json(&response)
+}
+
 async fn recover_with(
     terminal: &mut Terminal,
     socket: &Path,

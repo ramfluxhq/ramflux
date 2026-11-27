@@ -21,7 +21,8 @@ pub(crate) fn verify_stored_data_secret_with(
     let vault_secret = zeroize::Zeroizing::new(source.vault_secret(id)?);
     let wrapping = zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret)?);
     let wrapped = index.load_wrapped_db_key(id)?.ok_or(SdkError::AccountDbNotUnlocked)?;
-    let _key = unwrap_with_vault_secret(&wrapping, &wrapped)?;
+    let _key = unwrap_with_vault_secret(&wrapping, &wrapped)
+        .map_err(|error| device_unlock::wrong_code(SdkError::from(error)))?;
     device_unlock::code_attempt_succeeded(&index, id)
 }
 
