@@ -30,7 +30,7 @@ impl RamfluxClient {
             .client_record("conversation", &record.conversation_id)?
             .ok_or_else(|| invalid("surface conversation missing"))?;
         let epoch = self.account_db()?.load_actor_state::<u64>(&key("group_epoch", reference))?;
-        self.check_owned_surface_floor(&conversation, epoch)?;
+        self.check_owned_surface_floor(&conversation)?;
         let wire = state.resync_frame()?.wire_bytes()?;
         Ok(OwnedSurfaceCheckpoint {
             record,
@@ -41,24 +41,12 @@ impl RamfluxClient {
             group_epoch: epoch,
         })
     }
-    fn check_owned_surface_floor(
-        &self,
-        conversation: &Value,
-        epoch: Option<u64>,
-    ) -> Result<(), SdkError> {
+    fn check_owned_surface_floor(&self, conversation: &Value) -> Result<(), SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if let Some(group) = conversation["group_id"].as_str() {
-            let identity = self.owned_device_identity()?;
-            let floor = self
-                .account_db()?
-                .group_member_joined_epoch_metadata(group, identity.device_id())?;
-            if self.account_db()?.group_member_key_binding(group, &identity)?.is_none()
-                || !self.group_state(group)?.roles.contains_key(identity.device_id())
-                || floor.is_none_or(|f| epoch.is_none_or(|e| e < f))
-            {
-                return Err(invalid("surface is below the own-device membership floor"));
-            }
-        } else if conversation["kind"] != "direct"
+        if conversation["group_id"].as_str().is_some() {
+            return Err(invalid("surface group context is unavailable"));
+        }
+        if conversation["kind"] != "direct"
             || !conversation["participants"]
                 .as_array()
                 .is_some_and(|ids| ids.len() == 2 && ids.iter().any(|id| id == &local.principal_id))
@@ -122,8 +110,7 @@ impl RamfluxClient {
             || owned.conversation["kind"] == "group"
             || owned.conversation["group_id"].is_string()
         {
-            ramflux_protocol::message::dm_scope::validate_group(&owned.record.conversation_id)
-                .map_err(|_| invalid("reserved DM conversation namespace"))?;
+            return Err(invalid("surface group checkpoint is unavailable"));
         }
         if owned.record.conversation_id.starts_with("dm:") {
             let roots = owned.conversation["participant_roots"]
@@ -174,7 +161,7 @@ impl RamfluxClient {
             return Err(invalid("owned checkpoint author is not a locally owned agent"));
         }
         self.validate_owned_checkpoint_namespace(owned)?;
-        self.check_owned_surface_floor(&owned.conversation, owned.group_epoch)?;
+        self.check_owned_surface_floor(&owned.conversation)?;
         let reference = super::scope::surface_reference(
             &record.conversation_id,
             &record.author_principal_id,

@@ -106,15 +106,17 @@ impl RamfluxClient {
         let thread = db
             .client_record("conversation", conversation)?
             .ok_or_else(|| invalid("surface conversation absent"))?;
-        let group = thread["group_id"].as_str();
+        if thread["group_id"].as_str().is_some() {
+            return Err(invalid("surface group context is unavailable"));
+        }
         let request = ResyncRequest {
             kind: KIND.into(),
             conversation_id: conversation.into(),
             surface_ref: reference.into(),
             author: author.into(),
             surface_id: required(&view, "surface_id")?.into(),
-            group: group.map(str::to_owned),
-            epoch: group.map(|id| self.group_state(id).map(|s| s.group_epoch)).transpose()?,
+            group: None,
+            epoch: None,
         };
         if !self.claim_resync_window(&key("resync_requested", reference))? {
             return Ok(None);
@@ -207,8 +209,6 @@ impl RamfluxClient {
                 conversation,
                 request.group.as_deref(),
                 &entry.envelope.source_principal_id,
-                &entry.envelope.source_device_id,
-                request.epoch,
             )?;
         }
         let Some((record, _)) = self.surface_state_ref(&request.surface_ref)? else {
@@ -224,18 +224,13 @@ impl RamfluxClient {
         let root = required(&source, "principal_commitment")?;
         let target = required(&source, "target_delivery_id")?;
         let now = crate::prelude::now_unix_timestamp();
-        let epoch = request
-            .group
-            .as_deref()
-            .map(|g| self.group_state(g).map(|s| s.group_epoch))
-            .transpose()?;
         let destination = ResyncDestination {
             principal: entry.envelope.source_principal_id.clone(),
             root: root.into(),
             device: entry.envelope.source_device_id.clone(),
             target: target.into(),
             group: request.group.clone(),
-            epoch,
+            epoch: None,
             expires_at: now.saturating_add(WINDOW),
         };
         self.queue_surface_resync_reply(entry, &request.surface_ref, destination)?;
@@ -342,8 +337,6 @@ impl RamfluxClient {
                 &reply.carrier.conversation_id,
                 target.group.as_deref(),
                 &target.principal,
-                &target.device,
-                target.epoch,
             )?;
         }
         Ok(())
@@ -362,11 +355,6 @@ impl RamfluxClient {
         else {
             return Ok(false);
         };
-        if let Some(group) =
-            thread.get("group_id").and_then(Value::as_str).filter(|id| !id.is_empty())
-        {
-            return self.surface_group_device_allowed(group, &self.owned_device_identity()?);
-        }
         let author = carrier.author_principal_id.as_str();
         let local_id = local.principal_id.as_str();
         Ok(thread.get("participants").and_then(Value::as_array).is_some_and(|ids| {

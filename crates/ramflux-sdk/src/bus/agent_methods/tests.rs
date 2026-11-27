@@ -9,7 +9,7 @@ use crate::bus::own_device_copy;
 use crate::bus::state::LocalBusAccountState;
 use crate::client::agent_custody::AgentCustodySend;
 use crate::client::native_test_support::bus::receive_copy;
-use crate::client::shared_group::tests::{
+use crate::client::native_test_support::people::{
     install_native_directories, native_person, native_sibling,
 };
 use crate::custody::agent_creation::AgentCreationState;

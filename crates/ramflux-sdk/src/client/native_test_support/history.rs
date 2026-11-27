@@ -32,11 +32,9 @@ impl Fixture {
         let inner = g::Inner::decode(exact)?;
         let kind = inner.kind;
         let identity = inner.identity.ok_or("identity")?;
-        let route = match (kind, identity.group_id.as_deref()) {
-            (8, Some(group)) => Route::group_control(group),
-            (8 | 11 | 12, None) => Route::control(),
-            (6, _) => Route::receipt(),
-            (_, Some(group)) => Route::group_message(group),
+        let route = match kind {
+            8 | 11 | 12 => Route::control(),
+            6 => Route::receipt(),
             _ => Route::direct(),
         };
         let mut message = GatewayDirectMessage {

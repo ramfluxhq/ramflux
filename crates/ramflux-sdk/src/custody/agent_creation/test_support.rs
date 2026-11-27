@@ -12,7 +12,7 @@
 //! code.
 //!
 //! Fixtures: the primary phone and its paired desktop are the native fixtures of
-//! `client::shared_group::tests` (`native_person`, `native_sibling`), not network-paired devices,
+//! `client::native_test_support::people` (`native_person`, `native_sibling`), not network-paired devices,
 //! and the packets are not carried by a gateway session. The node record pinned by the SDK
 //! accounts is `network_tests::node` (the test node), not the native fixture's key.
 
@@ -21,11 +21,11 @@ use crate::bus::own_device_copy;
 use crate::bus::state::LocalBusAccountState;
 use crate::client::native_test_support::bus::receive_copy;
 use crate::client::native_test_support::bus::seed_pair;
-use crate::client::native_test_support::router::publish_router_envelope;
-use crate::client::shared_group::tests::native_person_keeping_phrase;
-use crate::client::shared_group::tests::{
+use crate::client::native_test_support::people::native_person_keeping_phrase;
+use crate::client::native_test_support::people::{
     install_native_directories, native_person, native_sibling,
 };
+use crate::client::native_test_support::router::publish_router_envelope;
 use crate::custody::agent_creation::{
     AgentCreationRecord, AgentCreationStore, AgentSteps, BeginInput, BeginOutcome, PrimarySigning,
     begin, commit_approved, complete_with_receipt, primary_sign_decision,

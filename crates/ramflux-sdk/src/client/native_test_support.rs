@@ -238,6 +238,7 @@ impl Fixture {
 
 pub(crate) mod account;
 pub(crate) mod history;
+pub(crate) mod people;
 mod sibling;
 
 #[path = "native_test_support/authored.rs"]

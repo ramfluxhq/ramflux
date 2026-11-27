@@ -429,7 +429,7 @@ impl RamfluxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::shared_group::tests::{
+    use crate::client::native_test_support::people::{
         install_native_directories, native_person, native_sibling,
     };
     use crate::prelude::now_unix_timestamp;

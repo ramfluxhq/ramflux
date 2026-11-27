@@ -36,16 +36,14 @@ fn seal(
     target: &Fixture,
     message: &mut GatewayDirectMessage,
     exact: &[u8],
-    group: Option<&str>,
 ) -> TestResult<ramflux_protocol::Envelope> {
-    let route = group.map_or_else(Route::direct, Route::group_message);
     let material = source.material_for(target)?;
     Ok(source.client.account_db()?.write_transaction(|| {
         let sealed = source.client.seal_generated_routed_prepared(
             &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
             message,
             exact,
-            route,
+            Route::direct(),
             material,
         )?;
         crate::dm::gateway_generated_envelope_from_sealed(
@@ -56,70 +54,35 @@ fn seal(
     })?)
 }
 
-async fn pair(group: bool) -> TestResult<(Fixture, Fixture, String, Option<String>)> {
+async fn pair() -> TestResult<(Fixture, Fixture, String)> {
     let source = Box::pin(Fixture::with_device("delete-source", "source-device")).await?;
     let target = Box::pin(Fixture::with_device("delete-target", "target-device")).await?;
     source.client.persist_observed_identity_directory_now(&target.manifest)?;
     target.client.persist_observed_identity_directory_now(&source.manifest)?;
-    if !group {
-        source.accept_peer(&target)?;
-        target.accept_peer(&source)?;
-        let conversation = g::dm_scope::derive(
-            &source.client.own_account_anchor()?,
-            &target.client.own_account_anchor()?,
-        )?;
-        return Ok((source, target, conversation, None));
-    }
-    let primary = source
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("native source")?
-        .group_primary(source.vault.as_ref())?;
-    source.client.shared_group_create_with_primary(
-        "delete-group",
-        "delete-thread",
-        None,
-        &source.config.target_delivery_id,
-        Some(&primary),
+    source.accept_peer(&target)?;
+    target.accept_peer(&source)?;
+    let conversation = g::dm_scope::derive(
+        &source.client.own_account_anchor()?,
+        &target.client.own_account_anchor()?,
     )?;
-    let state = source.client.shared_group_change_with_primary(
-        "delete-group",
-        &source.config.target_delivery_id,
-        ramflux_protocol::GroupStateChange::Add {
-            member: target.client.owned_group_actor(&target.config.target_delivery_id)?.identity,
-            role: ramflux_protocol::SharedGroupRole::Member,
-        },
-        Some(&primary),
-    )?;
-    target.client.accept_shared_group_state(&state, &target.config.target_delivery_id)?;
-    let distribution = source
-        .client
-        .export_group_sender_key_distribution("delete-group", &source.config.device_id)?;
-    target.client.import_group_sender_key_distribution(&distribution)?;
-    Ok((source, target, "delete-thread".into(), Some("delete-group".into())))
+    Ok((source, target, conversation))
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn direct_delete_retains_one_event_and_packet_after_source_erasure() -> TestResult {
-    super::watchdog::within(exercise(false)).await?
+    super::watchdog::within(exercise()).await?
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn group_delete_retains_one_event_and_packet_after_source_erasure() -> TestResult {
-    super::watchdog::within(exercise(true)).await?
-}
-
-async fn exercise(group: bool) -> TestResult {
-    let (source, mut target, conversation, group) =
-        Box::pin(pair(group)).await.map_err(|e| format!("native Delete setup: {e}"))?;
+async fn exercise() -> TestResult {
+    let (source, mut target, conversation) =
+        Box::pin(pair()).await.map_err(|e| format!("native Delete setup: {e}"))?;
     let mut original = request(&source, &target, &conversation, "original-operation");
     let content = g::Message { text: "content to erase".into(), ..Default::default() };
     let prepared = source
         .client
-        .prepare_authored_message(&mut original, group.as_deref(), &content)
+        .prepare_authored_message(&mut original, None, &content)
         .map_err(|e| format!("original prepare: {e}"))?;
-    let first = seal(&source, &target, &mut original, &prepared.wire, group.as_deref())
+    let first = seal(&source, &target, &mut original, &prepared.wire)
         .map_err(|e| format!("original seal: {e}"))?;
     source
         .client
@@ -132,11 +95,11 @@ async fn exercise(group: bool) -> TestResult {
     let retry_input = erase.clone();
     let prepared = source
         .client
-        .prepare_authored_content(&mut erase, group.as_deref(), &draft.content)
+        .prepare_authored_content(&mut erase, None, &draft.content)
         .map_err(|e| format!("Delete prepare: {e}"))?;
     let identity =
         g::Inner::decode(prepared.exact.as_slice())?.identity.ok_or("Delete identity")?;
-    let envelope = seal(&source, &target, &mut erase, &prepared.wire, group.as_deref())
+    let envelope = seal(&source, &target, &mut erase, &prepared.wire)
         .map_err(|e| format!("Delete seal: {e}"))?;
     source
         .client
@@ -157,13 +120,12 @@ async fn exercise(group: bool) -> TestResult {
         source.client.authored_delete_draft(&conversation, &original.message_id, None)?;
     let mut retry = retry_input;
     retry.envelope_id = "changed-delete-retry-header".into();
-    let retained =
-        source.client.prepare_authored_content(&mut retry, group.as_deref(), &repeated.content)?;
+    let retained = source.client.prepare_authored_content(&mut retry, None, &repeated.content)?;
     assert_eq!(
         retained.exact, prepared.exact,
         "erasure retry must retain the exact generated Delete identity and tombstone"
     );
-    let retransmitted = seal(&source, &target, &mut retry, &retained.wire, group.as_deref())?;
+    let retransmitted = seal(&source, &target, &mut retry, &retained.wire)?;
     assert_eq!(
         retransmitted.encrypted_payload, envelope.encrypted_payload,
         "source erasure must preserve the content-free Delete retry packet"
@@ -268,100 +230,4 @@ fn assert_committed_copy(
     }
     assert_eq!(found, 1, "target erasure must retain exactly one committed sibling intent");
     Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn closed_direct_contact_does_not_select_bootstrap_for_native_group_traffic() -> TestResult {
-    super::watchdog::within(async {
-        for decision in ["declined", "blocked"] {
-            let (source, mut target, conversation, group) = Box::pin(pair(true)).await?;
-            let directory = super::directory::Directory::new(vec![
-                source.manifest.clone(),
-                target.manifest.clone(),
-            ])
-            .await?;
-            directory.configure(&mut target);
-            let entry = crate::client::contact_requests::native_tests::request_entry(
-                &source,
-                &target.manifest,
-            )
-            .await?;
-            target
-                .receive(entry.envelope, 1)
-                .await
-                .map_err(|e| format!("closed-contact setup request: {e}"))?;
-            let root = source.client.own_account_anchor()?;
-            let inbound = target
-                .client
-                .account_db()?
-                .contact_request(&root, "inbound")?
-                .ok_or("native inbound contact")?;
-            target.client.decide_inbound_contact(&inbound, decision)?;
-            for link in target.client.friend_links()? {
-                if link.state == "accepted" && (link.requester_id == root || link.target_id == root) {
-                    if decision == "blocked" {
-                        target.client.block_friend_link(&link.link_id)?;
-                    } else {
-                        target.client.remove_friend_link(&link.link_id, "me")?;
-                    }
-                }
-            }
-            assert!(
-                !target.client.friend_link_peer_is_accepted(&root)?,
-                "no accepted direct alias may bypass the closed-contact gate",
-            );
-            source.client.remove_device_pair(
-                &target.client.owned_device_identity()?,
-                "test_independent_group_pair",
-            )?;
-            let mut message = request(&source, &target, &conversation, "group-after-direct-close");
-            let content = g::Message {
-                text: "group traffic follows the independent group policy".into(),
-                ..Default::default()
-            };
-            let prepared =
-                source.client.prepare_authored_message(&mut message, group.as_deref(), &content)?;
-            let envelope = seal(&source, &target, &mut message, &prepared.wire, group.as_deref())?;
-            let result = target.receive(envelope, 2).await;
-            if decision == "blocked" {
-                assert!(
-                    matches!(result.as_ref().err().and_then(|error| error.downcast_ref::<SdkError>()),
-                        Some(SdkError::InboundRejected(reason)) if reason.contains("group sender is blocked")),
-                    "an explicit sender block must reach group policy: {result:?}",
-                );
-                assert!(
-                    target
-                        .client
-                        .generated_message_view_page(&conversation, None, 10)?
-                        .messages
-                        .iter()
-                        .all(|row| row.kind == "service"),
-                    "the blocked sender must create no group row",
-                );
-            } else {
-                result.map_err(|e| format!("independent group receive after decline: {e}"))?;
-                let rendered = target
-                    .client
-                    .generated_message_detail(&conversation, &message.message_id)?
-                    .message;
-                assert_eq!(
-                    rendered.text.as_deref(),
-                    Some(content.text.as_str()),
-                    "direct decline must not select Contact bootstrap for an authorized group",
-                );
-            }
-            assert_eq!(
-                target
-                    .client
-                    .account_db()?
-                    .contact_request(&root, "inbound")?
-                    .ok_or("retained direct fence")?
-                    .state,
-                decision,
-                "group routing must never reopen the direct relationship",
-            );
-        }
-        Ok(())
-    })
-    .await?
 }

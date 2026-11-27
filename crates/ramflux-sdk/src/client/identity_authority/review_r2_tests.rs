@@ -124,8 +124,7 @@ fn own_proof_refresh_is_due_at_half_the_proof_lifetime() -> TestResult {
 }
 
 #[test]
-fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_pin_intact()
--> TestResult {
+fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_and_pair_intact() -> TestResult {
     let alice = Actor::new("alice", "alice", 21, 22, 1)?;
     let bob = Actor::new("bob", "shared", 31, 32, 1)?;
     let mallory = Actor::new("mallory", "shared", 41, 42, 1)?;
@@ -134,16 +133,8 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
     observe(&alice.client, &b)?;
     let bob_ref = ramflux_protocol::qualified_device_id(&b.principal_commitment, "shared")?;
     let mallory_ref = ramflux_protocol::qualified_device_id(&m.principal_commitment, "shared")?;
-    alice.client.create_group("group", "alice")?;
-    alice.client.add_group_member_with_root(
-        "group",
-        "shared",
-        "member",
-        &b.principal_commitment,
-    )?;
     let local = alice.client.local_device_identity("alice")?;
     let bob_device = alice.client.device_identity(&bob_ref)?;
-    let pin = alice.client.account_db()?.group_member_device_key("group", &bob_device)?;
     let pair = ramflux_crypto::DmSession::initiator(
         [1; 32],
         dm_device_id_hash("alice"),
@@ -182,7 +173,6 @@ fn another_roots_equal_device_name_and_tombstone_leave_bobs_keys_pair_and_group_
                 .require_cached_root_authority(HeadUse::NewAuthorization, &identity))
             .is_err()
     );
-    assert_eq!(alice.client.account_db()?.group_member_device_key("group", &bob_device)?, pin);
     assert_eq!(
         alice.client.active_pair(&local, &bob_device)?.ok_or("bob pair")?.0.session_id,
         pair.session_id
@@ -261,42 +251,6 @@ fn pending_revocation_intent_survives_a_concurrent_own_registration_fork() -> Te
             .devices
             .iter()
             .any(|entry| entry.device_id == "two" && entry.status == DeviceSetStatus::Active)
-    );
-    Ok(())
-}
-
-#[test]
-fn a_foreign_roots_copy_of_the_local_name_cannot_prevent_creating_an_own_group() -> TestResult {
-    let owner = Actor::new("alice", "alice", 61, 62, 1)?;
-    let stranger = Actor::new("mallory", "alice", 71, 72, 1)?;
-    observe(&owner.client, &stranger.manifest()?)?;
-    owner.client.create_group("own-group", "alice")?;
-    let own = owner.client.local_device_reference("alice")?;
-    let binding = owner
-        .client
-        .account_db()?
-        .group_member_key_binding(
-            "own-group",
-            &crate::client::identity_authority::test_support::group_device(
-                &owner.client,
-                "own-group",
-                &own,
-            )?,
-        )?
-        .ok_or("own pin")?;
-    assert_eq!(binding.principal_id.as_deref(), Some("alice"));
-    assert_eq!(
-        binding.signing_public_key,
-        ramflux_protocol::encode_base64url(
-            owner
-                .client
-                .device_branch
-                .as_ref()
-                .ok_or("branch")?
-                .signing_key
-                .verifying_key()
-                .to_bytes()
-        )
     );
     Ok(())
 }

@@ -256,7 +256,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
     (
         "client/routed/discovery_tests.rs",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/routed/discovery_tests.rs")),
-        [1, 0, 0, 0],
+        [0, 0, 0, 0],
     ),
     (
         "client/routed/object_slot.rs",

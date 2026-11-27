@@ -186,7 +186,6 @@ async fn local_search_live_versions_and_scope() -> TestResult {
                 hits(&runtime, &target.client, "newcanary").await?.items.is_empty(),
                 "visibility restriction must purge all conversation derivatives"
             );
-            search_step("group scope", group_scope(&source, &target, &runtime)).await?;
             Ok::<_, Box<dyn std::error::Error>>(())
         }),
     )
@@ -327,57 +326,6 @@ async fn shared_cancellation_and_lease_ownership(
         .query(&fixture.client, 7, &SearchQuery::new("cancelled-reply", "canary"))
         .await?
         .take()?;
-    Ok(())
-}
-
-async fn group_scope(source: &Fixture, target: &Fixture, runtime: &LocalSearch) -> TestResult {
-    use ramflux_protocol::group_state::GroupStateChange;
-    let primary = source
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("native source")?
-        .group_primary(source.vault.as_ref())?;
-    source.client.shared_group_create_with_primary(
-        "search-group",
-        "group-thread",
-        Some("groupcanary".into()),
-        &source.config.target_delivery_id,
-        Some(&primary),
-    )?;
-    let member = target.client.owned_group_actor(&target.config.target_delivery_id)?.identity;
-    let state = source.client.shared_group_change_with_primary(
-        "search-group",
-        &source.config.target_delivery_id,
-        GroupStateChange::Add {
-            member: member.clone(),
-            role: ramflux_protocol::SharedGroupRole::Member,
-        },
-        Some(&primary),
-    )?;
-    target.client.accept_shared_group_state(&state, &target.config.target_delivery_id)?;
-    rebuild(runtime, &target.client).await?;
-    let mut query = SearchQuery::new("group-query", "groupcanary");
-    query.kinds = vec![SearchKind::Conversation];
-    assert_eq!(
-        runtime.query(&target.client, 1, &query).await?.take()?.items.len(),
-        1,
-        "verified current group member may search the signed conversation title"
-    );
-    let removed = source.client.shared_group_change_with_primary(
-        "search-group",
-        &source.config.target_delivery_id,
-        GroupStateChange::Remove {
-            root_commitment: member.root_commitment,
-            device_id: member.device_id,
-        },
-        Some(&primary),
-    )?;
-    target.client.accept_shared_group_state(&removed, &target.config.target_delivery_id)?;
-    assert!(
-        runtime.query(&target.client, 1, &query).await?.take()?.items.is_empty(),
-        "membership revocation must purge the title before replacement maintenance"
-    );
     Ok(())
 }
 

@@ -62,6 +62,7 @@ pub mod group_delivery;
 mod group_distribution_auth;
 #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod group_identity;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod group_key_safety;
 #[cfg(test)]
 #[cfg(test)]
@@ -85,6 +86,7 @@ pub mod object;
 mod own_contact;
 pub(crate) mod own_device_copy;
 mod own_device_group_pins;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod own_device_group_state;
 pub mod own_device_sync;
 #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]

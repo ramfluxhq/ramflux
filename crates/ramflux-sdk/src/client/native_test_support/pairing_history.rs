@@ -2,23 +2,17 @@
 // Copyright (c) 2026 Span Brain
 
 //! Enrollment-history proof fixture on the generation-1 own-device carriers: received history
-//! travels as exact-item pages, own-authored group history as authored copies. The retired group
+//! travels as exact-item pages, own-authored history as authored copies. The retired group
 //! codec and own-sync importer are deleted and never return.
 use super::*;
 use crate::client::generated_history::producer::Outgoing;
 use crate::client::routed::SendMaterial;
-use crate::custody::PrimaryVault;
 use crate::custody::tests::{Root, TestVault};
-use ramflux_protocol::message as g;
-use ramflux_protocol::{GroupStateChange, SharedGroupRole};
 use std::sync::Arc;
 
-const GROUP: &str = "enrollment-history-group";
-const THREAD: &str = "enrollment-history-thread";
 const DM_TEXT: &str = "native first-hand history";
 const ERASED_DM_TEXT: &str = "own-authored message erased before pairing";
 const OWN_DM_TEXT: &str = "own-authored history before pairing";
-const GROUP_TEXT: &str = "historical group message";
 const MAX_STEPS: usize = 16;
 
 /// What `seed` authored or received before the enrollment.
@@ -28,8 +22,6 @@ pub(crate) struct Seeded {
     own_dm_id: Vec<u8>,
     erased_dm_id: Vec<u8>,
     dm_conversation: String,
-    group_owner: String,
-    group_state: ramflux_crypto::VerifiedGroupState,
     peer_sessions: Vec<String>,
 }
 
@@ -58,8 +50,8 @@ impl Fixture {
     }
 }
 
-/// Seed one received first-hand DM and one own-authored group message, before any enrollment.
-pub(crate) async fn seed(source: &mut Fixture, vault: &dyn PrimaryVault) -> TestResult<Seeded> {
+/// Seed received and own-authored first-hand DMs, before any enrollment.
+pub(crate) async fn seed(source: &mut Fixture) -> TestResult<Seeded> {
     let mut peer = Fixture::new("enrollment-history-peer").await?;
     let (dm, _, dm_conversation) = Box::pin(history::receive_first_hand(source, &peer)).await?;
     let own_dm =
@@ -80,41 +72,6 @@ pub(crate) async fn seed(source: &mut Fixture, vault: &dyn PrimaryVault) -> Test
         "everyone",
         &ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
     )?;
-    let primary = source
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("test: native source account")?
-        .group_primary(vault)?;
-    source.client.shared_group_create_with_primary(
-        GROUP,
-        THREAD,
-        Some("Enrollment history".into()),
-        &source.config.target_delivery_id,
-        Some(&primary),
-    )?;
-    let group_state = source.client.shared_group_change_with_primary(
-        GROUP,
-        &source.config.target_delivery_id,
-        GroupStateChange::Add {
-            member: peer.client.owned_group_actor(&peer.config.target_delivery_id)?.identity,
-            role: SharedGroupRole::Member,
-        },
-        Some(&primary),
-    )?;
-    drop(primary);
-    let identity = source.client.allocate_generated_identity(
-        THREAD,
-        crate::client::generated_identity::now_ms(),
-        false,
-    )?;
-    let group_owner = ramflux_protocol::encode_base64url(&identity.id);
-    source.client.encrypt_generated_group_inner(
-        GROUP,
-        &source.config.device_id,
-        identity,
-        &g::Message { text: GROUP_TEXT.into(), ..Default::default() },
-    )?;
     let peer_sessions = source.client.account_db()?.actor_state_keys("dm-pair/")?;
     assert!(!peer_sessions.is_empty(), "test: the source holds no live pair session to protect");
     Ok(Seeded {
@@ -123,8 +80,6 @@ pub(crate) async fn seed(source: &mut Fixture, vault: &dyn PrimaryVault) -> Test
         own_dm_id: own_dm.id,
         erased_dm_id: erased.id,
         dm_conversation,
-        group_owner,
-        group_state,
         peer_sessions,
     })
 }
@@ -225,12 +180,7 @@ pub(crate) async fn verify(source: &Fixture, target: &mut Fixture, seeded: &Seed
         Some(DM_TEXT),
         "test: the enrolled device cannot read the pre-enrollment DM"
     );
-    // Own-authored group history travels as an authored copy once the target holds the signed
-    // group state, exactly as the sibling group tests install it.
-    target
-        .client
-        .accept_shared_group_state(&seeded.group_state, &target.config.target_delivery_id)?;
-    // Every own-authored capture (the group message and the direct message) travels as an
+    // Every own-authored capture (the direct messages) travels as an
     // authored copy; drain the courier plan exactly as the background courier would.
     let mut copies = 0_u64;
     for _ in 0..MAX_STEPS {
@@ -248,12 +198,6 @@ pub(crate) async fn verify(source: &Fixture, target: &mut Fixture, seeded: &Seed
         copies += 1;
     }
     assert!(copies > 0, "test: no authored history was staged for the enrolled device");
-    let group = target.client.generated_message_detail(THREAD, &seeded.group_owner)?;
-    assert_eq!(
-        group.message.text.as_deref(),
-        Some(GROUP_TEXT),
-        "test: the enrolled device cannot read the pre-enrollment group message"
-    );
     assert_own_history(source, target, seeded)?;
     let target_sessions = target.client.account_db()?.actor_state_keys("dm-pair/")?;
     for session in &seeded.peer_sessions {

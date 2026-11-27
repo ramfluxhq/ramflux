@@ -24,10 +24,6 @@ impl SurfaceExportMetadata {
     }
 }
 impl RamfluxClient {
-    #[cfg(test)]
-    pub(crate) fn own_surface_history_controls(&self) -> Result<Vec<SurfaceControl>, SdkError> {
-        Ok(self.own_surface_history_export(None)?.controls)
-    }
     pub(crate) fn own_surface_history_export(
         &self,
         before: Option<i64>,
@@ -67,16 +63,9 @@ impl RamfluxClient {
             }
             bytes += size + 1;
             let epoch = checkpoint.group_epoch;
-            let floor = if let Some(group) = checkpoint.conversation["group_id"].as_str() {
-                let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-                db.group_member_joined_epoch_metadata(group, &local.device_id)?
-            } else {
-                None
-            };
             result.checkpoints.push(checkpoint);
             block.extend(self.surface_export_decisions(
                 reference,
-                floor,
                 epoch,
                 &mut bytes,
                 &mut result.metadata,
@@ -117,7 +106,6 @@ impl RamfluxClient {
     fn surface_export_decisions(
         &self,
         reference: &str,
-        floor: Option<u64>,
         epoch: Option<u64>,
         bytes: &mut usize,
         metadata: &mut SurfaceExportMetadata,
@@ -128,12 +116,6 @@ impl RamfluxClient {
         actions.truncate(128);
         let mut controls = Vec::new();
         for (_, action) in actions {
-            if floor.is_some_and(|floor| {
-                action["group_epoch"].as_u64().is_none_or(|epoch| epoch < floor)
-            }) {
-                metadata.skip("action_below_join_floor");
-                continue;
-            }
             let control = serde_json::from_value::<Carrier>(action["attestation"].clone())
                 .ok()
                 .and_then(|receipt| {

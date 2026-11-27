@@ -429,37 +429,6 @@ async fn exact_protocol_bytes_and_current_projection_survive_account_reopen() ->
     Ok(())
 }
 #[tokio::test]
-async fn deferred_group_content_is_validated_before_fallback_is_published() -> TestResult {
-    let f = Fixture::new().await?;
-    f.human.create_group("g", "human-device")?;
-    f.human.add_group_member("g", f.author.owned_device_identity()?.storage_key(), "member")?;
-    f.human.account_db()?.persist_client_record(
-        "conversation",
-        "thread",
-        &json!({"kind":"group","group_id":"g"}),
-    )?;
-    let signed = carrier(
-        &f.author,
-        PayloadKind::Event,
-        "deferred",
-        &event(1, C::CreateSurface(snapshot()))?,
-    )?;
-    f.human.send_direct_message(
-        "thread",
-        "deferred",
-        f.author.owned_device_identity()?.device_id(),
-        b"encrypted",
-    )?;
-    f.human.account_db()?.store_message_content("thread", "deferred", &signed.bytes()?)?;
-    f.human.project_deferred_surface("thread", "deferred")?;
-    assert_eq!(
-        f.human.account_db()?.message_content("deferred")?,
-        Some(super::fallback::render("author", "Working").into_bytes())
-    );
-    assert_eq!(f.human.surface_get("s", 0, None)?["version"], 1);
-    Ok(())
-}
-#[tokio::test]
 async fn surface_changed_metadata_never_contains_snapshots_fallback_or_action_values() -> TestResult
 {
     let f = Fixture::new().await?;

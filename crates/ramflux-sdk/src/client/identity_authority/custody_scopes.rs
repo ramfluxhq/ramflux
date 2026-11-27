@@ -110,16 +110,7 @@ mod tests {
             assert!(fixture.client.require_native_operation(&identity, operation).is_err());
             match operation {
                 NativeOperation::Call => assert!(fixture.client.call_local_endpoint().is_err()),
-                NativeOperation::Group => {
-                    assert!(
-                        fixture
-                            .client
-                            .create_group("denied-group", identity.storage_key())
-                            .is_err()
-                    );
-                    assert!(fixture.client.group_state("denied-group").is_err());
-                }
-                NativeOperation::Sync => {}
+                NativeOperation::Group | NativeOperation::Sync => {}
             }
         }
         Ok(())

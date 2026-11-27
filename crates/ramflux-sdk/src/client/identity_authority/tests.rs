@@ -216,27 +216,14 @@ fn substituted_branch_or_agreement_key_and_real_v1_proof_never_enter_the_cache()
     Ok(())
 }
 #[test]
-fn newer_root_authorized_rotation_retires_pairs_rotates_group_pin_and_preserves_friend()
--> TestResult {
+fn newer_root_authorized_rotation_retires_pairs_and_preserves_friend() -> TestResult {
     let owner = Actor::new("alice", "alice", 51, 52, 1)?;
     let replacement = Actor::new("alice", "alice", 51, 53, 2)?;
     let peer = Actor::new("bob", "bob", 61, 62, 1)?;
     let original = owner.manifest()?;
     observe(&peer.client, &original)?;
     peer.client.establish_friend_link("friend", "bob", "alice")?;
-    peer.client.create_group("group", "bob")?;
     let reference = ramflux_protocol::qualified_device_id(&original.principal_commitment, "alice")?;
-    peer.client.add_group_member("group", &reference, "member")?;
-    let db = peer.client.account_db()?;
-    let old = &original.devices[0].branch_public_key;
-    db.persist_group_member_device_key("group", &peer.client.device_identity(&reference)?, old)?;
-    db.bind_group_member_key_identity(
-        "group",
-        &peer.client.device_identity(&reference)?,
-        "alice",
-        &original.principal_commitment,
-        old,
-    )?;
     let pair = ramflux_crypto::DmSession::initiator(
         [1; 32],
         dm_device_id_hash("bob"),
@@ -259,10 +246,6 @@ fn newer_root_authorized_rotation_retires_pairs_rotates_group_pin_and_preserves_
             .pair_peer_devices(&peer.client.local_device_identity("bob")?)?
             .iter()
             .any(|d| d == &reference)
-    );
-    assert_eq!(
-        db.group_member_device_key("group", &peer.client.device_identity(&reference)?)?,
-        Some(rotated.devices[0].branch_public_key.clone())
     );
     assert!(peer.client.friend_link_peer_is_accepted("alice")?);
     assert!(observe(&peer.client, &original).is_err());

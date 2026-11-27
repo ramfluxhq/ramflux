@@ -64,21 +64,16 @@ impl RamfluxClient {
             }
         };
         let principal = origin.principal.clone();
-        let source = self.peer_device_identity(&principal, &origin.device)?;
+        self.peer_device_identity(&principal, &origin.device)?;
         db.surface_transaction(|| {
             let sender = origin.sender();
             let outcome = if let Ok(Some(carrier)) = Carrier::decode(&bytes) {
                 let thread = db
                     .client_record("conversation", conversation)?
                     .ok_or_else(|| invalid("surface conversation missing"))?;
-                let member = if let Some(group) = thread["group_id"].as_str() {
-                    db.group_member_role(group, &source)?.is_some()
-                        && db.group_member_role(group, &self.owned_device_identity()?)?.is_some()
-                } else {
-                    thread["participants"]
-                        .as_array()
-                        .is_some_and(|ids| ids.iter().any(|id| id == &principal))
-                };
+                let member = thread["participants"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id == &principal));
                 if member
                     && origin.device == device
                     && origin.principal == principal

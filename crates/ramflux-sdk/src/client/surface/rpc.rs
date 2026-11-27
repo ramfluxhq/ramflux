@@ -141,8 +141,6 @@ impl RamfluxClient {
             &carrier.conversation_id,
             group,
             &carrier.sender_principal_id,
-            &carrier.sender_device_id,
-            group_epoch,
         )?;
         if !self.claim_surface_rpc_rate(&carrier.author_principal_id, now)? {
             return Ok(dropped());

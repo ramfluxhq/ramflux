@@ -97,35 +97,26 @@ impl RamfluxClient {
                 .account_db()?
                 .client_record("conversation", &carrier.conversation_id)?
                 .ok_or_else(|| invalid("surface conversation missing"))?;
-            let group = if let Some(id) = thread["group_id"].as_str() {
-                Some(
-                    self.own_device_group_snapshot(id, &local.device_id)?
-                        .ok_or_else(|| invalid("own-device group access unavailable"))?,
-                )
-            } else {
-                None
-            };
+            if thread["group_id"].as_str().is_some() {
+                return Err(invalid("surface group context is unavailable"));
+            }
             let participants: Vec<String> =
                 thread["participants"].as_array().map_or_else(Vec::new, |ids| {
                     ids.iter().filter_map(Value::as_str).map(str::to_owned).collect()
                 });
-            let friend = if group.is_none() {
-                let peer = participants.iter().find(|id| *id != &local.principal_id);
-                if let Some(peer) = peer {
-                    let direct = self.account_db()?.friend_link_for_peer(peer)?;
-                    if direct.is_some() {
-                        direct
-                    } else {
-                        let identity = self.account_db()?.client_record("identity", peer)?;
-                        identity
-                            .as_ref()
-                            .and_then(|v| v["contact_identity_commitment"].as_str())
-                            .map(|c| Ok::<_, SdkError>(self.account_db()?.friend_link_for_peer(c)?))
-                            .transpose()?
-                            .flatten()
-                    }
+            let peer = participants.iter().find(|id| *id != &local.principal_id);
+            let friend = if let Some(peer) = peer {
+                let direct = self.account_db()?.friend_link_for_peer(peer)?;
+                if direct.is_some() {
+                    direct
                 } else {
-                    None
+                    let identity = self.account_db()?.client_record("identity", peer)?;
+                    identity
+                        .as_ref()
+                        .and_then(|v| v["contact_identity_commitment"].as_str())
+                        .map(|c| Ok::<_, SdkError>(self.account_db()?.friend_link_for_peer(c)?))
+                        .transpose()?
+                        .flatten()
                 }
             } else {
                 None
@@ -133,7 +124,7 @@ impl RamfluxClient {
             Some(OwnContext {
                 conversation_id: carrier.conversation_id.clone(),
                 participants,
-                group,
+                group: None,
                 friend,
             })
         } else {
@@ -259,45 +250,18 @@ impl RamfluxClient {
         if control.kind == ControlKind::Own {
             if let Some(context) = &control.context {
                 if context.conversation_id != conversation
-                    || context.group.as_ref().map(|g| g.group_id.as_str()) != group
+                    || context.group.is_some()
+                    || group.is_some()
                 {
                     return Err(invalid("own surface routing context mismatch"));
                 }
-                if let Some(group) = &context.group {
-                    let epoch = control
-                        .group_epoch
-                        .ok_or_else(|| invalid("own surface group epoch missing"))?;
-                    if epoch < group.local_joined_epoch
-                        || epoch > group.group_epoch
-                        || self
-                            .account_db()?
-                            .group_member_joined_epoch_metadata(
-                                &group.group_id,
-                                &local_device(self)?,
-                            )?
-                            .is_some_and(|floor| epoch < floor)
-                    {
-                        return Err(invalid("own surface snapshot is below the joined epoch"));
-                    }
-                }
                 self.import_surface_context(context)?;
             } else {
-                self.require_existing_own_surface_context(
-                    conversation,
-                    group,
-                    control.group_epoch,
-                    &entry.envelope.source_device_id,
-                )?;
+                self.require_existing_own_surface_context(conversation, group)?;
             }
             self.bootstrap_owned_surface(&carrier)?;
         } else {
-            self.authorize_surface_peer_context(
-                conversation,
-                group,
-                principal,
-                &entry.envelope.source_device_id,
-                control.group_epoch,
-            )?;
+            self.authorize_surface_peer_context(conversation, group, principal)?;
         }
         self.project_surface_control(entry, &carrier, &control, logical_message, expires_at)
     }
@@ -357,8 +321,4 @@ impl RamfluxClient {
         self.surface_signer_record(&carrier.sender_principal_id, &carrier.sender_device_id)?;
         Ok(carrier.sender_principal_id.clone())
     }
-}
-
-fn local_device(client: &RamfluxClient) -> Result<String, SdkError> {
-    Ok(client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id.clone())
 }

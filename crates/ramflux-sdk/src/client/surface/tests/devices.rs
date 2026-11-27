@@ -266,51 +266,6 @@ async fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallb
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn own_surface_history_omits_group_state_below_the_current_membership_floor() -> TestResult {
-    crate::client::native_test_support::watchdog::within(
-        own_surface_history_omits_group_state_below_the_current_membership_floor_body(),
-    )
-    .await?
-}
-async fn own_surface_history_omits_group_state_below_the_current_membership_floor_body()
--> TestResult {
-    let t = Box::pin(Terminals::new()).await?;
-    let source = &t.clients[0];
-    source.create_group("g", source.owned_device_identity()?.storage_key())?;
-    let db = source.account_db()?;
-    db.persist_client_record("conversation", "thread", &json!({"kind":"group","group_id":"g"}))?;
-    let mut first =
-        carrier(source, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
-
-    first = source.sign_surface_carrier(first)?;
-    source.project_surface_message(
-        "thread",
-        "group-create",
-        super::super::SurfaceSender {
-            principal: "author",
-            device: source.owned_device_identity()?.device_id(),
-            envelope_id: "group-create",
-            expires_at: None,
-            group_epoch: Some(1),
-        },
-        &first.bytes()?,
-        false,
-    )?;
-    assert_eq!(source.own_surface_history_export(None)?.checkpoints.len(), 1);
-    db.upsert_group_local_membership_snapshot(
-        "g",
-        5,
-        128,
-        "none",
-        source.owned_device_identity()?.storage_key(),
-        "owner",
-        5,
-    )?;
-    assert_eq!(source.own_surface_history_controls()?.len(), 0);
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it() -> TestResult {
     crate::client::native_test_support::watchdog::within(
         live_deltas_omit_repeated_context_while_explicit_history_keeps_it_body(),

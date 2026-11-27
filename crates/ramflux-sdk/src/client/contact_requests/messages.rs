@@ -123,9 +123,7 @@ impl RamfluxClient {
             });
             if let Err(error) = outcome {
                 match error {
-                    SdkError::Storage(
-                        StorageError::AuthorizationRejected | StorageError::GroupPermissionDenied,
-                    ) => {
+                    SdkError::Storage(StorageError::AuthorizationRejected) => {
                         tracing::debug!(%error,"unauthorized held application payload dropped on consent");
                     }
                     SdkError::Storage(_) | SdkError::Io(_) => return Err(error),

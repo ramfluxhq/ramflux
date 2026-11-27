@@ -68,25 +68,7 @@ async fn active_profile_malformed_effects_preserve_account_body() -> TestResult 
         "thread",
         &g::Reaction::default(),
     ));
-    refused(own.client.encrypt_generated_group_message("group", "primary", &g::Message::default()));
     refused(own.client.generated_object_revoke_inner(g::ObjectRevokeAccess::default(), "peer"));
-    let distribution = crate::SdkGroupSenderKeyDistribution {
-        schema: String::new(),
-        version: 0,
-        group_id: "group".into(),
-        sender_id: "primary".into(),
-        group_key_epoch: 1,
-        group_state_hash: None,
-        sender_key_seed: [0; 32],
-        sender_key_signature: None,
-        sender_device_signing_public_key: None,
-    };
-    refused(own.client.generated_group_key_inner(
-        "thread",
-        1,
-        &distribution,
-        &sibling.client.owned_device_identity()?,
-    ));
     assert!(
         actors(&own.client)? == before,
         "counters, ratchets and queue actor bytes must stay unchanged"

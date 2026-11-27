@@ -31,7 +31,7 @@ async fn run() -> TestResult {
         source_native.record().clone(),
     )
     .map_err(|error| format!("test: adopt source: {error}"))?;
-    let seeded = Box::pin(pairing_history::seed(&mut seeding, rig.source.vault.as_ref()))
+    let seeded = Box::pin(pairing_history::seed(&mut seeding))
         .await
         .map_err(|error| format!("test: seed: {error}"))?;
     rig.source.client = seeding.into_client();

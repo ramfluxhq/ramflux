@@ -201,43 +201,8 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         use crate::client::routed::Kind;
         if matches!(route.kind, Kind::GroupControl | Kind::GroupMessage) {
-            let group = route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?;
-            self.check_group_decline_fence(group)?;
-            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-            if self.friend_rejection_reason(source.root_commitment())?.as_deref()
-                == Some("friend.blocked")
-                || self.friend_rejection_reason(&entry.envelope.source_principal_id)?.as_deref()
-                    == Some("friend.blocked")
-            {
-                return Err(invalid("group sender is blocked"));
-            }
-            if route.kind == Kind::GroupControl
-                && !crate::client::shared_group::is_shared_group_packet(body)
-            {
-                let group = route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?;
-                // A legacy bootstrap cannot prove a creator-bound invitation.
-                // Already joined legacy groups remain readable during upgrade.
-                if self.account_db()?.group_snapshot_epoch(group)?.is_none() {
-                    return Err(invalid(
-                        "legacy stranger group bootstrap requires a v2 invitation",
-                    ));
-                }
-            }
-            if route.kind == Kind::GroupMessage {
-                let group = route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?;
-                if !self
-                    .local_is_group_member(group)
-                    .map_err(|error| SdkError::InboundPending(error.to_string()))?
-                {
-                    if self.account_db()?.shared_group_state(group)?.is_some() {
-                        return Err(invalid("group membership has ended"));
-                    }
-                    return Err(SdkError::InboundPending(
-                        "group consent or membership is pending".into(),
-                    ));
-                }
-            }
-            return Ok(());
+            // The old shared-group route is gone; MLS groups never travel on it.
+            return Err(invalid("group routes are not accepted"));
         }
         if !matches!(route.kind, Kind::Direct | Kind::Control) {
             return Ok(());

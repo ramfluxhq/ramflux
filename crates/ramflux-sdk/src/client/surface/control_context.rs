@@ -13,8 +13,7 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         use ramflux_protocol::message::dm_scope;
         if context.group.is_some() {
-            return dm_scope::validate_group(&context.conversation_id)
-                .map_err(|_| invalid("group uses reserved DM namespace"));
+            return Err(invalid("own surface group context is unavailable"));
         }
         if !context.conversation_id.starts_with(dm_scope::PREFIX) {
             return Ok(());
@@ -64,8 +63,6 @@ impl RamfluxClient {
         &self,
         conversation: &str,
         group: Option<&str>,
-        epoch: Option<u64>,
-        source: &str,
     ) -> Result<(), SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let thread =
@@ -75,15 +72,10 @@ impl RamfluxClient {
         if thread["group_id"].as_str() != group {
             return Err(invalid("own surface group context mismatch"));
         }
-        if let Some(group) = group {
-            self.authorize_surface_peer_context(
-                conversation,
-                Some(group),
-                &local.principal_id,
-                source,
-                epoch,
-            )?;
-        } else if thread["kind"] != "direct"
+        if group.is_some() {
+            return Err(invalid("own surface group context is unavailable"));
+        }
+        if thread["kind"] != "direct"
             || !thread["participants"]
                 .as_array()
                 .is_some_and(|ids| ids.iter().any(|id| id == &local.principal_id))
@@ -107,70 +99,41 @@ impl RamfluxClient {
         conversation: &str,
         group: Option<&str>,
         principal: &str,
-        device: &str,
-        epoch: Option<u64>,
     ) -> Result<(), SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let thread = self.account_db()?.client_record("conversation", conversation)?;
-        if let Some(id) = group {
-            let state = self.group_state(id).map_err(|_| {
-                SdkError::InboundPending("surface group context unavailable".into())
-            })?;
-            let epoch = epoch.ok_or_else(|| invalid("surface group epoch missing"))?;
-            if epoch > state.group_epoch {
-                return Err(SdkError::InboundPending("surface group epoch not available".into()));
-            }
-            if self
-                .account_db()?
-                .group_member_joined_epoch_metadata(id, &local.device_id)?
-                .is_some_and(|floor| epoch < floor)
+        if group.is_some() {
+            return Err(SdkError::InboundPending("surface group context unavailable".into()));
+        }
+        if self.friend_rejection_reason(principal)?.is_some() {
+            return Err(invalid("surface peer is blocked or revoked"));
+        }
+        if let Some(thread) = thread {
+            let peers = thread["participants"]
+                .as_array()
+                .ok_or_else(|| invalid("surface direct participants absent"))?;
+            if thread["kind"] != "direct"
+                || !peers.iter().any(|p| p == principal)
+                || !peers.iter().any(|p| p == &local.principal_id)
             {
-                return Err(invalid("surface message below joined epoch"));
-            }
-            if !self
-                .surface_group_device_allowed(id, &self.peer_device_identity(principal, device)?)?
-                || !self.surface_group_device_allowed(id, &self.owned_device_identity()?)?
-            {
-                return Err(SdkError::InboundPending(
-                    "surface group membership unavailable".into(),
-                ));
-            }
-            if thread.as_ref().is_none_or(|v| v["kind"] != "group" || v["group_id"] != id) {
-                return Err(SdkError::InboundPending(
-                    "surface group conversation unavailable".into(),
-                ));
+                return Err(invalid("surface direct conversation membership mismatch"));
             }
         } else {
             if self.friend_rejection_reason(principal)?.is_some() {
-                return Err(invalid("surface peer is blocked or revoked"));
+                return Err(invalid("surface peer is not an accepted contact"));
             }
-            if let Some(thread) = thread {
-                let peers = thread["participants"]
-                    .as_array()
-                    .ok_or_else(|| invalid("surface direct participants absent"))?;
-                if thread["kind"] != "direct"
-                    || !peers.iter().any(|p| p == principal)
-                    || !peers.iter().any(|p| p == &local.principal_id)
+            let mut record = json!({"id":conversation,"kind":"direct","group_id":null,"title":null,"participants":[local.principal_id,principal]});
+            if let Some(identity) = self.account_db()?.client_record("identity", principal)?
+                && let Some(root) = identity["contact_identity_commitment"].as_str()
+            {
+                let own = self.own_account_anchor()?;
+                if ramflux_protocol::message::dm_scope::derive(&own, root).ok().as_deref()
+                    == Some(conversation)
                 {
-                    return Err(invalid("surface direct conversation membership mismatch"));
+                    record["participant_roots"] = json!([own, root]);
                 }
-            } else {
-                if self.friend_rejection_reason(principal)?.is_some() {
-                    return Err(invalid("surface peer is not an accepted contact"));
-                }
-                let mut record = json!({"id":conversation,"kind":"direct","group_id":null,"title":null,"participants":[local.principal_id,principal]});
-                if let Some(identity) = self.account_db()?.client_record("identity", principal)?
-                    && let Some(root) = identity["contact_identity_commitment"].as_str()
-                {
-                    let own = self.own_account_anchor()?;
-                    if ramflux_protocol::message::dm_scope::derive(&own, root).ok().as_deref()
-                        == Some(conversation)
-                    {
-                        record["participant_roots"] = json!([own, root]);
-                    }
-                }
-                self.account_db()?.persist_client_record("conversation", conversation, &record)?;
             }
+            self.account_db()?.persist_client_record("conversation", conversation, &record)?;
         }
         Ok(())
     }
@@ -181,28 +144,20 @@ impl RamfluxClient {
         self.validate_own_context_namespace(context)?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let db = self.account_db()?;
-        if let Some(group) = &context.group {
-            self.import_surface_group_context(context, group)?;
-        } else {
-            self.import_surface_friend(context)?;
-            if context.participants.len() != 2
-                || !context.participants.contains(&local.principal_id)
+        self.import_surface_friend(context)?;
+        if context.participants.len() != 2 || !context.participants.contains(&local.principal_id) {
+            return Err(invalid("own surface direct context mismatch"));
+        }
+        if let Some(old) = db.client_record("conversation", &context.conversation_id)? {
+            if old["kind"] != "direct"
+                || old["participants"].as_array().map(|ids| {
+                    ids.iter().filter_map(Value::as_str).collect::<std::collections::BTreeSet<_>>()
+                }) != Some(context.participants.iter().map(String::as_str).collect())
             {
-                return Err(invalid("own surface direct context mismatch"));
+                return Err(invalid("own surface direct conversation conflict"));
             }
-            if let Some(old) = db.client_record("conversation", &context.conversation_id)? {
-                if old["kind"] != "direct"
-                    || old["participants"].as_array().map(|ids| {
-                        ids.iter()
-                            .filter_map(Value::as_str)
-                            .collect::<std::collections::BTreeSet<_>>()
-                    }) != Some(context.participants.iter().map(String::as_str).collect())
-                {
-                    return Err(invalid("own surface direct conversation conflict"));
-                }
-            } else {
-                db.persist_client_record("conversation",&context.conversation_id,&json!({"id":context.conversation_id,"kind":"direct","group_id":null,"title":null,"participants":context.participants}))?;
-            }
+        } else {
+            db.persist_client_record("conversation",&context.conversation_id,&json!({"id":context.conversation_id,"kind":"direct","group_id":null,"title":null,"participants":context.participants}))?;
         }
         if context.conversation_id.starts_with("dm:") {
             let mut record = db
@@ -258,40 +213,5 @@ impl RamfluxClient {
             }
         }
         Ok(())
-    }
-}
-
-impl RamfluxClient {
-    fn import_surface_group_context(
-        &self,
-        context: &OwnContext,
-        group: &crate::own_device_sync::SdkOwnDeviceGroupSnapshot,
-    ) -> Result<(), SdkError> {
-        let snapshot = group
-            .shared_state
-            .as_ref()
-            .ok_or_else(|| invalid("own Surface requires signed native group state"))?;
-        let state = ramflux_crypto::verify_group_state_snapshot(snapshot.clone())?;
-        if state.view().conversation_id != context.conversation_id {
-            return Err(invalid("own Surface signed group conversation mismatch"));
-        }
-        self.restore_own_shared_group(group, snapshot)?;
-        let current = self
-            .account_db()?
-            .shared_group_state(&group.group_id)?
-            .ok_or_else(|| invalid("own Surface signed group state missing"))?;
-        if !self.local_is_group_member(&group.group_id)?
-            || current.view().conversation_id != context.conversation_id
-        {
-            return Err(invalid("own Surface group does not admit this device"));
-        }
-        self.ensure_shared_group_device(&current, &self.owned_device_identity()?)?;
-        if let Some(old) =
-            self.account_db()?.client_record("conversation", &context.conversation_id)?
-            && (old["kind"] != "group" || old["group_id"] != group.group_id)
-        {
-            return Err(invalid("own Surface group conversation conflict"));
-        }
-        self.merge_routed_group_link(&group.group_id, &context.conversation_id)
     }
 }

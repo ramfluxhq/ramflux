@@ -19,39 +19,6 @@ async fn invalid_signatures_never_reserve_another_senders_receipt() -> TestResul
     assert!(project(&f.human, &good, "real")?.accepted);
     Ok(())
 }
-#[tokio::test]
-async fn deferred_group_sender_principal_comes_from_the_verified_device_record() -> TestResult {
-    let f = Fixture::new().await?;
-    f.author.persist_root_verified_directory(&f.human.local_own_copy_manifest()?)?;
-    f.author.create_group("g", f.author.owned_device_identity()?.storage_key())?;
-    f.author.add_group_member("g", f.human.owned_device_identity()?.storage_key(), "member")?;
-    f.author.account_db()?.persist_client_record(
-        "conversation",
-        "thread",
-        &json!({"kind":"group","group_id":"g"}),
-    )?;
-    let mut forged = carrier(
-        &f.human,
-        PayloadKind::Event,
-        "reserved",
-        &event(1, C::CreateSurface(snapshot()))?,
-    )?;
-    forged.sender_principal_id = "author".into();
-    f.author.send_direct_message("thread", "deferred-forgery", "human-device", b"encrypted")?;
-    f.author.account_db()?.store_message_content("thread", "deferred-forgery", &forged.bytes()?)?;
-    f.author.project_deferred_surface("thread", "deferred-forgery")?;
-    let receipt = super::super::receipt_key(&forged)?;
-    assert!(f.author.account_db()?.load_actor_state::<Value>(&receipt)?.is_none());
-    assert_eq!(f.author.surface_list("thread", "", 100)?["surfaces"], json!([]));
-    let real = carrier(
-        &f.author,
-        PayloadKind::Event,
-        "reserved",
-        &event(1, C::CreateSurface(snapshot()))?,
-    )?;
-    assert!(project(&f.author, &real, "real")?.accepted);
-    Ok(())
-}
 fn signed_in(
     sender: &RamfluxClient,
     author: &str,
