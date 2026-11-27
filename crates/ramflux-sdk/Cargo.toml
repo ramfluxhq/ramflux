@@ -66,6 +66,7 @@ ramflux-prx-client = { workspace = true }
 ramflux-crypto = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-storage = { workspace = true }
+ramflux-mls = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-transport = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist

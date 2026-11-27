@@ -25,6 +25,8 @@ pub async fn serve_local_bus_until(
         std::fs::create_dir_all(&config.data_root)?;
         set_owner_only_dir_permissions(&config.data_root)?;
     }
+    // MLS crypto provider: probe the random source once; a failure ends the daemon start.
+    crate::mls::init_process_crypto()?;
     let diagnostic_config = crate::diag::DiagnosticConfig {
         process: "daemon".into(),
         #[cfg(feature = "diag-realrun")]

@@ -390,6 +390,9 @@ pub enum SdkError {
     InvalidGatewayCursor(String),
     #[error("local bus error: {0}")]
     LocalBus(String),
+    /// MLS runtime failure; `code` is the typed `ramflux-mls` code (`credential_rejected`, ...).
+    #[error("mls {code}: {detail}")]
+    Mls { code: &'static str, detail: String },
     #[error("local bus peer credential check failed")]
     LocalBusPermissionDenied,
     #[error("capability denied: {0}")]

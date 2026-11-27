@@ -61,6 +61,7 @@ mod group_retention;
 mod group_snapshot;
 pub mod groups;
 pub mod history;
+pub mod mls_kv;
 #[cfg(any(test, feature = "test-instrumentation"))]
 mod test_busy;
 pub use attachment_retirement::{NativeGrantAssociation, PendingAttachmentRetirement};

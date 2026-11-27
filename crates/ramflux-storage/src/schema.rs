@@ -953,6 +953,7 @@ fn ensure_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
     ensure_object_index_legacy_columns(connection)?;
     ensure_object_transfer_state_columns(connection)?;
     ensure_device_directory_table(connection)?;
+    ensure_mls_kv_table(connection)?;
     ensure_object_share_grant_table(connection)?;
     ensure_guardian_recovery_share_table(connection)?;
     ensure_pending_recovery_tables(connection)?;
@@ -1129,6 +1130,20 @@ fn ensure_object_share_grant_table(connection: &Connection) -> Result<(), Storag
         );
         CREATE INDEX IF NOT EXISTS idx_object_share_grant_recipient
             ON object_share_grant_projection(recipient_principal_id, revoked_at);",
+    )?;
+    Ok(())
+}
+
+/// MLS group state (`ramflux-mls` storage rows). Local to the device: backups, transfers and
+/// merges never carry it.
+fn ensure_mls_kv_table(connection: &Connection) -> Result<(), StorageError> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mls_kv (
+            label TEXT NOT NULL,
+            key BLOB NOT NULL,
+            value BLOB NOT NULL,
+            PRIMARY KEY (label, key)
+        ) WITHOUT ROWID;",
     )?;
     Ok(())
 }

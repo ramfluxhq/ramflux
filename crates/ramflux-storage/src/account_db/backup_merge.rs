@@ -53,6 +53,8 @@ fn skip_merge_table(table: &str, native_data_only: bool) -> bool {
             | "object_segment_resource"
             | "object_segment_floor"
             | "account_mac_bundle"
+            // MLS group state never leaves the device (MLS-0 decision 4).
+            | "mls_kv"
             | "full_imported_mac_bundle"
             // Tombstones are unioned by their own helper (P03a-3d1), never row-merged.
             | "receive_erased_input"

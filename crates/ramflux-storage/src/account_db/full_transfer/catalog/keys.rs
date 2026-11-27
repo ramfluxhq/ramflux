@@ -117,3 +117,38 @@ pub(super) const RULE_159: FamilyRule = table_rule!(
         ("subkeys", Bytes, false, Transfer, ImportedBundle, CodecRule::SqlMacSubkeys),
     ]
 );
+
+pub(super) const RULE_161: FamilyRule = table_rule!(
+    "sql/mls_kv/local",
+    "mls_kv",
+    Exclude,
+    PreferLocal,
+    false,
+    [],
+    [
+        (
+            "label",
+            Utf8,
+            true,
+            Exclude,
+            PreferLocal,
+            CodecRule::Scalar { cell_type: CellType::Utf8 }
+        ),
+        (
+            "key",
+            Bytes,
+            true,
+            Exclude,
+            PreferLocal,
+            CodecRule::Scalar { cell_type: CellType::Bytes }
+        ),
+        (
+            "value",
+            Bytes,
+            false,
+            Exclude,
+            PreferLocal,
+            CodecRule::Scalar { cell_type: CellType::Bytes }
+        ),
+    ]
+);

@@ -101,7 +101,7 @@ pub trait MlsKv {
     /// Backend failure or an error returned by `caller`.
     fn commit_batch<F>(&self, batch: WriteBatch, caller: F) -> Result<(), MlsKvError>
     where
-        F: for<'a> FnOnce(&mut Self::Tx<'a>) -> Result<(), MlsKvError>;
+        F: for<'a> FnOnce(&mut Self::Tx<'a>) -> Result<(), MlsKvError> + Send + 'static;
 }
 
 /// An operation output that is released only after its state reached the database. It holds the
@@ -136,7 +136,7 @@ impl<'k, K: MlsKv, T> Staged<'k, K, T> {
     /// Backend failure or an error returned by `caller`.
     pub fn commit<F>(self, caller: F) -> Result<T, MlsKvError>
     where
-        F: for<'a> FnOnce(&mut K::Tx<'a>) -> Result<(), MlsKvError>,
+        F: for<'a> FnOnce(&mut K::Tx<'a>) -> Result<(), MlsKvError> + Send + 'static,
     {
         self.kv.commit_batch(self.batch, caller)?;
         Ok(self.output)

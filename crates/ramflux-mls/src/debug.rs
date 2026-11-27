@@ -51,7 +51,7 @@ impl MlsKv for ScratchKv {
 
     fn commit_batch<F>(&self, _batch: WriteBatch, _caller: F) -> Result<(), MlsKvError>
     where
-        F: for<'a> FnOnce(&mut Self::Tx<'a>) -> Result<(), MlsKvError>,
+        F: for<'a> FnOnce(&mut Self::Tx<'a>) -> Result<(), MlsKvError> + Send + 'static,
     {
         Err(MlsKvError::Backend("the scratch store is never flushed".to_owned()))
     }

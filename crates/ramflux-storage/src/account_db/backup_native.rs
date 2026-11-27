@@ -78,7 +78,7 @@ impl BackupDatabase {
             DELETE FROM runtime_operation; DELETE FROM message_footprint WHERE kind='journal'; DELETE FROM runtime_journal; DELETE FROM runtime_message_sequence; DELETE FROM runtime_outbox;
             DELETE FROM outbox_queue; DELETE FROM session_capability_cache;
             DELETE FROM pending_recovery_projection; DELETE FROM pending_recovery_approval_projection;
-            DELETE FROM guardian_recovery_share_projection; COMMIT;")?;
+            DELETE FROM guardian_recovery_share_projection; DELETE FROM mls_kv; COMMIT;")?;
         if search_stripped {
             super::local_search::lifecycle::compact(&self.db)?;
         } else {

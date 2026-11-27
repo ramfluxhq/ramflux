@@ -125,6 +125,9 @@ pub use account_db::large_segments::{
     SegmentStore,
 };
 pub use account_db::mac_subkeys::full::FullImportedMacDomain;
+pub use account_db::mls_kv::{
+    MlsKvCommitError, MlsKvParam, MlsKvStats, MlsKvStore, MlsKvTx, MlsKvWrite,
+};
 pub use account_db::object_retention::{
     ObjectReferenceAdmission, ObjectReferenceOwner, ObjectResourceRetirement, ObjectRetention,
     ObjectRetirementObserver, PreSendObjectHold, PrivacyResourceRegistration,

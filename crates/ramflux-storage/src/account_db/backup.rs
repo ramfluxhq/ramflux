@@ -250,6 +250,8 @@ impl AccountDb {
                 }
             }
             target.execute("UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1", rusqlite::params![fingerprint])?;
+            // MLS group state never leaves the device (MLS-0 decision 4): strip it before every return.
+            target.execute("DELETE FROM mls_kv", [])?;
             if matches!(policy, SnapshotPolicy::NativeFullTransfer(_)) {
                 if let Err(error) = super::backup_native::full_transfer_snapshot_preflight(&target) {
                     return Ok(Err(error));

@@ -143,6 +143,9 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) receive_active_cache: Option<(u64, String, bool)>,
     /// Prepared-send upload parked off the actor (`attachment_sends`).
     pub(crate) attachment_send: super::account_runtime::attachment_sends::Slot,
+    /// MLS runtime of this account, opened on first use by the `mls` surface (MLS-0c).
+    #[allow(dead_code, reason = "read by the debug.mls surface of MLS-0c")]
+    pub(crate) mls: Option<crate::mls::MlsRuntime>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -216,6 +219,7 @@ impl LocalBusAccountState {
             object_get_spools: BTreeMap::new(),
             receive_active_cache: None,
             attachment_send: super::account_runtime::attachment_sends::Slot::default(),
+            mls: None,
         }
     }
 
@@ -281,6 +285,7 @@ impl LocalBusAccountState {
             object_get_spools: BTreeMap::new(),
             receive_active_cache: None,
             attachment_send: super::account_runtime::attachment_sends::Slot::default(),
+            mls: None,
         }
     }
 
