@@ -1180,6 +1180,38 @@ impl GatewaySessionEngine {
         }
     }
 
+    /// One large-group request over the authenticated live session. The frame carries no identity
+    /// (requests are signed by pseudonyms inside `body`); the answer is `(status, body)`.
+    ///
+    /// # Errors
+    /// Rejects transport failures, a mismatched reply or a gateway refusal.
+    pub async fn large_group_call(
+        &mut self,
+        op: &str,
+        body: &[u8],
+    ) -> Result<(String, Vec<u8>), SdkError> {
+        let mut id_bytes = [0_u8; 16];
+        getrandom::fill(&mut id_bytes)
+            .map_err(|_| SdkError::GatewaySessionRejected("randomness unavailable".into()))?;
+        let id = ramflux_protocol::encode_base64url(id_bytes);
+        self.write_frame(&GatewayClientFrame::LargeGroup {
+            request_id: id.clone(),
+            op: op.to_owned(),
+            body: ramflux_protocol::encode_base64url(body),
+        })
+        .await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::LargeGroup).await? {
+            GatewayServerFrame::LargeGroup { request_id, status, body } if request_id == id => {
+                let bytes = ramflux_protocol::decode_base64url(&body).map_err(|_| {
+                    SdkError::GatewaySessionRejected("large-group reply body".into())
+                })?;
+                Ok((status, bytes))
+            }
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
+            _ => Err(SdkError::GatewaySessionRejected("expected large-group reply".into())),
+        }
+    }
+
     /// Finish the application stream, then close a QUIC UDP socket before returning.
     ///
     /// Declaration order drops the endpoint while the stream still holds the connection, so the

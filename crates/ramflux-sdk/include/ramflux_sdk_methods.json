@@ -1160,10 +1160,46 @@
     },
     {
       "bridge_allowed": true,
+      "capability": "diag",
+      "key_export": false,
+      "name": "diag.export",
+      "secret_input": true,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "diag",
+      "key_export": false,
+      "name": "diag.snapshot",
+      "secret_input": true,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.activity.report",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
       "capability": "device",
       "key_export": false,
       "name": "device.list",
       "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.notifications.cleared",
+      "secret_input": true,
       "secret_output": true,
       "show_once": false
     },
@@ -1225,8 +1261,35 @@
       "bridge_allowed": true,
       "capability": "device",
       "key_export": false,
+      "name": "device.push_policy.set",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
       "name": "device.push_route.set",
       "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.push_route.test",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "push",
+      "key_export": false,
+      "name": "push.keyset.get",
+      "secret_input": false,
       "secret_output": true,
       "show_once": false
     },
@@ -1397,6 +1460,87 @@
       "capability": "grant",
       "key_export": false,
       "name": "grant.revoke_standing_approval",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "group",
+      "key_export": false,
+      "name": "group.large.create",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "group",
+      "key_export": false,
+      "name": "group.large.invite",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "group",
+      "key_export": false,
+      "name": "group.large.join",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "group",
+      "key_export": false,
+      "name": "group.large.tokens",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "group",
+      "key_export": false,
+      "name": "group.large.ratchet",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "group",
+      "key_export": false,
+      "name": "group.large.post",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "group",
+      "key_export": false,
+      "name": "group.large.read",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "group",
+      "key_export": false,
+      "name": "group.large.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "group",
+      "key_export": false,
+      "name": "group.large.admin",
       "secret_input": true,
       "secret_output": true,
       "show_once": false

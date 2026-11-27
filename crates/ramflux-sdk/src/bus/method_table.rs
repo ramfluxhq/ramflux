@@ -54,7 +54,7 @@ methods! {
     LocalRead(Always) => Reader: ["attachment.transfer.list"];
     LocalMutation(Always) => Supervisor: ["attachment.transfer.pause", "attachment.transfer.resume"];
     LocalMutation(Always) => Actor: ["search.index.rebuild"];
-    LocalRead(Always) => Actor: ["account.config.get", "diag.residue"];
+    LocalRead(Always) => Actor: ["account.config.get", "diag.residue", "group.large.status", "debug.lg.kat_poprf"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     NeedsNetwork(AuthorityFromNode) => Actor: ["attachment.enable"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin", "username.mutate", "profile.update", "account.reach.set"];
@@ -240,6 +240,17 @@ methods! {
         "group.member.remove",
         "group.name.set",
         "group.owner.transfer",
+        "group.large.create",
+        "group.large.invite",
+        "group.large.join",
+        "group.large.tokens",
+        "group.large.ratchet",
+        "group.large.post",
+        "group.large.read",
+        "group.large.admin",
+        "debug.lg.clock",
+        "debug.lg.fault",
+        "debug.lg.bulk_join",
         "group.read",
         "group.role.set",
         "group.send",

@@ -15,8 +15,12 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
             return Err(RfError::Message("content".into()));
         }
     }
+    if let GroupAction::Large(large) = command.action {
+        return super::large_group::handle_large(socket, large).await;
+    }
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
+        GroupAction::Large(_) => Ok(()),
         GroupAction::Create(create) => {
             let request = LocalBusGroupCreateRequest {
                 group_id: create.group.clone(),

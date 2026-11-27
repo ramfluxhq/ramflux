@@ -599,6 +599,12 @@ pub enum GatewayClientFrame {
     PushRouteTest {
         request: Box<super::GatewayPushRouteTestFrame>,
     },
+    /// Large-group request: `op` plus a base64url binary body. Carries no identity.
+    LargeGroup {
+        request_id: String,
+        op: String,
+        body: String,
+    },
     VoiceLease {
         request: Box<ramflux_protocol::VoiceLeaseFrame>,
     },
@@ -699,6 +705,12 @@ pub enum GatewayServerFrame {
         reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after_ms: Option<u64>,
+    },
+    /// Answer of a large-group request: a status token and a base64url binary body.
+    LargeGroup {
+        request_id: String,
+        status: String,
+        body: String,
     },
     VoiceLease {
         response: Box<ramflux_protocol::VoiceLeaseResponse>,

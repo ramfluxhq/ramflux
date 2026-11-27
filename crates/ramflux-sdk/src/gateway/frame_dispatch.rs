@@ -13,6 +13,7 @@ pub(crate) enum FrameKind {
     PushRouteTested,
     VoiceLease,
     Attachment,
+    LargeGroup,
     SessionEstablished,
     Deliver,
     ForwardAck,
@@ -59,6 +60,7 @@ impl FrameKind {
             GatewayServerFrame::PushRouteTested { .. } => Self::PushRouteTested,
             GatewayServerFrame::VoiceLease { .. } => Self::VoiceLease,
             GatewayServerFrame::Attachment { .. } => Self::Attachment,
+            GatewayServerFrame::LargeGroup { .. } => Self::LargeGroup,
             GatewayServerFrame::SessionEstablished { .. } => Self::SessionEstablished,
             GatewayServerFrame::Deliver { .. } => Self::Deliver,
             GatewayServerFrame::ForwardAck { .. } => Self::ForwardAck,
@@ -113,6 +115,7 @@ impl FrameKind {
             Self::SessionEstablished => FrameClass::Unexpected,
             Self::VoiceLease
             | Self::Attachment
+            | Self::LargeGroup
             | Self::ForwardAck
             | Self::OwnDeviceFanout
             | Self::IdentityRegistered
@@ -149,6 +152,7 @@ pub(crate) enum ExpectedReply {
     RelayTokenV3,
     VoiceLease,
     Attachment,
+    LargeGroup,
     PushRoute,
     GrantRenew,
 }
@@ -177,6 +181,7 @@ impl ExpectedReply {
             Self::RelayTokenV3 => matches!(kind, FrameKind::RelayTokenV3Issued),
             Self::VoiceLease => matches!(kind, FrameKind::VoiceLease),
             Self::Attachment => matches!(kind, FrameKind::Attachment),
+            Self::LargeGroup => matches!(kind, FrameKind::LargeGroup),
             Self::PushRoute => matches!(
                 kind,
                 FrameKind::PushRouteRegistered

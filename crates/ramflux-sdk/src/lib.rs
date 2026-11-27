@@ -99,6 +99,7 @@ mod itest_bus_fault;
 mod itest_crash_seam;
 #[cfg(feature = "itest-rfd-fault")]
 mod itest_rfd_fault;
+mod large_group;
 mod node;
 mod object;
 pub mod search;

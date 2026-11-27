@@ -176,7 +176,7 @@ pub(crate) fn method_names() -> Vec<&'static str> {
     let mut names = super::method_table::METHODS
         .iter()
         .map(|method| method.name)
-        .filter(|name| !name.contains("itest"))
+        .filter(|name| !name.contains("itest") && !name.starts_with("debug.lg."))
         .collect::<Vec<_>>();
     names.extend(crate::backup::BACKUP_JOB_METHODS.iter().copied());
     names.extend([

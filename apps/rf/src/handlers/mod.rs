@@ -23,6 +23,7 @@ pub(crate) mod dm;
 pub(crate) mod grant;
 pub(crate) mod group;
 pub(crate) mod keychain;
+pub(crate) mod large_group;
 pub(crate) mod mcp;
 pub(crate) mod node;
 #[cfg(not(unix))]

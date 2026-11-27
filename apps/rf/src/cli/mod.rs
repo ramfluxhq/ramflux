@@ -26,6 +26,7 @@ mod dm;
 mod grant;
 mod group;
 mod keychain;
+pub(crate) mod large_group;
 mod prx;
 mod root;
 mod vault;
@@ -103,6 +104,8 @@ pub(crate) enum Command {
     Dm(DmCommand),
     Conversation(ConversationCommand),
     Group(GroupCommand),
+    #[command(hide = true)]
+    Debug(large_group::DebugCommand),
     Object(ObjectCommand),
     Call(CallCommand),
     Bot(BotCommand),

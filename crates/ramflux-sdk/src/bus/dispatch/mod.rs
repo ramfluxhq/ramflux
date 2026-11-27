@@ -34,6 +34,7 @@ pub(crate) mod itest_agent;
     not(ramflux_production)
 ))]
 pub(crate) mod itest_migration;
+pub(crate) mod large_group;
 pub mod message;
 mod message_delete;
 pub mod node;

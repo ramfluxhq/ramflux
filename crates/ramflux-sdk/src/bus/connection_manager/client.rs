@@ -93,6 +93,19 @@ impl SessionClient {
         self.generation
     }
 
+    /// One large-group call through the host: `(status, body)`.
+    pub(crate) fn large_group_call(
+        &mut self,
+        op: String,
+        body: Vec<u8>,
+    ) -> GatewayCallFuture<'_, (String, Vec<u8>)> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.large_group_call(&op, &body).await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
+
     /// One attachment-plane call through the host. The reply echoes the request id.
     pub(crate) fn attachment_call(
         &mut self,

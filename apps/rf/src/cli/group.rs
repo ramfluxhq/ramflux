@@ -26,6 +26,8 @@ pub(crate) enum GroupAction {
     Role(GroupRoleCommand),
     Disappearing(GroupDisappearingCommand),
     Mute(GroupMute),
+    /// Large groups: pseudonymous posting, up to 1 000 members.
+    Large(super::large_group::LargeCommand),
 }
 
 #[derive(Args)]

@@ -349,6 +349,15 @@ async fn dispatch_routed_request(
         "itest.agent.approve_once" => {
             crate::bus::dispatch::itest_agent::approve_once(request, state)
         }
+        #[cfg(all(
+            feature = "itest-memory-vault",
+            ramflux_itest,
+            not(ramflux_release_profile),
+            not(ramflux_production)
+        ))]
+        method if method.starts_with("debug.lg.") => {
+            crate::bus::dispatch::large_group::dispatch(request, state).await
+        }
         "username.mutate"
         | "username.status"
         | "username.resolve"
@@ -391,6 +400,9 @@ async fn dispatch_local_bus_remainder(
         }
         method if method.starts_with("device.") || method == "push.keyset.get" => {
             Box::pin(dispatch_device_bus_request(request, state)).await
+        }
+        method if method.starts_with("group.large.") => {
+            crate::bus::dispatch::large_group::dispatch(request, state).await
         }
         method if method.starts_with("group.") => {
             Box::pin(dispatch_group_bus_request(request, state)).await

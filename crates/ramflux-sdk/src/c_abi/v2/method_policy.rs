@@ -191,6 +191,15 @@ policies! {
     "grant.request" => ("grant", true, true, false, false),
     "grant.revoke" => ("grant", true, true, false, false),
     "grant.revoke_standing_approval" => ("grant", true, true, false, false),
+    "group.large.create" => ("group", true, true, false, false),
+    "group.large.invite" => ("group", true, true, false, false),
+    "group.large.join" => ("group", true, true, false, false),
+    "group.large.tokens" => ("group", true, true, false, false),
+    "group.large.ratchet" => ("group", true, true, false, false),
+    "group.large.post" => ("group", true, true, false, false),
+    "group.large.read" => ("group", true, true, false, false),
+    "group.large.status" => ("group", false, true, false, false),
+    "group.large.admin" => ("group", true, true, false, false),
     "group.create" => ("group", true, true, false, false),
     "group.history" => ("group", false, true, false, false),
     "group.invitation.accept" => ("group", true, true, false, false),
@@ -318,6 +327,7 @@ pub(super) fn requires_key_export(name: &str) -> bool {
 pub(super) fn allowed(name: &str) -> bool {
     !DENIED_METHODS.contains(&name)
         && !name.contains("itest")
+        && !name.starts_with("debug.lg.")
         && METHOD_POLICIES.iter().any(|row| row.name == name)
 }
 
