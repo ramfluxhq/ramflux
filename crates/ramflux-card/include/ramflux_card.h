@@ -22,8 +22,8 @@ extern "C" {
  * Mutations carry signed_version/hash, edit_seq and a complete host_slots array.
  * Event tokens carry session/signedVersion/editSeq/treeVersion/key. The stable
  * C handle differs from the fresh token session identity after resume.
- * HostSlotReply and ImageResult belong to the later SDK/native authority bridge;
- * encoded image bytes must never be serialized into these JSON callbacks.
+ * HostSlotReply belongs to the SDK/native authority bridge; image bytes are never
+ * serialized into JSON (the SDK hands the host an object selector instead).
  * Only project-signed bytecode for the pinned engine is accepted. */
 typedef struct RamfluxCardBytes { const uint8_t *data; size_t len; } RamfluxCardBytes;
 typedef struct RamfluxCardOpen {

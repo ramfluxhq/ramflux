@@ -49,7 +49,7 @@ fn refresh(
             result: "updated",
             session,
             fallback,
-            batch: Some(respond::batch_value(&batch)?),
+            batch: Some(respond::batch_value(client, held.conversation(), &batch)?),
             host_request: None,
             submit: None,
             draft_conflict: conflict,
@@ -68,23 +68,23 @@ pub(super) fn present(
     match keep(client, account, parsed.session)? {
         Kept::Stopped(value) => Ok(value),
         Kept::Ready { state, fallback, .. } => {
-            change(account, parsed.session, &state, &fallback, locale, dark)
+            change(client, account, parsed.session, &state, &fallback, (locale, dark))
         }
     }
 }
 
 fn change(
+    client: &RamfluxClient,
     account: &str,
     session: u64,
     state: &SurfaceState,
     fallback: &str,
-    locale: &str,
-    dark: bool,
+    (locale, dark): (&str, bool),
 ) -> Result<Value, SdkError> {
     let presentation = Presentation::bundled(locale, dark).map_err(card_err)?;
     store::with_session(account, session, |held| {
         if !held.matches(state) {
-            return Ok(stale(session, fallback));
+            return Ok(stale(session, fallback, None));
         }
         held.set_presentation(locale, dark);
         let batch = held.session().present(presentation).map_err(card_err)?;
@@ -92,7 +92,7 @@ fn change(
             result: "presented",
             session,
             fallback,
-            batch: Some(respond::batch_value(&batch)?),
+            batch: Some(respond::batch_value(client, held.conversation(), &batch)?),
             host_request: None,
             submit: None,
             draft_conflict: false,
@@ -110,7 +110,7 @@ pub(super) fn suspend(
     match keep(client, account, parsed.session)? {
         Kept::Stopped(value) => Ok(value),
         Kept::Ready { state, fallback, .. } => {
-            pause(account, parsed.session, &state, &fallback, true)
+            pause(client, account, parsed.session, &state, &fallback, true)
         }
     }
 }
@@ -124,12 +124,13 @@ pub(super) fn resume(
     match keep(client, account, parsed.session)? {
         Kept::Stopped(value) => Ok(value),
         Kept::Ready { state, fallback, .. } => {
-            pause(account, parsed.session, &state, &fallback, false)
+            pause(client, account, parsed.session, &state, &fallback, false)
         }
     }
 }
 
 fn pause(
+    client: &RamfluxClient,
     account: &str,
     session: u64,
     state: &SurfaceState,
@@ -138,7 +139,7 @@ fn pause(
 ) -> Result<Value, SdkError> {
     store::with_session(account, session, |held| {
         if !held.matches(state) {
-            return Ok(stale(session, fallback));
+            return Ok(stale(session, fallback, None));
         }
         let batch = if suspending {
             held.set_pending(None);
@@ -153,7 +154,7 @@ fn pause(
             result,
             session: id,
             fallback,
-            batch: Some(respond::batch_value(&batch)?),
+            batch: Some(respond::batch_value(client, held.conversation(), &batch)?),
             host_request: None,
             submit: None,
             draft_conflict: false,

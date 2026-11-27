@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded local session bodies. Host events are not a new wire decoder.
-use super::super::invalid;
+use super::codes::typed;
 use crate::SdkError;
 use serde::Deserialize;
 use serde_json::Value;
@@ -12,9 +12,9 @@ pub(super) const MAX_BODY: usize = 16 * 1024;
 pub(super) fn parse<T: for<'de> Deserialize<'de>>(body: &Value, max: usize) -> Result<T, SdkError> {
     let bytes = serde_json::to_vec(body)?;
     if bytes.len() > max {
-        return Err(invalid("card_session_limit"));
+        return Err(typed("card_session_limit"));
     }
-    serde_json::from_slice(&bytes).map_err(|_| invalid("card_session_refused"))
+    serde_json::from_slice(&bytes).map_err(|_| typed("card_session_refused"))
 }
 
 #[derive(Deserialize)]

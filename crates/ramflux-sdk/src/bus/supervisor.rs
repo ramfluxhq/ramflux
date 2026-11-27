@@ -1351,6 +1351,18 @@ impl Supervisor {
         self.subscribers.borrow_mut().remove(&id);
         self.attended.borrow_mut().remove(&id);
         self.daemon_attended.borrow_mut().remove(&id);
+        self.drop_card_sessions(id);
+    }
+
+    /// Card sessions are bound to the bus connection that opened them.
+    fn drop_card_sessions(&self, connection: u64) {
+        for account in crate::client::surface::card_session::connection_closed(connection) {
+            let actor = self.accounts.borrow().get(&account).cloned();
+            let Some(actor) = actor else { continue };
+            if let Err(error) = actor.sweep_card_sessions() {
+                tracing::warn!(%error, account_id = %account, "card session sweep not queued");
+            }
+        }
     }
 
     pub(super) fn broadcast(&self, events: &[LocalBusFrame]) {

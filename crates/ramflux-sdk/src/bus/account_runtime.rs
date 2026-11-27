@@ -215,6 +215,7 @@ type WriterBudget = ();
 
 impl AccountRuntime {
     async fn close_actor(&mut self) -> Result<(), SdkError> {
+        crate::client::surface::card_session::drop_account(&self.id, "actor_stop");
         if let Some(state) = self.state.accounts.get(&self.id) {
             state.client.stop_in_process_media(ramflux_media::authorization::GateReason::Terminal);
         }
