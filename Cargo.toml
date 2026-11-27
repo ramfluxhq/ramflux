@@ -6,6 +6,7 @@ default-members = [
     "crates/ramflux-core",
     "crates/ramflux-protocol",
     "crates/ramflux-crypto",
+    "crates/ramflux-mls",
     "crates/ramflux-storage",
     "crates/ramflux-transport",
     "crates/ramflux-sync",
@@ -30,6 +31,7 @@ members = [
     "crates/ramflux-core",
     "crates/ramflux-protocol",
     "crates/ramflux-crypto",
+    "crates/ramflux-mls",
     "crates/ramflux-media",
     "crates/ramflux-storage",
     "crates/ramflux-transport",
@@ -61,6 +63,7 @@ ramflux-core = { version = "0.2.9", path = "crates/ramflux-core" }
 ramflux-protocol = { version = "0.2.9", path = "crates/ramflux-protocol" }
 ramflux-prx-client = { version = "0.2.9", path = "crates/ramflux-prx-client" }
 ramflux-crypto = { version = "0.2.9", path = "crates/ramflux-crypto" }
+ramflux-mls = { version = "0.2.9", path = "crates/ramflux-mls" }
 ramflux-media = { version = "0.2.9", path = "crates/ramflux-media" }
 ramflux-storage = { version = "0.2.9", path = "crates/ramflux-storage" }
 ramflux-transport = { version = "0.2.9", path = "crates/ramflux-transport" }
