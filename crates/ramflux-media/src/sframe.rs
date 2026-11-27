@@ -39,8 +39,7 @@ pub const MAX_HEADER_LEN: usize = 17;
 
 /// Packets remembered per key for replay detection (RFC 9605 §9.3).
 ///
-/// The width is the product receiver's [`ramflux_crypto::SFRAME_REPLAY_WINDOW`].
-pub use ramflux_crypto::SFRAME_REPLAY_WINDOW as REPLAY_WINDOW;
+pub const REPLAY_WINDOW: u64 = 128;
 
 /// The bitmap is one bit per counter, so the shared window is a multiple of 64.
 const _: () = assert!(REPLAY_WINDOW >= 64 && REPLAY_WINDOW.is_multiple_of(64));

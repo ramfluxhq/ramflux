@@ -3,9 +3,11 @@
 
 //! Owner-only mirror of one PRX journal. The host checkpoint stays separate.
 
-use ramflux_prx_client::{ApprovalCopy, JournalEvent, SnapshotPage, format_cursor, parse_cursor};
+use ramflux_prx_client::{
+    ApprovalCopy, JournalEvent, MirrorOp, SnapshotPage, TurnBody, format_cursor, parse_cursor,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -142,6 +144,12 @@ pub(super) struct Mirror {
     pub(super) approvals: BTreeMap<String, ApprovalRow>,
     #[serde(default)]
     seen: VecDeque<String>,
+    /// Set by a resync mark; cleared when a complete cut has been drained.
+    #[serde(default, skip_serializing_if = "is_false")]
+    resync: bool,
+    /// Turn ids seen in the cut being pulled. Empty outside a cut.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    cut_turns: BTreeSet<String>,
 }
 
 /// One stored approval. The map key is the approval id.
@@ -191,6 +199,8 @@ impl Mirror {
             erases: Vec::new(),
             approvals: BTreeMap::new(),
             seen: VecDeque::new(),
+            resync: false,
+            cut_turns: BTreeSet::new(),
         }
     }
 
@@ -218,11 +228,13 @@ impl Mirror {
         Counts { sessions: self.sessions.len(), agents: self.agents.len(), turns: self.turns.len() }
     }
 
+    /// Applies one snapshot page. Returns the number of turns removed by retention: only on the
+    /// last page of a cut pulled after a resync, and only when PRX reported `retained_since`.
     pub(super) fn apply_page(
         &mut self,
         store: &MirrorStore,
         page: &SnapshotPage,
-    ) -> Result<(), StoreError> {
+    ) -> Result<usize, StoreError> {
         if self.page_token.is_some() {
             let same_id = self.snapshot_id.as_deref() == Some(page.snapshot_id.as_str());
             let same_epoch = self.epoch.as_deref() == Some(page.epoch.as_str());
@@ -231,8 +243,19 @@ impl Mirror {
             }
         }
         let mut next = self.clone();
+        if self.page_token.is_none() {
+            next.cut_turns.clear();
+        }
         for row in &page.rows {
             next.apply_op(&row.op)?;
+            if let MirrorOp::Turn(copy) = &row.op
+                && !matches!(copy.body, TurnBody::Deleted)
+            {
+                next.cut_turns.insert(copy.message_id.clone());
+            }
+        }
+        if next.cut_turns.len() > MAX_TURNS {
+            return Err(StoreError::Full);
         }
         next.epoch = Some(page.epoch.clone());
         next.snapshot_id = Some(page.snapshot_id.clone());
@@ -241,7 +264,20 @@ impl Mirror {
             Some(format_cursor(&page.epoch, page.cursor.seq).map_err(|_| StoreError::Io)?);
         next.page_token.clone_from(&page.next);
         next.ready = page.next.is_none();
-        self.commit(store, next)
+        let mut removed = 0;
+        if next.ready {
+            // The cut is complete (PRX-58): a local turn absent from it no longer exists at PRX.
+            if next.resync && page.retained_since.is_some() {
+                let before = next.turns.len();
+                let kept = std::mem::take(&mut next.cut_turns);
+                next.turns.retain(|id, _| kept.contains(id));
+                removed = before - next.turns.len();
+            }
+            next.resync = false;
+            next.cut_turns.clear();
+        }
+        self.commit(store, next)?;
+        Ok(removed)
     }
 
     pub(super) fn apply_event(
@@ -272,6 +308,7 @@ impl Mirror {
         next.page_token = None;
         next.snapshot_id = None;
         next.ready = false;
+        next.cut_turns.clear();
         self.commit(store, next)
     }
 
@@ -283,6 +320,8 @@ impl Mirror {
         next.cursor = None;
         next.cursor_seq = None;
         next.epoch = None;
+        next.resync = true;
+        next.cut_turns.clear();
         self.commit(store, next)
     }
 
@@ -477,6 +516,7 @@ fn validate(mut mirror: Mirror) -> Result<Mirror, StoreError> {
         || mirror.sessions.len() > MAX_SESSIONS
         || mirror.agents.len() > MAX_AGENTS
         || mirror.turns.len() > MAX_TURNS
+        || mirror.cut_turns.len() > MAX_TURNS
         || mirror.runs.len() > MAX_RUNS
         || mirror.erases.len() > MAX_ERASES
         || mirror.run_order.len() > MAX_RUNS

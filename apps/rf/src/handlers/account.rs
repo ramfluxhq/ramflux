@@ -105,6 +105,15 @@ async fn handle_app_lock(
             )
             .await?,
         ),
+        AccountAppLockAction::Lifecycle(lifecycle) => print_json(
+            &bus.request(
+                Some(lifecycle.account),
+                "account",
+                "account.app_lock.lifecycle",
+                serde_json::json!({"state": lifecycle.state.as_wire()}),
+            )
+            .await?,
+        ),
         AccountAppLockAction::Set(_) => {
             Err(RfError::Message("Changing the app lock requires the attended client.".into()))
         }

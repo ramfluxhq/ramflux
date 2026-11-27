@@ -9,6 +9,12 @@ use crate::prelude::*;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
+// Teardown after the stop reply; each phase is bounded and named in the stop log.
+/// Backstop only: the wait starts after the shutdown finished and ends when the reply is written.
+const STOP_RESPONSE_MS: u64 = 2000;
+const CONNECTIONS_MS: u64 = 250;
+const BACKGROUND_TASKS_MS: u64 = 250;
+
 pub(super) async fn serve(
     config: LocalBusConfig,
     shutdown: watch::Receiver<bool>,
@@ -46,9 +52,13 @@ pub(super) async fn serve(
     let mut background = JoinSet::new();
     supervisor.hydrate(&mut background)?;
     tracing::info!(socket = %supervisor.config.socket_path.display(), "local bus daemon ready");
-    let result = accept(listener, owner, supervisor, shutdown).await;
-    background.abort_all();
-    while background.join_next().await.is_some() {}
+    let result = accept(listener, owner, Rc::clone(&supervisor), shutdown).await;
+    supervisor
+        .bounded_phase("background_tasks", BACKGROUND_TASKS_MS, async {
+            background.abort_all();
+            while background.join_next().await.is_some() {}
+        })
+        .await;
     result
 }
 
@@ -113,15 +123,27 @@ pub(super) async fn accept<L: BusListener>(
         socket.remove()?;
     }
     if explicit_stop {
+        // The reply carries the shutdown outcome, so the shutdown (its own detached task, started
+        // once by whichever caller came first) must finish before the reply wait begins; the
+        // connections are torn down only after the reply was written and flushed.
+        let _ = supervisor.shutdown().await;
         let mut response = supervisor.stop_response();
-        while !*response.borrow() {
-            if response.changed().await.is_err() {
-                break;
-            }
-        }
+        supervisor
+            .bounded_phase("stop_response", STOP_RESPONSE_MS, async {
+                while !*response.borrow() {
+                    if response.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await;
     }
-    connections.abort_all();
-    while connections.join_next().await.is_some() {}
+    supervisor
+        .bounded_phase("connections", CONNECTIONS_MS, async {
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
+        })
+        .await;
     supervisor.shutdown().await?;
     lease_error.map_or(Ok(()), Err)
 }

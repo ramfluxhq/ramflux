@@ -70,7 +70,6 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
             | ramflux_crypto::CryptoError::TransparencyProofFailed
             | ramflux_crypto::CryptoError::InvalidHomeNodeMigrationProof(_)
             | ramflux_crypto::CryptoError::Pairing(_)
-            | ramflux_crypto::CryptoError::SFrame(_)
             | ramflux_crypto::CryptoError::VoiceRebind(_)
             | ramflux_crypto::CryptoError::MembershipCommitmentMismatch
             | ramflux_crypto::CryptoError::ReportFrameTooShort
