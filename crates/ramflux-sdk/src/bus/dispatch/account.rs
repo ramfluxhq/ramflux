@@ -49,6 +49,8 @@ pub(crate) async fn dispatch_account_bus_request(
         }
         "account.lock" | "account.sign_out" => {
             let account_id = request_account_id(request)?.to_owned();
+            let reason = if request.method == "account.sign_out" { "sign_out" } else { "lock" };
+            crate::client::surface::card_session::drop_account(&account_id, reason);
             local_bus_account_lock(state, &account_id).await?;
             let mut body = serde_json::json!({
                 "local_account_id": account_id,

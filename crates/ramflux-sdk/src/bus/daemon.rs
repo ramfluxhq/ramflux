@@ -378,7 +378,8 @@ async fn dispatch_local_bus_remainder(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match method {
         method if method.starts_with("card.") => {
-            crate::bus::dispatch::card_session::dispatch(request, state).await
+            crate::bus::dispatch::card_session::dispatch(request, state, connection.connection_id)
+                .await
         }
         method if method.starts_with("message.") => {
             Box::pin(dispatch_message_bus_request(request, state, connection)).await

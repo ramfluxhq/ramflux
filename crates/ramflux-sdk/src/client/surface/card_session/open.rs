@@ -3,6 +3,7 @@
 
 //! Open one session from the current publication of a surface reference.
 use super::body::{self, OpenBody};
+use super::codes::typed;
 use super::gate::{Admission, admit, card_err, refused};
 use super::package;
 use super::respond::{View, view};
@@ -12,7 +13,12 @@ use crate::{RamfluxClient, SdkError};
 use ramflux_card::CardSession;
 use serde_json::Value;
 
-pub(super) fn open(client: &RamfluxClient, account: &str, body: &Value) -> Result<Value, SdkError> {
+pub(super) fn open(
+    client: &RamfluxClient,
+    account: &str,
+    connection: u64,
+    body: &Value,
+) -> Result<Value, SdkError> {
     let parsed: OpenBody = body::parse(body, 4 * 1024)?;
     let (locale, dark) = body::presentation(parsed.locale.as_deref(), parsed.dark);
     match admit(client, &parsed.surface_ref)? {
@@ -25,20 +31,26 @@ pub(super) fn open(client: &RamfluxClient, account: &str, body: &Value) -> Resul
             let spec = super::host_view::stamp(client, spec, &state)?;
             let (session, batch) =
                 CardSession::open(spec, package::bundled()?).map_err(card_err)?;
-            let hash = state.hash().ok_or_else(|| super::super::invalid("card_session_refused"))?;
+            let hash = state.hash().ok_or_else(|| typed("card_session_refused"))?;
+            let conversation =
+                state.conversation_id().ok_or_else(|| typed("card_session_refused"))?;
             let id = store::insert(
-                account,
-                &parsed.surface_ref,
                 session,
-                &fallback,
-                state.version(),
-                hash,
+                &store::Opened {
+                    account,
+                    connection,
+                    surface_ref: &parsed.surface_ref,
+                    conversation,
+                    fallback: &fallback,
+                    signed_version: state.version(),
+                    signed_hash: hash,
+                },
             )?;
             store::with_session(account, id, |held| {
                 held.set_presentation(locale, dark);
                 Ok(())
             })?;
-            let batch = super::respond::batch_value(&batch)?;
+            let batch = super::respond::batch_value(client, conversation, &batch)?;
             Ok(view(View {
                 result: "opened",
                 allowed: true,

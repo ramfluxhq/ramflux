@@ -3,6 +3,7 @@
 
 //! Send the carrier signed by the event. A failed send keeps the same message id.
 use super::body::{self, SessionBody};
+use super::codes::typed;
 use super::guard::{Kept, keep};
 use super::host_view;
 use super::respond::{self, stale};
@@ -34,7 +35,7 @@ pub(super) fn admit_send(
                 held.set_pending(None);
                 Ok(())
             });
-            Ok(Some(stale(session, &fallback)))
+            Ok(Some(stale(session, &fallback, None)))
         }
     }
 }
@@ -72,9 +73,9 @@ fn take(
     })?;
     let Some(pending) = pending else {
         return if store::with_session(account, session, |held| Ok(held.matches(state)))? {
-            Err(super::super::invalid("card_session_inactive"))
+            Err(typed("card_session_inactive"))
         } else {
-            Ok(SubmitPrep::Done(stale(session, fallback)))
+            Ok(SubmitPrep::Done(stale(session, fallback, None)))
         };
     };
     if client.surface_outgoing_submitted(&pending.carrier)? {
@@ -127,7 +128,7 @@ fn blocked(
         return Ok(None);
     };
     host_view::forget_pending(account, session)?;
-    let batch = store::with_session(account, session, |held| mounted(held))?;
+    let batch = store::with_session(account, session, |held| mounted(client, held))?;
     Ok(Some(respond::stopped(
         session,
         fallback,
@@ -138,9 +139,9 @@ fn blocked(
     )))
 }
 
-fn mounted(held: &store::Held) -> Result<Option<Value>, SdkError> {
+fn mounted(client: &RamfluxClient, held: &store::Held) -> Result<Option<Value>, SdkError> {
     match held.session_ref().shown_batch() {
-        Ok(batch) => Ok(Some(respond::batch_value(&batch)?)),
+        Ok(batch) => Ok(Some(respond::batch_value(client, held.conversation(), &batch)?)),
         Err(ramflux_card::CardError::Inactive) => Ok(None),
         Err(error) => Err(super::gate::card_err(error)),
     }

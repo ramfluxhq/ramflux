@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Account-scoped sessions on the actor thread. The VM is not Send.
-use super::super::invalid;
+use super::codes::{expired, typed};
+use super::registry;
 use super::sign::Pending;
 use crate::SdkError;
 use ramflux_card::CardSession;
@@ -16,6 +17,8 @@ const MAX_CONSUMED: usize = 256;
 pub(super) struct Held {
     account_id: String,
     surface_ref: String,
+    conversation: String,
+    connection: u64,
     fallback: String,
     locale: String,
     dark: bool,
@@ -30,32 +33,40 @@ thread_local! {
     static SESSIONS: RefCell<Vec<Held>> = const { RefCell::new(Vec::new()) };
 }
 
-pub(super) fn insert(
-    account: &str,
-    surface_ref: &str,
-    session: CardSession,
-    fallback: &str,
-    signed_version: u64,
-    signed_hash: &str,
-) -> Result<u64, SdkError> {
+pub(super) struct Opened<'a> {
+    pub account: &'a str,
+    pub connection: u64,
+    pub surface_ref: &'a str,
+    pub conversation: &'a str,
+    pub fallback: &'a str,
+    pub signed_version: u64,
+    pub signed_hash: &'a str,
+}
+
+pub(super) fn insert(session: CardSession, opened: &Opened<'_>) -> Result<u64, SdkError> {
+    let Opened { account, connection, surface_ref, conversation, fallback, .. } = *opened;
+    sweep_closed(account);
     with_all(|sessions| {
         sessions.retain(|held| !(held.account_id == account && held.surface_ref == surface_ref));
         if sessions.len() >= MAX_SESSIONS {
-            return Err(invalid("card_session_limit"));
+            return Err(typed("card_session_limit"));
         }
         let id = session.id();
         sessions.push(Held {
             account_id: account.to_owned(),
             surface_ref: surface_ref.to_owned(),
+            conversation: conversation.to_owned(),
+            connection,
             fallback: fallback.to_owned(),
             locale: "en".to_owned(),
             dark: false,
-            signed_version,
-            signed_hash: signed_hash.to_owned(),
+            signed_version: opened.signed_version,
+            signed_hash: opened.signed_hash.to_owned(),
             session,
             pending: None,
             consumed: BTreeSet::new(),
         });
+        registry::track(connection, account)?;
         Ok(id)
     })
 }
@@ -65,11 +76,17 @@ pub(super) fn with_session<T>(
     id: u64,
     visit: impl FnOnce(&mut Held) -> Result<T, SdkError>,
 ) -> Result<T, SdkError> {
+    sweep_closed(account);
     with_all(|sessions| {
-        let held = sessions
-            .iter_mut()
-            .find(|held| held.account_id == account && held.session.id() == id)
-            .ok_or_else(|| invalid("card_session_inactive"))?;
+        let Some(held) =
+            sessions.iter_mut().find(|held| held.account_id == account && held.session.id() == id)
+        else {
+            return Err(if registry::is_expired(account, id)? {
+                expired(id)
+            } else {
+                typed("card_session_inactive")
+            });
+        };
         visit(held)
     })
 }
@@ -95,9 +112,56 @@ pub(super) fn clear_pending(account: &str, id: u64, message_id: &str) -> Result<
     })
 }
 
+/// Drop every session of `account`. Later calls with those ids fail with `card_session_expired`.
+pub(super) fn drop_account(account: &str, reason: &str) {
+    drop_where(account, reason, |_| true);
+    registry::forget_account(account);
+}
+
+/// Drop the sessions of connections that closed. Runs on the actor thread.
+pub(super) fn sweep_closed(account: &str) {
+    let closed = match registry::take_closed(account) {
+        Ok(closed) if !closed.is_empty() => closed,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::warn!(%error, account_id = account, "card session sweep skipped");
+            return;
+        }
+    };
+    drop_where(account, "connection_closed", |held| closed.contains(&held.connection));
+}
+
+fn drop_where(account: &str, reason: &str, doomed: impl Fn(&Held) -> bool) {
+    let dropped = with_all(|sessions| {
+        let mut count = 0_usize;
+        let mut highest = 0_u64;
+        sessions.retain(|held| {
+            if held.account_id != account || !doomed(held) {
+                return true;
+            }
+            count += 1;
+            highest = highest.max(held.session.id());
+            false
+        });
+        Ok((count, highest))
+    });
+    match dropped {
+        Ok((0, _)) => {}
+        Ok((count, highest)) => {
+            if let Err(error) = registry::raise_floor(account, highest) {
+                tracing::warn!(%error, account_id = account, "card session floor not recorded");
+            }
+            tracing::info!(account_id = account, reason, sessions = count, "card sessions dropped");
+        }
+        Err(error) => {
+            tracing::warn!(%error, account_id = account, reason, "card sessions not dropped");
+        }
+    }
+}
+
 fn with_all<T>(visit: impl FnOnce(&mut Vec<Held>) -> Result<T, SdkError>) -> Result<T, SdkError> {
     SESSIONS.with(|cell| {
-        let mut sessions = cell.try_borrow_mut().map_err(|_| invalid("card_session_busy"))?;
+        let mut sessions = cell.try_borrow_mut().map_err(|_| typed("card_session_busy"))?;
         visit(&mut sessions)
     })
 }
@@ -126,6 +190,10 @@ impl Held {
     pub(super) fn set_presentation(&mut self, locale: &str, dark: bool) {
         locale.clone_into(&mut self.locale);
         self.dark = dark;
+    }
+
+    pub(super) fn conversation(&self) -> &str {
+        &self.conversation
     }
 
     pub(super) fn surface_ref(&self) -> &str {

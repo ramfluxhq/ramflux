@@ -81,6 +81,8 @@ pub(super) enum PrivateCommand {
         activity: Box<OwnerActivity>,
         reply: oneshot::Sender<Result<(), SdkError>>,
     },
+    /// Drop the card sessions of bus connections that closed. Fire and forget.
+    CardSweep,
     AuthorizeBackup {
         generation: i64,
         reply: oneshot::Sender<Result<(), SdkError>>,
@@ -470,6 +472,11 @@ impl AccountActor {
     ) -> Result<super::backup_jobs::MissingAttachments, SdkError> {
         self.reader_pool()?.backup_missing_references().await
     }
+    /// Ask the actor to drop the card sessions of connections that closed.
+    pub(super) fn sweep_card_sessions(&self) -> Result<(), SdkError> {
+        self.send_private(PrivateCommand::CardSweep)
+    }
+
     pub(super) fn send_private(&self, backup: PrivateCommand) -> Result<(), SdkError> {
         let (outbound, _events) = mpsc::channel(1);
         let lifecycle = is_lifecycle_private(&backup);
