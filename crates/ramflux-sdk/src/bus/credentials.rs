@@ -167,6 +167,9 @@ pub(super) async fn unlock_secret(
             }
             Err(error) => return Err(error.into()),
         }
+        // Advisory: a throttled account is refused before any prompt; the counted guard stays
+        // authoritative at verification.
+        crate::client::device_unlock::code_attempt_wait(&index, &account)?;
         let generation = load_reservation(&root, &account)?.map_or(1, |r| r.frontend_generation);
         let mut nonce = [0_u8; 32];
         getrandom::fill(&mut nonce).map_err(|_| SdkError::CustodyRandomUnavailable)?;

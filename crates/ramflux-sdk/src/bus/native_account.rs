@@ -47,7 +47,10 @@ pub(super) fn unlock(
 ) -> Result<LocalBusCreatedAccount, SdkError> {
     if let Some(account) = state.accounts.get(id) {
         if let NativeUnlockSecret::Code(passphrase) = &secret {
-            account.client.verify_active_account_secret(id, passphrase.as_bytes())?;
+            account
+                .client
+                .verify_active_account_secret(id, passphrase.as_bytes())
+                .map_err(crate::client::device_unlock::wrong_code)?;
         }
         return response(account);
     }
@@ -64,7 +67,9 @@ pub(super) fn unlock(
         crate::client::device_unlock::DeviceSecret::Load,
     )?;
     match &secret {
-        NativeUnlockSecret::Code(passphrase) => client.unlock_account(id, passphrase.as_bytes())?,
+        NativeUnlockSecret::Code(passphrase) => client
+            .unlock_account(id, passphrase.as_bytes())
+            .map_err(crate::client::device_unlock::wrong_code)?,
         NativeUnlockSecret::Device => client.unlock_account_with_device(id)?,
     }
     if let Some(node_id) = home_node_id {

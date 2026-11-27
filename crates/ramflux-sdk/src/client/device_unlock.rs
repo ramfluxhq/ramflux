@@ -251,6 +251,16 @@ pub(crate) fn open_device_wrap(
 /// # Errors
 /// `UnlockAttemptsExhausted` after [`MAX_CODE_FAILURES`]; `UnlockRetryLater` during a wait.
 pub(crate) fn guard_code_attempt(index: &AccountIndex, account_id: &str) -> Result<(), SdkError> {
+    code_attempt_wait(index, account_id)?;
+    index.begin_code_attempt(account_id, ramflux_storage::unix_now())?;
+    Ok(())
+}
+
+/// Read-only throttle check: refuses while the account is exhausted or waiting, writes nothing.
+///
+/// # Errors
+/// `UnlockAttemptsExhausted` after [`MAX_CODE_FAILURES`]; `UnlockRetryLater` during a wait.
+pub(crate) fn code_attempt_wait(index: &AccountIndex, account_id: &str) -> Result<(), SdkError> {
     let now = ramflux_storage::unix_now();
     let attempts = index.code_attempts(account_id)?;
     if attempts.failures >= MAX_CODE_FAILURES {
@@ -279,8 +289,24 @@ pub(crate) fn guard_code_attempt(index: &AccountIndex, account_id: &str) -> Resu
             ));
         }
     }
-    index.begin_code_attempt(account_id, now)?;
     Ok(())
+}
+
+/// Maps the code-wrap authentication failure of a native code check to `wrong_passphrase`;
+/// every other error passes through.
+pub(crate) fn wrong_code(error: SdkError) -> SdkError {
+    match error {
+        SdkError::Storage(ramflux_storage::StorageError::Integrity(message))
+            if message == ramflux_storage::WRAP_AUTH_FAILED =>
+        {
+            refusal(
+                "wrong_passphrase",
+                "the account code is wrong",
+                serde_json::json!({"reason_code": "wrong_passphrase"}),
+            )
+        }
+        other => other,
+    }
 }
 
 /// Clears the failure count after a correct code.
