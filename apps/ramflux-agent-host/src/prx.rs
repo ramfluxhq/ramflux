@@ -18,6 +18,8 @@ use std::{
     time::Instant,
 };
 
+/// PRX keeps `client_message_id` dedup for 15 days (PRX-58); older resends would start a new turn.
+const PRX_DEDUP_WINDOW_MS: u64 = 15 * 86_400_000;
 const MAX_TOKEN_BYTES: u64 = 8192;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const UNAVAILABLE_LOG_WINDOW_SECONDS: u64 = 60;
@@ -576,6 +578,9 @@ impl PrxEngine {
 }
 
 impl EngineProvider for PrxEngine {
+    fn dedup_window_ms(&self) -> Option<u64> {
+        Some(PRX_DEDUP_WINDOW_MS)
+    }
     fn is_busy(&self, conversation_id: &str) -> bool {
         self.state.jobs.contains_key(conversation_id)
             || self.state.pending.contains_key(conversation_id)

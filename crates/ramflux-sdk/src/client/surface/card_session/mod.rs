@@ -2,10 +2,13 @@
 // Copyright (c) 2026 Span Brain
 
 //! SDK card session. The runtime renders; this module admits, signs and dispatches.
-//! Approval decisions stay on the SDK task APIs. Image bytes stay on the native callback.
+//! Approval decisions stay on the SDK task APIs: the slot reply carries a ready `task.resolve`
+//! body. Image slots resolve to an object selector the host reads through the object APIs.
 
 #[cfg_attr(not(feature = "card-runtime"), allow(dead_code))]
 mod body;
+#[cfg_attr(not(feature = "card-runtime"), allow(dead_code))]
+mod codes;
 #[cfg_attr(not(feature = "card-runtime"), allow(dead_code))]
 mod gate;
 #[cfg_attr(not(feature = "card-runtime"), allow(dead_code))]
@@ -14,17 +17,23 @@ mod respond;
 #[cfg(feature = "card-runtime")]
 mod approval;
 #[cfg(feature = "card-runtime")]
+mod batch;
+#[cfg(feature = "card-runtime")]
 mod event;
 #[cfg(feature = "card-runtime")]
 mod guard;
 #[cfg(feature = "card-runtime")]
 mod host_view;
 #[cfg(feature = "card-runtime")]
+mod images;
+#[cfg(feature = "card-runtime")]
 mod lifecycle;
 #[cfg(feature = "card-runtime")]
 mod open;
 #[cfg(feature = "card-runtime")]
 mod package;
+#[cfg(feature = "card-runtime")]
+mod registry;
 #[cfg(feature = "card-runtime")]
 mod sign;
 #[cfg(feature = "card-runtime")]
@@ -54,13 +63,50 @@ pub(crate) enum SubmitPrep {
     },
 }
 
-pub(crate) fn open(client: &RamfluxClient, account: &str, body: &Value) -> Result<Value, SdkError> {
+pub(crate) fn open(
+    client: &RamfluxClient,
+    account: &str,
+    connection: u64,
+    body: &Value,
+) -> Result<Value, SdkError> {
     #[cfg(feature = "card-runtime")]
     {
-        open::open(client, account, body)
+        open::open(client, account, connection, body)
     }
     #[cfg(not(feature = "card-runtime"))]
-    unavailable(client, account, body)
+    {
+        let _ = connection;
+        unavailable(client, account, body)
+    }
+}
+
+/// Drop every card session of `account` (lock, sign-out or actor stop). Actor thread only.
+pub(crate) fn drop_account(account: &str, reason: &str) {
+    #[cfg(feature = "card-runtime")]
+    store::drop_account(account, reason);
+    #[cfg(not(feature = "card-runtime"))]
+    let _ = (account, reason);
+}
+
+/// Drop the sessions of bus connections that closed. Actor thread only.
+pub(crate) fn sweep_closed(account: &str) {
+    #[cfg(feature = "card-runtime")]
+    store::sweep_closed(account);
+    #[cfg(not(feature = "card-runtime"))]
+    let _ = account;
+}
+
+/// A bus connection closed. Returns the accounts that hold sessions opened on it.
+pub(crate) fn connection_closed(connection: u64) -> Vec<String> {
+    #[cfg(feature = "card-runtime")]
+    {
+        registry::connection_closed(connection)
+    }
+    #[cfg(not(feature = "card-runtime"))]
+    {
+        let _ = connection;
+        Vec::new()
+    }
 }
 
 pub(crate) fn update(

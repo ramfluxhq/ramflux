@@ -58,8 +58,22 @@ fn run_local_bus_thread(
     }
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let local_set = LocalSet::new();
-    local_set.block_on(&runtime, serve_local_bus_until_local(config, shutdown))
+    let result = local_set.block_on(&runtime, serve_local_bus_until_local(config, shutdown));
+    drop(local_set);
+    // A plain drop waits for every `spawn_blocking` task; the limit abandons the rest.
+    let started = std::time::Instant::now();
+    runtime.shutdown_timeout(std::time::Duration::from_millis(RUNTIME_BLOCKING_MS));
+    if started.elapsed() >= std::time::Duration::from_millis(RUNTIME_BLOCKING_MS) {
+        tracing::warn!(
+            phase = "runtime_blocking",
+            budget_ms = RUNTIME_BLOCKING_MS,
+            "daemon stop phase overran"
+        );
+    }
+    result
 }
+
+const RUNTIME_BLOCKING_MS: u64 = 500;
 
 async fn serve_local_bus_until_local(
     config: LocalBusConfig,
@@ -383,7 +397,8 @@ async fn dispatch_local_bus_remainder(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match method {
         method if method.starts_with("card.") => {
-            crate::bus::dispatch::card_session::dispatch(request, state).await
+            crate::bus::dispatch::card_session::dispatch(request, state, connection.connection_id)
+                .await
         }
         method if method.starts_with("message.") => {
             Box::pin(dispatch_message_bus_request(request, state, connection)).await

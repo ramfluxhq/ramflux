@@ -121,3 +121,6 @@ validation. Only HTTPS URLs with DNS hosts are allowed, with no credentials, loc
 hosts or IP literals. A URL binding cannot read an input-owned pointer. Actual opening requires a later host-owned sheet and a qualified
 browser-only path. Wire admission does not launch a URL or confer approval
 execution authority.
+
+Host sessions for agent cards (`card.session.*`: open, events, host slots, task
+resolution, images, lifetime) are specified in `docs/card_session.md`.

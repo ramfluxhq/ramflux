@@ -56,10 +56,3 @@ pub struct HostSlotReply {
     pub request_id: String,
     pub outcome: SlotOutcome,
 }
-/// Trusted SDK-to-native image callback. Bytes never enter the VM or JSON tree.
-pub struct ImageResult<'a> {
-    pub token: EventToken,
-    pub slot_id: &'a str,
-    pub request_id: &'a str,
-    pub result: Result<(&'a str, &'a [u8]), &'a str>,
-}

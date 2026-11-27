@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Build an authorized envelope from the stored publication. The host supplies no snapshot.
-use super::super::{StoredSurface, invalid};
+use super::super::StoredSurface;
+use super::codes::typed;
 use super::gate::card_err;
 use crate::SdkError;
 use ramflux_card::{CardSpec, Presentation};
@@ -27,9 +28,9 @@ pub(super) fn authorized(
     locale: &str,
     dark: bool,
 ) -> Result<CardSpec, SdkError> {
-    let snapshot = state.content().ok_or_else(|| invalid("card_session_refused"))?;
-    let conversation = state.conversation_id().ok_or_else(|| invalid("card_session_refused"))?;
-    let hash = state.hash().ok_or_else(|| invalid("card_session_refused"))?;
+    let snapshot = state.content().ok_or_else(|| typed("card_session_refused"))?;
+    let conversation = state.conversation_id().ok_or_else(|| typed("card_session_refused"))?;
+    let hash = state.hash().ok_or_else(|| typed("card_session_refused"))?;
     let bytes = ramflux_protocol::canonical_json_bytes(&Envelope {
         conversation_id: conversation,
         author_principal_id: &stored.author_principal_id,
@@ -40,7 +41,7 @@ pub(super) fn authorized(
         snapshot,
     })?;
     if bytes.len() > 32 * 1024 {
-        return Err(invalid("card_session_limit"));
+        return Err(typed("card_session_limit"));
     }
     let spec = CardSpec::parse(&bytes).map_err(card_err)?;
     spec.with_presentation(Presentation::bundled(locale, dark).map_err(card_err)?).map_err(card_err)

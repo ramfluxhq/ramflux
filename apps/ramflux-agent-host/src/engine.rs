@@ -209,6 +209,12 @@ pub struct RunApprovalPost {
 }
 
 pub trait EngineProvider {
+    /// Window in milliseconds after which the provider no longer deduplicates a resubmitted
+    /// message; older messages must not be submitted again. `None` means no such limit.
+    #[must_use]
+    fn dedup_window_ms(&self) -> Option<u64> {
+        None
+    }
     /// Whether a conversation has provider work that needs a busy hint rather than a new turn.
     #[must_use]
     fn is_busy(&self, _conversation_id: &str) -> bool {

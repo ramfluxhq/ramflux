@@ -144,16 +144,19 @@ sheets. Only one sheet may be active, with security sheets taking precedence.
   Cancel and a single tap Open. M3 consumes the request, rechecks authority and
   uses a qualified browser-only handoff; no author event or prefetch.
 - Image contains only an attachment selector, description, fit and variant.
-  M3 verifies conversation membership, exact manifest digest, access and erasure
-  before delivering encoded bytes out of band. JSON/JS never receive bytes,
-  paths, URLs or data URIs. B owns PNG/JPEG header checks and decoding: encoded
-  <=8 MiB, dimension <=4096, <=4,194,304 pixels/16 MiB RGBA, <=32 MiB decoded per
-  session and one decode in flight. It copies borrowed callback bytes before
-  posting to UI and releases buffers on cancellation/erasure. These decoder and
-  authenticated-fetch behaviors are downstream requirements, not runtime proof.
+  The SDK resolves the selector against the account's object directory before a
+  batch leaves it: the object must belong to the card's conversation, match the
+  exact manifest digest and not be erased or oversize. The host then receives
+  `{"retrieval":"object", object_id, manifest_digest, transfer_state, size, mime}`
+  (or `{"retrieval":"unavailable"}`) and reads the bytes through the object read
+  APIs. JSON/JS never receive bytes, paths, URLs or data URIs. B owns PNG/JPEG
+  header checks and decoding: encoded <=8 MiB, dimension <=4096, <=4,194,304
+  pixels/16 MiB RGBA, <=32 MiB decoded per session and one decode in flight, and
+  it releases buffers on cancellation/erasure. These decoder behaviors are
+  downstream requirements, not runtime proof.
 
-`HostSlotReply` and borrowed `ImageResult` define the downstream boundary; the
-runtime grants no authority to them. M3 must consume each confirmation once.
+`HostSlotReply` defines the downstream boundary for link and approval slots; the
+runtime grants no authority to it. The SDK must consume each confirmation once.
 Chart retains independent series/labels/raw integers and requires a complete
 native table alternative (up to 32 rows). Table keys are unique and rows must be
 rectangular. Task is untrusted reported status. Icon accepts bounded named icons
