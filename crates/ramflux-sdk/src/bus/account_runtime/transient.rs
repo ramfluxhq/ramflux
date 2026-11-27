@@ -150,7 +150,8 @@ impl AccountRuntime {
         else {
             return;
         };
-        let pending = std::mem::take(&mut account.notifications_cleared_pending);
+        let pending = account.notifications_cleared_pending;
+        account.notifications_cleared_pending = 0;
         let events = (0..pending.min(16))
             .map(|_| {
                 let mut event = crate::LocalBusFrame::request(
