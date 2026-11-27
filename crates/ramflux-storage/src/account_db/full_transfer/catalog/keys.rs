@@ -129,7 +129,7 @@ pub(super) const RULE_161: FamilyRule = table_rule!(
         (
             "label",
             Utf8,
-            true,
+            false,
             Exclude,
             PreferLocal,
             CodecRule::Scalar { cell_type: CellType::Utf8 }
@@ -137,7 +137,7 @@ pub(super) const RULE_161: FamilyRule = table_rule!(
         (
             "key",
             Bytes,
-            true,
+            false,
             Exclude,
             PreferLocal,
             CodecRule::Scalar { cell_type: CellType::Bytes }
