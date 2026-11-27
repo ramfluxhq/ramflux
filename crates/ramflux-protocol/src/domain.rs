@@ -201,8 +201,16 @@ pub const DM_FS_V3_REQUEST_HASH: &str = "ramflux.dm_bootstrap_fs.request_hash.v1
 
 /// MLS leaf certificate tag: the device signing key signs `tag || u16 suite || leaf signature key`.
 pub const MLS_LEAF_CERT_V1: &str = "rf-mls-leaf-v1";
+/// MLS leaf certificate tag v2: the device signing key signs
+/// `tag || u16 suite || leaf signature key || anchor || device_id || u64 device_epoch`.
+pub const MLS_LEAF_CERT_V2: &str = "rf-mls-leaf-v2";
+/// MLS rejoin tag: the device signing key signs
+/// `tag || group_id || kp_hash || u64 epoch || u64 issued_at`.
+pub const MLS_REJOIN_V1: &str = "rf-mls-rejoin-v1";
+/// MLS self-conversation scope tag: `blake3(tag || anchor)` is the self conversation id.
+pub const MLS_SELF_SCOPE_V1: &str = "rf-mls-self-scope-v1";
 
-pub const ALL: [&str; 168] = [
+pub const ALL: [&str; 171] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -371,6 +379,9 @@ pub const ALL: [&str; 168] = [
     NOTIFICATION_CALL_INTENT_DIGEST_V1,
     NOTIFICATION_DEVICE_COLLAPSE_V1,
     MLS_LEAF_CERT_V1,
+    MLS_LEAF_CERT_V2,
+    MLS_REJOIN_V1,
+    MLS_SELF_SCOPE_V1,
 ];
 
 pub const USERNAME_BINDING: &str = "ramflux.identity.username_binding.v1";
