@@ -144,10 +144,18 @@ fn admit_native_account(
         target_delivery_id: delivery,
         prekey_http_url: None,
     };
-    let gateway =
+    let mut gateway =
         GatewaySessionConfig::auto(endpoint).with_host_network(&state.config).with_born_v3_account(
             client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?,
         );
+    // Restart restore of the stored push-route book, its control sequence and the device policy.
+    let stored_push = super::dispatch::device::stored_push_route(&client)?;
+    gateway.push_routes = stored_push.routes;
+    gateway.push_route_clears = stored_push.clears;
+    gateway.push_route_clear_pending = stored_push.clear_pending;
+    // Next sequence = max(saved + 1, now in ms): a reset clock never reuses one.
+    gateway.push_route_last_seq = super::dispatch::device::stored_push_route_seq(&client)?;
+    gateway.device_policy = super::dispatch::device::stored_device_policy(&client)?;
     let mut account = LocalBusAccountState::disconnected(client, gateway, anchor);
     account.activation_pending = true;
     account.native_setup = Some(state.config.clone());

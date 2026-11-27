@@ -7,32 +7,10 @@ use crate::prelude::*;
 use ramflux_protocol::{
     DeviceSetStatus, PrincipalKind, SignedDeviceSetEntry, SignedDeviceSetRecord,
 };
-use serde_json::json;
 impl RamfluxClient {
     pub(crate) fn local_principal_kind(&self) -> Result<PrincipalKind, SdkError> {
         if let Some(account) = &self.born_v3_account {
             return Ok(account.record().body.principal_kind);
-        }
-        if let Ok(db) = self.account_db() {
-            let path =
-                local_bus_account_manifest_path(self.account_index()?.root(), &db.local_account_id);
-            if path.exists() {
-                let manifest = read_local_bus_account_manifest(&path)?;
-                let kind =
-                    manifest.kind.map(|k| serde_json::from_value(json!(k))).transpose()?.unwrap_or(
-                        if manifest.client_mode == LocalBusClientMode::HeadlessAi {
-                            PrincipalKind::HeadlessAi
-                        } else {
-                            PrincipalKind::Human
-                        },
-                    );
-                if manifest.client_mode == LocalBusClientMode::HeadlessAi
-                    && kind == PrincipalKind::Human
-                {
-                    return Err(invalid("headless account cannot claim human kind"));
-                }
-                return Ok(kind);
-            }
         }
         Ok(PrincipalKind::Human)
     }
@@ -139,15 +117,6 @@ impl RamfluxClient {
             .map(|d| d.device_id.clone())
             .chain(approvals.iter().map(|p| p.device_id.clone()))
             .collect::<std::collections::BTreeSet<_>>();
-        let path = local_bus_account_manifest_path(
-            self.account_index()?.root(),
-            &self.account_db()?.local_account_id,
-        );
-        if path.exists() {
-            devices.extend(
-                read_local_bus_account_manifest(&path)?.devices.into_iter().map(|d| d.device_id),
-            );
-        }
         devices.remove(local);
         let mut entries = Vec::new();
         for device in devices {

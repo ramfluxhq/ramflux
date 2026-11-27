@@ -170,7 +170,6 @@ fn restored_data_assertions(
     assert!(db.actor_state_exists("backup/inactive-pair/imported")?);
     assert!(restored.identity_root.is_none());
     assert!(restored.device_branch.is_none());
-    assert!(!root.join("local_bus_accounts/account.json").exists());
     Ok(())
 }
 

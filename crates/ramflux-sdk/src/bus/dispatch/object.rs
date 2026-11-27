@@ -8,7 +8,6 @@ use crate::prelude::*;
 // T25-A3 (CTRL-102 / OBJ-IPC-01): the bounded UPLOAD spool wiring.
 use std::io::{Read as _, Write as _};
 
-use crate::bus::daemon::local_bus_accounts_dir;
 use crate::bus::io::{
     MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES, MAX_LOCAL_BUS_OBJECT_BYTES,
     MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES,
@@ -781,7 +780,7 @@ async fn dispatch_object_put_reconciled_core(
 /// The private, account-scoped, owner-only (0700) directory that holds in-flight UPLOAD spool files
 /// under the daemon `data_root`. T25-A5: rehydrated per-account on startup (no longer blanket-swept).
 pub(crate) fn object_put_spool_dir(data_root: &Path) -> PathBuf {
-    local_bus_accounts_dir(data_root).join("object_put_spool")
+    data_root.join("object_spool").join("put")
 }
 
 /// T25-A5 (OBJ-IPC-01): `object.put.status` state for a live/rehydrated chunk-phase spool that has no
@@ -1317,7 +1316,7 @@ pub(in crate::bus) fn apply_put_job(
 /// The private, account-scoped, owner-only (0700) directory that holds in-flight DOWNLOAD spool
 /// files under the daemon `data_root`. Swept on daemon startup (orphans from a prior crash).
 pub(crate) fn object_get_spool_dir(data_root: &Path) -> PathBuf {
-    local_bus_accounts_dir(data_root).join("object_get_spool")
+    data_root.join("object_spool").join("get")
 }
 
 /// The deterministic, filename-safe spool path for one `(account_id, operation_id)`. Mirrors the

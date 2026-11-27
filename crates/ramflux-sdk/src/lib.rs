@@ -164,9 +164,6 @@ pub use bus::{
     LocalMcpStandingApprovalSigningBody, MediaOwnership, SessionLeasePriority, TaskApprovalBinding,
     serve_local_bus, serve_local_bus_until,
 };
-#[cfg(feature = "itest-restore-state")]
-#[doc(hidden)]
-pub use bus::{LocalBusStartupRestoreGate, LocalBusStartupRestoreGateControl};
 pub use client::RamfluxClient;
 pub use client::account::account_db_key_encryption_key;
 pub use client::call::{InProcessMediaReceipt, InProcessMediaStatus};

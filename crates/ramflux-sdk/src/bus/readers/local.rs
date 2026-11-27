@@ -8,8 +8,7 @@ use crate::prelude::{
     LocalBusDeviceListResponse, LocalBusFrame, LocalBusGroupRequest,
     LocalBusMessageFrankingEvidenceRequest, LocalBusObjectGetStatusRequest,
     LocalBusObjectPutStatusRequest, LocalBusObjectTransferStatusRequest, LocalMcpAuditRecord,
-    RamfluxClient, SdkError, local_bus_account, local_bus_account_manifest_path,
-    read_local_bus_account_manifest,
+    RamfluxClient, SdkError, local_bus_account,
 };
 use serde_json::{Value, json};
 use std::{
@@ -46,6 +45,9 @@ impl AccountView {
     pub(super) fn capture(state: &LocalBusDaemonState, id: &str) -> Result<Self, SdkError> {
         let account = local_bus_account(state, id)?;
         let client = &account.client;
+        if client.born_v3_account.is_none() {
+            return Err(super::super::account_local::missing());
+        }
         let mut views = BTreeMap::new();
         views.insert("grant.list", json!({"grants":account.mcp_grants.values().collect::<Vec<_>>(),"approvals":super::super::dispatch::task_approval::list(account)?}));
         views.insert("grant.list_standing_approvals", json!({"standing_approvals":account.mcp_standing_approvals.values().collect::<Vec<_>>()}));
@@ -81,25 +83,6 @@ impl AccountView {
             status["display_name"] = json!(native.record().body.profile.display_name);
             status["principal_kind"] = json!(native.record().body.principal_kind);
             status["authority_blocked"] = json!(native.authority_blocked());
-        } else if let Ok(manifest) = read_local_bus_account_manifest(
-            &local_bus_account_manifest_path(&state.config.data_root, id),
-        ) {
-            status["node_id"] = json!(manifest.node_id);
-            status["client_mode"] = json!(manifest.client_mode);
-            status["local_device_authorized"] = json!(
-                manifest
-                    .devices
-                    .iter()
-                    .any(|device| device.device_id == account.gateway_config.device_id)
-            );
-            status["secure_sessions"] =
-                json!(if client.account_db()?.load_actor_state::<bool>("backup/reestablishing")?
-                    == Some(true)
-                {
-                    "reestablishing"
-                } else {
-                    "ready"
-                });
         }
         Ok(Self {
             account_root: native.as_ref().map(|_| client.account_index().map(|index| index.root().to_path_buf())).transpose()?,

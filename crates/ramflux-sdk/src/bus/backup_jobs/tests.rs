@@ -377,7 +377,6 @@ async fn failed_install_with_a_healthy_reopen_clears_stale_restore_state() -> Te
             .await?;
             let id = row["job"]["job_id"].as_str().ok_or("job")?;
             finished(&supervisor, id, BackupJobState::Verified).await?;
-            supervisor.mark_restore_failed("alice", "wrong_passphrase");
             *supervisor.backup_jobs.install_hook.lock().map_err(|_| "hook")? =
                 Some(Arc::new(|point, _| {
                     if point == super::test_install::InstallPoint::Prepared {

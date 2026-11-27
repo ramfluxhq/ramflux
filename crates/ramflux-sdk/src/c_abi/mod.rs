@@ -939,8 +939,6 @@ macro_rules! sdk_invalid_argument {
             | SdkError::ContactInput(_)
             | SdkError::AccountNotOpen(_)
             | SdkError::AccountRestorePending(_)
-            | SdkError::AccountRestoreFailed { .. }
-            | SdkError::AccountManifestUnreadable
             | SdkError::LocalBus(_)
             | SdkError::Mls { .. }
             | SdkError::LocalBusRefused { .. }

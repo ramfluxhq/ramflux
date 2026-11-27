@@ -4,7 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 
 fn account_request<T: serde::de::DeserializeOwned>(
     body: &serde_json::Value,
@@ -68,9 +68,8 @@ pub(crate) async fn dispatch_account_bus_request(
                 return Ok(local_bus_ok(serde_json::to_value(result)?));
             }
 
-            let mut body: LocalBusAccountUnlockRequest = account_request(&request.body)?;
-            let response = local_bus_account_unlock(state, &account_id, &mut body).await?;
-            Ok(local_bus_ok(serde_json::to_value(response)?))
+            // Only native custody accounts exist; any other id is unknown.
+            Err(super::super::account_local::missing())
         }
         "account.passphrase.rotate" => {
             let account_id = request_account_id(request)?.to_owned();
@@ -166,59 +165,10 @@ fn account_status(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
     let account = local_bus_account(state, account_id)?;
-    if account.client.born_v3_account.is_some() {
-        return Ok(local_bus_ok(super::super::native_account::status(account, account_id)?));
+    if account.client.born_v3_account.is_none() {
+        return Err(super::super::account_local::missing());
     }
-    let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
-        &state.config.data_root,
-        account_id,
-    ))?;
-    let reestablishing = account
-        .client
-        .account_db()
-        .ok()
-        .map(|db| db.load_actor_state::<bool>("backup/reestablishing"))
-        .transpose()?
-        .flatten()
-        .unwrap_or(false);
-    Ok(local_bus_ok(serde_json::json!({
-        "local_account_id": account_id,
-        "secure_sessions":if reestablishing{"reestablishing"}else{"ready"},
-        "node_id": manifest.node_id,
-        "client_mode":manifest.client_mode,
-        "local_device_authorized":manifest.devices.iter().any(|device|device.device_id==account.gateway_config.device_id),
-        "principal_id": account.gateway_config.principal_id,
-        "principal_commitment":account.principal_commitment,
-        "device_id": account.gateway_config.device_id,
-        "target_delivery_id": account.target_delivery_id,
-        "session_delivery_mode":account.session_delivery_mode(),
-        "session_id": account.engine.as_ref().map(|engine| engine.session().session_id.clone()),
-        "active_transport_kind": account.engine.as_ref().map(|engine| engine.active_transport_kind().wire_name()),
-        "pending_deliveries": account.pending_deliveries.len(),
-    })))
-}
-
-pub(crate) fn local_bus_account_response(
-    manifest: &LocalBusPersistedAccount,
-    account: &LocalBusAccountState,
-) -> LocalBusAccountCreateResponse {
-    LocalBusAccountCreateResponse {
-        local_account_id: manifest.local_account_id.clone(),
-        principal_id: manifest.principal_id.clone(),
-        principal_commitment: manifest.principal_commitment.clone(),
-        device_id: manifest.device_id.clone(),
-        target_delivery_id: manifest.target_delivery_id.clone(),
-        client_mode: manifest.client_mode.clone(),
-        session_id: account.engine.as_ref().map_or_else(
-            || "disconnected".to_owned(),
-            |engine| engine.session().session_id.clone(),
-        ),
-        active_transport_kind: account.engine.as_ref().map_or_else(
-            || "disconnected".to_owned(),
-            |engine| engine.active_transport_kind().wire_name().to_owned(),
-        ),
-        contact_restore: None,
-    }
+    Ok(local_bus_ok(super::super::native_account::status(account, account_id)?))
 }
 
 async fn local_bus_account_lock(
@@ -251,26 +201,6 @@ async fn local_bus_account_lock(
     Ok(())
 }
 
-async fn local_bus_account_unlock(
-    state: &mut LocalBusDaemonState,
-    account_id: &str,
-    body: &mut LocalBusAccountUnlockRequest,
-) -> Result<LocalBusAccountCreateResponse, SdkError> {
-    let passphrase = Zeroizing::new(std::mem::take(&mut body.passphrase));
-    let manifest_path = local_bus_account_manifest_path(&state.config.data_root, account_id);
-    let manifest = read_local_bus_account_manifest(&manifest_path)?;
-    let response = if let Some(account) = state.accounts.get(account_id) {
-        // The actor serializes startup restore and client unlock. Repeated unlocks must still
-        // authenticate against the wrapped database key, never the cached manifest secret.
-        account.client.verify_active_account_secret(account_id, passphrase.as_bytes())?;
-        local_bus_account_response(&manifest, account)
-    } else {
-        restore_local_bus_account_with_passphrase(state, &manifest, &passphrase).await?
-    };
-    state.active_account_id = Some(response.local_account_id.clone());
-    Ok(response)
-}
-
 fn local_bus_account_passphrase_rotate(
     state: &mut LocalBusDaemonState,
     account_id: &str,
@@ -286,15 +216,6 @@ fn local_bus_account_passphrase_rotate(
         let account = local_bus_account_mut(state, account_id)?;
         account.client.rekey_active_account(account_id, body.new_passphrase.as_bytes())?;
     }
-    if local_bus_account(state, account_id)?.client.born_v3_account.is_some() {
-        body.new_passphrase.zeroize();
-        return Ok(());
-    }
-    let manifest_path = local_bus_account_manifest_path(&state.config.data_root, account_id);
-    let mut manifest = read_local_bus_account_manifest(&manifest_path)?;
-    manifest.account_secret.zeroize();
-    manifest.account_secret.clone_from(&body.new_passphrase);
-    write_local_bus_account_manifest(&state.config.data_root, &manifest)?;
     body.new_passphrase.zeroize();
     Ok(())
 }
