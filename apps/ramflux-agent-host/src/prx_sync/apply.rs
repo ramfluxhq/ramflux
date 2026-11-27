@@ -74,6 +74,12 @@ impl Mirror {
                 self.turns.remove(message_id);
                 Ok(None)
             }
+            MirrorOp::DeleteRun { run_id } => {
+                self.runs.remove(run_id);
+                self.run_order.retain(|key| key != run_id);
+                self.turns.retain(|_, turn| turn.run_id.as_deref() != Some(run_id.as_str()));
+                Ok(None)
+            }
             MirrorOp::Erase(erase) => {
                 self.apply_erase(erase)?;
                 Ok(None)

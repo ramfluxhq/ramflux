@@ -52,6 +52,8 @@ pub enum MirrorOp {
     Cancelled { run_id: Option<String>, session: String, agent: String },
     /// A tombstoned message. The host deletes its local copy.
     DeleteMessage { message_id: String },
+    /// A deleted child run (`turn.deleted` without a message id). The host deletes its run rows.
+    DeleteRun { run_id: String },
     /// A history erase or an agent purge. The host deletes matching local copies.
     Erase(EraseCopy),
     /// A run-approval row. Pending and decided share one shape.
@@ -436,7 +438,12 @@ fn turn_origin(payload: &Value) -> Result<Option<TurnOrigin>, PrxError> {
 }
 
 fn deleted_message(payload: &Value) -> Result<MirrorOp, PrxError> {
-    Ok(MirrorOp::DeleteMessage { message_id: req_id(payload, "message_id")? })
+    // PRX deletes the child runs a message spawned and records each in its own session stream
+    // with `message_id: null` and the child `run_id`. `side` and `agent` are not needed here.
+    match opt_id(payload, "message_id")? {
+        Some(message_id) => Ok(MirrorOp::DeleteMessage { message_id }),
+        None => Ok(MirrorOp::DeleteRun { run_id: req_id(payload, "run_id")? }),
+    }
 }
 
 fn started_op(
