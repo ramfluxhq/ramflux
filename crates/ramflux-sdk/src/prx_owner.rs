@@ -109,10 +109,10 @@ pub(crate) async fn after_agent(
     Ok(())
 }
 
-/// An `agent.get` of an agent that was created but not yet updated has no mirrored revision.
-/// When PRX is reachable and holds the config the mirror shows, its revision is added to the
-/// reply, so a client can pass it to `agent.update`. A PRX that is absent, down, or changed
-/// leaves the reply as the mirror has it.
+/// An `agent.get` shows the agent's revision (`config::agent_revision`, the value `agent.update`
+/// compares). When PRX is reachable and holds the config the mirror shows, the revision is
+/// computed from PRX's current config, also over an older mirrored one. A PRX that is absent,
+/// down, or holds another config leaves the reply as the mirror has it.
 pub(crate) async fn fill_revision(
     client: Option<&PrxClient>,
     mut result: g::AgentConfigResult,
@@ -122,7 +122,7 @@ pub(crate) async fn fill_revision(
     else {
         return result;
     };
-    if record.revision.is_some() || record.lifecycle != crate::agent_record::LIFECYCLE_ACTIVE {
+    if record.lifecycle != crate::agent_record::LIFECYCLE_ACTIVE {
         return result;
     }
     let Some(mirror) = record.config.as_ref().and_then(crate::agent_record::config::config_of_wire)
@@ -138,7 +138,7 @@ pub(crate) async fn fill_revision(
     if let Ok(current) = client.get(&caps, &name).await
         && crate::agent_record::config::configs_match(&mirror, &current.config)
     {
-        record.revision = Some(current.revision.as_str().to_owned());
+        record.revision = Some(crate::agent_record::config::agent_revision(&current.config));
     }
     result
 }
@@ -266,6 +266,9 @@ fn map_prx(error: &PrxError) -> SdkError {
 /// and `details` carries what PRX answered (its code and HTTP status when it sent them, and the
 /// client's one-line description, which holds no secret) so the cause can be diagnosed.
 pub(crate) fn rejected(error: &PrxError) -> SdkError {
+    if let PrxError::RateLimited { retry_after_ms } = error {
+        return rate_limited(*retry_after_ms);
+    }
     let (prx_code, prx_status) = match error {
         PrxError::Api { code, status, .. } => (Some(api_code_text(code)), Some(*status)),
         _ => (None, None),
@@ -282,6 +285,26 @@ pub(crate) fn rejected(error: &PrxError) -> SdkError {
     SdkError::LocalBusRefused {
         code: "prx_rejected".to_owned(),
         message: "prx_rejected".to_owned(),
+        body: Box::new(body),
+    }
+}
+
+/// PRX answered HTTP 429: its own request limit, not a refusal of the request. The rf code is
+/// `prx_rate_limited`; `details` has `retry_after_ms` when PRX sent one and `prx_status` 429.
+fn rate_limited(retry_after_ms: Option<u64>) -> SdkError {
+    let body = serde_json::json!({
+        "reason_code": "prx_rate_limited",
+        "details": {
+            "cause": "prx_rate_limited",
+            "prx_code": "rate_limited",
+            "prx_status": 429,
+            "retry_after_ms": retry_after_ms,
+            "message": "PRX rate-limited the request",
+        },
+    });
+    SdkError::LocalBusRefused {
+        code: "prx_rate_limited".to_owned(),
+        message: "prx_rate_limited".to_owned(),
         body: Box::new(body),
     }
 }

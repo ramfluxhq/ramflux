@@ -114,10 +114,11 @@ async fn change(
             return Err(refused("agent_retired", "retired in PRX"));
         }
         // A request that names a revision asserts the view it was made from: only an equal
-        // revision is fresh. The mirror comparison is the fallback for a request without one
+        // per-agent revision (`fields::agent_revision`, the value `agent.get` shows) is fresh.
+        // PRX's own revision covers every agent's config and is never shown or compared. The mirror comparison is the fallback for a request without one
         // (a mirror without a prompt accepts any PRX prompt, so it cannot vouch for a revision).
         let seen = match &parsed.revision {
-            Some(revision) => *revision == readback.revision,
+            Some(revision) => revision.as_str() == fields::agent_revision(&readback.config),
             None => fields::mirror_matches(&record, &readback.config),
         };
         if !seen {
@@ -180,7 +181,7 @@ fn conflict(current: Option<&AgentReadback>) -> SdkError {
     refused_with(
         "revision_conflict",
         json!({
-            "current_revision": current.map(|readback| readback.revision.as_str()),
+            "current_revision": current.map(|readback| fields::agent_revision(&readback.config)),
             "current": current.map(|readback| config_json(&readback.config)),
         }),
     )
@@ -217,7 +218,7 @@ fn mirror(
     if record.lifecycle != LIFECYCLE_ACTIVE {
         return Ok(());
     }
-    fields::set_mirror(&mut record, &readback.config, readback.revision.as_str());
+    fields::set_mirror(&mut record, &readback.config, &fields::agent_revision(&readback.config));
     if reset_prompt {
         // PRX composed the prompt; the mirror keeps none so `agent.get` shows it as reset.
         record.prompt = None;
@@ -290,7 +291,7 @@ fn answer(anchor: &str, readback: &AgentReadback, applied: &str) -> Value {
     };
     json!({
         "agent_anchor": anchor,
-        "revision": readback.revision.as_str(),
+        "revision": fields::agent_revision(&readback.config),
         "status": status,
         "applied": applied,
         "config": config_json(&readback.config),

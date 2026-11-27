@@ -205,6 +205,40 @@ pub(crate) fn config_of_wire(
     )
 }
 
+/// The revision of ONE agent: SHA-256 over its own config as PRX reports it. PRX's own revision
+/// covers all configuration files, so it moves when any other agent changes; this one moves only
+/// when this agent's config does. `agent.get` and `agent.update` both use it, so a revision shown
+/// is accepted until this agent changes. The approval wait is not part of it (it is not mirrored).
+pub(crate) fn agent_revision(config: &AgentConfig) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let mut hasher = Sha256::new();
+    let mut field = |text: &str| {
+        hasher.update(u64::try_from(text.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(text.as_bytes());
+    };
+    field("rf-agent-revision-v1");
+    field(&config.provider);
+    field(&config.model);
+    field(config.prompt.as_deref().map_or("-", |_| "+"));
+    field(config.prompt.as_deref().unwrap_or(""));
+    field(autonomy_text(config.autonomy));
+    field(&config.enabled.to_string());
+    let names = tools_names(&config.tools);
+    field(&names.len().to_string());
+    for name in &names {
+        field(name);
+    }
+    let (turns, cost) = config.limits.as_ref().map_or((None, None), |limits| {
+        (limits.max_concurrent_turns, limits.max_cost_per_day_cents)
+    });
+    field(&format!("{turns:?}/{cost:?}"));
+    hasher.finalize().iter().fold(String::with_capacity(64), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
 /// Writes what PRX stored into the mirror of `record`.
 pub(crate) fn set_mirror(record: &mut StoredAgentRecord, config: &AgentConfig, revision: &str) {
     record.provider = Some(config.provider.clone());
