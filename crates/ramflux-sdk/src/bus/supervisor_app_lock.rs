@@ -6,6 +6,7 @@
 use super::super::lifecycle;
 use super::Supervisor;
 use crate::bus::io::request_account_id;
+use crate::client::device_unlock::CodeThrottle;
 use crate::prelude::*;
 use ramflux_storage::{AppLockPolicy, StorageError, WrappedAccountDbKey};
 use std::sync::Arc;
@@ -305,7 +306,13 @@ impl Supervisor {
             .await
             .map_err(|error| SdkError::LocalBus(format!("index reader failed: {error}")))??;
         Ok(super::reply(match policy {
-            PolicyRead::Ready(policy) => self.app_lock_body(&policy, &account_id)?,
+            PolicyRead::Ready(policy, throttle) => {
+                let mut body = self.app_lock_body(&policy, &account_id)?;
+                let fields = body.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?;
+                fields.insert("code_retry_after_ms".into(), throttle.retry_after_ms().into());
+                fields.insert("code_attempts_exhausted".into(), throttle.exhausted.into());
+                body
+            }
             PolicyRead::Unreadable => unavailable_body(),
         }))
     }
@@ -341,7 +348,7 @@ impl Supervisor {
 }
 
 enum PolicyRead {
-    Ready(AppLockPolicy),
+    Ready(AppLockPolicy, CodeThrottle),
     Unreadable,
 }
 
@@ -367,7 +374,10 @@ fn read_policy(
 ) -> Result<PolicyRead, SdkError> {
     index.account(account_id)?;
     match index.app_lock_policy(account_id) {
-        Ok(policy) => Ok(PolicyRead::Ready(policy)),
+        Ok(policy) => {
+            let throttle = crate::client::device_unlock::code_throttle(index, account_id)?;
+            Ok(PolicyRead::Ready(policy, throttle))
+        }
         Err(StorageError::AccountNotFound(missing)) => {
             Err(SdkError::Storage(StorageError::AccountNotFound(missing)))
         }

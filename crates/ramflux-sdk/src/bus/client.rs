@@ -8,6 +8,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as PendingMutex};
 use tokio::sync::oneshot;
 
+use super::client_prompt::{PROMPT_METHOD, Prompts};
+use crate::custody::pairing::LocalCredentialProvider;
+
 type Pending =
     Arc<PendingMutex<BTreeMap<String, oneshot::Sender<Result<LocalBusFrame, SdkError>>>>>;
 
@@ -36,6 +39,7 @@ struct ClientConnection {
     next: AtomicU64,
     connected: Arc<AtomicBool>,
     events: Mutex<mpsc::Receiver<LocalBusFrame>>,
+    prompts: Arc<Prompts>,
     reader: tokio::task::JoinHandle<()>,
     writer: tokio::task::JoinHandle<()>,
 }
@@ -48,18 +52,43 @@ impl Drop for ClientConnection {
 }
 
 impl LocalBusClient {
+    /// Connects without an attended credential provider: an account-code prompt from the
+    /// daemon is answered with a refusal and the connection stays up.
+    ///
     /// # Errors
     /// Returns an error when the Unix socket cannot be opened.
     pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self, SdkError> {
+        Self::connect_inner(socket_path, None).await
+    }
+
+    /// Connects with an attended provider that answers the daemon's account-code prompts
+    /// (for example when weakening the app lock) on this same shared connection.
+    ///
+    /// # Errors
+    /// Returns an error when the Unix socket cannot be opened.
+    pub async fn connect_with_provider(
+        socket_path: impl AsRef<Path>,
+        provider: Arc<dyn LocalCredentialProvider>,
+    ) -> Result<Self, SdkError> {
+        Self::connect_inner(socket_path, Some(provider)).await
+    }
+
+    async fn connect_inner(
+        socket_path: impl AsRef<Path>,
+        provider: Option<Arc<dyn LocalCredentialProvider>>,
+    ) -> Result<Self, SdkError> {
+        let (prompts, reply_rx, window_rx) = Prompts::new(provider);
+        let reader_prompts = Arc::clone(&prompts);
+        let writer_prompts = Arc::clone(&prompts);
         let stream = crate::platform::listener::connect(socket_path).await?;
-        let (mut reader, mut writer) = stream.into_split();
-        let (outbound, mut outbound_rx) = mpsc::channel::<OutboundFrame>(64);
+        let (mut reader, writer) = stream.into_split();
+        let (outbound, outbound_rx) = mpsc::channel::<OutboundFrame>(64);
         let (events, event_rx) = mpsc::channel(64);
         let pending: Pending = Arc::new(PendingMutex::new(BTreeMap::new()));
         let connected = Arc::new(AtomicBool::new(true));
         let reader_connected = Arc::clone(&connected);
         let writer_connected = Arc::clone(&connected);
-        let (disconnected, mut writer_disconnect) = watch::channel(false);
+        let (disconnected, writer_disconnect) = watch::channel(false);
         let reader_pending = Arc::clone(&pending);
         let host_key: HostKeySlot = Arc::new(PendingMutex::new(None));
         let reader_host_key = Arc::clone(&host_key);
@@ -75,6 +104,11 @@ impl LocalBusClient {
                         break;
                     }
                 };
+                if frame.kind == LocalBusFrameKind::Request && frame.method == PROMPT_METHOD {
+                    // An account-code prompt is answered on this connection, never fatal.
+                    reader_prompts.handle(&frame);
+                    continue;
+                }
                 local_bus_trace(
                     "BUS-CLIENT-RX",
                     format!(
@@ -97,40 +131,20 @@ impl LocalBusClient {
                 }
             }
             reader_connected.store(false, Ordering::Release);
+            reader_prompts.connection_closed();
             let _ = disconnected.send(true);
         });
         let writer_pending = Arc::clone(&pending);
-        let writer_task = tokio::spawn(async move {
-            loop {
-                let frame = tokio::select! {
-                    _ = writer_disconnect.changed() => break,
-                    frame = outbound_rx.recv() => frame,
-                };
-                let Some(frame) = frame else {
-                    break;
-                };
-                let OutboundFrame { frame, encoded } = frame;
-                let label = frame.as_ref().map_or_else(
-                    || "private credential reply".to_owned(),
-                    |frame| format!("method={} request_id={}", frame.method, frame.request_id),
-                );
-                local_bus_trace("BUS-CLIENT-TX-IN", label.clone());
-                let written = match &frame {
-                    Some(_) => {
-                        super::io::write_encoded_local_bus_frame(&mut writer, &encoded).await
-                    }
-                    None => write_private_reply(&mut writer, &encoded).await,
-                };
-                if let Err(error) = written {
-                    writer_connected.store(false, Ordering::Release);
-                    fail_pending(&writer_pending, &error.to_string());
-                    break;
-                }
-                local_bus_trace("BUS-CLIENT-TX-OUT", label);
-            }
-            writer_connected.store(false, Ordering::Release);
-            fail_pending(&writer_pending, "local bus writer stopped");
-        });
+        let writer_task = tokio::spawn(run_writer(WriterParts {
+            writer,
+            outbound_rx,
+            reply_rx,
+            window_rx,
+            disconnect: writer_disconnect,
+            connected: writer_connected,
+            pending: writer_pending,
+            prompts: writer_prompts,
+        }));
         Ok(Self {
             inner: Arc::new(ClientConnection {
                 outbound,
@@ -139,6 +153,7 @@ impl LocalBusClient {
                 connected,
                 next: AtomicU64::new(1),
                 events: Mutex::new(event_rx),
+                prompts,
                 reader: reader_task,
                 writer: writer_task,
             }),
@@ -261,6 +276,7 @@ impl LocalBusClient {
             return Err(SdkError::CustodySetupInvalid);
         }
         let deadline = super::requests::deadline(&protected.0);
+        let parent = self.inner.prompts.parent_of(&protected.0);
         let encoded = encode_owned_body(&mut protected.0);
         let deadline = deadline?;
         let encoded = encoded?;
@@ -279,8 +295,12 @@ impl LocalBusClient {
             }
             pending.insert(frame.request_id.clone(), sender);
         }
-        let _registration =
-            Registration { pending: Arc::clone(&self.inner.pending), id: frame.request_id.clone() };
+        self.inner.prompts.register(parent);
+        let _registration = Registration {
+            pending: Arc::clone(&self.inner.pending),
+            prompts: Arc::clone(&self.inner.prompts),
+            id: frame.request_id.clone(),
+        };
         let wait = async {
             self.inner
                 .outbound
@@ -320,14 +340,101 @@ impl Drop for SecretFrame {
 
 struct Registration {
     pending: Pending,
+    prompts: Arc<Prompts>,
     id: String,
 }
 impl Drop for Registration {
     fn drop(&mut self) {
+        self.prompts.forget(&self.id);
         if let Ok(mut pending) = self.pending.lock() {
             pending.remove(&self.id);
         }
     }
+}
+struct WriterParts<W> {
+    writer: W,
+    outbound_rx: mpsc::Receiver<OutboundFrame>,
+    reply_rx: mpsc::Receiver<super::client_prompt::Reply>,
+    window_rx: watch::Receiver<bool>,
+    disconnect: watch::Receiver<bool>,
+    connected: Arc<AtomicBool>,
+    pending: Pending,
+    prompts: Arc<Prompts>,
+}
+
+/// Writes queued requests and, with priority, private credential replies. While an input
+/// window is open the daemon reads only the reply, so every other frame waits for it.
+async fn run_writer<W: tokio::io::AsyncWrite + Unpin>(parts: WriterParts<W>) {
+    let WriterParts {
+        mut writer,
+        mut outbound_rx,
+        mut reply_rx,
+        mut window_rx,
+        mut disconnect,
+        connected,
+        pending,
+        prompts,
+    } = parts;
+    // A frame taken from the queue while an input window opened waits here.
+    let mut held: Option<OutboundFrame> = None;
+    loop {
+        let reply = if *window_rx.borrow() {
+            tokio::select! {
+                _ = disconnect.changed() => break,
+                reply = reply_rx.recv() => reply,
+            }
+        } else if let Some(frame) = held.take() {
+            if let Err(error) = write_outbound(&mut writer, frame).await {
+                connected.store(false, Ordering::Release);
+                fail_pending(&pending, &error.to_string());
+                break;
+            }
+            continue;
+        } else {
+            tokio::select! {
+                _ = disconnect.changed() => break,
+                _ = window_rx.changed() => continue,
+                reply = reply_rx.recv() => reply,
+                frame = outbound_rx.recv() => {
+                    let Some(frame) = frame else {
+                        break;
+                    };
+                    held = Some(frame);
+                    continue;
+                }
+            }
+        };
+        let Some(reply) = reply else {
+            break;
+        };
+        let written = write_private_reply(&mut writer, &reply).await;
+        prompts.reply_written();
+        if let Err(error) = written {
+            connected.store(false, Ordering::Release);
+            fail_pending(&pending, &error.to_string());
+            break;
+        }
+    }
+    connected.store(false, Ordering::Release);
+    fail_pending(&pending, "local bus writer stopped");
+}
+
+async fn write_outbound<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    outbound: OutboundFrame,
+) -> Result<(), SdkError> {
+    let OutboundFrame { frame, encoded } = outbound;
+    let label = frame.as_ref().map_or_else(
+        || "private credential reply".to_owned(),
+        |frame| format!("method={} request_id={}", frame.method, frame.request_id),
+    );
+    local_bus_trace("BUS-CLIENT-TX-IN", label.clone());
+    match &frame {
+        Some(_) => super::io::write_encoded_local_bus_frame(writer, &encoded).await?,
+        None => write_private_reply(writer, &encoded).await?,
+    }
+    local_bus_trace("BUS-CLIENT-TX-OUT", label);
+    Ok(())
 }
 fn fail_pending(pending: &Pending, message: &str) {
     if let Ok(mut pending) = pending.lock() {

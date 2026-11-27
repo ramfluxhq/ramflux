@@ -17,6 +17,7 @@ pub(crate) mod attachment_plane;
 mod attachment_scheduler;
 pub(crate) mod backup_jobs;
 pub mod client;
+mod client_prompt;
 mod command_admission;
 mod connection;
 pub(crate) mod connection_manager;
