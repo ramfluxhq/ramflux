@@ -3,14 +3,16 @@
 
 //! The MLS runtime of the SDK: one process-wide crypto provider and one `Mls` per account, over
 //! the `SQLCipher` account database. The bus surface (`debug.mls.*`) is MLS-0 part 0c.
+mod authority;
 mod device_identity;
 mod kv_adapter;
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 pub use kv_adapter::SqlMlsKv;
 use ramflux_mls::{CryptoHandle, Mls, MlsError};
 
+use self::authority::SdkAuthority;
 use crate::{RamfluxClient, SdkError};
 
 static PROCESS_CRYPTO: OnceLock<CryptoHandle> = OnceLock::new();
@@ -51,15 +53,25 @@ pub fn process_crypto() -> Result<CryptoHandle, SdkError> {
 pub struct MlsRuntime {
     mls: Mls<SqlMlsKv>,
     kv: SqlMlsKv,
-    custody: Option<(u64, u64, bool)>,
+    custody: Option<CustodyStamp>,
 }
 
-/// What the own credential was built from: the custody record's epoch and issue time and whether
-/// the branch key is unlocked. A change means the credential must be rebuilt.
-fn custody_stamp(client: &RamfluxClient) -> Option<(u64, u64, bool)> {
+/// (device-set epoch, issue time, branch key unlocked, own lease deadline).
+type CustodyStamp = (u64, u64, bool, u64);
+
+/// What the own credential was built from: the custody record's epoch and issue time, whether the
+/// branch key is unlocked and the own lease deadline. A change means the credential must be
+/// rebuilt.
+fn custody_stamp(client: &RamfluxClient) -> Option<CustodyStamp> {
     client.born_v3_account.as_ref().map(|account| {
         let body = &account.record().body;
-        (body.device_set_epoch, body.issued_at, client.device_branch.is_some())
+        let lease_deadline = account
+            .local_device_id()
+            .ok()
+            .and_then(|id| body.devices.iter().find(|entry| entry.device_id == id))
+            .and_then(|entry| entry.branch_certificate.as_ref())
+            .map_or(0, |cert| cert.body.expires_at);
+        (body.device_set_epoch, body.issued_at, client.device_branch.is_some(), lease_deadline)
     })
 }
 
@@ -71,7 +83,12 @@ impl MlsRuntime {
     /// The account database is locked, the provider is not initialised or storage fails.
     pub fn open(client: &RamfluxClient) -> Result<Self, SdkError> {
         let kv = SqlMlsKv::new(client.account_db()?.mls_kv());
-        let mut mls = Mls::new(kv.clone(), process_crypto()?);
+        let authority = Arc::new(SdkAuthority::default());
+        // Own head first; peers' heads are refreshed by the engine on the card's triggers.
+        if let Ok(anchor) = client.own_account_anchor() {
+            authority.refresh(client, &anchor)?;
+        }
+        let mut mls = Mls::new(kv.clone(), process_crypto()?).with_authority(authority);
         if let Some(identity) = client.mls_device_identity()? {
             mls = mls.with_device_identity(identity);
         }

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! The own device identity for MLS device credentials: root key, signed device set and the device
-//! signing key of the account.
+//! The own device identity for MLS device credentials (v2): account anchor, device id and epoch,
+//! the device-set epoch and the device signing key of the account. The credential carries no
+//! record; peers look the record up through the custody directory.
 use ed25519_dalek::Signer;
 use ramflux_crypto::DeviceBranch;
 use ramflux_mls::{DeviceCertSigner, DeviceIdentity, MlsError};
-use ramflux_protocol::custody::CustodyKind;
 use ramflux_protocol::{DeviceSetStatus, decode_base64url};
 
 use crate::{RamfluxClient, SdkError};
@@ -31,9 +31,11 @@ impl RamfluxClient {
     ///
     /// Sources: the verified custody record of the selected born-v3 account (`born_v3_account`,
     /// loaded by `custody::load_account`, whose `record()` is the `Envelope<DeviceSet>` signed by
-    /// the self-signing key and carrying the master certificate) and the leased branch signing
-    /// key unlocked from the vault by `initialize_born_v3_branch` (`device_branch`). The primary
-    /// (self-signing) key is not needed: the leaf certificate is signed by the branch key.
+    /// the self-signing key) and the leased branch signing key unlocked from the vault by
+    /// `initialize_born_v3_branch` (`device_branch`). The primary (self-signing) key is not
+    /// needed: the leaf certificate is signed by the branch key. A hosted agent
+    /// (`ExternalHuman` custody) has the same identity: the credential no longer embeds the
+    /// record, so no custodian chain travels with it.
     ///
     /// `Ok(None)` when no native account is selected, its branch key is not unlocked, or this
     /// device is not an active, leased device of the record (a `dm` group then fails with a typed
@@ -46,39 +48,26 @@ impl RamfluxClient {
             return Ok(None);
         };
         let record = account.record();
-        let master = &record.body.master_certificate.body;
-        // Only a human account with local custody carries a self-contained chain; a hosted
-        // agent needs its custodian's record as well and is not a DM identity in MLS-0.
-        if master.custody_kind != CustodyKind::LocalHuman {
-            return Ok(None);
-        }
         let device_id = account.local_device_id()?;
         if branch.device_id != device_id {
             return Ok(None);
         }
         let device_signing_pk = branch.signing_key.verifying_key().to_bytes();
-        let active_with_key = record.body.devices.iter().any(|entry| {
+        let Some(entry) = record.body.devices.iter().find(|entry| {
             entry.device_id == device_id
                 && entry.status == DeviceSetStatus::Active
                 && entry.branch_certificate.as_ref().is_some_and(|cert| {
                     decode_base64url(&cert.body.branch_signing_public_key)
                         .is_ok_and(|key| key == device_signing_pk)
                 })
-        });
-        if !active_with_key {
+        }) else {
             return Ok(None);
-        }
-        let root_vk: [u8; 32] = decode_base64url(&master.master_public_key)
-            .ok()
-            .and_then(|key| key.try_into().ok())
-            .ok_or(SdkError::CustodySetupInvalid)?;
-        // The credential carries the canonical I-JSON of the record; the verifier re-parses it
-        // strictly and re-verifies every signature.
-        let device_set_record = ramflux_protocol::canonical_json_bytes(record)?;
+        };
         Ok(Some(DeviceIdentity {
-            root_vk,
+            account_anchor: record.body.account_anchor.clone(),
             device_id: device_id.to_owned(),
-            device_set_record,
+            device_epoch: entry.device_epoch,
+            device_set_epoch: record.body.device_set_epoch,
             device_signing_pk,
             signer: Box::new(BranchCertSigner { branch: branch.clone() }),
         }))
