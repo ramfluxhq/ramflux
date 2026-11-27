@@ -58,6 +58,7 @@ impl Contact {
         )?
         .encode_to_vec())
     }
+    #[cfg(test)]
     pub(super) fn decode(body: &[u8]) -> Result<Option<Self>, SdkError> {
         use prost::Message as _;
         if g::validation::scan_message("Control", body, g::registry::COMPILED_LAYER).is_err() {

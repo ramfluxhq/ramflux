@@ -62,8 +62,12 @@ async fn check_account_surfaces(fault: Fault) -> TestResult {
     // Bus account.create stays refused; the ceremony owns creation.
     assert!(matches!(error, SdkError::CustodySetupInvalid));
 
-    let Err(error) =
-        super::daemon::restore_local_bus_account_offline(&mut daemon, &fixture.manifest).await
+    let Err(error) = super::daemon::restore_local_bus_account_with_passphrase(
+        &mut daemon,
+        &fixture.manifest,
+        &fixture.manifest.account_secret,
+    )
+    .await
     else {
         return Err("faulted daemon load unexpectedly succeeded".into());
     };

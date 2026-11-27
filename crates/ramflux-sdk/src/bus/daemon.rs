@@ -168,13 +168,6 @@ pub(crate) fn write_local_bus_account_manifest(
     Ok(())
 }
 
-pub(crate) async fn restore_local_bus_account_offline(
-    state: &mut LocalBusDaemonState,
-    manifest: &LocalBusPersistedAccount,
-) -> Result<LocalBusAccountCreateResponse, SdkError> {
-    restore_local_bus_account_impl(state, manifest, false, None).await
-}
-
 pub(crate) async fn restore_local_bus_account_with_passphrase(
     state: &mut LocalBusDaemonState,
     manifest: &LocalBusPersistedAccount,

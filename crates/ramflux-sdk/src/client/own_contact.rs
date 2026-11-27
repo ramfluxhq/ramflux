@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Accepted root relationships replicated only inside authenticated own-device packets.
+#[cfg(test)]
 use crate::bus::protocol::{LocalBusBackupContactSkip, LocalBusBackupContactSkipReason};
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
@@ -53,6 +54,7 @@ struct MissingManifest {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OwnContactReceiveOutcome {
+    #[cfg(test)]
     NotPacket,
     Restored,
     TombstoneApplied,
@@ -66,6 +68,7 @@ pub(super) enum OwnContactReceiveMode {
     BackupRestore,
 }
 impl RamfluxClient {
+    #[cfg(test)]
     pub(super) fn backup_contact_skip(
         &self,
         body: &[u8],
@@ -151,6 +154,7 @@ impl RamfluxClient {
         Ok(None)
     }
 
+    #[cfg(test)]
     fn native_backup_authority_skip(
         &self,
         native: &ramflux_protocol::custody::CustodyManifest,
@@ -281,6 +285,7 @@ impl RamfluxClient {
             })
             .transpose()
     }
+    #[cfg(test)]
     pub(super) fn own_history_contacts(&self) -> Result<Vec<String>, SdkError> {
         let own = self.owned_device_identity()?;
         let db = self.account_db()?;
@@ -470,6 +475,7 @@ impl RamfluxClient {
         Ok(self.receive_own_contact_outcome(body, OwnContactReceiveMode::Sibling)?
             != OwnContactReceiveOutcome::NotPacket)
     }
+    #[cfg(test)]
     pub(super) fn receive_own_contact_outcome(
         &self,
         body: &[u8],

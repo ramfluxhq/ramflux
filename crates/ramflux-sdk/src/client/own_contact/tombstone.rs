@@ -7,7 +7,9 @@ use super::{
 };
 use prost::Message as _;
 use ramflux_protocol::message as g;
+#[cfg(test)]
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Tombstone {
@@ -15,6 +17,7 @@ struct Tombstone {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     decided_at: Option<i64>,
 }
+#[cfg(test)]
 pub(super) fn is_packet(body: &[u8]) -> bool {
     decode(body).is_ok_and(|value| value.is_some())
 }
@@ -44,6 +47,7 @@ pub(super) fn encode(
     )?
     .encode_to_vec())
 }
+#[cfg(test)]
 fn decode(body: &[u8]) -> Result<Option<Tombstone>, SdkError> {
     if g::validation::scan_message("Control", body, g::registry::COMPILED_LAYER).is_err() {
         return Ok(None);
@@ -60,6 +64,7 @@ fn decode(body: &[u8]) -> Result<Option<Tombstone>, SdkError> {
     }))
 }
 impl RamfluxClient {
+    #[cfg(test)]
     pub(super) fn receive_own_contact_tombstone(
         &self,
         body: &[u8],

@@ -323,18 +323,6 @@ pub struct LocalBusDeviceSyncExportRequest {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusAccountBackupExportRequest {
-    pub output_path: String,
-    pub passphrase: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusAccountBackupImportRequest {
-    pub input_path: String,
-    pub passphrase: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusAccountPassphraseRotateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_passphrase: Option<String>,

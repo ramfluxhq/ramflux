@@ -376,7 +376,7 @@ pub(super) fn guard_account(
     if !crate::custody::account_exists(root, id)? {
         return Ok(None);
     }
-    if matches!(request.method.as_str(), "account.create" | "account.backup.import") {
+    if request.method == "account.create" {
         return Err(SdkError::CustodyModeDowngrade);
     }
     Ok(None)

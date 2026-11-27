@@ -1186,9 +1186,8 @@ async fn restored_contact_bootstrap(backup: bool) -> TestResult {
 }
 
 /// The account's contact snapshot restores the accepted contact on a freshly enrolled device of the
-/// same root before any sibling backfill tick or peer message. The legacy seed-manifest file wrapper
-/// (`account.backup.export` / `import`) cannot carry a born-v3 account, so the snapshot is applied
-/// through the client API that the retired wrapper called.
+/// same root before any sibling backfill tick or peer message. The snapshot is applied through the
+/// client API that the removed v1 seed-manifest file wrapper used to call.
 fn restore_contacts_from_backup(
     source: &LocalBusAccountState,
     sibling: &LocalBusAccountState,

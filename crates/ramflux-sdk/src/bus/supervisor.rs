@@ -423,9 +423,6 @@ impl Supervisor {
             .borrow()
             .upgrade()
             .ok_or_else(|| SdkError::LocalBus("supervisor is stopping".to_owned()))?;
-        if request.method == "account.backup.import" {
-            request.account_id = Some(super::lifecycle::import_account_id(&request).await?);
-        }
         let receipt = super::lifecycle::fingerprint(self.config.data_root.clone(), &request)
             .await?
             .ok_or_else(|| SdkError::LocalBus("missing lifecycle key".into()))?;
@@ -569,9 +566,6 @@ impl Supervisor {
         connection: &LocalBusConnectionState,
         prepared: Option<super::lifecycle::Receipt>,
     ) -> Result<ActorResponse, SdkError> {
-        if request.method == "account.backup.import" && prepared.is_none() {
-            request.account_id = Some(super::lifecycle::import_account_id(&request).await?);
-        }
         if let Some(body) = super::custody_setup::guard_account(&self.config.data_root, &request)? {
             return Ok(reply(body));
         }
@@ -734,10 +728,9 @@ impl Supervisor {
 
     async fn route_account(
         &self,
-        mut request: LocalBusFrame,
+        request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
-        self.prepare_import(&mut request, connection).await?;
         let id = account_actor_id(&request)?;
         if request.method == "account.unlock" {
             // AGENT-IDENTITY-01 E0 unlock guard (decision r21): a passphrase unlock of a paused agent
@@ -1033,33 +1026,6 @@ impl Supervisor {
             "account_details": details,
             "active_account_id": active,
         })))
-    }
-
-    async fn prepare_import(
-        &self,
-        request: &mut LocalBusFrame,
-        connection: &LocalBusConnectionState,
-    ) -> Result<(), SdkError> {
-        if request.method == "account.backup.import" {
-            let id = request_account_id(request)?.to_owned();
-            let old = self.accounts.borrow().get(&id).cloned();
-            if let Some(actor) = old {
-                let lock = LocalBusFrame::request(
-                    "import-lock",
-                    Some(id.clone()),
-                    "account",
-                    "account.lock",
-                    serde_json::json!({}),
-                );
-                actor.request(command(lock, connection)).await?;
-                actor.stop().await?;
-                self.attended.borrow_mut().retain(|_, account| account != &id);
-                self.subscribers.borrow_mut().retain(|_, subscriber| subscriber.account_id != id);
-                self.accounts.borrow_mut().remove(&id);
-            }
-            request.account_id = Some(id);
-        }
-        Ok(())
     }
 
     /// Closes an open account session the way the `account.lock` route does: the lock request, then
@@ -1495,7 +1461,7 @@ fn reply(body: serde_json::Value) -> ActorResponse {
 }
 
 fn opens_account(method: &str) -> bool {
-    matches!(method, "account.create" | "account.unlock" | "account.backup.import")
+    matches!(method, "account.create" | "account.unlock")
 }
 
 fn account_actor_id(request: &LocalBusFrame) -> Result<String, SdkError> {
