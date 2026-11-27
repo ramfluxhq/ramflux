@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "dd946570674a35fc9b29e46de7a269f9a2a6bc96";
+const PIN: &str = "6bfe946a4ee62d0bd6f5948b9a4a1315c2acb1c9";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
