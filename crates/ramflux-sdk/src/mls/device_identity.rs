@@ -6,7 +6,8 @@
 use ed25519_dalek::Signer;
 use ramflux_crypto::DeviceBranch;
 use ramflux_mls::{DeviceCertSigner, DeviceIdentity, MlsError};
-use ramflux_protocol::SignedDeviceSetRecord;
+use ramflux_protocol::custody::CustodyKind;
+use ramflux_protocol::{DeviceSetStatus, decode_base64url};
 
 use crate::{RamfluxClient, SdkError};
 
@@ -26,34 +27,59 @@ impl DeviceCertSigner for BranchCertSigner {
 }
 
 impl RamfluxClient {
-    /// The own MLS device identity, from the account's signed device set and device key.
+    /// The own MLS device identity of a custody-native account.
     ///
-    /// `Ok(None)` when this account has no raw root or device key or no accepted device set
-    /// (for example a custody-native account); a `dm` group then fails with a typed error and
-    /// pseudonym groups are unaffected.
+    /// Sources: the verified custody record of the selected born-v3 account (`born_v3_account`,
+    /// loaded by `custody::load_account`, whose `record()` is the `Envelope<DeviceSet>` signed by
+    /// the self-signing key and carrying the master certificate) and the leased branch signing
+    /// key unlocked from the vault by `initialize_born_v3_branch` (`device_branch`). The primary
+    /// (self-signing) key is not needed: the leaf certificate is signed by the branch key.
+    ///
+    /// `Ok(None)` when no native account is selected, its branch key is not unlocked, or this
+    /// device is not an active, leased device of the record (a `dm` group then fails with a typed
+    /// error and pseudonym groups are unaffected).
     ///
     /// # Errors
-    /// Storage failures and a stored record that cannot be encoded.
+    /// A stored record or key that cannot be encoded.
     pub(crate) fn mls_device_identity(&self) -> Result<Option<DeviceIdentity>, SdkError> {
-        let (Some(root), Some(branch)) = (&self.identity_root, &self.device_branch) else {
+        let (Some(account), Some(branch)) = (&self.born_v3_account, &self.device_branch) else {
             return Ok(None);
         };
-        let root_key = root.signing_key.verifying_key();
-        let commitment = ramflux_crypto::identity_root_commitment(&root_key);
-        let db = self.account_db()?;
-        let key = super::super::client::identity_authority::record_key(&commitment);
-        let record: Option<SignedDeviceSetRecord> = db.load_actor_state(&key)?;
-        let Some(record) = record else {
+        let record = account.record();
+        let master = &record.body.master_certificate.body;
+        // Only a human account with local custody carries a self-contained chain; a hosted
+        // agent needs its custodian's record as well and is not a DM identity in MLS-0.
+        if master.custody_kind != CustodyKind::LocalHuman {
             return Ok(None);
-        };
-        // The credential carries the record as I-JSON bytes; the verifier re-parses and checks the
-        // root signature, so the serialization of the stored record is the wire form.
-        let device_set_record = serde_json::to_vec(&record)?;
+        }
+        let device_id = account.local_device_id()?;
+        if branch.device_id != device_id {
+            return Ok(None);
+        }
+        let device_signing_pk = branch.signing_key.verifying_key().to_bytes();
+        let active_with_key = record.body.devices.iter().any(|entry| {
+            entry.device_id == device_id
+                && entry.status == DeviceSetStatus::Active
+                && entry.branch_certificate.as_ref().is_some_and(|cert| {
+                    decode_base64url(&cert.body.branch_signing_public_key)
+                        .is_ok_and(|key| key == device_signing_pk)
+                })
+        });
+        if !active_with_key {
+            return Ok(None);
+        }
+        let root_vk: [u8; 32] = decode_base64url(&master.master_public_key)
+            .ok()
+            .and_then(|key| key.try_into().ok())
+            .ok_or(SdkError::CustodySetupInvalid)?;
+        // The credential carries the canonical I-JSON of the record; the verifier re-parses it
+        // strictly and re-verifies every signature.
+        let device_set_record = ramflux_protocol::canonical_json_bytes(record)?;
         Ok(Some(DeviceIdentity {
-            root_vk: root_key.to_bytes(),
-            device_id: branch.device_id.clone(),
+            root_vk,
+            device_id: device_id.to_owned(),
             device_set_record,
-            device_signing_pk: branch.signing_key.verifying_key().to_bytes(),
+            device_signing_pk,
             signer: Box::new(BranchCertSigner { branch: branch.clone() }),
         }))
     }

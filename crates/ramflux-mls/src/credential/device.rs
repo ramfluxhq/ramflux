@@ -4,18 +4,23 @@
 //! `0xF0D1` device credential.
 //!
 //! TLS-style encoding `{version = 1, root_vk[32], device_id<V>, device_set_record<V>,
-//! device_signing_pk[32], cert_sig[64]}`. `cert_sig` is the device signing key's Ed25519
-//! signature over `"rf-mls-leaf-v1" || u16 suite || leaf_signature_key`, which binds the
-//! credential to exactly one leaf key.
+//! device_signing_pk[32], cert_sig[64]}`. `root_vk` is the account's master public key and
+//! `device_set_record` the canonical I-JSON of the custody `Envelope<DeviceSet>` (master
+//! certificate signed by the master key, branch certificates and roster signed by the
+//! self-signing key). `cert_sig` is the device (branch) signing key's Ed25519 signature over
+//! `"rf-mls-leaf-v1" || u16 suite || leaf_signature_key`, which binds the credential to exactly
+//! one leaf key. The only account kind is the custody-native one; there is no raw-root form.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use openmls::prelude::{Credential, CredentialType};
+use ramflux_protocol::custody::{DeviceRef, DeviceSet, Envelope};
 use ramflux_protocol::domain::{DEVICE_SIGNING_KEY_COMMITMENT, MLS_LEAF_CERT_V1};
-use ramflux_protocol::{DeviceSetStatus, SignedDeviceSetRecord};
+use ramflux_protocol::{DeviceSetStatus, decode_base64url};
 use tls_codec::{DeserializeBytes, Serialize, VLBytes};
 
 use super::VerifiedMember;
 use super::device_sets;
+use crate::group::unix_now;
 use crate::storage::MlsStorage;
 use crate::storage::kv::MlsKv;
 use crate::{
@@ -33,13 +38,13 @@ pub trait DeviceCertSigner: Send + Sync {
 
 /// The own device identity, issued by the account (part 0b).
 pub struct DeviceIdentity {
-    /// Root verifying key of the principal.
+    /// Master public key of the account (its commitment is the account anchor).
     pub root_vk: [u8; 32],
     /// Own device id inside the signed device set.
     pub device_id: String,
-    /// Original I-JSON bytes of the principal's `SignedDeviceSetRecord`.
+    /// Canonical I-JSON bytes of the account's custody `Envelope<DeviceSet>`.
     pub device_set_record: Vec<u8>,
-    /// Device signing public key.
+    /// Device (branch) signing public key.
     pub device_signing_pk: [u8; 32],
     /// Signer for the leaf certificate.
     pub signer: Box<dyn DeviceCertSigner>,
@@ -53,6 +58,9 @@ pub(crate) struct DeviceCredential {
     pub(crate) device_signing_pk: [u8; 32],
     pub(crate) cert_sig: [u8; 64],
 }
+
+/// The branch capability a device credential needs (the leased `message` capability).
+const DEVICE_CAPABILITY: &str = "message";
 
 fn reject(what: &str) -> MlsError {
     MlsError::CredentialRejected(what.to_owned())
@@ -151,17 +159,27 @@ pub(crate) fn verify<K: MlsKv>(
     leaf_signature_key: &[u8; 32],
 ) -> Result<VerifiedMember, MlsError> {
     let credential = DeviceCredential::decode(content)?;
-    let record = SignedDeviceSetRecord::from_wire_bytes(&credential.device_set_record)
+    let envelope = Envelope::<DeviceSet>::from_wire_bytes(&credential.device_set_record)
         .map_err(|error| reject(&format!("device set record: {error}")))?;
-    let root = VerifyingKey::from_bytes(&credential.root_vk).map_err(|_| reject("root key"))?;
-    ramflux_crypto::verify_signed_device_set(&root, &record)
+    let now = unix_now()?;
+    // Master certificate, branch certificates, roster, section hashes and every signature. A
+    // compacted revocation checkpoint (needs separate membership evidence) and an external
+    // human custodian (needs the custodian's record) are refused here.
+    let verified = ramflux_crypto::custody::verify_record(&envelope, now, None, None)
         .map_err(|error| reject(&format!("device set signature: {error}")))?;
-    let entry = record
+    let body = &envelope.body;
+    let master_key = decode_base64url(&body.master_certificate.body.master_public_key)
+        .map_err(|_| reject("master key encoding"))?;
+    if master_key != credential.root_vk {
+        return Err(reject("root key is not the master key of the device set"));
+    }
+    let entry = body
         .devices
         .iter()
         .find(|entry| entry.device_id == credential.device_id)
         .ok_or_else(|| reject("device is not in the device set"))?;
-    if entry.status != DeviceSetStatus::Active {
+    if entry.status != DeviceSetStatus::Active || verified.revoked_ids().contains(&entry.device_id)
+    {
         return Err(reject("device is revoked"));
     }
     let signing_key = VerifyingKey::from_bytes(&credential.device_signing_pk)
@@ -176,22 +194,33 @@ pub(crate) fn verify<K: MlsKv>(
     if entry.signing_key_commitment != commitment {
         return Err(reject("device signing key does not match its commitment"));
     }
+    let reference = DeviceRef {
+        account_anchor: body.account_anchor.clone(),
+        device_id: entry.device_id.clone(),
+        device_epoch: entry.device_epoch,
+    };
+    let lease = verified
+        .authorize(&reference, DEVICE_CAPABILITY, now)
+        .map_err(|error| reject(&format!("device lease: {error}")))?;
+    if decode_base64url(&lease.branch_signing_public_key).ok().as_deref()
+        != Some(credential.device_signing_pk.as_slice())
+    {
+        return Err(reject("device signing key is not the leased branch key"));
+    }
     let signature = Signature::from_bytes(&credential.cert_sig);
     signing_key
         .verify_strict(&cert_message(MLS_SUITE_CODE, leaf_signature_key), &signature)
         .map_err(|_| reject("leaf certificate signature"))?;
     device_sets::authorize(
         storage,
-        &record.principal_commitment,
-        &record,
-        &credential.device_set_record,
+        &verified,
         &credential.device_id,
         &entry.signing_key_commitment,
     )?;
     Ok(VerifiedMember {
-        root_commitment: record.principal_commitment.clone(),
+        root_commitment: body.account_anchor.clone(),
         device_id: credential.device_id,
-        device_set_epoch: record.device_set_epoch,
+        device_set_epoch: body.device_set_epoch,
         leaf_sig_pk: *leaf_signature_key,
     })
 }
@@ -203,12 +232,12 @@ pub(crate) fn describe(
     leaf_signature_key: &[u8; 32],
 ) -> Result<VerifiedMember, MlsError> {
     let credential = DeviceCredential::decode(content)?;
-    let record = SignedDeviceSetRecord::from_wire_bytes(&credential.device_set_record)
+    let envelope = Envelope::<DeviceSet>::from_wire_bytes(&credential.device_set_record)
         .map_err(|error| reject(&format!("device set record: {error}")))?;
     Ok(VerifiedMember {
-        root_commitment: record.principal_commitment,
+        root_commitment: envelope.body.account_anchor,
         device_id: credential.device_id,
-        device_set_epoch: record.device_set_epoch,
+        device_set_epoch: envelope.body.device_set_epoch,
         leaf_sig_pk: *leaf_signature_key,
     })
 }
