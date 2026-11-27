@@ -169,6 +169,7 @@ mod enabled {
     fn kind(body: &Value) -> Result<GroupKind, MlsError> {
         match text(body, "kind")? {
             "device" | "dm" => Ok(GroupKind::Dm),
+            "self" => Ok(GroupKind::Own),
             "pseudonym" | "group" => Ok(GroupKind::Group),
             other => Err(bad(&format!("unknown kind {other}"))),
         }
