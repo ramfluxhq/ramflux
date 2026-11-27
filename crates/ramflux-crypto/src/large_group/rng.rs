@@ -45,7 +45,7 @@ impl TryRng for FallibleOsRng {
 impl TryCryptoRng for FallibleOsRng {}
 
 /// Fixed bytes handed out once (derives the POPRF root key from a stored 32-byte seed through the
-/// allowed `PoprfServer::new` call).
+/// allowed root-key constructor).
 pub(crate) struct SeedRng<'a> {
     seed: &'a [u8; 32],
 }

@@ -23,6 +23,8 @@ const INPUT_2: &str = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
 const OUTPUT_1: &str = "ca688351e88afb1d841fde4401c79efebb2eb75e7998fa9737bd5a82a152406d38bd29f680504e54fd4587eddcf2f37a2617ac2fbd2993f7bdf45442ace7d221";
 const OUTPUT_2: &str = "7c6557b276a137922a0bcfc2aa2b35dd78322bd500235eb6d6b6f91bc5b56a52de2d65612d503236b321f5d0bebcbc52b64b92e426f29c9b8b69f52de98ae507";
 
+type KatCase = (&'static str, Vec<Vec<u8>>, Vec<Vec<u8>>);
+
 /// Result of the known-answer check: one line per vector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KatReport {
@@ -99,7 +101,7 @@ pub fn kat_poprf() -> Result<KatReport, LgError> {
     all &= pk_ok;
     let (in1, in2) = (hex_vec(INPUT_1)?, hex_vec(INPUT_2)?);
     let (out1, out2) = (hex_vec(OUTPUT_1)?, hex_vec(OUTPUT_2)?);
-    let cases: [(&str, Vec<Vec<u8>>, Vec<Vec<u8>>); 3] = [
+    let cases: [KatCase; 3] = [
         ("vector 1", vec![in1.clone()], vec![out1.clone()]),
         ("vector 2", vec![in2.clone()], vec![out2.clone()]),
         ("vector 3", vec![in1, in2], vec![out1, out2]),

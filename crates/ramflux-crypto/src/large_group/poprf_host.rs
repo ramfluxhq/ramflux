@@ -23,7 +23,7 @@ pub struct IssuedBatch {
     pub proof: [u8; 64],
 }
 
-fn map_error(error: &voprf::Error, context: &'static str) -> LgError {
+fn map_error(error: voprf::Error, context: &'static str) -> LgError {
     if matches!(error, voprf::Error::Protocol) {
         LgError::PoprfProtocol
     } else {
@@ -43,18 +43,17 @@ impl LgTokenRootKey {
     /// `Error::Protocol` maps to [`LgError::PoprfProtocol`].
     pub fn from_seed(seed: &[u8; 32]) -> Result<Self, LgError> {
         let mut rng = SeedRng::new(seed);
-        let server =
-            PoprfServer::<Ristretto255>::new(&mut rng).map_err(|e| map_error(&e, "new"))?;
+        let server = PoprfServer::<Ristretto255>::new(&mut rng).map_err(|e| map_error(e, "new"))?;
         Ok(Self { server })
     }
 
-    /// RFC 9497 DeriveKeyPair with an explicit `info` (known-answer check only).
+    /// RFC 9497 `DeriveKeyPair` with an explicit `info` (known-answer check only).
     ///
     /// # Errors
     /// Returns a typed POPRF error.
     pub(crate) fn kat_from_seed(seed: &[u8], key_info: &[u8]) -> Result<Self, LgError> {
         let server = PoprfServer::<Ristretto255>::new_from_seed(seed, key_info)
-            .map_err(|e| map_error(&e, "derive key pair"))?;
+            .map_err(|e| map_error(e, "derive key pair"))?;
         Ok(Self { server })
     }
 
@@ -74,13 +73,13 @@ impl LgTokenRootKey {
         for raw in blinded {
             elements.push(
                 BlindedElement::<Ristretto255>::deserialize(raw)
-                    .map_err(|e| map_error(&e, "blinded element"))?,
+                    .map_err(|e| map_error(e, "blinded element"))?,
             );
         }
         let prepared = self
             .server
             .batch_blind_evaluate_prepare(elements.iter(), Some(info))
-            .map_err(|e| map_error(&e, "prepare"))?;
+            .map_err(|e| map_error(e, "prepare"))?;
         let tweak = prepared.prepared_tweak;
         let evaluations: Vec<PreparedEvaluationElement<Ristretto255>> =
             prepared.prepared_evaluation_elements.collect();
@@ -91,7 +90,7 @@ impl LgTokenRootKey {
             &evaluations,
             &tweak,
         )
-        .map_err(|e| map_error(&e, "finish"))?;
+        .map_err(|e| map_error(e, "finish"))?;
         let mut evaluated = Vec::with_capacity(elements.len());
         for message in finished.messages {
             evaluated.push(to_array::<32>(message.serialize().as_slice())?);
@@ -106,7 +105,7 @@ impl LgTokenRootKey {
     /// Returns a typed POPRF error.
     pub fn evaluate(&self, input: &[u8], info: &[u8]) -> Result<[u8; 64], LgError> {
         let output =
-            self.server.evaluate(input, Some(info)).map_err(|e| map_error(&e, "evaluate"))?;
+            self.server.evaluate(input, Some(info)).map_err(|e| map_error(e, "evaluate"))?;
         to_array::<64>(output.as_slice())
     }
 }
