@@ -165,6 +165,9 @@ impl AccountRuntime {
             AgentCall::Create(body) => {
                 custody(account.client.agent_create(vault.as_ref(), &body, now)?)
             }
+            AgentCall::AbandonCreate(request_id) => {
+                custody(account.client.agent_create_abandon(vault.as_ref(), &request_id, now)?)
+            }
             AgentCall::Decide(body) => {
                 custody(account.client.agent_creation_decide(vault.as_ref(), &body, now)?)
             }

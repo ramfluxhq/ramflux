@@ -109,6 +109,25 @@ pub(crate) async fn after_agent(
     Ok(())
 }
 
+/// Best effort after a refused create: when PRX holds the agent for this anchor (the outcome of
+/// the PUT was unknown), retire and purge it. Failures are logged and never returned.
+pub(crate) async fn abandon_publish(client: &PrxClient, anchor: &str) {
+    let Ok(name) = name_from_anchor(anchor) else {
+        return;
+    };
+    let Ok(caps) = client.capabilities().await else {
+        return;
+    };
+    // A refused PUT stores nothing, so a failed read is the normal case and is not logged.
+    let Ok(readback) = client.get(&caps, &name).await else {
+        return;
+    };
+    let key = stable_key("rf-purge-", anchor);
+    if let Err(error) = client.retire_and_purge(&caps, &name, &readback.revision, &key).await {
+        tracing::warn!(step = "prx", error = %map_prx(&error), "agent create cleanup failed");
+    }
+}
+
 /// An `agent.get` shows the agent's revision (`config::agent_revision`, the value `agent.update`
 /// compares). When PRX is reachable and holds the config the mirror shows, the revision is
 /// computed from PRX's current config, also over an older mirrored one. A PRX that is absent,

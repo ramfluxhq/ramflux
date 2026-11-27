@@ -263,6 +263,56 @@ impl RamfluxClient {
         status_of(&record)
     }
 
+    /// Closes a create that PRX refused: stage a cancel to the primary first (so its pending
+    /// copy goes), then cancel locally (vault items and request file). A request that is no
+    /// longer `authorization_pending` or `authorized` is left alone.
+    /// # Errors
+    /// Store, send and vault failures; the request then expires by its deadline.
+    pub(crate) fn agent_create_abandon(
+        &self,
+        vault: &dyn PrimaryVault,
+        request_id: &str,
+        now: u64,
+    ) -> Result<g::AgentCustodyStatus, SdkError> {
+        let store = self.agent_creation_store()?;
+        let record = store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
+        if !matches!(
+            record.state,
+            AgentCreationState::AuthorizationPending | AgentCreationState::Authorized
+        ) {
+            return status_of(&record);
+        }
+        let cancel = ramflux_protocol::custody::encode_register_cancel(
+            &ramflux_protocol::custody::RegisterCancel {
+                request_id: request_id.to_owned(),
+                request_hash: record.request_hash.clone(),
+            },
+        )
+        .map_err(|_| SdkError::CustodySetupInvalid)?;
+        let plan = decode_register_plan(&record.plan_bytes()?)
+            .map_err(|_| SdkError::CustodySetupInvalid)?;
+        let human = self.human_authority()?;
+        let target = RootQualifiedDeviceRef::from_custody_record(
+            self.born_v3_account.as_deref().ok_or(SdkError::AccountDbNotUnlocked)?.verified(),
+            &human.primary.device_id,
+        )?;
+        let staged = self.stage_agent_custody(AgentCustodySend {
+            target: &target,
+            owner_anchor: &human.record.body.account_anchor,
+            agent_anchor: &plan.agent_anchor,
+            correlation_id: request_id,
+            custody: g::AgentCustodyPacket {
+                value: Some(g::agent_custody_packet::Value::CancelJson(cancel.clone())),
+            },
+            now,
+        });
+        if let Err(error) = &staged {
+            tracing::warn!(request_id, step = "phone", %error, "agent create cleanup failed");
+        }
+        let closed = crate::custody::agent_creation::cancel(&store, vault, &cancel, now)?;
+        status_of(&closed)
+    }
+
     /// `agent.creation.decide` on the current primary: sign approve or deny for a stored request
     /// after user presence, persist the decision, then send it point-to-point to the desktop.
     /// An exact replay returns the saved decision without signing again.

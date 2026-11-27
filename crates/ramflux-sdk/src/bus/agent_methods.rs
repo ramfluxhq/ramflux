@@ -31,6 +31,8 @@ pub(super) enum AgentCall {
     PersonaEdit(Box<g::AgentPersonaEdit>),
     /// `agent.access.set` (contract 2 `AgentAccessSet`).
     AccessSet(Box<g::AgentAccessSet>),
+    /// Internal (not a bus method): close a create whose PRX publish was refused.
+    AbandonCreate(String),
 }
 
 pub(super) fn handles(method: &str) -> bool {
@@ -121,14 +123,20 @@ async fn apply(
         prove_node_retirement(supervisor, &actor, &account_id, &call).await?;
     }
     let result = actor.agent_call(call).await?;
-    crate::prx_owner::after_agent(
+    if let Err(error) = crate::prx_owner::after_agent(
         supervisor.config.prx.as_deref(),
         &supervisor.config.data_root,
         publish.as_ref(),
         purge.as_deref(),
         &result,
     )
-    .await?;
+    .await
+    {
+        if publish.is_some() {
+            abandon_create(supervisor, &actor, &result, &error).await;
+        }
+        return Err(error);
+    }
     let result = super::agent_directory::attach_hosted(&actor, list_limit, result).await?;
     let result = if reads_record {
         crate::prx_owner::fill_revision(supervisor.config.prx.as_deref(), result).await
@@ -143,6 +151,33 @@ async fn apply(
             actor.agent_call(AgentCall::Get(id)).await
         }
         _ => Ok(result),
+    }
+}
+
+/// Undoes a create that PRX refused: PRX copy (best effort), phone plan, vault items and request
+/// file. Failures are logged; the caller still gets the PRX error.
+async fn abandon_create(
+    supervisor: &Supervisor,
+    actor: &AccountActor,
+    result: &g::AgentConfigResult,
+    cause: &SdkError,
+) {
+    let Some(g::agent_config_result::Value::Custody(status)) = &result.value else {
+        return;
+    };
+    let request_id = status.request_id.clone();
+    if let (Some(client), Some(anchor)) =
+        (supervisor.config.prx.as_deref(), status.agent_anchor.as_deref())
+    {
+        crate::prx_owner::abandon_publish(client, anchor).await;
+    }
+    match actor.agent_call(AgentCall::AbandonCreate(request_id.clone())).await {
+        Ok(_) => {
+            tracing::info!(%request_id, cause = %cause, "agent create abandoned after PRX refusal");
+        }
+        Err(error) => {
+            tracing::warn!(%request_id, step = "local", %error, "agent create cleanup failed");
+        }
     }
 }
 
