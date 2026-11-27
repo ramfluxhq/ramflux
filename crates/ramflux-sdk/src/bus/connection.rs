@@ -10,7 +10,8 @@ use std::sync::Arc;
 use tokio::task::JoinSet;
 
 // Teardown after the stop reply; each phase is bounded and named in the stop log.
-const STOP_RESPONSE_MS: u64 = 250;
+/// Backstop only: the wait starts after the shutdown finished and ends when the reply is written.
+const STOP_RESPONSE_MS: u64 = 2000;
 const CONNECTIONS_MS: u64 = 250;
 const BACKGROUND_TASKS_MS: u64 = 250;
 
@@ -122,6 +123,10 @@ pub(super) async fn accept<L: BusListener>(
         socket.remove()?;
     }
     if explicit_stop {
+        // The reply carries the shutdown outcome, so the shutdown (its own detached task, started
+        // once by whichever caller came first) must finish before the reply wait begins; the
+        // connections are torn down only after the reply was written and flushed.
+        let _ = supervisor.shutdown().await;
         let mut response = supervisor.stop_response();
         supervisor
             .bounded_phase("stop_response", STOP_RESPONSE_MS, async {

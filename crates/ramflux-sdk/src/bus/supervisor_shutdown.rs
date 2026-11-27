@@ -21,6 +21,7 @@ const PHASE_IDLE: &str = "idle";
 const PHASE_FINISHED: &str = "finished";
 
 /// The stored outcome of the single shutdown run.
+#[derive(Clone)]
 pub(super) struct ShutdownReport {
     pub(super) forced: bool,
     pub(super) overran: Vec<&'static str>,
@@ -85,13 +86,13 @@ fn note_overrun(overran: &mut Vec<&'static str>, phase: &'static str, budget_ms:
 impl Supervisor {
     /// Runs the shutdown once; a later call returns the stored result without waiting again.
     pub(in crate::bus) async fn shutdown(&self) -> Result<(), SdkError> {
-        self.shutdown_report().await.result.clone().map_err(SdkError::LocalBus)
+        self.shutdown_report().await.result.map_err(SdkError::LocalBus)
     }
 
     /// Runs the shutdown and builds the `daemon.stop` reply body.
     pub(super) async fn stop_reply_body(&self) -> Result<serde_json::Value, SdkError> {
-        self.shutdown().await?;
         let report = self.shutdown_report().await;
+        report.result.map_err(SdkError::LocalBus)?;
         Ok(serde_json::json!({
             "stopping": true,
             "forced": report.forced,
@@ -100,8 +101,35 @@ impl Supervisor {
         }))
     }
 
-    async fn shutdown_report(&self) -> &ShutdownReport {
-        self.shutdown_report.get_or_init(|| self.run_shutdown()).await
+    /// The first caller starts the run as its own local task; every caller then waits for it.
+    /// The run never lives inside a caller's future, so closing the caller's connection (the
+    /// stop request's own, or any other) cannot cancel it and cannot make it start a second time.
+    async fn shutdown_report(&self) -> ShutdownReport {
+        if !self.shutdown_started.replace(true) {
+            let owner = self.owner.borrow().upgrade();
+            if let Some(supervisor) = owner {
+                tokio::task::spawn_local(async move {
+                    let report = supervisor.run_shutdown().await;
+                    let _ = supervisor.shutdown_report.set(report);
+                    supervisor.shutdown_done.send_replace(true);
+                });
+            } else {
+                let report = self.run_shutdown().await;
+                let _ = self.shutdown_report.set(report);
+                self.shutdown_done.send_replace(true);
+            }
+        }
+        let mut done = self.shutdown_done.subscribe();
+        while !*done.borrow_and_update() {
+            if done.changed().await.is_err() {
+                break;
+            }
+        }
+        self.shutdown_report.get().cloned().unwrap_or_else(|| ShutdownReport {
+            forced: true,
+            overran: Vec::new(),
+            result: Err("daemon stop did not finish".to_owned()),
+        })
     }
 
     /// Marks the phase the watchdog reports; the teardown after the stop reply uses it too.

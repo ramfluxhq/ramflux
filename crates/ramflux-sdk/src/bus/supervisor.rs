@@ -60,6 +60,8 @@ pub(super) struct Supervisor {
     lifecycle_changed: tokio::sync::Notify,
     lifecycle_registry: super::lifecycle_registry::Registry,
     shutdown_report: tokio::sync::OnceCell<shutdown::ShutdownReport>,
+    shutdown_started: std::cell::Cell<bool>,
+    shutdown_done: watch::Sender<bool>,
     stop_watch: shutdown::StopWatch,
 }
 
@@ -113,6 +115,8 @@ impl Supervisor {
             lifecycle_changed: tokio::sync::Notify::new(),
             lifecycle_registry: super::lifecycle_registry::Registry::default(),
             shutdown_report: tokio::sync::OnceCell::new(),
+            shutdown_started: std::cell::Cell::new(false),
+            shutdown_done: watch::channel(false).0,
             stop_watch: shutdown::StopWatch::new(),
             events,
             event_receiver: RefCell::new(Some(event_receiver)),
