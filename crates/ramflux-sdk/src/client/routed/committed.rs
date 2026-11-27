@@ -3,7 +3,7 @@
 
 //! Replay receipts retain authenticated attribution and are scoped by sender device and envelope.
 use super::{
-    Deserialize, GatewayInboxEntry, Kind, RamfluxClient, Routing, SdkError, Serialize, invalid,
+    Deserialize, GatewayInboxEntry, RamfluxClient, Routing, SdkError, Serialize, invalid,
 };
 use crate::client::identity_authority::HeadUse;
 #[derive(Serialize, Deserialize)]
@@ -227,29 +227,6 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         route: &Routing,
     ) -> Result<String, SdkError> {
-        if route.kind == Kind::GroupMessage {
-            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-            let logical = if let Some(logical) = route.group_message_id.as_deref() {
-                logical
-            } else {
-                let upgrade = self
-                    .account_db()?
-                    .load_actor_state::<i64>("group-message/upgrade-start")?
-                    .ok_or_else(|| invalid("group upgrade window unavailable"))?;
-                if crate::time::now_unix_timestamp() > upgrade.saturating_add(7 * 86400)
-                    || entry.envelope.created_at > upgrade
-                {
-                    return Err(invalid("group logical id missing outside upgrade window"));
-                }
-                &entry.envelope.envelope_id
-            };
-            return Ok(ramflux_protocol::group_message_id(
-                route.group_id.as_deref().ok_or_else(|| invalid("group id missing"))?,
-                source.root_commitment(),
-                source.device_id(),
-                logical,
-            )?);
-        }
         self.projection_id_for(
             entry,
             route.group_message_id.as_deref().unwrap_or(&entry.envelope.envelope_id),

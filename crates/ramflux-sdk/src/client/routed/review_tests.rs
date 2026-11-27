@@ -117,14 +117,6 @@ async fn a_duplicate_cannot_replace_the_original_authenticated_attribution() -> 
         .map_err(|error| invalid(&format!("native attribution: {error}")))
 }
 
-#[tokio::test]
-async fn group_delivery_preserves_existing_titles_and_all_conversation_links()
--> Result<(), SdkError> {
-    crate::client::native_test_support::watchdog::within(native_delivery::group_metadata())
-        .await
-        .map_err(|_| invalid("test: native group metadata watchdog"))?
-        .map_err(|error| invalid(&format!("native group metadata: {error}")))
-}
 
 #[test]
 fn decrypted_payload_debug_output_never_discloses_plaintext_or_franking_keys() {

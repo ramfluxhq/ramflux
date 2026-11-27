@@ -36,7 +36,9 @@ mod transfer_outcome;
 mod transfer_wire;
 #[cfg(test)]
 pub(crate) use bootstrap::decode_packet as decode_shared_group_packet;
-pub(crate) use bootstrap::{PreparedSharedGroup, is_packet as is_shared_group_packet};
+#[cfg(test)]
+pub(crate) use bootstrap::PreparedSharedGroup;
+pub(crate) use bootstrap::is_packet as is_shared_group_packet;
 pub(crate) use controls::{BeaconRecord, GroupControlBody, GroupControlPacket};
 pub(crate) use requests::request_key as request_record_key;
 pub(crate) use transfer::{SEND_PREFIX as TRANSFER_SEND_PREFIX, TransferDelivery};

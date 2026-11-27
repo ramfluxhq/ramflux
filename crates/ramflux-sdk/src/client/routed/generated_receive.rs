@@ -141,12 +141,6 @@ impl RamfluxClient {
                 code: crate::error::GeneratedRefusalCode::Authority,
                 reason,
             },
-            SdkError::Storage(ramflux_storage::StorageError::GroupPermissionDenied) => {
-                SdkError::GeneratedRefused {
-                    code: crate::error::GeneratedRefusalCode::Authority,
-                    reason: "group sender lacks permission".into(),
-                }
-            }
             other => other,
         })
     }
@@ -176,9 +170,6 @@ impl RamfluxClient {
             return Ok(GeneratedProjection::Handled(None));
         }
         self.capture_generated_original_header(entry, bytes)?;
-        if opened.routing.kind == Kind::GroupMessage && scanned.kind == 1 {
-            return self.project_generated_group(opened, entry, &scanned, metadata);
-        }
         if scanned.outcome == ScanOutcome::Unsupported
             || inner.as_ref().is_none_or(|inner| inner.identity.is_none())
         {
@@ -267,11 +258,7 @@ impl RamfluxClient {
             if stored == bytes {
                 return Ok(true);
             }
-            if routing.kind != Kind::GroupMessage {
-                return Err(SdkError::ReplayMismatch);
-            }
-            // An authenticated authored copy may have arrived first. Decrypt and
-            // compare the entire plaintext Inner before accepting its sealed form.
+            return Err(SdkError::ReplayMismatch);
         }
         let now_ms = crate::client::generated_identity::now_ms();
         self.merge_generated_clock(identity.hlc, now_ms)?;
@@ -315,90 +302,6 @@ impl RamfluxClient {
             })
     }
 
-    fn project_generated_group(
-        &self,
-        opened: &Opened,
-        entry: &GatewayInboxEntry,
-        scanned: &validation::ScannedInner<'_>,
-        metadata: Option<&MessageMetadata>,
-    ) -> Result<GeneratedProjection, SdkError> {
-        let wrapper =
-            g::Message::decode(scanned.body).map_err(|_| invalid("group Message missing"))?;
-        let sealed =
-            wrapper.sealed_group.as_ref().ok_or_else(|| invalid("sealed group missing"))?;
-        let native = crate::client::generated_group::to_native(sealed)?;
-        let decrypted = self.decrypt_group_envelope_with_opening(
-            &native,
-            &opened.routing.message_id,
-            &opened.remote_device,
-        )?;
-        let plaintext = &decrypted.plaintext;
-        let origin = self.capture_group_retained_origin(
-            opened,
-            entry,
-            scanned.exact_inner,
-            &decrypted,
-            sealed,
-        )?;
-        let message = g::Message::decode(plaintext.as_slice())
-            .map_err(|_| invalid("invalid group Message"))?;
-        if message.sealed_group.is_some() {
-            return Err(invalid("recursive sealed group"));
-        }
-        let outcome = validation::scan_message("Message", plaintext, scanned.layer)
-            .map_err(|error| invalid(&format!("invalid group content: {error}")))?;
-        if scanned.outcome == ScanOutcome::Unsupported || outcome == ScanOutcome::Unsupported {
-            self.retain_generated_unsupported_origin(opened, entry, scanned, origin.as_ref())?;
-            let copy = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
-            self.account_db()?.put_unsupported_raw_copy(RawInnerCopyWrite {
-                owner_id: &opened.routing.message_id,
-                verified_source_anchor: opened.remote_device.root_commitment(),
-                copy_id: &format!("{copy}/nested-group"),
-                kind: RawInnerCopyKind::NestedGroup,
-                bytes: plaintext,
-                bounded_metadata: &[],
-            })?;
-            return Ok(GeneratedProjection::Handled(None));
-        }
-        validation::validate_message(&message).map_err(|_| invalid("invalid group content"))?;
-        Self::attachment_message_content(&message.text, &message.media)?;
-        self.merge_routed_group_link(&sealed.group_id, &opened.routing.conversation_id)?;
-        let db = self.account_db()?;
-        if let Some(stored) = db.message_content(&opened.routing.message_id)? {
-            let mut normalized = g::Inner::decode(scanned.exact_inner)
-                .map_err(|_| invalid("group Inner malformed"))?;
-            normalized.body.clone_from(plaintext);
-            let exact = zeroize::Zeroizing::new(normalized.encode_to_vec());
-            zeroize::Zeroize::zeroize(&mut normalized.body);
-            if stored != scanned.exact_inner && stored != exact.as_slice() {
-                return Err(SdkError::ReplayMismatch);
-            }
-        } else {
-            self.append_plaintext_projection_once(
-                &opened.routing.conversation_id,
-                &opened.routing.message_id,
-                entry,
-                scanned.exact_inner,
-                metadata,
-            )?;
-        }
-        let db = self.account_db()?;
-        if let Some(origin) = origin.as_ref() {
-            self.persist_known_origin(&opened.routing.message_id, origin)?;
-        }
-        db.persist_message_actor_state(
-            &opened.routing.message_id,
-            &format!("routed/group-projection/{}", opened.routing.message_id),
-            &message,
-        )?;
-        db.persist_message_actor_state(
-            &opened.routing.message_id,
-            &format!("routed/group-content/{}", opened.routing.message_id),
-            plaintext,
-        )?;
-        Ok(GeneratedProjection::Handled(Some(message.text.into_bytes())))
-    }
-
     fn retain_direct_message_origin(
         &self,
         opened: &Opened,
@@ -426,11 +329,6 @@ impl RamfluxClient {
             self.apply_generated_pair_control(opened, entry, identity, control, bytes)?;
         } else if matches!(control.payload.as_ref(), Some(g::control::Payload::ContactControl(_))) {
             self.receive_generated_contact_control(entry, &opened.routing, bytes)?;
-        } else if matches!(control.payload.as_ref(), Some(g::control::Payload::GroupState(_))) {
-            // Authenticate before W1 applies the separately prepared native effect.
-            if !self.authorize_generated_group_control_body(entry, &opened.routing, bytes)? {
-                return Err(invalid("native group control preparation missing"));
-            }
         } else if matches!(control.payload.as_ref(), Some(g::control::Payload::OwnHistory(_))) {
             let scanned = validation::scan_inner(bytes)
                 .map_err(|_| invalid("history Control Inner missing"))?;
@@ -449,12 +347,6 @@ impl RamfluxClient {
             self.apply_generated_metadata_control_once(entry, identity, bytes, || {
                 self.receive_generated_contact_tombstone(tombstone)
             })?;
-        } else if let Some(g::control::Payload::OwnGroupConsent(consent)) = control.payload.as_ref()
-        {
-            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-            self.apply_generated_metadata_control_once(entry, identity, bytes, || {
-                self.receive_generated_own_group_consent(&source, consent).map(|_| ())
-            })?;
         } else if let Some(g::control::Payload::OwnLayerRenewal(renewal)) = control.payload.as_ref()
         {
             let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
@@ -463,8 +355,6 @@ impl RamfluxClient {
             })?;
         } else if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
             self.apply_generated_friend_control(entry, identity, friend, bytes)?;
-        } else if let Some(g::control::Payload::GroupKeyControl(key)) = control.payload.as_ref() {
-            self.apply_generated_group_key(opened, entry, identity, key, bytes)?;
         } else if let Some(g::control::Payload::RecoveryControl(recovery)) =
             control.payload.as_ref()
         {
@@ -740,7 +630,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         scanned: &validation::ScannedInner<'_>,
     ) -> Result<(), SdkError> {
-        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         if scanned.kind == 8 {
             let control = g::Control::decode(scanned.body)
                 .map_err(|_| invalid("generated Control missing"))?;
@@ -751,7 +641,7 @@ impl RamfluxClient {
                 });
             }
         }
-        if (scanned.kind == 1 && !matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage))
+        if (scanned.kind == 1 && opened.routing.kind != Kind::Direct)
             || (scanned.kind == 6 && opened.routing.kind != Kind::Receipt)
             || (scanned.kind == 12 && opened.routing.kind != Kind::Control)
         {
@@ -768,64 +658,8 @@ impl RamfluxClient {
         let identity = g::Inner::decode(scanned.exact_inner)
             .map_err(|_| invalid("generated identity missing"))?
             .identity;
-        if let Some(group_id) = identity.as_ref().and_then(|identity| identity.group_id.as_deref())
-        {
-            if Some(group_id) != opened.routing.group_id.as_deref() {
-                return Err(invalid("group identity conflicts with route"));
-            }
-            self.require_native_operation(&source, NativeOperation::Group)?;
-            if opened.routing.kind != Kind::GroupControl {
-                self.require_routed_group_member(group_id, entry)?;
-            }
-            if opened.routing.kind != Kind::GroupControl
-                && !self.group_state(group_id)?.members.contains(source.device_id())
-            {
-                return Err(SdkError::InboundRejected("group author lacks a current role".into()));
-            }
-        }
-        if opened.routing.kind == Kind::GroupControl
-            && !(scanned.kind == 8
-                && g::Control::decode(scanned.body)
-                    .is_ok_and(|control| matches!(control.operation, 4 | 5)))
-        {
-            return Err(invalid("group control route requires GroupState or GroupKey Control"));
-        }
-        if opened.routing.kind == Kind::GroupMessage {
-            self.require_routed_group_member(
-                opened.routing.group_id.as_deref().ok_or_else(|| invalid("group missing"))?,
-                entry,
-            )?;
-            if opened.routing.kind == Kind::GroupMessage && scanned.kind == 1 {
-                let message = g::Message::decode(scanned.body)
-                    .map_err(|_| invalid("group Message authority fields missing"))?;
-                let group =
-                    message.sealed_group.as_ref().ok_or_else(|| invalid("sealed group missing"))?;
-                if Some(group.group_id.as_str()) != opened.routing.group_id.as_deref() {
-                    return Err(SdkError::InboundRejected(
-                        "generated group routing mismatch".into(),
-                    ));
-                }
-                let identity =
-                    identity.as_ref().ok_or_else(|| invalid("group identity missing"))?;
-                if identity.author != group.author
-                    || identity.group_id.as_deref() != Some(group.group_id.as_str())
-                    || identity.group_epoch != Some(group.key_epoch)
-                {
-                    return Err(invalid("sealed group and event identity disagree"));
-                }
-                self.check_generated_group_source(group, &opened.remote_device, entry)?;
-            } else {
-                let epoch = identity
-                    .as_ref()
-                    .and_then(|identity| identity.group_epoch)
-                    .ok_or_else(|| invalid("group epoch missing"))?;
-                self.require_generated_group_epoch(
-                    opened.routing.group_id.as_deref().ok_or_else(|| invalid("group missing"))?,
-                    &source,
-                    epoch,
-                    false,
-                )?;
-            }
+        if identity.as_ref().is_some_and(|identity| identity.group_id.is_some()) {
+            return Err(invalid("group events are unavailable"));
         }
         self.authorize_generated_scope(opened, entry, scanned)?;
         self.authorize_generated_native_fields(opened, entry, scanned)
@@ -927,12 +761,18 @@ impl RamfluxClient {
         if matches!(control.payload.as_ref(), Some(g::control::Payload::ContactControl(_))) {
             self.verify_contact_control(entry, &opened.routing, scanned.exact_inner)?;
         }
-        if matches!(control.payload.as_ref(), Some(g::control::Payload::GroupState(_))) {
-            self.authorize_generated_group_control_body(
-                entry,
-                &opened.routing,
-                scanned.exact_inner,
-            )?;
+        if matches!(
+            control.payload.as_ref(),
+            Some(
+                g::control::Payload::GroupState(_)
+                    | g::control::Payload::GroupKeyControl(_)
+                    | g::control::Payload::OwnGroupConsent(_)
+            )
+        ) {
+            return Err(SdkError::GeneratedRefused {
+                code: crate::error::GeneratedRefusalCode::Content,
+                reason: "group controls are unavailable".into(),
+            });
         }
         if matches!(control.operation, 1 | 2) {
             self.authorize_generated_pair_control(opened, entry)?;
@@ -941,9 +781,6 @@ impl RamfluxClient {
             self.authorize_generated_history_page(&source, scanned.body)?;
         }
         match control.payload.as_ref() {
-            Some(g::control::Payload::GroupKeyControl(key)) => {
-                self.authorize_generated_group_key(opened, entry, key)?;
-            }
             Some(g::control::Payload::RecoveryControl(recovery)) => {
                 self.authorize_generated_recovery(opened, entry, recovery)?;
             }
@@ -965,9 +802,6 @@ impl RamfluxClient {
         {
             self.authorize_generated_contact_tombstone(tombstone)?;
         }
-        if let Some(g::control::Payload::OwnGroupConsent(consent)) = control.payload.as_ref() {
-            self.authorize_generated_own_group_consent(&source, consent)?;
-        }
         if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_ref() {
             self.authorize_generated_own_message_copy(opened, entry, copy)?;
         }
@@ -982,7 +816,7 @@ impl RamfluxClient {
         opened: &Opened,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
-        if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
+        if opened.routing.kind == Kind::Direct {
             self.resolve_generated_pending_edit(
                 &opened.routing.conversation_id,
                 &opened.routing.message_id,
@@ -1054,11 +888,7 @@ impl RamfluxClient {
             self.generated_provenance(opened, entry, &source, &copy_id, origin_copy.clone())?;
         let db = self.account_db()?;
         if !nonchat {
-            if let Some(group) = opened.routing.group_id.as_deref() {
-                self.merge_routed_group_link(group, &opened.routing.conversation_id)?;
-            } else {
-                self.ensure_generated_direct_conversation(opened, entry)?;
-            }
+            self.ensure_generated_direct_conversation(opened, entry)?;
         }
         if let (Some(origin), Some(origin_copy)) = (origin, origin_copy.as_ref()) {
             self.retain_raw_origin_copy(

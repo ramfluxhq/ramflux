@@ -7,6 +7,7 @@ use crate::client::identity_authority::HeadUse;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 impl RamfluxClient {
+    #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
     pub(crate) fn require_routed_group_member(
         &self,
         group: &str,

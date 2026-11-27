@@ -511,47 +511,6 @@ async fn generated_a2i_requires_pinned_signature_and_device_binding() -> Result<
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn generated_group_key_off_its_group_route_is_refused_without_retention()
--> Result<(), SdkError> {
-    let key = |event: bool| g::Control {
-        operation: 5,
-        payload: Some(g::control::Payload::GroupKeyControl(g::GroupKeyControl {
-            schema: "ramflux.sdk.group_sender_key.distribution_envelope.v1".into(),
-            version: 1,
-            membership_event: event.then(|| g::NativeGroupEvent { canonical: vec![1] }),
-            actor_manifest_url: None,
-            distribution: Some(g::GroupKeyDistribution {
-                schema: "ramflux.sdk.group_sender_key.distribution.v4".into(),
-                version: 4,
-                group_id: "group".into(),
-                sender_id: "device".into(),
-                group_key_epoch: 1,
-                group_state_hash: Some("head".into()),
-                sender_key_seed: vec![7; 32],
-                sender_key_signature: Some("sig".into()),
-                sender_device_signing_public_key: Some("key".into()),
-            }),
-        })),
-    };
-    for (id, event, code, why) in [
-        ("group-key-direct", false, crate::error::GeneratedRefusalCode::Authority, "route"),
-        ("group-key-bootstrap", true, crate::error::GeneratedRefusalCode::Content, "bootstrap"),
-    ] {
-        let (a, mut b) = pair(245, 247).await?;
-        let entry = manual_entry(&a, &b, id, &key(event), true)?;
-        let result = run(&mut b, &entry).await;
-        // The reason is part of the assertion: later sender checks must not mask a lost route check.
-        assert!(
-            matches!(&result, Err(SdkError::GeneratedRefused { code: got, reason })
-                if *got == code && reason.contains(why)),
-            "{id} was not refused for its {why}: {result:?}"
-        );
-        assert_eq!(b.client.account_db()?.actor_state_keys(APPLIED)?.len(), 0);
-        assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 0);
-    }
-    Ok(())
-}
 
 #[tokio::test(flavor = "current_thread")]
 async fn peer_control_author_must_be_the_authenticated_pair_peer() -> Result<(), SdkError> {
@@ -609,15 +568,12 @@ fn no_known_control_operation_reaches_inbound_pending() {
     let dispatcher = &source[start..end];
     for arm in [
         "ContactControl",
-        "GroupState",
-        "GroupKeyControl",
         "OwnContactSync",
         "OwnHistory",
         "RecoveryControl",
         "A2i",
         "ObjectRevoke",
         "OwnContactTombstone",
-        "OwnGroupConsent",
         "OwnMessageCopy",
         "Friend",
     ] {

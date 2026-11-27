@@ -101,6 +101,7 @@ mod gateway;
 mod push_keyset;
 mod sealing;
 pub(crate) use sealing::SealingConfig;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod group;
 #[cfg(feature = "itest-bus-fault")]
 mod itest_bus_fault;

@@ -49,6 +49,9 @@ impl RamfluxClient {
         self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
         let packet = SentMessage::from_generated(sent)?;
         let group = packet.context.group.as_ref().map(|group| group.group_id.as_str());
+        if group.is_some() {
+            return Err(invalid("own sent group copies are unavailable"));
+        }
         packet.validate_route(&sent.envelope_id, conversation, group)?;
         self.validate_own_context_namespace(&packet.context)?;
         let scanned = g::validation::scan_inner(&sent.exact_inner)
@@ -92,28 +95,6 @@ impl RamfluxClient {
             return Err(invalid("own sent original epoch mismatch"));
         }
         self.trusted_device(HeadUse::NewAuthorization, &original)?;
-        if let Some(group) = group {
-            self.require_generated_group_epoch(
-                group,
-                &original,
-                identity.group_epoch.ok_or_else(|| invalid("own sent group epoch missing"))?,
-                false,
-            )?;
-            let local = self.owned_device_identity()?;
-            self.require_generated_group_epoch(
-                group,
-                &local,
-                identity.group_epoch.unwrap_or(0),
-                false,
-            )?;
-            let state = self
-                .account_db()?
-                .shared_group_state(group)?
-                .ok_or_else(|| SdkError::InboundPending("own sent group state missing".into()))?;
-            if state.snapshot().genesis.conversation_id != conversation {
-                return Err(invalid("own sent group conversation mismatch"));
-            }
-        }
         if scanned.kind == 4 {
             let delete = g::Delete::decode(scanned.body)
                 .map_err(|_| invalid("own sent Delete malformed"))?;
@@ -217,43 +198,6 @@ impl RamfluxClient {
         })
     }
 
-    fn own_sent_matches_stored_group(
-        &self,
-        stored: &[u8],
-        plaintext_inner: &[u8],
-        identity: &g::EventIdentity,
-    ) -> Result<bool, SdkError> {
-        let Some(group) = identity.group_id.as_ref() else { return Ok(false) };
-        let mut original =
-            g::Inner::decode(stored).map_err(|_| invalid("stored group Inner malformed"))?;
-        let wrapper = g::Message::decode(original.body.as_slice())
-            .map_err(|_| invalid("stored group Message malformed"))?;
-        if original.kind != 1
-            || original.identity.as_ref() != Some(identity)
-            || !wrapper.sealed_group.as_ref().is_some_and(|sealed| {
-                &sealed.group_id == group
-                    && sealed.author == identity.author
-                    && Some(sealed.key_epoch) == identity.group_epoch
-            })
-        {
-            return Ok(false);
-        }
-        let id = ramflux_protocol::encode_base64url(&identity.id);
-        let Some(body) = self
-            .account_db()?
-            .load_actor_state::<Vec<u8>>(&format!("routed/group-content/{id}"))?
-        else {
-            return Ok(false);
-        };
-        // This is the exact plaintext authenticated when the stored sealed Message
-        // was received. Preserve the original wrapper and evidence on duplicate copy.
-        let body = zeroize::Zeroizing::new(body);
-        original.body = body.to_vec();
-        let encoded = zeroize::Zeroizing::new(original.encode_to_vec());
-        zeroize::Zeroize::zeroize(&mut original.body);
-        Ok(encoded.as_slice() == plaintext_inner)
-    }
-
     pub(super) fn bind_generated_own_sent_context(
         &self,
         packet: &SentMessage,
@@ -261,41 +205,33 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         let thread = db.client_record("conversation", &identity.conversation_id)?;
-        if let Some(group) = identity.group_id.as_deref() {
-            // Named native GROUP_STATE owns authority. A copied cosmetic snapshot never
-            // installs membership, routes, joined floors or roles.
-            if thread.as_ref().is_some_and(|thread| {
-                thread["kind"] != "group" || thread["group_id"].as_str() != Some(group)
-            }) {
-                return Err(invalid("own sent conflicts with bound group scope"));
-            }
-            self.merge_routed_group_link(group, &identity.conversation_id)?;
-        } else {
-            let thread = thread.ok_or_else(|| {
-                SdkError::InboundPending(
-                    "own sent direct context awaits native contact bootstrap".into(),
-                )
-            })?;
-            let participants = packet
-                .context
-                .participants
+        if identity.group_id.is_some() {
+            return Err(invalid("own sent group copies are unavailable"));
+        }
+        let thread = thread.ok_or_else(|| {
+            SdkError::InboundPending(
+                "own sent direct context awaits native contact bootstrap".into(),
+            )
+        })?;
+        let participants = packet
+            .context
+            .participants
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let bound = thread["participants"].as_array().map(|values| {
+            values
                 .iter()
-                .map(String::as_str)
-                .collect::<std::collections::BTreeSet<_>>();
-            let bound = thread["participants"].as_array().map(|values| {
-                values
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .collect::<std::collections::BTreeSet<_>>()
-            });
-            if thread["kind"] != "direct"
-                || !thread["group_id"].is_null()
-                || packet.context.participants.len() != 2
-                || participants.len() != 2
-                || bound.as_ref() != Some(&participants)
-            {
-                return Err(invalid("own sent conflicts with bound direct participants"));
-            }
+                .filter_map(serde_json::Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+        if thread["kind"] != "direct"
+            || !thread["group_id"].is_null()
+            || packet.context.participants.len() != 2
+            || participants.len() != 2
+            || bound.as_ref() != Some(&participants)
+        {
+            return Err(invalid("own sent conflicts with bound direct participants"));
         }
         Ok(())
     }
@@ -317,32 +253,6 @@ impl RamfluxClient {
         Ok(())
     }
 
-    fn persist_own_sent_group_content(
-        &self,
-        identity: &g::EventIdentity,
-        sent: &g::OwnSentMessage,
-        id: &str,
-    ) -> Result<(), SdkError> {
-        if identity.group_id.is_none() {
-            return Ok(());
-        }
-        let (_, content) = Self::decode_generated_inner(&sent.exact_inner)?;
-        let Some(g::content::Value::Message(message)) = content.value else {
-            return Err(invalid("own group copy requires a plaintext Message"));
-        };
-        if message.sealed_group.is_some() {
-            return Err(invalid("own group copy cannot project a sealed wrapper"));
-        }
-        let db = self.account_db()?;
-        db.persist_message_actor_state(id, &format!("routed/group-projection/{id}"), &message)?;
-        db.persist_message_actor_state(
-            id,
-            &format!("routed/group-content/{id}"),
-            &message.encode_to_vec(),
-        )?;
-        Ok(())
-    }
-
     pub(super) fn project_generated_own_sent_message(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -351,6 +261,9 @@ impl RamfluxClient {
         packet: &SentMessage,
         projection: MessageProjection,
     ) -> Result<(), SdkError> {
+        if identity.group_id.is_some() {
+            return Err(invalid("own sent group copies are unavailable"));
+        }
         let (copy_created_at, topic) = match projection {
             MessageProjection::Live(at) => (at, "message.received"),
             MessageProjection::Reparse(at) => (at, "message.schema.updated"),
@@ -367,9 +280,7 @@ impl RamfluxClient {
             return Ok(());
         }
         if let Some(stored) = db.message_content(&id)? {
-            if stored != sent.exact_inner
-                && !self.own_sent_matches_stored_group(&stored, &sent.exact_inner, identity)?
-            {
+            if stored != sent.exact_inner {
                 return Err(SdkError::ReplayMismatch);
             }
             let was_own = self
@@ -377,7 +288,6 @@ impl RamfluxClient {
                 .ok_or_else(|| invalid("own sent existing row missing"))?
                 .is_own;
             db.mark_generated_message_owned(&id, source)?;
-            self.persist_own_sent_group_content(identity, sent, &id)?;
             if !was_own {
                 self.publish_owned_message_update(identity, &id, topic)?;
             }
@@ -399,7 +309,6 @@ impl RamfluxClient {
         )?;
         db.persist_message_actor_state(&id, &format!("routed/generated-identity/{id}"), identity)?;
         db.mark_generated_message_owned(&id, source)?;
-        self.persist_own_sent_group_content(identity, sent, &id)?;
         db.persist_message_actor_state(
             &id,
             &format!("routed/generated-order/{id}"),

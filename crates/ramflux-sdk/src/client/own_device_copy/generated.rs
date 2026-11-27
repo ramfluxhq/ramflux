@@ -45,19 +45,14 @@ impl RamfluxClient {
         let messages = std::mem::take(&mut draft.messages);
         let siblings = std::mem::take(&mut draft.siblings);
         let mut envelopes = Vec::with_capacity(messages.len());
-        let mut identity = self.allocate_generated_identity(
+        if draft.group.is_some() {
+            return Err(invalid("group own-device copies are unavailable"));
+        }
+        let identity = self.allocate_generated_identity(
             &draft.conversation,
             crate::client::generated_identity::now_ms(),
             true,
         )?;
-        if let Some(group) = draft.group.as_deref() {
-            let state = self
-                .account_db()?
-                .shared_group_state(group)?
-                .ok_or_else(|| invalid("own copy group state missing"))?;
-            identity.group_id = Some(group.into());
-            identity.group_epoch = Some(state.view().epoch);
-        }
         for (mut message, (material, sibling)) in
             messages.into_iter().zip(materials.into_iter().zip(siblings))
         {

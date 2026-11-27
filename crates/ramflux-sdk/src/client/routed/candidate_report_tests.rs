@@ -113,31 +113,6 @@ fn seal_as(
     message.conversation_id = identity.conversation_id;
     super::seal_as(sender, receiver, message, exact, route)
 }
-fn group_inner(a: &Fixture, b: &Fixture, group: &str) -> Result<Vec<u8>, SdkError> {
-    a.create_shared_group(group, "c")?;
-    let state = a.change_shared_group(
-        group,
-        ramflux_protocol::GroupStateChange::Add {
-            member: b.client.owned_group_actor(&b.config()?.target_delivery_id)?.identity,
-            role: ramflux_protocol::SharedGroupRole::Member,
-        },
-    )?;
-    b.client.accept_shared_group_state(&state, &b.config()?.target_delivery_id)?;
-    b.client.import_group_sender_key_distribution(
-        &a.client.export_group_sender_key_distribution(group, &a.id)?,
-    )?;
-    let identity = a.client.allocate_generated_identity(
-        "c",
-        crate::client::generated_identity::now_ms(),
-        false,
-    )?;
-    a.client.encrypt_generated_group_inner(
-        group,
-        &a.id,
-        identity,
-        &ramflux_protocol::message::Message { text: "group-body".into(), ..Default::default() },
-    )
-}
 
 fn friend(receiver: &mut Fixture, sender: &Fixture) -> Result<(), SdkError> {
     if receiver.client.account_db()?.friend_link("link").is_ok() {
@@ -519,25 +494,6 @@ async fn gate_on_receipt_route_opens() -> Result<(), SdkError> {
     .expect("scenario deadline")
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn gate_on_group_message_route_opens() -> Result<(), SdkError> {
-    Box::pin(tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        let (a, mut b) = pair(165, 166).await?;
-        let body = group_inner(&a, &b, "report-group")?;
-        let entry = seal_as(
-            &a,
-            &b,
-            message("report-group-msg", "c"),
-            &body,
-            Route::group_message("report-group"),
-        )?;
-        ramflux_node_core::check_entry_bound(&entry.envelope)
-            .map_err(|error| invalid(&error.to_string()))?;
-        opened_kind(&apply(&mut b, &entry).await?, &Kind::GroupMessage)
-    }))
-    .await
-    .expect("scenario deadline")
-}
 
 #[tokio::test(flavor = "current_thread")]
 async fn retired_opaque_own_device_body_cannot_build_envelope() -> Result<(), SdkError> {
@@ -884,18 +840,6 @@ async fn every_envelope_has_uniform_tag_and_commitment() -> Result<(), SdkError>
         uniform_tag_and_commitment(
             &seal_as(&a, &b, message("t07-control", "c"), &reset_inner(&a, &b)?, Route::control())?
                 .envelope,
-        )?;
-        let (a, b) = pair(193, 194).await?;
-        let group_body = group_inner(&a, &b, "t07-group")?;
-        uniform_tag_and_commitment(
-            &seal_as(
-                &a,
-                &b,
-                message("t07-group-msg", "c"),
-                &group_body,
-                Route::group_message("t07-group"),
-            )?
-            .envelope,
         )?;
         let (a, b) = pair(195, 196).await?;
         uniform_tag_and_commitment(

@@ -259,6 +259,7 @@ impl RamfluxClient {
         Ok(packet)
     }
 
+    #[allow(dead_code, reason = "MLS: allowance removed in P1-b")]
     pub(crate) fn own_group_copy_envelope(
         &self,
         group: &str,

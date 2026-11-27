@@ -28,6 +28,7 @@ mod session_fresh_tests;
 
 mod project;
 pub(crate) use committed::{Committed, conversation_watermark, object_watermark};
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 pub(crate) mod group_directory;
 #[cfg(test)]
 mod legacy;
@@ -228,14 +229,12 @@ impl Route {
     }
 }
 fn routing(message: &GatewayDirectMessage, route: Route) -> Routing {
-    let group_message_id =
-        matches!(&route.kind, Kind::GroupMessage).then(|| message.message_id.clone());
     Routing {
         kind: route.kind,
         attachments: route.attachments,
         group_id: route.group_id,
         conversation_id: message.conversation_id.clone(),
-        group_message_id,
+        group_message_id: None,
         message_id: message.envelope_id.clone(),
     }
 }
@@ -720,20 +719,7 @@ impl RamfluxClient {
         route: Route,
     ) -> Result<Routing, SdkError> {
         let mut route = routing(message, route);
-        if route.kind == Kind::GroupMessage {
-            route.group_message_id = Some(
-                self.outgoing_group_logical_id(&message.message_id)?
-                    .unwrap_or_else(|| message.message_id.clone()),
-            );
-        }
-        if route.kind == Kind::GroupControl
-            && let Some(group) = route.group_id.as_deref()
-            && let Some(link) = self.account_db()?.client_record("group", group)?
-            && let Some(conversation) =
-                link.get("conversation_id").and_then(serde_json::Value::as_str)
-        {
-            conversation.clone_into(&mut route.conversation_id);
-        }
+        refuse_removed_group_route(&route.kind)?;
         bind_generated_route_identity(&mut route, body);
         Ok(route)
     }
@@ -803,17 +789,8 @@ impl RamfluxClient {
         {
             return Err(invalid("invalid authenticated routing header"));
         }
-        if matches!(plaintext.routing.kind, Kind::GroupMessage | Kind::GroupControl)
-            && plaintext.routing.group_id.as_deref().is_none_or(str::is_empty)
-        {
-            return Err(invalid("missing authenticated group id"));
-        }
-        if let Some(id) = &plaintext.routing.group_message_id
-            && (plaintext.routing.kind != Kind::GroupMessage
-                || id.is_empty()
-                || id.len() > 256
-                || !ramflux_protocol::text_safety::single_line_is_safe(id))
-        {
+        refuse_removed_group_route(&plaintext.routing.kind)?;
+        if plaintext.routing.group_message_id.is_some() {
             return Err(invalid("invalid authenticated group message id"));
         }
         Ok(Opened {
@@ -859,10 +836,15 @@ fn bind_generated_route_identity(route: &mut Routing, body: &[u8]) {
         && let Some(identity) = inner.identity
     {
         route.message_id = ramflux_protocol::encode_base64url(identity.id);
-        if route.kind == Kind::GroupMessage {
-            route.group_message_id = Some(route.message_id.clone());
-        }
     }
+}
+
+/// The old group route kinds are refused on send and receive until the MLS group path lands.
+fn refuse_removed_group_route(kind: &Kind) -> Result<(), SdkError> {
+    if matches!(kind, Kind::GroupMessage | Kind::GroupControl) {
+        return Err(invalid("group routes are unavailable"));
+    }
+    Ok(())
 }
 
 fn invalid(message: &str) -> SdkError {

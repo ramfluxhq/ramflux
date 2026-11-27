@@ -37,10 +37,6 @@ struct Finish {
     background: bool,
 }
 
-struct PreparedGroupControls {
-    shared: Option<crate::client::shared_group::PreparedSharedGroup>,
-}
-
 struct ApplyOpts {
     prepared: Option<Result<super::PreparedInbound, SdkError>>,
 }
@@ -50,9 +46,6 @@ pub(crate) struct Commit<'a> {
     entry: &'a GatewayInboxEntry,
     body: &'a [u8],
     metadata: Option<&'a MessageMetadata>,
-    membership: Option<&'a (ramflux_protocol::GroupEvent, String)>,
-    shared_group: Option<&'a crate::client::shared_group::PreparedSharedGroup>,
-    local_target: Option<&'a str>,
     slots: &'a [crate::SdkObjectKeySlot],
     references: Vec<(
         &'a crate::dm::SdkDmAttachmentRef,
@@ -153,7 +146,7 @@ impl RamfluxClient {
                     reason: "route and generated id disagree".into(),
                 });
             }
-        } else if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
+        } else if opened.routing.kind == Kind::Direct {
             opened.routing.message_id = self.projection_id(entry, &opened.routing)?;
         }
         self.confirm_routed_context(&opened.routing, entry)?;
@@ -341,8 +334,7 @@ impl RamfluxClient {
                 .apply_contact_request_for::<JOINING>(engine, entry, prepared, persist)
                 .await;
         }
-        let (native_prepared, directory) =
-            self.prepare_routed_authority(engine, entry, prepared).await?;
+        let native_prepared = self.prepare_routed_authority(engine, entry, prepared).await?;
         let commit = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
         if let Some(delivery) = self.committed_routed_delivery(&commit, entry)? {
             return self.joined_cover::<JOINING>(persist, delivery);
@@ -365,9 +357,6 @@ impl RamfluxClient {
                 &entry.envelope.source_principal_id,
             )?;
         let consumed_slots = Vec::<crate::SdkObjectKeySlot>::new();
-        let groups = self
-            .prepare_routed_group_controls(engine, &opened, entry, &body, directory.as_ref())
-            .await?;
         let (plaintext, _) = persist(
             self,
             JoinedW1::Project(Commit {
@@ -375,9 +364,6 @@ impl RamfluxClient {
                 entry,
                 body: &body,
                 metadata: metadata.as_ref(),
-                membership: None,
-                shared_group: groups.shared.as_ref(),
-                local_target: Some(&engine.config().target_delivery_id),
                 slots: &consumed_slots,
                 references: Vec::new(),
                 receipt: &commit,
@@ -459,9 +445,8 @@ impl RamfluxClient {
         &self,
         engine: &impl GatewaySessionAccess,
         entry: &GatewayInboxEntry,
-        mut prepared: Option<super::PreparedInbound>,
-    ) -> Result<(bool, Option<super::ReceiveGroupDirectory>), SdkError> {
-        let directory = prepared.as_mut().and_then(|value| value.group_directory.take());
+        prepared: Option<super::PreparedInbound>,
+    ) -> Result<bool, SdkError> {
         let native_prepared = prepared.as_ref().is_some_and(|value| value.native_prepared);
         self.ensure_prepared_inbound_device(
             engine.config(),
@@ -469,7 +454,7 @@ impl RamfluxClient {
             prepared.map(|value| Ok(value.manifest)),
         )
         .await?;
-        Ok((native_prepared, directory))
+        Ok(native_prepared)
     }
 
     fn routed_committed_content(
@@ -477,7 +462,7 @@ impl RamfluxClient {
         routing: &Routing,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<GatewayPlaintextDelivery>, SdkError> {
-        if !matches!(routing.kind, Kind::Direct | Kind::GroupMessage)
+        if routing.kind != Kind::Direct
             || self
                 .direct_message_by_id(&routing.message_id)?
                 .is_some_and(|message| message.deleted)
@@ -505,10 +490,7 @@ impl RamfluxClient {
         route: &Routing,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
-        if matches!(route.kind, Kind::GroupMessage | Kind::GroupControl) {
-            ramflux_protocol::message::dm_scope::validate_group(&route.conversation_id)
-                .map_err(|_| invalid("group uses reserved DM namespace"))?;
-        } else if route.kind == Kind::Direct && route.conversation_id.starts_with("dm:") {
+        if route.kind == Kind::Direct && route.conversation_id.starts_with("dm:") {
             let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
             ramflux_protocol::message::dm_scope::validate_direct(
                 &route.conversation_id,
@@ -538,58 +520,13 @@ impl RamfluxClient {
                     "authenticated sender is not a direct conversation participant",
                 ));
             }
-            if (route.kind == Kind::Direct && kind == Some("group"))
-                || (matches!(route.kind, Kind::GroupMessage | Kind::GroupControl)
-                    && kind == Some("direct"))
-            {
+            if route.kind == Kind::Direct && kind == Some("group") {
                 return Err(invalid(
                     "authenticated routing kind conflicts with local conversation",
                 ));
             }
-            if matches!(route.kind, Kind::GroupMessage | Kind::GroupControl)
-                && let Some(group) =
-                    conversation.get("group_id").and_then(serde_json::Value::as_str)
-                && Some(group) != route.group_id.as_deref()
-            {
-                return Err(invalid("authenticated group conflicts with local conversation"));
-            }
-        }
-        if let Some(group) = route.group_id.as_deref()
-            && let Some(link) = self.account_db()?.client_record("group", group)?
-            && let Some(conversation) =
-                link.get("conversation_id").and_then(serde_json::Value::as_str)
-            && conversation != route.conversation_id
-        {
-            return Err(invalid("authenticated group conversation conflicts with local binding"));
         }
         Ok(())
-    }
-
-    async fn prepare_routed_group_controls(
-        &self,
-        engine: &impl GatewaySessionAccess,
-        opened: &Opened,
-        entry: &GatewayInboxEntry,
-        body: &[u8],
-        directory: Option<&super::ReceiveGroupDirectory>,
-    ) -> Result<PreparedGroupControls, SdkError> {
-        let shared = match directory {
-            Some(super::ReceiveGroupDirectory::Shared(evidence)) => {
-                self.prepare_shared_group_receive_with_directory(
-                    engine,
-                    opened,
-                    entry,
-                    body,
-                    Some(evidence),
-                )
-                .await?
-            }
-            _ => self.prepare_shared_group_receive(engine, opened, entry, body).await?,
-        };
-        if shared.is_none() && opened.routing.kind == Kind::GroupControl {
-            self.authorize_generated_group_control_body(entry, &opened.routing, body)?;
-        }
-        Ok(PreparedGroupControls { shared })
     }
 
     pub(super) fn commit_contact_request_bootstrap(
@@ -645,31 +582,11 @@ impl RamfluxClient {
         }
         // A malformed request cannot leave a cached root or device, pair state, consent,
         // or message projection behind. Candidate authentication preceded this transaction.
-        let root = manifest.principal_commitment.as_str();
-        let (cache_existed, floor_existed, first_seen) = {
-            let db = self.account_db()?;
-            (
-                db.actor_state_exists(&format!("contact-request/cache/{root}"))?,
-                db.contact_request_authority_floor(root, crate::time::now_unix_timestamp())?
-                    .is_some(),
-                db.client_record("identity", &manifest.principal_id)?.is_none(),
-            )
-        };
+        let first_seen =
+            self.account_db()?.client_record("identity", &manifest.principal_id)?.is_none();
         self.remember_contact_request_cache(manifest)?;
         self.persist_root_verified_directory(manifest)?;
         let opened = self.open_routed(entry, local)?;
-        if self.commit_stranger_group_invitation(&opened, entry, &receipt)? {
-            // The directory is real. The requester cache and its floor are not.
-            self.release_borrowed_contact_cache(root, cache_existed, floor_existed)?;
-            #[cfg(test)]
-            commit_fault::take(commit_fault::Kind::Bootstrap)?;
-            return Ok(Delivery {
-                routing: Some(opened.routing),
-                plaintext: None,
-                call_control: false,
-                pair_reply: None,
-            });
-        }
         if first_seen {
             // A requester's root comes from the network, never from an imported card.
             self.mark_lookup_root(&manifest.principal_id)?;
@@ -684,9 +601,6 @@ impl RamfluxClient {
             entry,
             body: &opened.body,
             metadata: None,
-            membership: None,
-            shared_group: None,
-            local_target: None,
             slots: &[],
             references: Vec::new(),
             receipt: &receipt,
@@ -704,57 +618,6 @@ impl RamfluxClient {
         })
     }
 
-    fn commit_stranger_group_invitation(
-        &self,
-        opened: &Opened,
-        entry: &GatewayInboxEntry,
-        receipt: &str,
-    ) -> Result<bool, SdkError> {
-        let Some(invitation) = self.stranger_invitation_packet(&opened.routing, &opened.body)?
-        else {
-            return Ok(false);
-        };
-        let own = self.owned_device_identity()?;
-        let trusted = self.trusted_device(HeadUse::NewAuthorization, &own)?;
-        let target = trusted
-            .get("target_delivery_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| invalid("group receive target is absent"))?
-            .to_owned();
-        self.confirm_routed_context(&opened.routing, entry)?;
-        self.persist_routed_projection(Commit {
-            opened,
-            entry,
-            body: &opened.body,
-            metadata: None,
-            membership: None,
-            shared_group: Some(&invitation),
-            local_target: Some(&target),
-            slots: &[],
-            references: Vec::new(),
-            receipt,
-            consume_erased: false,
-            contact_held: false,
-        })?;
-        Ok(true)
-    }
-
-    fn release_borrowed_contact_cache(
-        &self,
-        root: &str,
-        cache_existed: bool,
-        floor_existed: bool,
-    ) -> Result<(), SdkError> {
-        if cache_existed {
-            return Ok(());
-        }
-        let db = self.account_db()?;
-        db.remove_actor_state(&format!("contact-request/cache/{root}"))?;
-        if !floor_existed {
-            db.release_contact_request_authority_floor(root)?;
-        }
-        Ok(())
-    }
 
     /// A content refusal still consumes its authenticated pair ciphertext. This joins the
     /// terminal receive transaction so a refused first packet cannot strand its successor.
@@ -787,9 +650,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         body: &[u8],
     ) -> Result<(), SdkError> {
-        if self.friend_rejection_reason(opened.remote_device.root_commitment())?.is_none()
-            || matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
-        {
+        if self.friend_rejection_reason(opened.remote_device.root_commitment())?.is_none() {
             self.commit_bootstrap_sequence(
                 &opened.local_device,
                 &opened.remote_device,
@@ -863,33 +724,19 @@ impl RamfluxClient {
             entry,
             body,
             metadata,
-            membership,
-            shared_group,
-            local_target,
             slots,
             receipt,
             references,
             consume_erased,
             contact_held: _,
         } = context;
-        if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage)
+        if opened.routing.kind == Kind::Direct
             && self.account_db()?.message_is_deleted(&opened.routing.message_id)?
         {
             self.persist_routed_seen(entry)?;
             return Ok((None, Vec::new(), false));
         }
         let mut admitted = Vec::new();
-        let deferred_group = deferred_generated_group(shared_group, body);
-        if let Some(shared) = shared_group.filter(|_| deferred_group.is_none()) {
-            self.apply_authorized_prepared_shared_group(shared, opened, entry, local_target)?;
-        }
-        if let Some((event, key)) = membership {
-            self.apply_bootstrap_group_member_join_event(
-                event,
-                &entry.envelope.source_device_id,
-                key,
-            )?;
-        }
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         if opened.routing.kind == Kind::Direct
             && self.friend_rejection_reason(source.root_commitment())?.is_none()
@@ -930,10 +777,6 @@ impl RamfluxClient {
             }
             self.project_routed(opened, entry, body, metadata)?
         };
-        // Generated control origin/identity/route authority precedes its native effect.
-        if let Some(shared) = deferred_group {
-            self.apply_authorized_prepared_shared_group(shared, opened, entry, local_target)?;
-        }
         self.finish_generated_projection(opened, entry)?;
         self.commit_routed_pair_context(opened, entry, body)?;
         self.remember_typing_conversation(opened, entry)?;
@@ -941,7 +784,7 @@ impl RamfluxClient {
         for slot in slots {
             self.persist_message_slot_receipt(&opened.routing.message_id, slot)?;
         }
-        if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
+        if opened.routing.kind == Kind::Direct {
             self.persist_projection_owner(entry, &opened.routing.message_id)?;
             self.account_db()?.persist_actor_state(
                 &format!("routed/message-metadata/{}", opened.routing.message_id),
@@ -957,21 +800,6 @@ impl RamfluxClient {
             commit_fault::take(commit_fault::projection(&opened.routing.kind))?;
         }
         Ok((plaintext, admitted, pending))
-    }
-
-    fn apply_authorized_prepared_shared_group(
-        &self,
-        shared: &crate::client::shared_group::PreparedSharedGroup,
-        opened: &Opened,
-        entry: &GatewayInboxEntry,
-        local_target: Option<&str>,
-    ) -> Result<(), SdkError> {
-        self.authorize_prepared_shared_group(shared, entry, &opened.routing)?;
-        self.apply_prepared_shared_group(
-            shared,
-            local_target.ok_or_else(|| invalid("group receive target is absent"))?,
-        )?;
-        Ok(())
     }
 
     fn persist_routed_marker(
@@ -1044,16 +872,6 @@ impl RamfluxClient {
         )?;
         self.persist_routed_seen(entry)
     }
-}
-
-fn deferred_generated_group<'a>(
-    shared: Option<&'a crate::client::shared_group::PreparedSharedGroup>,
-    body: &[u8],
-) -> Option<&'a crate::client::shared_group::PreparedSharedGroup> {
-    shared.filter(|_| {
-        ramflux_protocol::message::validation::scan_inner(body)
-            .is_ok_and(|scanned| scanned.kind == 8)
-    })
 }
 
 fn routed_message_metadata(

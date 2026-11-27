@@ -100,45 +100,6 @@ impl Fixture {
         self.client.persist_observed_identity_directory_now(&self.manifest()?)?;
         Ok(())
     }
-    fn create_shared_group(
-        &self,
-        group: &str,
-        conversation: &str,
-    ) -> Result<ramflux_crypto::VerifiedGroupState, SdkError> {
-        let native = self.native.as_ref().ok_or_else(|| invalid("native group fixture"))?;
-        let primary = self
-            .client
-            .born_v3_account
-            .as_ref()
-            .ok_or(SdkError::CustodySetupInvalid)?
-            .group_primary(native.vault.as_ref())?;
-        self.client.shared_group_create_with_primary(
-            group,
-            conversation,
-            None,
-            &self.config()?.target_delivery_id,
-            Some(&primary),
-        )
-    }
-    fn change_shared_group(
-        &self,
-        group: &str,
-        change: ramflux_protocol::GroupStateChange,
-    ) -> Result<ramflux_crypto::VerifiedGroupState, SdkError> {
-        let native = self.native.as_ref().ok_or_else(|| invalid("native group fixture"))?;
-        let primary = self
-            .client
-            .born_v3_account
-            .as_ref()
-            .ok_or(SdkError::CustodySetupInvalid)?
-            .group_primary(native.vault.as_ref())?;
-        self.client.shared_group_change_with_primary(
-            group,
-            &self.config()?.target_delivery_id,
-            change,
-            Some(&primary),
-        )
-    }
     fn manifest(&self) -> Result<SdkDeviceManifestResponse, SdkError> {
         if let Some(native) = &self.native {
             return Ok(native.manifest.clone());
@@ -197,25 +158,6 @@ fn fixture_peer_reference(client: &RamfluxClient, principal: &str) -> Result<Str
         .as_str()
         .ok_or_else(|| invalid("fixture peer root"))?;
     Ok(ramflux_protocol::qualified_device_id(root, principal)?)
-}
-// Fixture callers name the intended member explicitly; no directory name lookup grants authority.
-fn fixture_member(client: &RamfluxClient, group: &str, member: &Fixture) -> Result<(), SdkError> {
-    let manifest = member.manifest()?;
-    client.observe_device_manifest_json(
-        serde_json::to_value(&manifest)?,
-        &manifest.principal_commitment,
-    )?;
-    client.add_group_member(group, &member.reference()?, "member")?;
-    Ok(())
-}
-fn fixture_group(client: &RamfluxClient, group: &str, owner: &Fixture) -> Result<(), SdkError> {
-    let manifest = owner.manifest()?;
-    client.observe_device_manifest_json(
-        serde_json::to_value(&manifest)?,
-        &manifest.principal_commitment,
-    )?;
-    client.create_group(group, &owner.reference()?)?;
-    Ok(())
 }
 fn message(id: &str, conversation: &str) -> GatewayDirectMessage {
     GatewayDirectMessage {
@@ -616,69 +558,6 @@ impl ramflux_transport::GatewaySessionFrameSource for NoNetwork {
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn group_control_and_message_route_without_conversation_hint_and_reject_conflicting_link()
--> Result<(), SdkError> {
-    use ramflux_protocol::message as g;
-    let a = Fixture::native_named("alice", 101).await?;
-    let mut b = Fixture::native_named("bob", 111).await?;
-    let group = "private-group";
-    let conversation = "private-group-conversation";
-    effect_marker_tests::group_ready(&a, &mut b, group)?;
-    let control = effect_marker_tests::group_control_entry(&a, &b, group, conversation)?;
-    let outer = serde_json::to_string(&control)?;
-    assert!(!outer.contains(conversation));
-    assert!(!outer.contains(group));
-    let mut engine = GatewaySessionEngine::with_test_transport(b.config()?, Box::new(NoNetwork));
-    let delivery = b.client.apply_routed_entry(&mut engine, &review::pool()?, &control).await?;
-    assert_eq!(delivery.routing.ok_or_else(|| invalid("control route"))?.kind, Kind::GroupControl);
-    let identity = a.client.allocate_generated_identity(
-        conversation,
-        crate::client::generated_identity::now_ms(),
-        false,
-    )?;
-    let id = ramflux_protocol::encode_base64url(&identity.id);
-    let exact = a.client.encrypt_generated_group_inner(
-        group,
-        &a.id,
-        identity,
-        &g::Message { text: "private group text".into(), ..Default::default() },
-    )?;
-    let mut entry =
-        effect_marker_tests::generated_control_entry(&a, &b, &exact, Route::group_message(group))?;
-    entry.inbox_seq = 2;
-    let delivery = b.client.apply_routed_entry(&mut engine, &review::pool()?, &entry).await?;
-    assert_eq!(delivery.routing.ok_or_else(|| invalid("message route"))?.kind, Kind::GroupMessage);
-    assert_eq!(
-        b.client.generated_message_detail(conversation, &id)?.message.text.as_deref(),
-        Some("private group text")
-    );
-    let mut metadata = b
-        .client
-        .account_db()?
-        .client_record("group", group)?
-        .ok_or_else(|| invalid("group record"))?;
-    metadata["conversation_id"] = serde_json::json!("conflicting-conversation");
-    metadata["conversation_ids"] = serde_json::json!(["conflicting-conversation"]);
-    b.client.account_db()?.persist_client_record("group", group, &metadata)?;
-    let identity = a.client.allocate_generated_identity(
-        conversation,
-        crate::client::generated_identity::now_ms(),
-        false,
-    )?;
-    let exact = a.client.encrypt_generated_group_inner(
-        group,
-        &a.id,
-        identity,
-        &g::Message { text: "second group text".into(), ..Default::default() },
-    )?;
-    let mut next =
-        effect_marker_tests::generated_control_entry(&a, &b, &exact, Route::group_message(group))?;
-    next.inbox_seq = 3;
-    assert!(b.client.apply_routed_entry(&mut engine, &review::pool()?, &next).await.is_err());
-    assert_eq!(b.client.direct_chat_messages(conversation)?.len(), 1);
-    Ok(())
-}
 
 struct ReceivingGateway {
     queued: VecDeque<GatewayServerFrame>,
@@ -919,82 +798,6 @@ fn r5_direct_messages_cannot_preclaim_group_ids() -> Result<(), SdkError> {
     let entry = seal(&alice, &bob, message("wire", "thread"), b"hello")?;
     let direct = bob.client.projection_id_for(&entry, "groupmsg:reserved")?;
     assert!(direct.starts_with("routed:"));
-    Ok(())
-}
-#[test]
-fn r5_legacy_group_messages_have_a_seven_day_upgrade_window() -> Result<(), SdkError> {
-    let alice = Fixture::new("alice", 11)?;
-    let bob = Fixture::new("bob", 21)?;
-    let entry = seal(&alice, &bob, message("wire", "thread"), b"hello")?;
-    let mut route = routing(&message("legacy", "thread"), Route::group_message("g"));
-    route.group_message_id = None;
-    let legacy = entry.clone();
-    let start = legacy.envelope.created_at;
-    let installed = bob
-        .client
-        .account_db()?
-        .load_actor_state::<i64>("group-message/upgrade-start")?
-        .ok_or(SdkError::IdentityRootMissing)?;
-    assert!(installed <= start);
-    bob.client.account_db()?.persist_actor_state("group-message/upgrade-start", &start)?;
-    let actual = bob.client.projection_id(&legacy, &route)?;
-    let source = bob.client.authenticated_device_identity(HeadUse::NewAuthorization, &legacy)?;
-    assert_eq!(
-        actual,
-        ramflux_protocol::group_message_id(
-            "g",
-            source.root_commitment(),
-            source.device_id(),
-            &legacy.envelope.envelope_id
-        )?
-    );
-    bob.client
-        .account_db()?
-        .persist_actor_state("group-message/upgrade-start", &(start - 8 * 86400))?;
-    assert!(bob.client.projection_id(&legacy, &route).is_err());
-    route.group_message_id = Some("modern".into());
-    assert!(bob.client.projection_id(&legacy, &route).is_ok());
-    Ok(())
-}
-#[tokio::test]
-async fn r5_outsider_controls_are_rejected_before_directory_io() -> Result<(), SdkError> {
-    use crate::client::shared_group::{GroupControlBody, GroupControlPacket};
-    let outsider = Box::pin(Fixture::native("alice", 11)).await?;
-    let owner = Box::pin(Fixture::native("bob", 21)).await?;
-    owner.create_shared_group("g", "thread")?;
-    let entry = seal(&outsider, &owner, message("outsider", "thread"), b"hello")?;
-    let packet = GroupControlPacket::new(GroupControlBody::DeviceSet {
-        group_id: "g".into(),
-        actor: outsider.client.owned_group_actor(&outsider.config()?.target_delivery_id)?,
-        device_set_epoch: 1,
-    });
-    let engine = GatewaySessionEngine::with_test_transport(owner.config()?, Box::new(NoNetwork));
-    let route = routing(&message("outsider", "thread"), Route::group_control("g"));
-    assert!(matches!(
-        owner.client.prepare_group_control(&engine, &entry, &route, &packet).await,
-        Err(SdkError::Storage(StorageError::GroupPermissionDenied))
-    ));
-    let outsider_actor =
-        outsider.client.owned_group_actor(&outsider.config()?.target_delivery_id)?;
-    owner.change_shared_group(
-        "g",
-        ramflux_protocol::GroupStateChange::Add {
-            member: outsider_actor.identity,
-            role: ramflux_protocol::SharedGroupRole::Member,
-        },
-    )?;
-    let key =
-        format!("group-control:{}", outsider.client.owned_device_identity()?.root_commitment());
-    for _ in 0..32 {
-        assert!(owner.client.account_db()?.charge_contact_request(
-            &key,
-            32,
-            60,
-            now_unix_timestamp()
-        )?);
-    }
-    assert!(matches!(owner.client.prepare_group_control(&engine, &entry, &route, &packet).await,
-        Err(SdkError::InboundPending(reason)) if reason == "group control source rate exceeded"));
     Ok(())
 }
 

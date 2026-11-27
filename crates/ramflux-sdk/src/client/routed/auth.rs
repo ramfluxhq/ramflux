@@ -16,6 +16,7 @@ pub(crate) struct PreparedInbound {
     pub manifest: Option<crate::prekey::SdkDeviceManifestResponse>,
     pub native_prepared: bool,
 
+    #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
     pub group_directory: Option<super::ReceiveGroupDirectory>,
     pub candidate: Option<crate::prekey::SdkDeviceManifestResponse>,
 }

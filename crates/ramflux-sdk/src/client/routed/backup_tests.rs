@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 //! Native restore starts fresh outbound chains and retains authenticated delayed receive state.
-use super::review::trust;
 use super::*;
 use ramflux_storage::BackupDatabase;
 
@@ -77,117 +76,8 @@ async fn first_native_post_restore_dm_is_fresh_and_the_live_peer_keeps_delayed_o
     Ok(())
 }
 
-fn group_message(
-    source: &Fixture,
-    target: &Fixture,
-    text: &str,
-) -> Result<GeneratedDelivery, SdkError> {
-    let conversation = "restored-group-conversation";
-    let identity = source.client.allocate_generated_identity(
-        conversation,
-        crate::client::generated_identity::now_ms(),
-        false,
-    )?;
-    let message = ramflux_protocol::encode_base64url(&identity.id);
-    let exact = source.client.encrypt_generated_group_inner(
-        "restored-group",
-        &source.id,
-        identity,
-        &ramflux_protocol::message::Message { text: text.into(), ..Default::default() },
-    )?;
-    let entry = super::effect_marker_tests::generated_control_entry(
-        source,
-        target,
-        &exact,
-        Route::group_message("restored-group"),
-    )?;
-    Ok(GeneratedDelivery { conversation: conversation.into(), message, entry })
-}
-async fn group_key(source: &Fixture, target: &mut Fixture) -> Result<Vec<u8>, SdkError> {
-    let distribution =
-        source.client.export_group_sender_key_distribution("restored-group", &source.id)?;
-    let entry = super::effect_marker_tests::group_control_entry(
-        source,
-        target,
-        "restored-group",
-        "restored-group-conversation",
-    )?;
-    receive_generated(target, &entry).await?;
-    Ok(distribution)
-}
 
-#[tokio::test]
-async fn native_restored_group_rotates_its_chain_and_preserves_delayed_old_messages()
--> Result<(), SdkError> {
-    let alice = Fixture::native_named("alice", 41).await?;
-    let mut bob = Fixture::native_named("bob", 61).await?;
-    trust(&alice, &bob)?;
-    trust(&bob, &alice)?;
-    super::effect_marker_tests::group_ready(&alice, &mut bob, "restored-group")?;
-    let old_distribution = group_key(&alice, &mut bob).await?;
-    let first = group_message(&alice, &bob, "old zero")?;
-    receive_generated(&mut bob, &first.entry).await?;
-    let delayed = group_message(&alice, &bob, "late old message")?;
-    archive_native(&alice)?;
-    let new_distribution = group_key(&alice, &mut bob).await?;
-    assert_ne!(old_distribution, new_distribution, "archive must retire the outbound group chain");
-    let fresh = group_message(&alice, &bob, "fresh group message")?;
-    receive_generated(&mut bob, &fresh.entry).await?;
-    receive_generated(&mut bob, &delayed.entry).await?;
-    assert_eq!(
-        bob.client
-            .generated_message_detail(&fresh.conversation, &fresh.message)?
-            .message
-            .text
-            .as_deref(),
-        Some("fresh group message")
-    );
-    assert_eq!(
-        bob.client
-            .generated_message_detail(&delayed.conversation, &delayed.message)?
-            .message
-            .text
-            .as_deref(),
-        Some("late old message")
-    );
-    receive_generated(&mut bob, &fresh.entry).await?;
-    assert_eq!(
-        bob.client.direct_chat_messages(&fresh.conversation)?.len(),
-        3,
-        "replay duplicated group history"
-    );
-    Ok(())
-}
 
-#[tokio::test]
-async fn signed_native_group_distribution_cannot_replace_known_secret_under_the_same_chain_id()
--> Result<(), SdkError> {
-    let alice = Fixture::native_named("alice", 41).await?;
-    let mut bob = Fixture::native_named("bob", 61).await?;
-    trust(&alice, &bob)?;
-    trust(&bob, &alice)?;
-    super::effect_marker_tests::group_ready(&alice, &mut bob, "restored-group")?;
-    let original = group_key(&alice, &mut bob).await?;
-    let mut forged: crate::group::SdkGroupSenderKeyDistribution =
-        serde_json::from_slice(&original)?;
-    forged.sender_key_seed[0] ^= 1;
-    assert!(
-        bob.client.import_group_sender_key_distribution(&serde_json::to_vec(&forged)?).is_err(),
-        "changed native secret was accepted"
-    );
-    bob.client.import_group_sender_key_distribution(&original)?;
-    let sent = group_message(&alice, &bob, "original still works")?;
-    receive_generated(&mut bob, &sent.entry).await?;
-    assert_eq!(
-        bob.client
-            .generated_message_detail(&sent.conversation, &sent.message)?
-            .message
-            .text
-            .as_deref(),
-        Some("original still works")
-    );
-    Ok(())
-}
 
 #[tokio::test]
 async fn native_data_merge_rebootstraps_without_reusing_the_archived_outbound_ratchet()

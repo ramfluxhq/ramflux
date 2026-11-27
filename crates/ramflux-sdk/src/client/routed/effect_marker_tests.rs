@@ -161,50 +161,7 @@ fn friend(receiver: &mut Fixture, sender: &Fixture) -> Result<(), SdkError> {
     Ok(())
 }
 
-pub(super) fn group_ready(
-    sender: &Fixture,
-    receiver: &mut Fixture,
-    group: &str,
-) -> Result<(), SdkError> {
-    friend(receiver, sender)?;
-    sender.create_shared_group(group, &format!("{group}-conversation"))?;
-    let member =
-        receiver.client.owned_group_actor(&receiver.config()?.target_delivery_id)?.identity;
-    let state = sender.change_shared_group(
-        group,
-        ramflux_protocol::GroupStateChange::Add {
-            member,
-            role: ramflux_protocol::SharedGroupRole::Member,
-        },
-    )?;
-    receiver.client.accept_shared_group_state(&state, &receiver.config()?.target_delivery_id)?;
-    Ok(())
-}
 
-pub(super) fn group_control_entry(
-    sender: &Fixture,
-    receiver: &Fixture,
-    group: &str,
-    conversation: &str,
-) -> Result<GatewayInboxEntry, SdkError> {
-    let distribution = ramflux_protocol::parse_i_json(
-        &sender.client.export_group_sender_key_distribution(group, &sender.id)?,
-    )?;
-    let epoch = sender
-        .client
-        .account_db()?
-        .shared_group_state(group)?
-        .ok_or_else(|| invalid("group state"))?
-        .view()
-        .epoch;
-    let exact = sender.client.generated_group_key_inner(
-        conversation,
-        epoch,
-        &distribution,
-        &receiver.client.owned_device_identity()?,
-    )?;
-    generated_control_entry(sender, receiver, &exact, Route::group_control(group))
-}
 
 /// Kill before the named W1 commit, reopen equals pre-state; success then reopen equals post-state.
 async fn cut(
@@ -261,14 +218,6 @@ async fn atomic() -> Result<(), SdkError> {
         .client
         .generated_direct_conversation_id(&receiver.client.owned_device_identity()?)?;
     cut(&mut receiver, &entry, &scope, commit_fault::Kind::Control).await?;
-
-    let sender = Fixture::native_named("alice", 241).await?;
-    let mut receiver = Fixture::native_named("bob", 251).await?;
-    group_ready(&sender, &mut receiver, "private-group")?;
-    let entry =
-        group_control_entry(&sender, &receiver, "private-group", "private-group-conversation")?;
-    cut(&mut receiver, &entry, "private-group-conversation", commit_fault::Kind::GroupControl)
-        .await?;
 
     bootstrap(commit_fault::Kind::Bootstrap).await?;
     Ok(())
@@ -348,19 +297,6 @@ async fn redrive() -> Result<(), SdkError> {
     friend(&mut receiver, &sender)?;
     let sent = generated_delivery(&sender, &receiver, "redrive-pair", "once")?;
     redrive_kind(&mut receiver, &sent.entry, &sent.conversation, commit_fault::Kind::Pair).await?;
-
-    let sender = Fixture::native_named("alice", 111).await?;
-    let mut receiver = Fixture::native_named("bob", 121).await?;
-    group_ready(&sender, &mut receiver, "redrive-group")?;
-    let entry =
-        group_control_entry(&sender, &receiver, "redrive-group", "redrive-group-conversation")?;
-    redrive_kind(
-        &mut receiver,
-        &entry,
-        "redrive-group-conversation",
-        commit_fault::Kind::GroupControl,
-    )
-    .await?;
 
     bootstrap_redrive().await?;
     crate::client::application_outbox::projection_stage_redrive::projection_stage_redrive()?;

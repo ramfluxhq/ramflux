@@ -161,31 +161,10 @@ impl RamfluxClient {
     }
     pub(crate) fn capture_own_authored_group(
         &self,
-        group: &str,
-        sender: &str,
-        exact: &[u8],
+        _group: &str,
+        _sender: &str,
+        _exact: &[u8],
     ) -> Result<(), SdkError> {
-        let Ok(scanned) = g::validation::scan_inner(exact) else { return Ok(()) };
-        if !matches!(scanned.kind, 1 | 3) {
-            return Ok(());
-        }
-        let inner = g::Inner::decode(exact).map_err(|_| invalid("authored group Inner invalid"))?;
-        let identity = inner.identity.ok_or_else(|| invalid("authored group identity missing"))?;
-        let event = ramflux_protocol::encode_base64url(&identity.id);
-        let envelope =
-            self.own_group_copy_envelope(group, &identity.conversation_id, &event, None)?;
-        let recipients = self.group_state(group)?.members.into_iter().collect::<Vec<_>>();
-        self.capture_own_authored_revision(OwnSentInput {
-            envelope: &envelope,
-            conversation: &identity.conversation_id,
-            message: &event,
-            sender,
-            original_recipients: &recipients,
-            group: Some(group),
-            peer: None,
-            body: exact,
-            ciphertext: &[],
-            at: crate::time::now_unix_timestamp(),
-        })
+        Err(invalid("group own-sent capture is unavailable"))
     }
 }

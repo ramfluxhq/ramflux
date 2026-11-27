@@ -7,6 +7,7 @@ use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::message::{self as g, original_header::EvidenceError};
 use serde::{Deserialize, Serialize};
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod group;
 #[cfg(test)]
 mod group_golden_tests;

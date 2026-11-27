@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Authored structural events use the generated carrier and existing native projection rules.
-use super::{Kind, RamfluxClient, Route, SealPair, invalid};
+use super::{RamfluxClient, Route, SealPair, invalid};
 use crate::prelude::*;
 use ramflux_protocol::message as g;
 
@@ -55,24 +55,18 @@ impl RamfluxClient {
         {
             return Err(invalid("conversation event differs from authenticated author or wire"));
         }
-        let route = identity.group_id.as_deref().map_or_else(Route::direct, Route::group_message);
+        if identity.group_id.is_some() {
+            return Err(invalid("group conversation events are unavailable"));
+        }
+        let route = Route::direct();
         self.current_custody_authority(local.root_commitment(), crate::custody::network_now()?)?
             .ok_or(SdkError::NetworkingPending)?;
-        if route.kind == Kind::Direct {
-            let root = message
-                .recipient_principal_commitment
-                .as_deref()
-                .ok_or_else(|| invalid("conversation peer root absent"))?;
-            if !self.friend_link_peer_is_accepted(root)? {
-                return Err(SdkError::LocalBusPermissionDenied);
-            }
-        } else if let Some(group) = identity.group_id.as_deref() {
-            self.require_generated_group_epoch(
-                group,
-                &local,
-                identity.group_epoch.ok_or_else(|| invalid("group epoch absent"))?,
-                false,
-            )?;
+        let root = message
+            .recipient_principal_commitment
+            .as_deref()
+            .ok_or_else(|| invalid("conversation peer root absent"))?;
+        if !self.friend_link_peer_is_accepted(root)? {
+            return Err(SdkError::LocalBusPermissionDenied);
         }
         message.message_id = ramflux_protocol::encode_base64url(&identity.id);
         let (mut session, header, bundle) = self.send_pair_session(engine, &message).await?;
@@ -115,11 +109,7 @@ impl RamfluxClient {
                 wire,
             })?;
             // Edit retirement erases old payload graphs. Capture/queue the accepted revision after it.
-            if let Some(group) = identity.group_id.as_deref() {
-                self.capture_own_authored_group(group, &message.sender_id, exact)?;
-            } else {
-                self.capture_own_authored_direct(&message, exact)?;
-            }
+            self.capture_own_authored_direct(&message, exact)?;
             if matches!(content.value, Some(g::content::Value::Reaction(_))) {
                 self.stage_authored_conversation_reaction(&message, &identity, exact, recipients)?;
             }
@@ -255,23 +245,9 @@ impl RamfluxClient {
 
     pub(crate) fn wrap_conversation_group_reply(
         &self,
-        identity: &g::EventIdentity,
-        exact: &[u8],
+        _identity: &g::EventIdentity,
+        _exact: &[u8],
     ) -> Result<Vec<u8>, SdkError> {
-        let (source, content) = Self::decode_generated_inner(exact)?;
-        if source != *identity {
-            return Err(invalid("group reply identity mismatch"));
-        }
-        let group = identity.group_id.as_deref().ok_or_else(|| invalid("group absent"))?;
-        let author = identity.author.clone().ok_or_else(|| invalid("author absent"))?;
-        let Some(g::content::Value::Message(message)) = content.value else {
-            return Err(invalid("reply Message absent"));
-        };
-        self.capture_own_authored_group(group, &author.device_id, exact)?;
-        let wrapper = self.encrypt_generated_group_message(group, &author.device_id, &message)?;
-        Self::encode_generated_inner(
-            identity.clone(),
-            &g::Content { value: Some(g::content::Value::Message(wrapper)) },
-        )
+        Err(invalid("group conversation replies are unavailable"))
     }
 }

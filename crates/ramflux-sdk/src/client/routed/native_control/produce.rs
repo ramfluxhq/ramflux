@@ -4,7 +4,7 @@
 //! Sender side of peer controls 5/9/11/12: build the typed Control Inner once per logical
 //! operation and capture its exact bytes durably, so a retry resends the same event identity.
 //! The active transport callers send these retained bytes through the shared pair sealer.
-use super::{a2i, content, group_key, guardian};
+use super::{a2i, content, guardian};
 use crate::client::recovery::{SdkGuardianAcceptMessage, SdkGuardianInviteMessage};
 use crate::{RamfluxClient, SdkError, SdkGroupSenderKeyDistribution};
 use prost::Message as _;
@@ -108,65 +108,12 @@ impl RamfluxClient {
     /// Refuses a distribution this device did not author or a failed native check.
     pub fn generated_group_key_inner(
         &self,
-        conversation: &str,
-        group_epoch: u64,
-        distribution: &SdkGroupSenderKeyDistribution,
-        recipient_device: &ramflux_crypto::RootQualifiedDeviceRef,
+        _conversation: &str,
+        _group_epoch: u64,
+        _distribution: &SdkGroupSenderKeyDistribution,
+        _recipient_device: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-        if distribution.sender_id != self.owned_device_identity()?.device_id() {
-            return Err(content("group key producer must be its sender"));
-        }
-        let payload = g::control::Payload::GroupKeyControl(g::GroupKeyControl {
-            schema: group_key::WRAPPER_SCHEMA.into(),
-            version: 1,
-            membership_event: None,
-            actor_manifest_url: None,
-            distribution: Some(group_key::generated_distribution(distribution)),
-        });
-        let g::control::Payload::GroupKeyControl(key) = &payload else {
-            return Err(content("group key payload missing"));
-        };
-        group_key::distribution(key)?;
-        let own = self.owned_device_identity()?;
-        if distribution.group_key_epoch != group_epoch
-            || self.current_group_key_head(&distribution.group_id, group_epoch)?
-                != distribution.group_state_hash
-        {
-            return Err(content("group key producer requires the verified current head"));
-        }
-        let state = self
-            .account_db()?
-            .shared_group_state(&distribution.group_id)?
-            .ok_or_else(|| content("verified group state missing"))?;
-        if state.view().conversation_id != conversation {
-            return Err(content(
-                "group key producer conversation differs from verified group state",
-            ));
-        }
-        self.require_generated_group_epoch(&distribution.group_id, &own, group_epoch, false)?;
-        self.require_generated_group_epoch(
-            &distribution.group_id,
-            recipient_device,
-            group_epoch,
-            false,
-        )?;
-        Self::verify_group_distribution_auth(distribution, &own)?;
-        // A restored sender may rotate its chain without changing the signed group head.
-        let terms = Zeroizing::new(ramflux_protocol::canonical_json_bytes(distribution)?);
-        let revision =
-            ramflux_crypto::blake3_256_base64url("ramflux.group-key.local-operation.v1", &terms);
-        self.produce_generated_peer_control(
-            conversation,
-            Some((&distribution.group_id, group_epoch)),
-            payload,
-            &format!(
-                "group-key/{}/{}/{}/{}",
-                distribution.group_id,
-                distribution.group_key_epoch,
-                recipient_device.storage_key(),
-                revision
-            ),
-        )
+        Err(content("group key control is unavailable"))
     }
 
     /// `CONTROL_RECOVERY` invite. Records the issued invite so a later accept can be bound.

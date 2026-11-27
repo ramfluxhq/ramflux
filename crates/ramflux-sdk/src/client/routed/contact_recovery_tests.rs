@@ -237,43 +237,6 @@ async fn a_card_preserves_existing_local_display_and_kind_even_when_signed_field
 }
 
 #[tokio::test]
-async fn a_rejected_contact_resolution_keeps_the_group_key_change_observation()
--> Result<(), SdkError> {
-    let (_a, _b, fake, _d, _origin, mut s, _old) = Box::pin(lying_lookup()).await?;
-    let original = fake.manifest.clone();
-    let pinned_device = RamfluxClient::device_identity_from_manifest(&original, "bob")?;
-    client(&s)?.create_group("pinned", "alice")?;
-    client(&s)?.add_group_member("pinned", pinned_device.storage_key(), "member")?;
-    let db = client(&s)?.account_db()?;
-    db.persist_group_member_device_key(
-        "pinned",
-        &pinned_device,
-        &original.devices[0].branch_public_key,
-    )?;
-    db.bind_group_member_key_identity(
-        "pinned",
-        &pinned_device,
-        "bob",
-        &original.principal_commitment,
-        &original.devices[0].branch_public_key,
-    )?;
-    let link = client(&s)?.friend_links()?[0].link_id.clone();
-    client(&s)?.remove_friend_link(&link, "both")?;
-    let signed = card(&mut s).await?;
-    assert!(call(&mut s, "alice", "contact.add", json!({"card":signed})).await.is_err());
-    let db = client(&s)?.account_db()?;
-    let group = db.client_record("group", "pinned")?.ok_or_else(|| invalid("group"))?;
-    assert_eq!(group["safety_change"]["reason"], "pinned_group_member_key_changed");
-    assert!(db.journal_after(0, 128)?.iter().any(|e| e.topic == "safety.changed"));
-    assert!(client(&s)?.friend_links()?.iter().all(|link| link.state != "accepted"));
-    assert_eq!(
-        db.client_record("device", pinned_device.storage_key())?
-            .ok_or_else(|| invalid("device"))?["signing_public_key"],
-        original.devices[0].branch_public_key
-    );
-    Ok(())
-}
-#[tokio::test]
 async fn principal_add_and_accept_use_the_same_link_id_for_both_sides() -> Result<(), SdkError> {
     let mut a = Native::named("alice", "alice", "alice").await.map_err(native_account)?;
     let mut b = Native::named("bob", "bob", "bob").await.map_err(native_account)?;

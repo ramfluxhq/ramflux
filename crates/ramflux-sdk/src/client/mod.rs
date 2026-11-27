@@ -45,6 +45,7 @@ pub(crate) mod generated_control;
 mod generated_delete_fence;
 mod generated_edit_retirement;
 mod generated_fields;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 pub(crate) mod generated_group;
 mod generated_history;
 mod generated_identity;
@@ -52,15 +53,20 @@ mod generated_pending_edit;
 mod generated_receipts;
 mod generated_restore;
 pub(crate) mod generated_surface;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 pub mod group;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod group_control_roots;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 pub mod group_delivery;
 mod group_distribution_auth;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod group_identity;
 mod group_key_safety;
 #[cfg(test)]
 #[cfg(test)]
 pub(crate) mod group_quarantine;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 pub mod group_session;
 pub mod home_migration;
 pub mod identity;
@@ -81,6 +87,7 @@ pub(crate) mod own_device_copy;
 mod own_device_group_pins;
 mod own_device_group_state;
 pub mod own_device_sync;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 mod own_group_lazy_authority;
 mod own_sent_delivery;
 pub(crate) mod own_sent_message;
@@ -94,6 +101,7 @@ mod generated_updates;
 pub(crate) mod reply_outbox;
 pub(crate) mod routed;
 pub mod self_sync;
+#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
 pub(crate) mod shared_group;
 pub mod storage;
 pub(crate) mod surface;
