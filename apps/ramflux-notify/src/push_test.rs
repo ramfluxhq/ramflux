@@ -32,19 +32,30 @@ enum Slot {
     Full,
 }
 
-fn accepted_at() -> &'static Mutex<HashMap<String, Instant>> {
-    static ACCEPTED: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+/// Rate-limit table key: the notify delivery id of the caller's own device, wrapped so the table
+/// is never indexed by a bare device string.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DeliverySlot(String);
+
+impl DeliverySlot {
+    fn new(delivery_id: &str) -> Self {
+        Self(delivery_id.to_owned())
+    }
+}
+
+fn accepted_at() -> &'static Mutex<HashMap<DeliverySlot, Instant>> {
+    static ACCEPTED: OnceLock<Mutex<HashMap<DeliverySlot, Instant>>> = OnceLock::new();
     ACCEPTED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Check and take the device's 30 s slot in one step under the table lock. Entries older than the
 /// interval are pruned on every call.
-fn reserve(device: &str, now: Instant) -> Slot {
+fn reserve(slot: &DeliverySlot, now: Instant) -> Slot {
     let Ok(mut map) = accepted_at().lock() else {
         return Slot::Full;
     };
     map.retain(|_, taken| now.saturating_duration_since(*taken) < TEST_INTERVAL);
-    if let Some(taken) = map.get(device) {
+    if let Some(taken) = map.get(slot) {
         let remaining = TEST_INTERVAL.saturating_sub(now.saturating_duration_since(*taken));
         let ms = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX);
         return Slot::RateLimited(ms.max(1));
@@ -52,13 +63,13 @@ fn reserve(device: &str, now: Instant) -> Slot {
     if map.len() >= MAX_TRACKED_DEVICES {
         return Slot::Full;
     }
-    map.insert(device.to_owned(), now);
+    map.insert(slot.clone(), now);
     Slot::Reserved
 }
 
-fn release(device: &str) {
+fn release(slot: &DeliverySlot) {
     if let Ok(mut map) = accepted_at().lock() {
-        map.remove(device);
+        map.remove(slot);
     }
 }
 
@@ -71,6 +82,7 @@ pub(crate) fn handle(
     request: PushRouteTestMeshRequest,
 ) -> Result<PushRouteTestAnswer, NodeCoreError> {
     let device = request.device_delivery_id.clone();
+    let slot = DeliverySlot::new(&device);
     let Some(provider) = ingress.store.push_test_route_provider(&device, &request.route_tag)?
     else {
         return Ok(PushRouteTestAnswer::refused("rejected", None));
@@ -84,7 +96,7 @@ pub(crate) fn handle(
     {
         return Ok(PushRouteTestAnswer::refused("unavailable", None));
     }
-    match reserve(&device, Instant::now()) {
+    match reserve(&slot, Instant::now()) {
         Slot::Reserved => {}
         Slot::RateLimited(ms) => {
             return Ok(PushRouteTestAnswer::refused("rate_limited", Some(ms)));
@@ -93,7 +105,7 @@ pub(crate) fn handle(
     }
     let answer = admit(ingress, request);
     if !matches!(&answer, Ok(answer) if answer.status == "queued") {
-        release(&device);
+        release(&slot);
     }
     answer
 }

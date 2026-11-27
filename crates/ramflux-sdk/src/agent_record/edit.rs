@@ -43,6 +43,11 @@ pub(crate) fn create_from_plan(
         change_seq: 0,
         provider: intent.provider.clone(),
         model: intent.model.clone(),
+        autonomy: intent.autonomy.clone(),
+        prompt: intent.prompt.clone(),
+        tools: intent.tools.clone(),
+        enabled: intent.enabled,
+        revision: intent.revision.clone(),
         max_concurrent_turns: intent.max_concurrent_turns,
         max_cost_per_day_cents: intent.max_cost_per_day_cents,
     };
@@ -78,6 +83,11 @@ pub(crate) fn seed_for_test(
         change_seq: 0,
         provider: None,
         model: None,
+        autonomy: None,
+        prompt: None,
+        tools: None,
+        enabled: None,
+        revision: None,
         max_concurrent_turns: None,
         max_cost_per_day_cents: None,
     };

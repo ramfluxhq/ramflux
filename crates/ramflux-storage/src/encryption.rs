@@ -268,6 +268,10 @@ pub fn wrap_with_vault_secret(
     Ok((nonce, ciphertext))
 }
 
+/// Integrity message of a failed code-wrap authentication: a wrong account code or a damaged
+/// wrapped key (cryptographically indistinguishable).
+pub const WRAP_AUTH_FAILED: &str = "wrong passphrase or damaged local key";
+
 /// # Errors
 /// Returns an error when the wrapped key was tampered with or the wrong vault secret is used.
 pub fn unwrap_with_vault_secret(
@@ -281,7 +285,7 @@ pub fn unwrap_with_vault_secret(
             b"ramflux.account_db_key.wrap.v1",
             &mut *plaintext,
         )
-        .map_err(|_| StorageError::Integrity("wrong passphrase or damaged local key"))?;
+        .map_err(|_| StorageError::Integrity(WRAP_AUTH_FAILED))?;
     if plaintext.len() != 32 {
         return Err(StorageError::Integrity("invalid unwrapped DB key length"));
     }

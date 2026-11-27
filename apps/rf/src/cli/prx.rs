@@ -40,6 +40,11 @@ pub(crate) struct PrxBootstrap {
     /// `prx` binary. The default is `prx` on `PATH`.
     #[arg(long, default_value = "prx")]
     pub(crate) binary: PathBuf,
+    /// Install through the running daemon (`agent.host.manage`). The provider key is read from
+    /// stdin only when the daemon asks for it, and is answered as a private reply, never as JSON.
+    /// The daemon uses `prx` on its `PATH` and the default state directory.
+    #[arg(long, requires = "provider", conflicts_with_all = ["state_dir", "binary"])]
+    pub(crate) via_bus: bool,
 }
 
 #[derive(Args)]

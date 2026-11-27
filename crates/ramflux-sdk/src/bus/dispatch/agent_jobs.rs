@@ -4,9 +4,10 @@
 //! Owner job control. List, pause, resume, and remove call the paired PRX daemon.
 //! Job-run sessions are published by the host and listed from this account.
 
+use super::agent_prx::{account, field_invalid, map_prx, prx_client};
 use crate::client::agent_activity;
 use crate::prelude::*;
-use ramflux_prx_client::{AgentName, ApiCode, AutomationKind, PrxClient, PrxError};
+use ramflux_prx_client::{AgentName, AutomationKind};
 use serde_json::{Value, json};
 
 const SESSION_CAP: usize = 256;
@@ -107,25 +108,6 @@ fn list_sessions(
     Ok(local_bus_ok(json!({"sessions": sessions})))
 }
 
-fn prx_client<'a>(
-    request: &LocalBusFrame,
-    state: &'a mut LocalBusDaemonState,
-) -> Result<&'a PrxClient, SdkError> {
-    account(request, state).map(|_| ())?;
-    state
-        .config
-        .prx
-        .as_deref()
-        .ok_or_else(|| refused("prx_unconfigured", "the desktop daemon has no PRX client"))
-}
-
-fn account<'a>(
-    request: &LocalBusFrame,
-    state: &'a mut LocalBusDaemonState,
-) -> Result<&'a RamfluxClient, SdkError> {
-    Ok(&local_bus_account_mut(state, request_account_id(request)?)?.client)
-}
-
 fn stored(client: &RamfluxClient, state_kind: &str, record: Value) -> Result<(), SdkError> {
     if let Some(stored) = agent_activity::commit(client, state_kind, record)? {
         let _ = agent_activity::fan_out(client, state_kind, &stored);
@@ -201,43 +183,4 @@ fn id_ok(text: &str) -> bool {
         && !text.contains('/')
         && !text.contains("..")
         && !text.chars().any(char::is_control)
-}
-
-fn field_invalid(key: &str) -> SdkError {
-    refused("field_invalid", key)
-}
-
-fn map_prx(error: &PrxError) -> SdkError {
-    match error {
-        PrxError::Api { code: ApiCode::CronJobUnknown, .. } => {
-            refused("cron_job_unknown", "no such cron job")
-        }
-        PrxError::Api { code: ApiCode::XinTaskUnknown, .. } => {
-            refused("xin_task_unknown", "no such xin task")
-        }
-        PrxError::Api { code: ApiCode::XinGoalUnknown, .. } => {
-            refused("xin_goal_unknown", "no such xin goal")
-        }
-        PrxError::Api { code: ApiCode::AuthFailed, .. } => refused("auth_failed", "auth_failed"),
-        PrxError::Api { code: ApiCode::FieldInvalid, .. } => {
-            refused("field_invalid", "field_invalid")
-        }
-        PrxError::Api { code: ApiCode::AgentInvalid, .. } => {
-            refused("agent_invalid", "agent_invalid")
-        }
-        PrxError::Api { code: ApiCode::StorageUnavailable, .. } => {
-            refused("storage_unavailable", "storage_unavailable")
-        }
-        PrxError::Unsupported { .. } => refused("prx_unsupported", "prx_unsupported"),
-        PrxError::Unavailable | PrxError::Timeout => refused("prx_unavailable", "prx_unavailable"),
-        _ => refused("prx_rejected", "prx_rejected"),
-    }
-}
-
-fn refused(code: &str, detail: &str) -> SdkError {
-    SdkError::LocalBusRefused {
-        code: code.to_owned(),
-        message: code.to_owned(),
-        body: Box::new(json!({"reason_code": code, "details": {"cause": detail}})),
-    }
 }

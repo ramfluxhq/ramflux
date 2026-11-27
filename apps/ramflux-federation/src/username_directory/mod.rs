@@ -12,6 +12,7 @@ mod ipc;
 mod primary;
 mod primary_peer;
 mod quic;
+mod registered_nodes;
 mod rpc;
 mod source;
 mod tcp;

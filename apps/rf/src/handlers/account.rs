@@ -18,6 +18,11 @@ pub(crate) async fn handle_account(
         AccountAction::Create(create) => {
             return super::account_ceremony::create(&socket, &create.display_name).await;
         }
+        AccountAction::AppLock(AccountAppLockCommand {
+            action: AccountAppLockAction::Set(set),
+        }) => {
+            return app_lock_set(&socket, set).await;
+        }
         _ => {}
     }
     let mut bus = LocalBusClient::connect(&socket).await?;
@@ -104,16 +109,29 @@ async fn handle_app_lock(
             )
             .await?,
         ),
-        AccountAppLockAction::Set(set) => print_json(
-            &bus.request(
-                Some(set.account),
-                "account",
-                "account.app_lock.configure",
-                serde_json::json!({"enabled": set.enabled, "timeout_ms": set.timeout_ms}),
-            )
-            .await?,
-        ),
+        AccountAppLockAction::Set(_) => {
+            Err(RfError::Message("Changing the app lock requires the attended client.".into()))
+        }
     }
+}
+
+/// Weakening the app lock asks for the account code at the terminal, on a dedicated
+/// connection that can answer the daemon's private prompt.
+async fn app_lock_set(socket: &std::path::Path, set: &AccountAppLockSet) -> Result<(), RfError> {
+    let mut bus = ramflux_sdk::custody::pairing::private_credential::PairingBusClient::connect(
+        socket,
+        std::sync::Arc::new(super::pairing::TerminalProvider),
+    )
+    .await?;
+    print_json(
+        &bus.request(
+            Some(set.account.clone()),
+            "account",
+            "account.app_lock.configure",
+            serde_json::json!({"enabled": set.enabled, "timeout_ms": set.timeout_ms}),
+        )
+        .await?,
+    )
 }
 
 async fn handle_account_unlock(

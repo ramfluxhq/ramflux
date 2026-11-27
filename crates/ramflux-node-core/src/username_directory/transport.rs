@@ -122,6 +122,8 @@ pub struct ReportingChannel<'a> {
     pub node_id: &'a str,
     pub node_key: &'a str,
     pub exporter: &'a [u8; 32],
+    /// Per-node-key admissions per 60 s, charged for lookups and mutations alike.
+    pub node_rate_per_min: u64,
 }
 
 pub struct VerifiedReporter {

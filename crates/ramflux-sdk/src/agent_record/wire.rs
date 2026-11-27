@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! The wire view of a stored agent record (AGENT-IDENTITY-01 E4, contract 1 `AgentRecord`). The
-//! fields that belong to later modules (`host`, `config`, `revision`, `observation`, `cleanup`) are
-//! present in the message and always absent or empty here. `base` is the stored event identity.
+//! fields that belong to later modules (`host`, `observation`, `cleanup`) are present in the message
+//! and always absent or empty here. `config` and `revision` are the desktop's mirror of the PRX
+//! config (AGENT-MGMT-01A). `base` is the stored event identity.
 use super::StoredAgentRecord;
 use ramflux_protocol::message as g;
 
@@ -15,7 +16,7 @@ pub(crate) fn to_wire(record: &StoredAgentRecord) -> g::AgentRecord {
         persona: Some(record.persona.clone()),
         host: None,
         config: config_of(record),
-        revision: None,
+        revision: record.revision.clone(),
         lifecycle: record.lifecycle.clone(),
         observation: String::new(),
         cleanup: String::new(),
@@ -25,18 +26,27 @@ pub(crate) fn to_wire(record: &StoredAgentRecord) -> g::AgentRecord {
     }
 }
 
+/// The `AgentRecord` of a list page: the prompt is left out to keep a page bounded.
+pub(crate) fn to_wire_listed(record: &StoredAgentRecord) -> g::AgentRecord {
+    let mut wire = to_wire(record);
+    if let Some(config) = wire.config.as_mut() {
+        config.prompt = None;
+    }
+    wire
+}
+
 fn config_of(record: &StoredAgentRecord) -> Option<g::AgentConfigData> {
     let bounded = record.max_concurrent_turns.is_some() || record.max_cost_per_day_cents.is_some();
-    if !bounded && record.provider.is_none() && record.model.is_none() {
+    if record.provider.is_none() && record.model.is_none() && !bounded {
         return None;
     }
     Some(g::AgentConfigData {
         provider: record.provider.clone().unwrap_or_default(),
         model: record.model.clone().unwrap_or_default(),
-        prompt: None,
-        autonomy: String::new(),
-        tools: Vec::new(),
-        enabled: None,
+        prompt: record.prompt.clone(),
+        autonomy: record.autonomy.clone().unwrap_or_default(),
+        tools: record.tools.clone().unwrap_or_default(),
+        enabled: record.enabled,
         limits: bounded.then_some(g::AgentLimits {
             max_concurrent_turns: record.max_concurrent_turns,
             max_cost_per_day_cents: record.max_cost_per_day_cents,
