@@ -262,20 +262,10 @@ impl Supervisor {
         };
         call.require_live()?;
         let actor = self.accounts.borrow().get(account_id).cloned().ok_or_else(unauthorized)?;
-        match actor
+        actor
             .unlock_native(super::super::native_account::NativeUnlockSecret::Code(secret), None)
             .await
-        {
-            Ok(_) => Ok(()),
-            Err(SdkError::Storage(StorageError::Integrity(
-                "wrong passphrase or damaged local key",
-            ))) => Err(SdkError::LocalBusRefused {
-                code: "wrong_passphrase".to_owned(),
-                message: "the account code is wrong".to_owned(),
-                body: Box::new(serde_json::json!({"reason_code": "wrong_passphrase"})),
-            }),
-            Err(error) => Err(error),
-        }
+            .map(|_| ())
     }
     pub(in crate::bus) fn attach_app_control(&self, connection: u64, id: &str) {
         if !self.accounts.borrow().contains_key(id) && self.index.account(id).is_err() {

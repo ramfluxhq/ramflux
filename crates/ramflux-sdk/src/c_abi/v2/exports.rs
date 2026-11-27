@@ -824,11 +824,14 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "runtime_stale" => E::TransportUnavailable as i32,
         "Timeout" | "DeadlineExceeded" => E::Timeout as i32,
         "PermissionDenied"
+        | "UnlockAttemptsExhausted"
         | "authorization_rejected"
         | "not_authorized"
         | "desktop_required"
         | "ancestor_rejected" => E::PermissionDenied as i32,
-        "RateLimited" | "rate_limited" | "Busy" | "quota_exceeded" => E::RateLimited as i32,
+        "RateLimited" | "UnlockRetryLater" | "rate_limited" | "Busy" | "quota_exceeded" => {
+            E::RateLimited as i32
+        }
         "AccountBusy" | "DataRootInUse" | "account_busy" | "SessionLeaseBusy" => {
             E::AccountBusy as i32
         }

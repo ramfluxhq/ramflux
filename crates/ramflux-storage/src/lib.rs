@@ -151,7 +151,7 @@ pub use clock::{AccountClock, unix_now};
 pub use constants::*;
 pub use encryption::{
     AccountDbKey, AccountKeyWrappingProvider, EncryptionMode, FileVaultSecretSource,
-    LocalVaultKeyWrappingProvider, VaultSecretSource, WrappedAccountDbKey,
+    LocalVaultKeyWrappingProvider, VaultSecretSource, WRAP_AUTH_FAILED, WrappedAccountDbKey,
     unwrap_with_vault_secret, wrap_with_vault_secret,
 };
 pub use error::StorageError;

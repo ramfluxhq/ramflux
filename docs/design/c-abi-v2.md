@@ -79,6 +79,31 @@ empty confirmation. A null callback unregisters and drains. The host must not
 reenter the client from the callback. Close and replacement wait until the
 callback returns. `account.passphrase.rotate` stays in the wiped request body.
 
+Code refusals on `account.unlock`, `account.app_lock.configure` and activation
+use these names. Status values come from the existing enum; the header is
+unchanged.
+
+| Name | Status | `reason_code` | Retry field |
+|---|---|---|---|
+| `wrong_passphrase` | `AuthFailed` (5) | `wrong_passphrase` | none |
+| `reauth_required` | `AuthFailed` (5) | `reauth_required` | none |
+| `AccountCodeRequired` | `AuthFailed` (5) | `account_code_required` | none |
+| `UnlockRetryLater` | `RateLimited` (15) | `unlock_retry_later` | `retry_after_ms`, `retry_after_secs` |
+| `UnlockAttemptsExhausted` | `PermissionDenied` (12) | `unlock_attempts_exhausted` | none |
+
+- `retry_after_ms` is the number of milliseconds until the next code is
+  accepted (whole seconds times 1000); `retry_after_secs` carries the seconds.
+- A damaged wrapped key is cryptographically indistinguishable from a wrong
+  code. It is reported, and counted, as `wrong_passphrase`.
+- All prompted and JSON code checks share one persistent counter per account:
+  5 free failures, then a 30 s wait that doubles per failure, 10 failures is
+  `UnlockAttemptsExhausted`, and a correct code resets it. The counter survives
+  a daemon restart.
+- A throttled account answers `UnlockRetryLater` before the credential provider
+  is called; the host sees no `device.credential.request`.
+- `account.app_lock.configure` weakening asks the same provider with action
+  `"unlock"` and no `operation_id`.
+
 ## Generated method policy
 
 `crates/ramflux-sdk/include/ramflux_sdk_methods.json` is the machine-readable
