@@ -4,7 +4,7 @@
 //! Centre-provisioned list of home nodes the witness accepts reports from (K7B-WITNESS-01).
 //! The producer writes the file with tmp + rename; the witness polls it and keeps the last good
 //! list when an update is invalid. An expired list refuses every node until a fresh one arrives.
-use super::{Result, error, refuse};
+use super::{Error, Result, error, refuse};
 use std::{
     collections::HashMap,
     io::Read,
@@ -113,8 +113,16 @@ fn parse(bytes: &[u8], now: u64) -> Result<Snapshot> {
 impl RegisteredNodes {
     /// Startup load: a missing, unreadable or invalid file refuses to start the witness.
     pub(super) fn load(path: &Path) -> Result<Self> {
-        let seen = fingerprint(path)?;
-        let current = parse(&read_bounded(path)?, crate::now_unix_seconds()?).map_err(|reason| {
+        let named = |reason: Error| -> Error {
+            format!(
+                "registered nodes file {} (RAMFLUX_USERNAME_REGISTERED_NODES_FILE): {reason}",
+                path.display()
+            )
+            .into()
+        };
+        let seen = fingerprint(path).map_err(|reason| named(reason.into()))?;
+        let bytes = read_bounded(path).map_err(named)?;
+        let current = parse(&bytes, crate::now_unix_seconds()?).map_err(|reason| {
             tracing::error!(path = %path.display(), %reason, "registered_nodes invalid at start");
             reason
         })?;
