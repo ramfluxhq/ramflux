@@ -16,6 +16,8 @@ mod app_lifecycle;
 mod app_lock;
 #[path = "supervisor_device_unlock.rs"]
 mod device_unlock;
+#[path = "supervisor_shutdown.rs"]
+mod shutdown;
 
 #[derive(Clone)]
 enum RestoreState {
@@ -57,6 +59,10 @@ pub(super) struct Supervisor {
     lifecycle_tasks: RefCell<tokio::task::JoinSet<()>>,
     lifecycle_changed: tokio::sync::Notify,
     lifecycle_registry: super::lifecycle_registry::Registry,
+    shutdown_report: tokio::sync::OnceCell<shutdown::ShutdownReport>,
+    shutdown_started: std::cell::Cell<bool>,
+    shutdown_done: watch::Sender<bool>,
+    stop_watch: shutdown::StopWatch,
 }
 
 pub(super) enum OpenJournal {
@@ -108,6 +114,10 @@ impl Supervisor {
             lifecycle_tasks: RefCell::new(tokio::task::JoinSet::new()),
             lifecycle_changed: tokio::sync::Notify::new(),
             lifecycle_registry: super::lifecycle_registry::Registry::default(),
+            shutdown_report: tokio::sync::OnceCell::new(),
+            shutdown_started: std::cell::Cell::new(false),
+            shutdown_done: watch::channel(false).0,
+            stop_watch: shutdown::StopWatch::new(),
             events,
             event_receiver: RefCell::new(Some(event_receiver)),
             event_task: RefCell::new(None),
@@ -688,8 +698,7 @@ impl Supervisor {
                         Some((connection.connection_id, request.request_id.clone()));
                     self.stop_requested.send_replace(true);
                 }
-                self.shutdown().await?;
-                return Ok(reply(serde_json::json!({"stopping":true})));
+                return Ok(reply(self.stop_reply_body().await?));
             }
             "account.export_agent_credentials" => {
                 return self.export_agent_credentials(&request, connection).await;
@@ -1215,47 +1224,6 @@ impl Supervisor {
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) fn lifecycle_task_count(&self) -> usize {
         self.lifecycle_tasks.borrow().len()
-    }
-
-    pub(super) async fn shutdown(&self) -> Result<(), SdkError> {
-        if let Some(timer) = self.app_timer.borrow_mut().take() {
-            timer.abort();
-        }
-        self.close_lifecycle_admission();
-        // Admission is closed before moving the set; no new task can escape this drain.
-        let mut tasks = std::mem::take(&mut *self.lifecycle_tasks.borrow_mut());
-        #[cfg(test)]
-        if let Some(gate) = &self.config.lifecycle_gate {
-            gate.draining.notify_one();
-        }
-        if tokio::time::timeout(Duration::from_secs(5), async {
-            while tasks.join_next().await.is_some() {}
-        })
-        .await
-        .is_err()
-        {
-            tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
-        }
-        self.backup_jobs.stop().await;
-        self.start_event_router();
-        // A retained stopped handle must not reclaim a replacement daemon's staging.
-        let expiry = self.backup_expiry.borrow_mut().take();
-        if let Some(task) = expiry {
-            task.abort();
-            let _ = task.await;
-        }
-        let actors = self.accounts.borrow().values().cloned().collect::<Vec<_>>();
-        let mut result = Ok(());
-        for actor in actors {
-            if let Err(error) = actor.stop().await {
-                result = Err(error);
-            }
-        }
-        if let Err(error) = self.node_actor.stop().await {
-            result = Err(error);
-        }
-        result
     }
 
     pub(super) async fn subscribe_stream(

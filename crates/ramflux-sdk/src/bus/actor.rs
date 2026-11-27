@@ -512,8 +512,13 @@ impl AccountActor {
         matches!(*self.done.borrow(), ActorExit::Complete(_))
     }
 
-    pub(super) async fn stop(&self) -> Result<(), SdkError> {
+    /// Asks the actor to stop without waiting; `stop` then only waits for the exit.
+    pub(super) fn signal_stop(&self) {
         let _ = self.shutdown_signal.send(true);
+    }
+
+    pub(super) async fn stop(&self) -> Result<(), SdkError> {
+        self.signal_stop();
         let mut done = self.done.clone();
         loop {
             let status = done.borrow().clone();
