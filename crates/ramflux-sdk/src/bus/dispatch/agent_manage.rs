@@ -113,8 +113,13 @@ async fn change(
         if readback.status == AgentStatus::Retired {
             return Err(refused("agent_retired", "retired in PRX"));
         }
-        let seen = parsed.revision.as_ref() == Some(&readback.revision)
-            || fields::mirror_matches(&record, &readback.config);
+        // A request that names a revision asserts the view it was made from: only an equal
+        // revision is fresh. The mirror comparison is the fallback for a request without one
+        // (a mirror without a prompt accepts any PRX prompt, so it cannot vouch for a revision).
+        let seen = match &parsed.revision {
+            Some(revision) => *revision == readback.revision,
+            None => fields::mirror_matches(&record, &readback.config),
+        };
         if !seen {
             return Err(conflict(Some(readback)));
         }

@@ -64,7 +64,7 @@ pub(super) fn map_prx(error: &PrxError) -> SdkError {
         }
         PrxError::Unsupported { .. } => refused("prx_unsupported", "prx_unsupported"),
         PrxError::Unavailable | PrxError::Timeout => refused("prx_unavailable", "prx_unavailable"),
-        _ => refused("prx_rejected", "prx_rejected"),
+        _ => crate::prx_owner::rejected(error),
     }
 }
 

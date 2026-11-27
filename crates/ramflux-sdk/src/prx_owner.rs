@@ -55,16 +55,20 @@ impl ConfigPublish {
 }
 
 impl ConfigPublish {
-    /// Checks the requested tool names against PRX's catalog before the account writer saves
-    /// anything, so a create PRX would refuse leaves no local request. No client, or `Tools::All`,
-    /// means nothing to check.
+    /// Asks PRX before the account writer saves anything: its capabilities must answer, and the
+    /// requested tool names must be in its catalog, so a create PRX would refuse for those reasons
+    /// leaves no local request. No client means nothing to check. The agent anchor does not exist
+    /// until the account writer has stored the request, so the PUT itself can only follow it.
     ///
     /// # Errors
-    /// `agent_tools_invalid` when a name is not in the catalog; a catalog failure maps like any
-    /// other PRX failure (`prx_unavailable`, ...).
+    /// `agent_tools_invalid` when a name is not in the catalog; a capabilities or catalog failure
+    /// maps like any other PRX failure (`prx_unavailable`, ...).
     pub(crate) async fn precheck(&self, client: Option<&PrxClient>) -> Result<(), SdkError> {
-        let (Some(client), ramflux_prx_client::Tools::List(names)) = (client, &self.config.tools)
-        else {
+        let Some(client) = client else {
+            return Ok(());
+        };
+        client.capabilities().await.map_err(|error| map_prx(&error))?;
+        let ramflux_prx_client::Tools::List(names) = &self.config.tools else {
             return Ok(());
         };
         if names.is_empty() {
@@ -254,8 +258,52 @@ fn map_prx(error: &PrxError) -> SdkError {
         }
         PrxError::Unsupported { .. } => SdkError::PrxCall("prx_unsupported"),
         PrxError::Unavailable | PrxError::Timeout => SdkError::PrxCall("prx_unavailable"),
-        _ => SdkError::PrxCall("prx_rejected"),
+        _ => rejected(error),
     }
+}
+
+/// The `prx_rejected` refusal for a PRX failure with no rf code of its own. The rf code stays,
+/// and `details` carries what PRX answered (its code and HTTP status when it sent them, and the
+/// client's one-line description, which holds no secret) so the cause can be diagnosed.
+pub(crate) fn rejected(error: &PrxError) -> SdkError {
+    let (prx_code, prx_status) = match error {
+        PrxError::Api { code, status, .. } => (Some(api_code_text(code)), Some(*status)),
+        _ => (None, None),
+    };
+    let body = serde_json::json!({
+        "reason_code": "prx_rejected",
+        "details": {
+            "cause": "prx_rejected",
+            "prx_code": prx_code,
+            "prx_status": prx_status,
+            "message": error.to_string(),
+        },
+    });
+    SdkError::LocalBusRefused {
+        code: "prx_rejected".to_owned(),
+        message: "prx_rejected".to_owned(),
+        body: Box::new(body),
+    }
+}
+
+/// PRX's wire spelling of an error code (`snake_case`); an unknown code is PRX's own string,
+/// bounded and limited to printable ASCII.
+fn api_code_text(code: &ApiCode) -> String {
+    if let ApiCode::Unknown(text) = code {
+        return text.chars().filter(char::is_ascii_graphic).take(64).collect();
+    }
+    let mut out = String::new();
+    for (index, ch) in format!("{code:?}").chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn stable_key(prefix: &str, material: &str) -> String {
