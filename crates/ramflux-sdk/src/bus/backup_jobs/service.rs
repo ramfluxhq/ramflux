@@ -433,15 +433,24 @@ impl BackupJobs {
             state.events.pop_front();
         }
     }
-    pub(crate) async fn stop(&self) {
+    /// Waits for the running jobs for at most `budget`, then aborts what is left.
+    /// Returns `true` when the budget ran out and at least one handle was aborted.
+    pub(crate) async fn stop_within(&self, budget: std::time::Duration) -> bool {
         if let Ok(state) = self.state.lock() {
             state.registry.shutdown();
         }
         let tasks =
             self.tasks.lock().map(|mut tasks| std::mem::take(&mut *tasks)).unwrap_or_default();
-        for task in tasks {
-            let _ = task.await;
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut aborted = false;
+        for mut task in tasks {
+            // An elapsed deadline still lets a finished handle report first.
+            if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
+                task.abort();
+                aborted = true;
+            }
         }
+        aborted
     }
     pub(super) fn cancellation(
         &self,

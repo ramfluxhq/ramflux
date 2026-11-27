@@ -9,6 +9,11 @@ use crate::prelude::*;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
+// Teardown after the stop reply; each phase is bounded and named in the stop log.
+const STOP_RESPONSE_MS: u64 = 250;
+const CONNECTIONS_MS: u64 = 250;
+const BACKGROUND_TASKS_MS: u64 = 250;
+
 pub(super) async fn serve(
     config: LocalBusConfig,
     shutdown: watch::Receiver<bool>,
@@ -46,9 +51,13 @@ pub(super) async fn serve(
     let mut background = JoinSet::new();
     supervisor.hydrate(&mut background)?;
     tracing::info!(socket = %supervisor.config.socket_path.display(), "local bus daemon ready");
-    let result = accept(listener, owner, supervisor, shutdown).await;
-    background.abort_all();
-    while background.join_next().await.is_some() {}
+    let result = accept(listener, owner, Rc::clone(&supervisor), shutdown).await;
+    supervisor
+        .bounded_phase("background_tasks", BACKGROUND_TASKS_MS, async {
+            background.abort_all();
+            while background.join_next().await.is_some() {}
+        })
+        .await;
     result
 }
 
@@ -114,14 +123,22 @@ pub(super) async fn accept<L: BusListener>(
     }
     if explicit_stop {
         let mut response = supervisor.stop_response();
-        while !*response.borrow() {
-            if response.changed().await.is_err() {
-                break;
-            }
-        }
+        supervisor
+            .bounded_phase("stop_response", STOP_RESPONSE_MS, async {
+                while !*response.borrow() {
+                    if response.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await;
     }
-    connections.abort_all();
-    while connections.join_next().await.is_some() {}
+    supervisor
+        .bounded_phase("connections", CONNECTIONS_MS, async {
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
+        })
+        .await;
     supervisor.shutdown().await?;
     lease_error.map_or(Ok(()), Err)
 }
