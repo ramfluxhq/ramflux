@@ -45,6 +45,9 @@ struct OwnKeyPackageEntry {
     reference_key: Vec<u8>,
     /// Unix seconds after which the `KeyPackage` is deleted.
     not_after: u64,
+    /// Public key of the leaf signature key made for this `KeyPackage`; its secret is deleted with
+    /// an unused, expired `KeyPackage` (a consumed one leaves the index and keeps its key).
+    leaf_signature_key: Vec<u8>,
 }
 
 /// openmls storage: overlay in front of an [`MlsKv`] backend.
@@ -113,9 +116,14 @@ impl<'k, K: MlsKv> MlsStorage<'k, K> {
         &self,
         hash_ref: &R,
         not_after: u64,
+        leaf_signature_key: &[u8],
     ) -> Result<(), MlsKvError> {
         let mut entries = self.own_kp_entries()?;
-        entries.push(OwnKeyPackageEntry { reference_key: key_of(hash_ref)?, not_after });
+        entries.push(OwnKeyPackageEntry {
+            reference_key: key_of(hash_ref)?,
+            not_after,
+            leaf_signature_key: leaf_signature_key.to_vec(),
+        });
         self.own_kp_store(&entries)
     }
 
@@ -136,6 +144,7 @@ impl<'k, K: MlsKv> MlsStorage<'k, K> {
             entries.into_iter().partition(|entry| entry.not_after <= now);
         for entry in &expired {
             self.rows.delete(LABEL_KEY_PACKAGE, entry.reference_key.clone())?;
+            self.rows.delete(crate::RF_LABEL_LEAF_SIG, entry.leaf_signature_key.clone())?;
         }
         if !expired.is_empty() {
             self.own_kp_store(&live)?;

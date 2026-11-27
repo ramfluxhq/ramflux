@@ -247,9 +247,11 @@ impl<K: MlsKv> Mls<K> {
             .map_err(MlsError::mls)?;
         let hash_ref =
             bundle.key_package().hash_ref(self.crypto.crypto()).map_err(MlsError::mls)?;
-        op.provider
-            .mls_storage()
-            .own_kp_remember(&hash_ref, now.saturating_add(KEY_PACKAGE_LIFETIME_SECS))?;
+        op.provider.mls_storage().own_kp_remember(
+            &hash_ref,
+            now.saturating_add(KEY_PACKAGE_LIFETIME_SECS),
+            leaf_signer.public(),
+        )?;
         let bytes = MlsMessageOut::from(bundle).to_bytes().map_err(MlsError::mls)?;
         op.finish(KeyPackageOutput { bytes, leaf_sig_pk: *leaf_signer.public(), credential_bytes })
     }

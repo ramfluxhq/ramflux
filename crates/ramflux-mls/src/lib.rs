@@ -20,6 +20,10 @@
 //! delayed application messages still decrypt. The cost is that a compromise of the device exposes
 //! the not-yet-used message keys of up to three epochs (RFC 9420 sections 15.3 and 16.6). Higher
 //! layers may lower the number.
+//!
+//! Leaf lifetime: a leaf that entered through a `KeyPackage` (every creator and every member that
+//! never updated) carries that `KeyPackage`'s 30 day lifetime, and a joiner verifies lifetimes, so a
+//! group must be refreshed by update commits before a leaf expires.
 
 pub mod credential;
 mod error;
