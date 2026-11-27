@@ -63,8 +63,12 @@ async fn apply(
 ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
     super::custody_setup::validate_headers(request, &mut None)?;
     super::requests::deadline(request)?;
-    if request.kind != crate::LocalBusFrameKind::Request || request.operation_id.is_some() {
+    if request.kind != crate::LocalBusFrameKind::Request {
         return Err(SdkError::CustodySetupInvalid);
+    }
+    // Same named refusal as account creation, so a carrier that adds an operation id sees why.
+    if request.operation_id.is_some() {
+        return Err(SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::OperationId));
     }
     match request.method.as_str() {
         "account.recover.begin" => {
