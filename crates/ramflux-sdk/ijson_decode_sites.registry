@@ -290,7 +290,6 @@ crates/ramflux-sdk/src/client/routed/mod.rs | decode | 1 | E | excluded=target t
 crates/ramflux-sdk/src/client/routed/native_control/a2i.rs | json_to_native | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/native_control/a2i.rs | to_native | 1 | E | excluded=typed reconstruction of a native A2I document; native signature and source pins are checked after conversion
 crates/ramflux-sdk/src/client/routed/reset_work.rs | pair_control_refused | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/routed/review_native_delivery.rs | group_metadata | 1 | A | strict=parse_i_json; admission=review fixture parses its own canonical distribution through the strict I-JSON helper
 crates/ramflux-sdk/src/client/self_sync/delivery.rs | prepare_self_sync_repair | 1 | D | admitted-before-persist; private provenance, repair fingerprint or retirement metadata is read without granting fresh authority
 crates/ramflux-sdk/src/client/self_sync/delivery.rs | self_sync_repair_current | 1 | D | admitted-before-persist; private provenance, repair fingerprint or retirement metadata is read without granting fresh authority
 crates/ramflux-sdk/src/client/shared_group/bootstrap.rs | apply_prepared_shared_group | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
