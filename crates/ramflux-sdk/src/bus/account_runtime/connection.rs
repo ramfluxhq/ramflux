@@ -818,8 +818,6 @@ impl AccountRuntime {
             )
             .await?;
             super::super::native_account::record_networking(account, None)?;
-        } else {
-            return Err(super::super::account_local::missing());
         }
         account.finish_restored_resume_checkpoint(true)?;
         account.client.complete_backup_activation()?;

@@ -45,9 +45,6 @@ impl AccountView {
     pub(super) fn capture(state: &LocalBusDaemonState, id: &str) -> Result<Self, SdkError> {
         let account = local_bus_account(state, id)?;
         let client = &account.client;
-        if client.born_v3_account.is_none() {
-            return Err(super::super::account_local::missing());
-        }
         let mut views = BTreeMap::new();
         views.insert("grant.list", json!({"grants":account.mcp_grants.values().collect::<Vec<_>>(),"approvals":super::super::dispatch::task_approval::list(account)?}));
         views.insert("grant.list_standing_approvals", json!({"standing_approvals":account.mcp_standing_approvals.values().collect::<Vec<_>>()}));

@@ -8,11 +8,10 @@ use ramflux_protocol::{
     DeviceSetStatus, PrincipalKind, SignedDeviceSetEntry, SignedDeviceSetRecord,
 };
 impl RamfluxClient {
-    pub(crate) fn local_principal_kind(&self) -> Result<PrincipalKind, SdkError> {
-        if let Some(account) = &self.born_v3_account {
-            return Ok(account.record().body.principal_kind);
-        }
-        Ok(PrincipalKind::Human)
+    pub(crate) fn local_principal_kind(&self) -> PrincipalKind {
+        self.born_v3_account
+            .as_ref()
+            .map_or(PrincipalKind::Human, |account| account.record().body.principal_kind)
     }
     pub(crate) fn bound_current_device_proof(
         &self,
@@ -43,7 +42,7 @@ impl RamfluxClient {
                 capability_scope: capabilities,
                 issued_at: issued,
                 expires_at: expires,
-                principal_kind: self.local_principal_kind()?,
+                principal_kind: self.local_principal_kind(),
                 agreement_identity_public_key: agreement,
             },
         )?;
@@ -88,7 +87,7 @@ impl RamfluxClient {
             .as_ref()
             .ok_or_else(|| invalid("migration needs root-bound authorizations"))?;
         if proof.principal_id != root.principal_id
-            || binding.principal_kind != self.local_principal_kind()?
+            || binding.principal_kind != self.local_principal_kind()
         {
             return Err(invalid("migration owner or kind mismatch"));
         }
@@ -149,7 +148,7 @@ impl RamfluxClient {
         self.check_observed_set(record)?;
         let entry = entry_from_proof(proof)?;
         if record.principal_id != root.principal_id
-            || record.principal_kind != self.local_principal_kind()?
+            || record.principal_kind != self.local_principal_kind()
             || !record.devices.contains(&entry)
         {
             return Err(invalid(
@@ -205,7 +204,7 @@ impl RamfluxClient {
         )?;
         let local = entry_from_proof(&proof)?;
         let mut entries = previous.as_ref().map_or_else(Vec::new, |r| r.devices.clone());
-        let local_kind = self.local_principal_kind()?;
+        let local_kind = self.local_principal_kind();
         if previous.as_ref().is_some_and(|r| r.principal_kind != local_kind) {
             return Err(invalid("immutable own kind changed"));
         }
@@ -251,7 +250,7 @@ impl RamfluxClient {
         let next = ramflux_crypto::sign_device_set_with_profile(
             root,
             ramflux_crypto::DeviceSetSigningInput {
-                principal_kind: self.local_principal_kind()?,
+                principal_kind: self.local_principal_kind(),
                 device_set_epoch: epoch,
                 devices: entries,
             },

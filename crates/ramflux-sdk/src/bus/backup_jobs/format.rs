@@ -41,10 +41,10 @@ impl Identity {
             Self::Native { native } => &native.local_account_id,
         }
     }
-    pub fn label(&self) -> Option<String> {
+    pub fn label(&self) -> String {
         match self {
             Self::Native { native } => {
-                Some(native.authority.publication.record.body.profile.display_name.clone())
+                native.authority.publication.record.body.profile.display_name.clone()
             }
         }
     }

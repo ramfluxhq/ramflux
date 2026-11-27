@@ -104,7 +104,10 @@ impl BackupJobs {
         let metadata =
             format::load_metadata(&staging.directory().join("identity.sealed"), staging.key())?;
         validate_staged_observation(&staging, &metadata)?;
-        self.install_native(job, &staging, &metadata, (native_key, native_setup))
+        // The staging is owned here: it is discarded when this call ends, success or refusal.
+        let installed = self.install_native(job, &staging, &metadata, (native_key, native_setup));
+        drop(staging);
+        installed
     }
 }
 

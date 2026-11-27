@@ -517,7 +517,7 @@ impl BackupJobs {
         });
         Ok(BackupArchivePreview {
             local_account_id: id,
-            account_label: metadata.identity.label(),
+            account_label: Some(metadata.identity.label()),
             created_at,
             merge,
         })

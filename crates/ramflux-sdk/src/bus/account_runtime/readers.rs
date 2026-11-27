@@ -15,10 +15,11 @@ impl AccountRuntime {
             super::super::control_state::trim(account);
             super::super::read_model::initialize(account)?;
             let db = account.client.account_db()?;
-            if account.client.born_v3_account.is_none() {
-                return Err(super::super::account_local::missing());
-            }
-            let node_id = db.load_actor_state::<String>("account/node-id")?;
+            let node_id = if account.client.born_v3_account.is_some() {
+                db.load_actor_state::<String>("account/node-id")?
+            } else {
+                None
+            };
             db.persist_actor_state("sync/node-id", &node_id)?;
             let tick = db.journal_bounds()?.head_seq;
             db.append_journal(
