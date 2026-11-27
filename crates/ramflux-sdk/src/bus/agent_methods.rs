@@ -107,6 +107,10 @@ async fn apply(
     };
     let reads_record = matches!(call, AgentCall::Record(_));
     let publish = config_publish(&call);
+    if let Some(publish) = &publish {
+        // PRX must accept the tool names before anything is saved locally.
+        publish.precheck(supervisor.config.prx.as_deref()).await?;
+    }
     let purge = purge_anchor(&call);
     if let AgentCall::Delete(mutation) = &call {
         // The running session of the agent goes first (decision r23 F1 a).

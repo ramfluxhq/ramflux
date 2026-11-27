@@ -54,6 +54,31 @@ impl ConfigPublish {
     }
 }
 
+impl ConfigPublish {
+    /// Checks the requested tool names against PRX's catalog before the account writer saves
+    /// anything, so a create PRX would refuse leaves no local request. No client, or `Tools::All`,
+    /// means nothing to check.
+    ///
+    /// # Errors
+    /// `agent_tools_invalid` when a name is not in the catalog; a catalog failure maps like any
+    /// other PRX failure (`prx_unavailable`, ...).
+    pub(crate) async fn precheck(&self, client: Option<&PrxClient>) -> Result<(), SdkError> {
+        let (Some(client), ramflux_prx_client::Tools::List(names)) = (client, &self.config.tools)
+        else {
+            return Ok(());
+        };
+        if names.is_empty() {
+            return Ok(());
+        }
+        let catalog = client.catalog().await.map_err(|error| map_prx(&error))?;
+        if names.iter().all(|name| catalog.tools.iter().any(|tool| tool.name == *name)) {
+            Ok(())
+        } else {
+            Err(SdkError::PrxCall("agent_tools_invalid"))
+        }
+    }
+}
+
 /// Publishes the config and purges after the account writer has finished.
 /// No client means the local result stands and nothing is sent.
 ///
