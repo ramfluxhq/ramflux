@@ -8,7 +8,10 @@
 
 use openmls::prelude::{Credential, CredentialType};
 
-use crate::{CREDENTIAL_TYPE_PSEUDONYM, CREDENTIAL_VERSION, MlsError};
+use crate::{CREDENTIAL_TYPE_PSEUDONYM, MlsError};
+
+/// Format version of the pseudonym credential (the device credential is at v2).
+const PSEUDONYM_VERSION: u8 = 1;
 
 /// Encoded length: version byte plus key.
 const ENCODED_BYTES: usize = 33;
@@ -17,7 +20,7 @@ const ENCODED_BYTES: usize = 33;
 #[must_use]
 pub fn issue(pseudonym_pk: &[u8; 32]) -> Credential {
     let mut content = Vec::with_capacity(ENCODED_BYTES);
-    content.push(CREDENTIAL_VERSION);
+    content.push(PSEUDONYM_VERSION);
     content.extend_from_slice(pseudonym_pk);
     Credential::new(CredentialType::Other(CREDENTIAL_TYPE_PSEUDONYM), content)
 }
@@ -27,7 +30,7 @@ pub(crate) fn verify(content: &[u8], leaf_sig_pk: &[u8; 32]) -> Result<[u8; 32],
     let (version, key) = content
         .split_first()
         .ok_or_else(|| MlsError::CredentialRejected("empty pseudonym credential".to_owned()))?;
-    if *version != CREDENTIAL_VERSION {
+    if *version != PSEUDONYM_VERSION {
         return Err(MlsError::CredentialRejected("pseudonym credential version".to_owned()));
     }
     let key: [u8; 32] = key

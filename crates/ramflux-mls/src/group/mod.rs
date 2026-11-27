@@ -10,6 +10,8 @@
 //! memory between calls and operations never interleave.
 
 pub mod config;
+pub mod context;
+pub mod conversation;
 pub(crate) mod gate;
 pub mod policy;
 
@@ -25,10 +27,13 @@ use openmls_traits::random::OpenMlsRand as _;
 use tls_codec::Deserialize as _;
 use zeroize::Zeroizing;
 
+use self::context::CommitMeta;
+use self::conversation::{ConversationRole, ExpectedPrincipals, RfConversation};
 use self::gate::{Gate, JoinedGroup};
 use self::policy::{CommitPolicy, PermissiveCommitPolicy, RosterPolicy};
+use crate::credential::authority::NoAuthority;
 use crate::credential::{
-    self, CredentialPolicy, DeviceIdentity, GroupKind, MemberIdentity, device, device_sets,
+    self, CredentialPolicy, DeviceAuthority, DeviceIdentity, GroupKind, MemberIdentity, device,
     pseudonym,
 };
 use crate::provider::{CryptoHandle, RfMlsProvider};
@@ -126,7 +131,7 @@ pub struct MemberSummary {
     pub root_commitment: Option<String>,
     /// Device id (device credentials).
     pub device_id: Option<String>,
-    /// True when the highest accepted device set lists the device as revoked.
+    /// True when the directory's current record of the account shows the device revoked.
     pub revoked: bool,
 }
 
@@ -241,6 +246,7 @@ pub struct Mls<K: MlsKv> {
     pub(crate) crypto: CryptoHandle,
     identity: Option<DeviceIdentity>,
     pub(crate) creds: Arc<CredentialPolicy>,
+    pub(crate) authority: Arc<dyn DeviceAuthority>,
     pub(crate) commit_policy: Box<dyn CommitPolicy>,
     pub(crate) roster: Box<dyn RosterPolicy>,
     op_lock: Mutex<()>,
@@ -258,6 +264,7 @@ impl<'a, K: MlsKv> Op<'a, K> {
         Gate {
             provider: &self.provider,
             creds: &self.mls.creds,
+            authority: &*self.mls.authority,
             commit_policy: &*self.mls.commit_policy,
             roster: &*self.mls.roster,
             kind,
@@ -313,6 +320,7 @@ impl<K: MlsKv> Mls<K> {
             crypto,
             identity: None,
             creds: Arc::new(CredentialPolicy::new()),
+            authority: Arc::new(NoAuthority),
             commit_policy: Box::new(PermissiveCommitPolicy),
             roster: Box::new(policy::DenyAllRoster),
             op_lock: Mutex::new(()),
@@ -323,6 +331,14 @@ impl<K: MlsKv> Mls<K> {
     #[must_use]
     pub fn with_device_identity(mut self, identity: DeviceIdentity) -> Self {
         self.identity = Some(identity);
+        self
+    }
+
+    /// Install the directory-path device authority (without one every device credential answers
+    /// `authority_needed`).
+    #[must_use]
+    pub fn with_authority(mut self, authority: Arc<dyn DeviceAuthority>) -> Self {
+        self.authority = authority;
         self
     }
 
@@ -360,20 +376,17 @@ impl<K: MlsKv> Mls<K> {
 
     pub(crate) fn credential_for(
         &self,
-        op: &Op<'_, K>,
         kind: GroupKind,
         signer: &LeafSigner,
     ) -> Result<CredentialWithKey, MlsError> {
-        let credential = match kind {
-            GroupKind::Dm => {
-                let identity = self
-                    .identity
-                    .as_ref()
-                    .ok_or_else(|| MlsError::NotFound("own device identity".to_owned()))?;
-                device_sets::seed_own(op.provider.mls_storage(), &identity.device_set_record)?;
-                device::issue(identity, signer.public())?
-            }
-            GroupKind::Group => pseudonym::issue(signer.public()),
+        let credential = if kind.is_device_kind() {
+            let identity = self
+                .identity
+                .as_ref()
+                .ok_or_else(|| MlsError::NotFound("own device identity".to_owned()))?;
+            device::issue(identity, signer.public())?
+        } else {
+            pseudonym::issue(signer.public())
         };
         Ok(CredentialWithKey { credential, signature_key: signer.public().to_vec().into() })
     }
@@ -422,7 +435,6 @@ impl<K: MlsKv> Mls<K> {
         kind: GroupKind,
         group: &MlsGroup,
     ) -> Result<Vec<MemberSummary>, MlsError> {
-        let storage = op.provider.mls_storage();
         let mut members = Vec::new();
         for member in group.members().take(STATUS_MEMBER_LIMIT) {
             let identity = credential::describe(kind, &member.credential, &member.signature_key)?;
@@ -430,7 +442,10 @@ impl<K: MlsKv> Mls<K> {
                 MemberIdentity::Device(device) => (
                     Some(device.root_commitment.clone()),
                     Some(device.device_id.clone()),
-                    device_sets::is_revoked(storage, &device.root_commitment, &device.device_id)?,
+                    op.mls
+                        .authority
+                        .current(device.root_commitment.as_bytes())
+                        .is_some_and(|record| record.revoked_ids().contains(&device.device_id)),
                 ),
                 _ => (None, None, false),
             };
@@ -456,7 +471,7 @@ impl<K: MlsKv> Mls<K> {
         let now = unix_now()?;
         op.provider.mls_storage().own_kp_purge_expired(now)?;
         let signer = LeafSigner::generate(self.crypto.crypto())?;
-        let credential_with_key = self.credential_for(&op, kind, &signer)?;
+        let credential_with_key = self.credential_for(kind, &signer)?;
         let credential_bytes = credential_with_key.credential.serialized_content().len();
         Self::store_signer(&op, &signer)?;
         let bundle = KeyPackage::builder()
@@ -475,7 +490,9 @@ impl<K: MlsKv> Mls<K> {
         op.finish(KeyPackageOutput { bytes, leaf_sig_pk: *signer.public(), credential_bytes })
     }
 
-    /// Create a group. `dm` takes no tier, `group` requires one.
+    /// Create a group. `dm` and `self` take no tier, `group` requires one. A `dm` or `self`
+    /// group gets a synthetic `rf_conversation` binding (debug and interop use; the product path
+    /// is [`Self::create_with`]).
     ///
     /// # Errors
     /// Policy errors for a wrong tier, a missing device identity, provider or storage failure.
@@ -484,26 +501,56 @@ impl<K: MlsKv> Mls<K> {
         kind: GroupKind,
         tier: Option<Tier>,
     ) -> Result<Staged<'_, K, CreateOutput>, MlsError> {
-        let leaf_cap = match (kind, tier) {
-            (GroupKind::Dm, None) => ABSOLUTE_LEAF_CAP,
-            (GroupKind::Group, Some(tier)) => tier.leaf_cap(),
-            (GroupKind::Dm, Some(_)) => {
-                return Err(MlsError::PolicyRejected("a dm has no tier".to_owned()));
+        let binding = if kind.is_device_kind() {
+            let role =
+                if kind == GroupKind::Own { ConversationRole::Own } else { ConversationRole::Dm };
+            let mut id = [0_u8; 32];
+            let random = self.crypto.crypto().random_vec(id.len()).map_err(MlsError::mls)?;
+            id.copy_from_slice(&random);
+            Some(RfConversation::synthetic(role, id))
+        } else {
+            None
+        };
+        self.create_with(kind, tier, binding.as_ref(), None)
+    }
+
+    /// Create a group with an explicit conversation binding (`dm`, `self`) and, optionally, a
+    /// caller-derived group id (the orderer recomputes derived ids, so the engine must not pick a
+    /// random one).
+    ///
+    /// # Errors
+    /// Policy errors for a wrong tier or binding, a missing device identity, provider or storage
+    /// failure.
+    pub fn create_with(
+        &self,
+        kind: GroupKind,
+        tier: Option<Tier>,
+        binding: Option<&RfConversation>,
+        group_id: Option<[u8; GROUP_ID_BYTES]>,
+    ) -> Result<Staged<'_, K, CreateOutput>, MlsError> {
+        let leaf_cap = match (kind.is_device_kind(), tier) {
+            (true, None) => ABSOLUTE_LEAF_CAP,
+            (false, Some(tier)) => tier.leaf_cap(),
+            (true, Some(_)) => {
+                return Err(MlsError::PolicyRejected("a dm or self group has no tier".to_owned()));
             }
-            (GroupKind::Group, None) => {
+            (false, None) => {
                 return Err(MlsError::PolicyRejected("a group requires a tier".to_owned()));
             }
         };
         let op = self.begin()?;
         unix_now()?;
         let signer = LeafSigner::generate(self.crypto.crypto())?;
-        let credential_with_key = self.credential_for(&op, kind, &signer)?;
+        let credential_with_key = self.credential_for(kind, &signer)?;
         Self::store_signer(&op, &signer)?;
-        let group_id = self.crypto.crypto().random_vec(GROUP_ID_BYTES).map_err(MlsError::mls)?;
+        let group_id = match group_id {
+            Some(id) => id.to_vec(),
+            None => self.crypto.crypto().random_vec(GROUP_ID_BYTES).map_err(MlsError::mls)?,
+        };
         let group = MlsGroup::new_with_group_id(
             &op.provider,
             &signer,
-            &config::create_config(kind)?,
+            &config::create_config(kind, binding)?,
             GroupId::from_slice(&group_id),
             credential_with_key,
         )
@@ -530,12 +577,25 @@ impl<K: MlsKv> Mls<K> {
         group_id: &[u8],
         key_packages: &[Vec<u8>],
     ) -> Result<Staged<'_, K, AddOutput>, MlsError> {
+        self.add_with(group_id, key_packages, CommitMeta::default())
+    }
+
+    /// [`Self::add`] with the commit authenticated data and the commit time the policies see.
+    ///
+    /// # Errors
+    /// As [`Self::add`].
+    pub fn add_with(
+        &self,
+        group_id: &[u8],
+        key_packages: &[Vec<u8>],
+        meta: CommitMeta<'_>,
+    ) -> Result<Staged<'_, K, AddOutput>, MlsError> {
         let op = self.begin()?;
         let key_packages = key_packages
             .iter()
             .map(|bytes| parse_key_package(bytes, &self.crypto))
             .collect::<Result<Vec<_>, _>>()?;
-        Self::add_parsed(op, group_id, &key_packages)
+        Self::add_parsed(op, group_id, &key_packages, meta)
     }
 
     /// Add already parsed `KeyPackages` (also used by the debug bulk path).
@@ -543,11 +603,17 @@ impl<K: MlsKv> Mls<K> {
         op: Op<'a, K>,
         group_id: &[u8],
         key_packages: &[KeyPackage],
+        meta: CommitMeta<'_>,
     ) -> Result<Staged<'a, K, AddOutput>, MlsError> {
         let mut loaded = Self::load(&op, group_id)?;
         let signer = Self::load_signer(&op, &loaded.group)?;
-        let (commit, welcome) =
-            op.gate(loaded.kind).add(&mut loaded.group, &signer, key_packages, loaded.leaf_cap)?;
+        let (commit, welcome) = op.gate(loaded.kind).add(
+            &mut loaded.group,
+            &signer,
+            key_packages,
+            loaded.leaf_cap,
+            meta,
+        )?;
         let output = AddOutput {
             epoch: loaded.group.epoch().as_u64(),
             commit: commit.to_bytes().map_err(MlsError::mls)?,
@@ -561,13 +627,34 @@ impl<K: MlsKv> Mls<K> {
     /// # Errors
     /// `too_large`, `policy_rejected`, `credential_rejected` or a provider failure.
     pub fn join(&self, welcome: &[u8]) -> Result<Staged<'_, K, JoinOutput>, MlsError> {
+        self.join_checked(welcome, None)
+    }
+
+    /// Join the group a Welcome describes, requiring the conversation binding and the principals
+    /// to be the expected ones (`policy_rejected` otherwise).
+    ///
+    /// # Errors
+    /// As [`Self::join`], plus the expected-binding and expected-principal refusals.
+    pub fn join_expecting(
+        &self,
+        welcome: &[u8],
+        expected: &ExpectedPrincipals,
+    ) -> Result<Staged<'_, K, JoinOutput>, MlsError> {
+        self.join_checked(welcome, Some(expected))
+    }
+
+    fn join_checked(
+        &self,
+        welcome: &[u8],
+        expected: Option<&ExpectedPrincipals>,
+    ) -> Result<Staged<'_, K, JoinOutput>, MlsError> {
         let message = parse_message(welcome, MAX_MLS_MESSAGE_BYTES)?;
         let MlsMessageBodyIn::Welcome(welcome) = message.extract() else {
             return Err(MlsError::PolicyRejected("message is not a Welcome".to_owned()));
         };
         let op = self.begin()?;
-        let JoinedGroup { group, kind } = // A join derives the kind from the Welcome; the gate starts with a placeholder.
-        op.gate(GroupKind::Dm).join(welcome)?;
+        // A join derives the kind from the Welcome; the gate starts with a placeholder.
+        let JoinedGroup { group, kind } = op.gate(GroupKind::Dm).join(welcome, expected)?;
         let group_id = group.group_id().to_vec();
         op.provider.mls_storage().rf_put(
             RF_LABEL_GROUP_KIND,
@@ -615,6 +702,19 @@ impl<K: MlsKv> Mls<K> {
     /// `too_large`, `wrong_epoch`, `decrypt_failed`, `policy_rejected`, `credential_rejected`,
     /// `not_found`.
     pub fn receive(&self, message: &[u8]) -> Result<Staged<'_, K, ReceivedMessage>, MlsError> {
+        self.receive_at(message, None)
+    }
+
+    /// [`Self::receive`] with the orderer-signed `accepted_at` every lease check of a received
+    /// commit uses.
+    ///
+    /// # Errors
+    /// As [`Self::receive`].
+    pub fn receive_at(
+        &self,
+        message: &[u8],
+        accepted_at: Option<u64>,
+    ) -> Result<Staged<'_, K, ReceivedMessage>, MlsError> {
         let protocol = match parse_message(message, MAX_MLS_MESSAGE_BYTES)?.extract() {
             MlsMessageBodyIn::PrivateMessage(private) => ProtocolMessage::from(private),
             MlsMessageBodyIn::PublicMessage(_) => {
@@ -627,7 +727,7 @@ impl<K: MlsKv> Mls<K> {
         let group_id = protocol.group_id().to_vec();
         let op = self.begin()?;
         let mut loaded = Self::load(&op, &group_id)?;
-        let received = op.gate(loaded.kind).process(&mut loaded.group, protocol)?;
+        let received = op.gate(loaded.kind).process(&mut loaded.group, protocol, accepted_at)?;
         op.finish(received)
     }
 
@@ -636,7 +736,19 @@ impl<K: MlsKv> Mls<K> {
     /// # Errors
     /// `not_found`, gate rejections or a provider failure.
     pub fn update(&self, group_id: &[u8]) -> Result<Staged<'_, K, CommitOutput>, MlsError> {
-        self.own_commit(group_id, OwnOp::Update)
+        self.own_commit(group_id, OwnOp::Update, CommitMeta::default())
+    }
+
+    /// [`Self::update`] with the commit authenticated data and the commit time.
+    ///
+    /// # Errors
+    /// As [`Self::update`].
+    pub fn update_with(
+        &self,
+        group_id: &[u8],
+        meta: CommitMeta<'_>,
+    ) -> Result<Staged<'_, K, CommitOutput>, MlsError> {
+        self.own_commit(group_id, OwnOp::Update, meta)
     }
 
     /// Commit to the stored proposals (second half of a leave).
@@ -644,7 +756,7 @@ impl<K: MlsKv> Mls<K> {
     /// # Errors
     /// `not_found`, gate rejections or a provider failure.
     pub fn commit_pending(&self, group_id: &[u8]) -> Result<Staged<'_, K, CommitOutput>, MlsError> {
-        self.own_commit(group_id, OwnOp::CommitPending)
+        self.own_commit(group_id, OwnOp::CommitPending, CommitMeta::default())
     }
 
     /// Remove the member at `leaf`.
@@ -656,23 +768,38 @@ impl<K: MlsKv> Mls<K> {
         group_id: &[u8],
         leaf: u32,
     ) -> Result<Staged<'_, K, CommitOutput>, MlsError> {
-        self.own_commit(group_id, OwnOp::Remove(leaf))
+        self.own_commit(group_id, OwnOp::Remove(leaf), CommitMeta::default())
+    }
+
+    /// [`Self::remove`] with the commit authenticated data (the removal proof) and the commit
+    /// time.
+    ///
+    /// # Errors
+    /// As [`Self::remove`].
+    pub fn remove_with(
+        &self,
+        group_id: &[u8],
+        leaf: u32,
+        meta: CommitMeta<'_>,
+    ) -> Result<Staged<'_, K, CommitOutput>, MlsError> {
+        self.own_commit(group_id, OwnOp::Remove(leaf), meta)
     }
 
     fn own_commit(
         &self,
         group_id: &[u8],
         operation: OwnOp,
+        meta: CommitMeta<'_>,
     ) -> Result<Staged<'_, K, CommitOutput>, MlsError> {
         let op = self.begin()?;
         let mut loaded = Self::load(&op, group_id)?;
         let signer = Self::load_signer(&op, &loaded.group)?;
         let gate = op.gate(loaded.kind);
         let message = match operation {
-            OwnOp::Update => gate.update(&mut loaded.group, &signer)?,
-            OwnOp::CommitPending => gate.commit_pending(&mut loaded.group, &signer)?,
+            OwnOp::Update => gate.update(&mut loaded.group, &signer, meta)?,
+            OwnOp::CommitPending => gate.commit_pending(&mut loaded.group, &signer, meta)?,
             OwnOp::Remove(leaf) => {
-                gate.remove(&mut loaded.group, &signer, LeafNodeIndex::new(leaf))?
+                gate.remove(&mut loaded.group, &signer, LeafNodeIndex::new(leaf), meta)?
             }
         };
         let output = CommitOutput {

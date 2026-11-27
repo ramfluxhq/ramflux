@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use openmls::prelude::Extensions;
 use openmls::prelude::{
     CredentialType, KeyPackage, LeafNodeIndex, LeafNodeParameters, Member, MlsGroup, MlsMessageOut,
     ProcessMessageError, ProcessedMessageContent, ProtocolMessage, Sender, StagedCommit,
@@ -21,16 +22,16 @@ use openmls::prelude::{
 use openmls_traits::OpenMlsProvider as _;
 use zeroize::Zeroizing;
 
+use super::context::{CommitCtx, CommitMeta, WelcomeCtx};
+use super::conversation::{ConversationRole, ExpectedPrincipals, RfConversation};
 use super::policy::{CommitPolicy, RosterPolicy, check_proposal_type, check_sender};
 use super::{ReceivedMessage, config};
-use crate::credential::{self, CredentialPolicy, GroupKind, MemberIdentity};
+use crate::credential::{self, CredentialPolicy, DeviceAuthority, GroupKind, MemberIdentity};
 use crate::provider::RfMlsProvider;
 use crate::signer::LeafSigner;
-use crate::storage::MlsStorage;
 use crate::storage::kv::{MlsKv, MlsKvError};
 use crate::{
-    ABSOLUTE_LEAF_CAP, CREDENTIAL_TYPE_DEVICE, CREDENTIAL_TYPE_PSEUDONYM, DM_MAX_PRINCIPALS,
-    MLS_SUITE, MlsError,
+    ABSOLUTE_LEAF_CAP, CREDENTIAL_TYPE_DEVICE, CREDENTIAL_TYPE_PSEUDONYM, MLS_SUITE, MlsError,
 };
 
 /// What a successful Welcome produced.
@@ -43,6 +44,7 @@ pub(crate) struct JoinedGroup {
 pub(crate) struct Gate<'a, 'k, K: MlsKv> {
     pub(crate) provider: &'a RfMlsProvider<'k, K>,
     pub(crate) creds: &'a CredentialPolicy,
+    pub(crate) authority: &'a dyn DeviceAuthority,
     pub(crate) commit_policy: &'a dyn CommitPolicy,
     pub(crate) roster: &'a dyn RosterPolicy,
     pub(crate) kind: GroupKind,
@@ -82,20 +84,21 @@ pub(crate) fn leaf_count(group: &MlsGroup) -> usize {
 }
 
 impl<'k, K: MlsKv> Gate<'_, 'k, K> {
-    fn storage(&self) -> &MlsStorage<'k, K> {
-        self.provider.mls_storage()
-    }
-
     fn verify(
         &self,
         credential: &openmls::prelude::Credential,
         signature_key: &[u8],
     ) -> Result<MemberIdentity, MlsError> {
-        self.creds.verify_pair(self.storage(), self.kind, credential, signature_key)
+        self.creds.verify_pair(self.authority, self.kind, credential, signature_key)
     }
 
     fn describe(&self, member: &Member) -> Result<MemberIdentity, MlsError> {
-        credential::describe(self.kind, &member.credential, &member.signature_key)
+        let mut identity =
+            credential::describe(self.kind, &member.credential, &member.signature_key)?;
+        if let MemberIdentity::Device(device) = &mut identity {
+            device.leaf_index = Some(member.index.u32());
+        }
+        Ok(identity)
     }
 
     fn describe_at(
@@ -117,7 +120,12 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
             return Err(policy("key package ciphersuite is not 0x0001"));
         }
         let leaf = key_package.leaf_node();
-        self.verify(leaf.credential(), leaf.signature_key().as_slice())
+        let mut identity = self.verify(leaf.credential(), leaf.signature_key().as_slice())?;
+        if let MemberIdentity::Device(device) = &mut identity {
+            let hash = key_package.hash_ref(self.provider.crypto()).map_err(MlsError::mls)?;
+            device.kp_hash = hash.as_slice().try_into().ok();
+        }
+        Ok(identity)
     }
 
     /// (c) Every staged commit before it is merged, received or own: suite, pairs of every
@@ -129,6 +137,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         staged: &StagedCommit,
         committer: LeafNodeIndex,
         leaf_cap: usize,
+        ctx: &CommitCtx<'_>,
     ) -> Result<(), MlsError> {
         if staged.group_context().ciphersuite() != MLS_SUITE || group.ciphersuite() != MLS_SUITE {
             return Err(policy("group ciphersuite is not 0x0001"));
@@ -164,7 +173,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         // (e) successor rule.
         for (index, new) in &replaced {
             let old = self.describe_at(group, LeafNodeIndex::new(*index))?;
-            self.check_successor(&old, new)?;
+            self.check_successor(ctx, &old, new)?;
         }
 
         // (f) one leaf per device (dm) over the resulting tree.
@@ -172,7 +181,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
             .remove_proposals()
             .map(|remove| remove.remove_proposal().removed().u32())
             .collect();
-        let resulting = if self.kind == GroupKind::Dm {
+        let resulting = if self.kind.is_device_kind() {
             Some(self.resulting_dm_tree(group, &removed, &replaced, &added)?)
         } else {
             None
@@ -188,8 +197,8 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         if let Some(tree) = &resulting {
             let principals: BTreeSet<String> =
                 tree.iter().filter_map(MemberIdentity::principal).collect();
-            if principals.len() > DM_MAX_PRINCIPALS {
-                return Err(policy("a dm may hold at most two principals"));
+            if principals.len() > self.kind.max_principals() {
+                return Err(policy("the group holds more principals than its kind allows"));
             }
         } else {
             let after = current.saturating_sub(removed.len()).saturating_add(adds);
@@ -201,25 +210,33 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         // (g) commit rights and roster.
         let committer_identity = self.describe_at(group, committer)?;
         for identity in &added {
-            if !self.commit_policy.may_add(&committer_identity, identity) {
-                return Err(policy("the committer may not add this member"));
-            }
+            self.commit_policy.may_add(ctx, &committer_identity, identity)?;
             if self.kind == GroupKind::Group {
-                self.roster.accept_member(identity)?;
+                self.roster.accept_member(ctx, identity)?;
             }
         }
-        for index in &removed {
-            let identity = self.describe_at(group, LeafNodeIndex::new(*index))?;
-            if !self.commit_policy.may_remove(&committer_identity, &identity) {
-                return Err(policy("the committer may not remove this member"));
-            }
+        let mut removed_identities = Vec::new();
+        for queued in staged.remove_proposals() {
+            let index = queued.remove_proposal().removed();
+            let identity = self.describe_at(group, index)?;
+            let proposer = match queued.sender() {
+                Sender::Member(proposer) => self.describe_at(group, *proposer)?,
+                other => return Err(policy(&format!("remove proposal sender {other:?}"))),
+            };
+            self.commit_policy.may_remove(ctx, &committer_identity, &proposer, &identity)?;
+            removed_identities.push(identity);
         }
-        Ok(())
+        self.commit_policy.check_delta(ctx, &committer_identity, &added, &removed_identities)
     }
 
-    fn check_successor(&self, old: &MemberIdentity, new: &MemberIdentity) -> Result<(), MlsError> {
+    fn check_successor(
+        &self,
+        ctx: &CommitCtx<'_>,
+        old: &MemberIdentity,
+        new: &MemberIdentity,
+    ) -> Result<(), MlsError> {
         match self.kind {
-            GroupKind::Dm => {
+            GroupKind::Dm | GroupKind::Own => {
                 if old.device_key() == new.device_key() {
                     Ok(())
                 } else {
@@ -231,7 +248,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
                     (old, new),
                     (MemberIdentity::Pseudonym { pseudonym_pk: a }, MemberIdentity::Pseudonym { pseudonym_pk: b }) if a == b
                 );
-                if same_key { Ok(()) } else { self.roster.accept_successor(old, new) }
+                if same_key { Ok(()) } else { self.roster.accept_successor(ctx, old, new) }
             }
         }
     }
@@ -267,13 +284,25 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         Ok(tree)
     }
 
-    fn merge_own(&self, group: &mut MlsGroup, leaf_cap: usize) -> Result<(), MlsError> {
+    fn merge_own(
+        &self,
+        group: &mut MlsGroup,
+        leaf_cap: usize,
+        meta: CommitMeta<'_>,
+    ) -> Result<(), MlsError> {
         let own = group.own_leaf_index();
         {
             let pending = group
                 .pending_commit()
                 .ok_or_else(|| MlsError::internal("no pending commit to merge"))?;
-            self.check_commit(group, pending, own, leaf_cap)?;
+            let group_id = group.group_id().to_vec();
+            let ctx = CommitCtx {
+                group_id: &group_id,
+                epoch: group.epoch().as_u64(),
+                accepted_at: meta.accepted_at,
+                meta: meta.aad,
+            };
+            self.check_commit(group, pending, own, leaf_cap, &ctx)?;
         }
         group.merge_pending_commit(self.provider).map_err(MlsError::mls)
     }
@@ -286,6 +315,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         signer: &LeafSigner,
         key_packages: &[KeyPackage],
         own_leaf_cap: usize,
+        meta: CommitMeta<'_>,
     ) -> Result<(MlsMessageOut, MlsMessageOut), MlsError> {
         if self.kind == GroupKind::Group
             && leaf_count(group).saturating_add(key_packages.len()) > own_leaf_cap
@@ -293,15 +323,25 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
             return Err(policy("add exceeds the group tier leaf cap"));
         }
         let own = self.describe_at(group, group.own_leaf_index())?;
-        for key_package in key_packages {
-            let added = self.check_key_package(key_package)?;
-            if !self.commit_policy.may_add(&own, &added) {
-                return Err(policy("the committer may not add this member"));
+        {
+            // Pre-check each KeyPackage on its own; the staged commit is judged as a whole in
+            // `merge_own` (the proof entries are checked there, against the whole delta).
+            let group_id = group.group_id().to_vec();
+            let ctx = CommitCtx {
+                group_id: &group_id,
+                epoch: group.epoch().as_u64(),
+                accepted_at: meta.accepted_at,
+                meta: meta.aad,
+            };
+            for key_package in key_packages {
+                let added = self.check_key_package(key_package)?;
+                self.commit_policy.may_add(&ctx, &own, &added)?;
             }
         }
+        group.set_aad(meta.aad.to_vec());
         let (commit, welcome, _group_info) =
             group.add_members(self.provider, signer, key_packages).map_err(MlsError::mls)?;
-        self.merge_own(group, own_leaf_cap)?;
+        self.merge_own(group, own_leaf_cap, meta)?;
         Ok((commit, welcome))
     }
 
@@ -311,10 +351,12 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         group: &mut MlsGroup,
         signer: &LeafSigner,
         leaf: LeafNodeIndex,
+        meta: CommitMeta<'_>,
     ) -> Result<MlsMessageOut, MlsError> {
+        group.set_aad(meta.aad.to_vec());
         let (commit, _welcome, _group_info) =
             group.remove_members(self.provider, signer, &[leaf]).map_err(MlsError::mls)?;
-        self.merge_own(group, ABSOLUTE_LEAF_CAP)?;
+        self.merge_own(group, ABSOLUTE_LEAF_CAP, meta)?;
         Ok(commit)
     }
 
@@ -323,10 +365,12 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         &self,
         group: &mut MlsGroup,
         signer: &LeafSigner,
+        meta: CommitMeta<'_>,
     ) -> Result<MlsMessageOut, MlsError> {
+        group.set_aad(meta.aad.to_vec());
         let (commit, _welcome, _group_info) =
             group.commit_to_pending_proposals(self.provider, signer).map_err(MlsError::mls)?;
-        self.merge_own(group, ABSOLUTE_LEAF_CAP)?;
+        self.merge_own(group, ABSOLUTE_LEAF_CAP, meta)?;
         Ok(commit)
     }
 
@@ -335,28 +379,43 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         &self,
         group: &mut MlsGroup,
         signer: &LeafSigner,
+        meta: CommitMeta<'_>,
     ) -> Result<MlsMessageOut, MlsError> {
+        group.set_aad(meta.aad.to_vec());
         let bundle = group
             .self_update(self.provider, signer, LeafNodeParameters::default())
             .map_err(MlsError::mls)?;
         let (commit, _welcome, _group_info) = bundle.into_contents();
-        self.merge_own(group, ABSOLUTE_LEAF_CAP)?;
+        self.merge_own(group, ABSOLUTE_LEAF_CAP, meta)?;
         Ok(commit)
     }
 
-    /// (b) Join by Welcome: suite, kind from the authenticated `GroupContext`, no replacement of an
-    /// existing group, the absolute leaf cap, every member as a pair, the kind limits and the
-    /// roster (one call for the whole tree).
-    pub(crate) fn join(&self, welcome: Welcome) -> Result<JoinedGroup, MlsError> {
-        let staged =
-            StagedWelcome::new_from_welcome(self.provider, &config::join_config(), welcome, None)
-                .map_err(MlsError::mls)?;
+    /// (b) Join by Welcome: suite, kind from the authenticated `GroupContext`, the `rf_conversation`
+    /// binding of a `dm`/`self` group (role must match the kind, id and principals must match
+    /// `expected` when the caller has one), no replacement of an existing group, the absolute leaf
+    /// cap, every member as a pair, the kind limits and the roster (one call for the whole tree).
+    pub(crate) fn join(
+        &self,
+        welcome: Welcome,
+        expected: Option<&ExpectedPrincipals>,
+    ) -> Result<JoinedGroup, MlsError> {
+        let staged = StagedWelcome::new_from_welcome(
+            self.provider,
+            &config::join_config(self.kind),
+            welcome,
+            None,
+        )
+        .map_err(MlsError::mls)?;
         let context = staged.group_context();
         if context.ciphersuite() != MLS_SUITE {
             return Err(policy("welcome ciphersuite is not 0x0001"));
         }
-        let kind = kind_from_context(context.extensions().required_capabilities())?;
+        let binding = RfConversation::from_extensions(context.extensions())?;
+        let kind = kind_from_context(context.extensions(), binding.as_ref())?;
         let gate = Self { kind, ..*self };
+        if let Some(expected) = expected {
+            expected.check_binding(kind, binding.as_ref())?;
+        }
         if MlsGroup::load(gate.provider.storage(), context.group_id())
             .map_err(MlsError::Storage)?
             .is_some()
@@ -368,7 +427,11 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         }
         let mut identities = Vec::new();
         for member in staged.members() {
-            identities.push(gate.verify(&member.credential, &member.signature_key)?);
+            let mut identity = gate.verify(&member.credential, &member.signature_key)?;
+            if let MemberIdentity::Device(device) = &mut identity {
+                device.leaf_index = Some(member.index.u32());
+            }
+            identities.push(identity);
         }
         let mut devices = BTreeSet::new();
         for identity in &identities {
@@ -378,17 +441,28 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
                 return Err(credential_rejected("a device may hold only one leaf"));
             }
         }
-        match kind {
-            GroupKind::Dm => {
-                let principals: BTreeSet<String> =
-                    identities.iter().filter_map(MemberIdentity::principal).collect();
-                if principals.len() > DM_MAX_PRINCIPALS {
-                    return Err(policy("a dm may hold at most two principals"));
-                }
+        if kind.is_device_kind() {
+            let principals: BTreeSet<String> =
+                identities.iter().filter_map(MemberIdentity::principal).collect();
+            if principals.len() > kind.max_principals() {
+                return Err(policy("the group holds more principals than its kind allows"));
             }
-            GroupKind::Group => gate.roster.accept_welcome(&identities)?,
+            if let Some(expected) = expected {
+                expected.check_members(&identities)?;
+            }
+        } else {
+            let welcome_ctx = WelcomeCtx {
+                group_id: context.group_id().as_slice(),
+                expected_group_id: None,
+                leaf_cap: ABSOLUTE_LEAF_CAP,
+            };
+            gate.roster.accept_welcome(&welcome_ctx, &identities)?;
         }
-        let group = staged.into_group(gate.provider).map_err(MlsError::mls)?;
+        let mut group = staged.into_group(gate.provider).map_err(MlsError::mls)?;
+        // The join configuration was chosen before the kind was known; apply the kind's now.
+        group
+            .set_configuration(gate.provider.storage(), &config::join_config(kind))
+            .map_err(MlsError::Storage)?;
         Ok(JoinedGroup { group, kind })
     }
 
@@ -398,6 +472,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         &self,
         group: &mut MlsGroup,
         message: ProtocolMessage,
+        accepted_at: Option<u64>,
     ) -> Result<ReceivedMessage, MlsError> {
         if group.ciphersuite() != MLS_SUITE {
             return Err(policy("group ciphersuite is not 0x0001"));
@@ -410,7 +485,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
             ProcessedMessageContent::ApplicationMessage(message) => {
                 Ok(ReceivedMessage::Application {
                     plaintext: Zeroizing::new(message.into_bytes()),
-                    aad,
+                    aad: aad.clone(),
                     sender_leaf: sender.u32(),
                     epoch,
                 })
@@ -424,7 +499,9 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
                 Ok(ReceivedMessage::Proposal { sender_leaf: sender.u32(), epoch })
             }
             ProcessedMessageContent::StagedCommitMessage(staged) => {
-                self.check_commit(group, &staged, sender, ABSOLUTE_LEAF_CAP)?;
+                let group_id = group.group_id().to_vec();
+                let ctx = CommitCtx { group_id: &group_id, epoch, accepted_at, meta: &aad };
+                self.check_commit(group, &staged, sender, ABSOLUTE_LEAF_CAP, &ctx)?;
                 let removed = staged.self_removed();
                 group.merge_staged_commit(self.provider, *staged).map_err(MlsError::mls)?;
                 Ok(ReceivedMessage::Commit { epoch: group.epoch().as_u64(), removed })
@@ -439,11 +516,16 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
 }
 
 /// The group kind from the authenticated `GroupContext`: `required_capabilities` must list exactly
-/// one rf credential type.
+/// one rf credential type. The device type is shared by `dm` and `self`; their
+/// `rf_conversation` binding names the role, and a device-type group without a binding is
+/// refused.
 fn kind_from_context(
-    required: Option<&openmls::prelude::RequiredCapabilitiesExtension>,
+    extensions: &Extensions<openmls::prelude::GroupContext>,
+    binding: Option<&RfConversation>,
 ) -> Result<GroupKind, MlsError> {
-    let required = required.ok_or_else(|| policy("group context lacks required capabilities"))?;
+    let required = extensions
+        .required_capabilities()
+        .ok_or_else(|| policy("group context lacks required capabilities"))?;
     let rf_types: Vec<u16> = required
         .credential_types()
         .iter()
@@ -458,7 +540,17 @@ fn kind_from_context(
         .collect();
     match rf_types.as_slice() {
         [code] if required.credential_types().len() == 1 => {
-            GroupKind::from_credential_type(*code).ok_or_else(|| policy("unknown group kind"))
+            let kind = GroupKind::from_credential_type(*code)
+                .ok_or_else(|| policy("unknown group kind"))?;
+            match (kind.is_device_kind(), binding) {
+                (true, Some(binding)) => Ok(match binding.role {
+                    ConversationRole::Dm => GroupKind::Dm,
+                    ConversationRole::Own => GroupKind::Own,
+                }),
+                (true, None) => Err(policy("a dm or self group must carry rf_conversation")),
+                (false, None) => Ok(kind),
+                (false, Some(_)) => Err(policy("a group must not carry rf_conversation")),
+            }
         }
         _ => Err(policy("group context must list exactly one rf credential type")),
     }

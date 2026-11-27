@@ -17,6 +17,7 @@ use openmls::prelude::{
 use zeroize::Zeroizing;
 
 use crate::credential::{CredentialPolicy, GroupKind, MemberIdentity, pseudonym};
+use crate::group::context::{CommitCtx, CommitMeta, WelcomeCtx};
 use crate::group::policy::RosterPolicy;
 use crate::group::{CommitOutput, KeyPackageOutput, Mls, config, unix_now};
 use crate::provider::RfMlsProvider;
@@ -71,7 +72,7 @@ fn identity_key(member: &MemberIdentity) -> Vec<u8> {
 }
 
 impl RosterPolicy for PinnedRoster {
-    fn accept_member(&self, member: &MemberIdentity) -> Result<(), MlsError> {
+    fn accept_member(&self, _ctx: &CommitCtx<'_>, member: &MemberIdentity) -> Result<(), MlsError> {
         if self.policy.is_pinned(&identity_key(member)) {
             Ok(())
         } else {
@@ -81,13 +82,18 @@ impl RosterPolicy for PinnedRoster {
 
     fn accept_successor(
         &self,
+        ctx: &CommitCtx<'_>,
         _old: &MemberIdentity,
         new: &MemberIdentity,
     ) -> Result<(), MlsError> {
-        self.accept_member(new)
+        self.accept_member(ctx, new)
     }
 
-    fn accept_welcome(&self, members: &[MemberIdentity]) -> Result<(), MlsError> {
+    fn accept_welcome(
+        &self,
+        _ctx: &WelcomeCtx<'_>,
+        members: &[MemberIdentity],
+    ) -> Result<(), MlsError> {
         if members.iter().any(|member| self.policy.is_pinned(&identity_key(member))) {
             Ok(())
         } else {
@@ -214,7 +220,7 @@ impl<K: MlsKv> Mls<K> {
         } else {
             LeafSigner::from_secret(leaf_signer.secret())?
         };
-        let mut credential_with_key = self.credential_for(&op, kind, &credential_signer)?;
+        let mut credential_with_key = self.credential_for(kind, &credential_signer)?;
         match tamper {
             Some(KeyPackageTamper::Credential) => {
                 credential_with_key.credential = flip_last_byte(&credential_with_key.credential);
@@ -337,6 +343,7 @@ impl<K: MlsKv> Mls<K> {
                 &signer,
                 &key_packages,
                 loaded.leaf_cap,
+                CommitMeta::default(),
             )?;
             max_commit_bytes =
                 max_commit_bytes.max(commit.to_bytes().map_err(MlsError::mls)?.len());

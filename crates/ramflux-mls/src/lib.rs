@@ -9,8 +9,9 @@
 //!   [`RfMlsProvider`] (crypto plus the overlay storage).
 //! * `storage`: the 74-method storage surface over a caller-supplied [`MlsKv`], with an in-memory
 //!   overlay that reaches the database only through [`Staged::commit`] (one transaction).
-//! * `credential`: the two private-use credential types (`0xF0D1` device, `0xF0D2` pseudonym), the
-//!   (credential, leaf signature key) pair verification and the device-set authority.
+//! * `credential`: the two private-use credential types (`0xF0D1` device v2, `0xF0D2` pseudonym),
+//!   the (credential, leaf signature key) pair verification, the directory-path
+//!   [`DeviceAuthority`] and the pure removal-proof checks (`credential::authority`).
 //! * `group`: group configuration, the facade and the single gate that owns every merge.
 //!
 //! Suite: only `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` (0x0001). The provider also accepts
@@ -36,8 +37,11 @@ pub mod storage;
 #[cfg(feature = "itest-mls-debug")]
 pub mod debug;
 
+pub use credential::authority::{DeviceAuthority, NoAuthority, VerifiedRecord, verify_record};
 pub use credential::{DeviceCertSigner, DeviceIdentity, GroupKind, MemberIdentity, VerifiedMember};
 pub use error::MlsError;
+pub use group::context::{CommitCtx, CommitMeta, WelcomeCtx};
+pub use group::conversation::{ConversationRole, ExpectedPrincipals, RfConversation};
 pub use group::policy::{CommitPolicy, DenyAllRoster, PermissiveCommitPolicy, RosterPolicy};
 pub use group::{
     AddOutput, CommitOutput, CreateOutput, JoinOutput, KeyPackageOutput, MemberSummary, Mls,
@@ -56,9 +60,9 @@ pub const MLS_SUITE_CODE: u16 = 0x0001;
 pub const CREDENTIAL_TYPE_DEVICE: u16 = 0xF0D1;
 /// Credential type of a pseudonym credential (groups).
 pub const CREDENTIAL_TYPE_PSEUDONYM: u16 = 0xF0D2;
-/// Credential format version carried inside both credential types.
-pub const CREDENTIAL_VERSION: u8 = 1;
-/// Largest accepted credential (the device credential embeds its device-set record).
+/// Format version of the device credential `0xF0D1` (v2: it no longer embeds the device record).
+pub const CREDENTIAL_VERSION: u8 = 2;
+/// Largest accepted credential.
 pub const MAX_CREDENTIAL_BYTES: usize = 16 * 1024;
 /// Largest accepted `KeyPackage` message.
 pub const MAX_KEY_PACKAGE_BYTES: usize = 64 * 1024;
@@ -80,13 +84,15 @@ pub const LEAF_CAP_TIER_5000: usize = 15_000;
 pub const ABSOLUTE_LEAF_CAP: usize = LEAF_CAP_TIER_5000;
 /// Largest number of distinct principals in a direct-message group.
 pub const DM_MAX_PRINCIPALS: usize = 2;
+/// Largest number of principals in a `self` group.
+pub const SELF_MAX_PRINCIPALS: usize = 1;
+/// Group context extension type carrying the conversation binding (`rf_conversation`).
+pub const EXTENSION_TYPE_RF_CONVERSATION: u16 = 0xF0C1;
 /// Length of a generated group id in bytes.
 pub const GROUP_ID_BYTES: usize = 32;
 
 /// Label prefix of every own (non-openmls) row in `mls_kv`.
 pub const RF_LABEL_PREFIX: &str = "rf/";
-/// Highest accepted device-set record per root commitment.
-pub const RF_LABEL_DEVICE_SET: &str = "rf/device_set";
 /// Index of own `KeyPackages` with their expiry.
 pub const RF_LABEL_OWN_KP: &str = "rf/own_kp";
 /// Group kind per group id.
