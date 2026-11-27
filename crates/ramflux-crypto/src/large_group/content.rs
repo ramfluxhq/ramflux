@@ -40,6 +40,12 @@ impl EntryKind {
     pub const KEY_W_PRIME: u8 = 5;
     pub const KEY_REDELIVER: u8 = 6;
     pub const KEY_R: u8 = 7;
+    /// Host-written token epoch roll (plaintext body).
+    pub const TOKEN_EPOCH: u8 = 8;
+    /// Joiner-signed `slot_bad` notice (plaintext body).
+    pub const SLOT_BAD: u8 = 9;
+    /// Admin-signed promote/demote (plaintext body).
+    pub const ADMIN: u8 = 10;
 }
 
 /// Host-visible header fields that `hdr_hash` covers.

@@ -22,6 +22,7 @@ pub use node_directory_config::{
     load_node_directory_config, load_node_directory_config_file,
 };
 pub use node_push_config::{NodePushConfig, load_node_push_config, load_node_push_config_file};
+pub mod large_group;
 pub mod push_handoff;
 pub mod push_policy_stats;
 pub use node_report_config::{

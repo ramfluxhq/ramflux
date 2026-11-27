@@ -19,7 +19,9 @@ mod rng;
 mod rules;
 mod slots;
 mod token;
+mod wire;
 
+pub use codec::{Dec as LgReader, Enc as LgWriter};
 pub use content::{
     EntryHeader, EntryKind, MAX_BUCKET, OpenedEntry, SIZE_BUCKETS, SealedEntry, TAG_SLOTS,
     bucket_for, entry_bind_hash, entry_chain_hash, header_hash, open_entry, seal_entry,
@@ -48,4 +50,8 @@ pub use slots::{
 pub use token::{
     SPENT_KEY_LEN, TOKEN_LEN, Token, TokenBatchRequest, TokenSecret, begin_token_batch,
     finish_token_batch, spent_key, verify_token_binding,
+};
+pub use wire::{
+    KeyDelivery, LogView, PostEntry, ReadReply, ReadRequest, SignedReq, SlotView, admin_chain_head,
+    decode_header, encode_header, kd_meta_decode, kd_meta_encode,
 };

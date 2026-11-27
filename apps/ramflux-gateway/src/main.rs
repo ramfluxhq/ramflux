@@ -24,6 +24,7 @@ mod ingress_log;
 mod issued_probe;
 #[cfg(feature = "itest-http")]
 mod itest_http;
+mod large_group;
 mod mesh_delivery;
 mod notify_wake;
 mod object_issue;
@@ -97,6 +98,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         ramflux_node_core::load_config_from_args_reporting(std::env::args().skip(1), service)?
     {
         let redb_path = ramflux_node_core::effective_redb_path(&config);
+        large_group::install(&config)?;
         let store = ramflux_node_core::GatewayRedbStore::open(redb_path)?;
         let mut state = pre_auth::restore(&store, config.gateway.as_ref())?;
         pre_auth::configure(&mut state, config.gateway.as_ref())?;

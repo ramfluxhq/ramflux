@@ -92,6 +92,17 @@ impl SignedKeyBody {
     }
 
     /// Ed25519 signature (admin `P` or the writing member's device key) over the encoded body.
+    /// Decodes a body produced by [`Self::encode`].
+    ///
+    /// # Errors
+    /// Returns an error for a malformed or trailing-byte body.
+    pub fn decode(bytes: &[u8]) -> Result<Self, LgError> {
+        let mut dec = Dec::new(bytes);
+        let body = Self::decode_from(&mut dec)?;
+        dec.finish()?;
+        Ok(body)
+    }
+
     #[must_use]
     pub fn sign(&self, signing_seed: &[u8; 32]) -> [u8; 64] {
         SigningKey::from_bytes(signing_seed).sign(&self.encode()).to_bytes()

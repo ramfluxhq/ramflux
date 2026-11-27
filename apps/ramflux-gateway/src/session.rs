@@ -1047,6 +1047,9 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
                     )
                     .await;
                 }
+                ramflux_node_core::GatewayClientFrame::LargeGroup { request_id, op, body } => {
+                    crate::large_group::handle(&send, request_id, op, body).await;
+                }
                 ramflux_node_core::GatewayClientFrame::PushRouteTest { request } => {
                     crate::push_test::handle(&send, &context, &runtime, *request).await;
                 }
