@@ -38,12 +38,12 @@ const MAX_LIST_PREALLOC: usize = 1024;
 /// Key of the own-KeyPackage expiry index row.
 const OWN_KP_INDEX_KEY: &[u8] = b"index";
 
-/// One own KeyPackage in the expiry index.
+/// One own `KeyPackage` in the expiry index.
 #[derive(Serialize, Deserialize)]
 struct OwnKeyPackageEntry {
-    /// Row key of the KeyPackage (its serialized hash reference).
+    /// Row key of the `KeyPackage` (its serialized hash reference).
     reference_key: Vec<u8>,
-    /// Unix seconds after which the KeyPackage is deleted.
+    /// Unix seconds after which the `KeyPackage` is deleted.
     not_after: u64,
 }
 
@@ -108,7 +108,7 @@ impl<'k, K: MlsKv> MlsStorage<'k, K> {
         self.rows.delete(label, key.to_vec())
     }
 
-    /// Record an own KeyPackage with its expiry.
+    /// Record an own `KeyPackage` with its expiry.
     pub(crate) fn own_kp_remember<R: Serialize + ?Sized>(
         &self,
         hash_ref: &R,
@@ -129,7 +129,7 @@ impl<'k, K: MlsKv> MlsStorage<'k, K> {
         self.own_kp_store(&entries)
     }
 
-    /// Delete every own KeyPackage whose expiry passed, with its keys. Returns the count.
+    /// Delete every own `KeyPackage` whose expiry passed, with its keys. Returns the count.
     pub(crate) fn own_kp_purge_expired(&self, now: u64) -> Result<usize, MlsKvError> {
         let entries = self.own_kp_entries()?;
         let (expired, live): (Vec<_>, Vec<_>) =

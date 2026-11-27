@@ -3,7 +3,7 @@
 
 //! `0xF0D2` pseudonym credential: `{version = 1, pseudonym_pk[32]}`.
 //!
-//! The key is fresh per KeyPackage and group, never published at the home node, and valid only
+//! The key is fresh per `KeyPackage` and group, never published at the home node, and valid only
 //! when it equals the leaf signature key.
 
 use openmls::prelude::{Credential, CredentialType};

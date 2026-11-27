@@ -17,7 +17,7 @@ const RNG_PROBE_BYTES: usize = 32;
 
 /// The process-wide crypto provider. Cloning copies the `Arc`, never the provider.
 ///
-/// The provider seeds a ChaCha20 generator from the operating system and panics inside its
+/// The provider seeds a `ChaCha20` generator from the operating system and panics inside its
 /// default constructor when that source fails, so [`CryptoHandle::init`] probes the source with the
 /// same call first and reports a typed error instead.
 #[derive(Clone)]

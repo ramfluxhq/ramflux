@@ -38,7 +38,7 @@ pub trait RosterPolicy: Send + Sync {
     /// [`MlsError::PolicyRejected`] when the roster does not know the member.
     fn accept_member(&self, member: &MemberIdentity) -> Result<(), MlsError>;
 
-    /// May `new` replace `old` as the same member (Update or UpdatePath with another key)?
+    /// May `new` replace `old` as the same member (Update or `UpdatePath` with another key)?
     ///
     /// # Errors
     /// [`MlsError::PolicyRejected`] when the roster does not accept the successor.
@@ -73,7 +73,7 @@ impl RosterPolicy for DenyAllRoster {
 }
 
 /// Only Add, Update and Remove are allowed, in commits and before a proposal is stored. Every
-/// other type (PreSharedKey, ReInit, ExternalInit, GroupContextExtensions with any
+/// other type (`PreSharedKey`, `ReInit`, `ExternalInit`, `GroupContextExtensions` with any
 /// `ExternalSenders`, custom and unknown types, and the leave-by-sender kind) is refused.
 pub(crate) fn check_proposal_type(proposal: &Proposal) -> Result<(), MlsError> {
     match proposal {
@@ -85,7 +85,7 @@ pub(crate) fn check_proposal_type(proposal: &Proposal) -> Result<(), MlsError> {
     }
 }
 
-/// Only members may send handshake messages: External, NewMemberProposal and NewMemberCommit
+/// Only members may send handshake messages: External, `NewMemberProposal` and `NewMemberCommit`
 /// bypass the wire-format check and are refused.
 pub(crate) fn check_sender(sender: &Sender) -> Result<LeafNodeIndex, MlsError> {
     match sender {

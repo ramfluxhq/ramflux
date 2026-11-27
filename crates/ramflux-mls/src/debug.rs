@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Debug-only helpers behind the `itest-mls-debug` feature: an in-memory scratch store that is
-//! never flushed, synthetic pseudonym KeyPackages for bulk adds, tamper builders, the pinned
+//! never flushed, synthetic pseudonym `KeyPackages` for bulk adds, tamper builders, the pinned
 //! roster and blob-file helpers. None of this is compiled into production builds.
 
 use std::io::Read as _;
@@ -31,7 +31,7 @@ use crate::{
 pub const MAX_BULK_COUNT: usize = crate::ABSOLUTE_LEAF_CAP;
 /// Largest members-per-commit of a bulk add.
 pub const MAX_BULK_BATCH: usize = 2_000;
-/// The suite a `suite` tamper KeyPackage claims.
+/// The suite a `suite` tamper `KeyPackage` claims.
 const TAMPER_SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519;
 
 /// In-memory store that reads nothing and refuses to be flushed. Synthetic key material lives in
@@ -96,14 +96,14 @@ impl RosterPolicy for PinnedRoster {
     }
 }
 
-/// How a debug KeyPackage is damaged.
+/// How a debug `KeyPackage` is damaged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyPackageTamper {
     /// The credential no longer verifies.
     Credential,
     /// A valid credential of this account sits in a leaf with another signature key.
     Transplant,
-    /// The KeyPackage claims suite 0x0003.
+    /// The `KeyPackage` claims suite 0x0003.
     Suite,
 }
 
@@ -196,7 +196,7 @@ impl<K: MlsKv> Mls<K> {
         self.creds.pin(signature_key)
     }
 
-    /// A KeyPackage, optionally damaged on purpose.
+    /// A `KeyPackage`, optionally damaged on purpose.
     ///
     /// # Errors
     /// As [`Mls::key_package`].
@@ -225,7 +225,7 @@ impl<K: MlsKv> Mls<K> {
             Some(KeyPackageTamper::Suite) | None => {}
         }
         let credential_bytes = credential_with_key.credential.serialized_content().len();
-        self.store_signer(&op, &leaf_signer)?;
+        Self::store_signer(&op, &leaf_signer)?;
         let (ciphersuite, capabilities) = if tamper == Some(KeyPackageTamper::Suite) {
             (
                 TAMPER_SUITE,
@@ -261,8 +261,8 @@ impl<K: MlsKv> Mls<K> {
     /// `not_found` or a provider failure.
     pub fn tampered_update(&self, group_id: &[u8]) -> Result<CommitOutput, MlsError> {
         let op = self.begin()?;
-        let mut loaded = self.load(&op, group_id)?;
-        let signer = self.load_signer(&op, &loaded.group)?;
+        let mut loaded = Self::load(&op, group_id)?;
+        let signer = Self::load_signer(&op, &loaded.group)?;
         let own = loaded
             .group
             .own_leaf_node()
@@ -319,11 +319,11 @@ impl<K: MlsKv> Mls<K> {
             ));
         }
         let op = self.begin()?;
-        let mut loaded = self.load(&op, group_id)?;
+        let mut loaded = Self::load(&op, group_id)?;
         if loaded.kind != GroupKind::Group {
             return Err(MlsError::PolicyRejected("bulk add is for the group kind only".to_owned()));
         }
-        let signer = self.load_signer(&op, &loaded.group)?;
+        let signer = Self::load_signer(&op, &loaded.group)?;
         let started = Instant::now();
         let (mut remaining, mut commits, mut max_commit_bytes, mut max_welcome_bytes) =
             (count, 0_usize, 0_usize, 0_usize);

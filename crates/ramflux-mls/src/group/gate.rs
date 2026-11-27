@@ -81,7 +81,7 @@ pub(crate) fn leaf_count(group: &MlsGroup) -> usize {
     group.treesync().full_leaves().count()
 }
 
-impl<'a, 'k, K: MlsKv> Gate<'a, 'k, K> {
+impl<'k, K: MlsKv> Gate<'_, 'k, K> {
     fn storage(&self) -> &MlsStorage<'k, K> {
         self.provider.mls_storage()
     }
@@ -108,7 +108,7 @@ impl<'a, 'k, K: MlsKv> Gate<'a, 'k, K> {
         self.describe(&member)
     }
 
-    /// (a) A KeyPackage before it may be added: suite, credential type and pair.
+    /// (a) A `KeyPackage` before it may be added: suite, credential type and pair.
     pub(crate) fn check_key_package(
         &self,
         key_package: &KeyPackage,
@@ -185,19 +185,16 @@ impl<'a, 'k, K: MlsKv> Gate<'a, 'k, K> {
         }
 
         // (h) kind limits.
-        match &resulting {
-            Some(tree) => {
-                let principals: BTreeSet<String> =
-                    tree.iter().filter_map(MemberIdentity::principal).collect();
-                if principals.len() > DM_MAX_PRINCIPALS {
-                    return Err(policy("a dm may hold at most two principals"));
-                }
+        if let Some(tree) = &resulting {
+            let principals: BTreeSet<String> =
+                tree.iter().filter_map(MemberIdentity::principal).collect();
+            if principals.len() > DM_MAX_PRINCIPALS {
+                return Err(policy("a dm may hold at most two principals"));
             }
-            None => {
-                let after = current.saturating_sub(removed.len()).saturating_add(adds);
-                if after > leaf_cap {
-                    return Err(policy("commit exceeds the leaf cap"));
-                }
+        } else {
+            let after = current.saturating_sub(removed.len()).saturating_add(adds);
+            if after > leaf_cap {
+                return Err(policy("commit exceeds the leaf cap"));
             }
         }
 
@@ -261,10 +258,10 @@ impl<'a, 'k, K: MlsKv> Gate<'a, 'k, K> {
         tree.extend(added.iter().cloned());
         let mut devices = BTreeSet::new();
         for identity in &tree {
-            if let Some((root, device)) = identity.device_key() {
-                if !devices.insert((root.to_owned(), device.to_owned())) {
-                    return Err(credential_rejected("a device may hold only one leaf"));
-                }
+            if let Some((root, device)) = identity.device_key()
+                && !devices.insert((root.to_owned(), device.to_owned()))
+            {
+                return Err(credential_rejected("a device may hold only one leaf"));
             }
         }
         Ok(tree)
@@ -281,7 +278,7 @@ impl<'a, 'k, K: MlsKv> Gate<'a, 'k, K> {
         group.merge_pending_commit(self.provider).map_err(MlsError::mls)
     }
 
-    /// Add members: every KeyPackage is verified, the own cap (tier) is applied, then the commit
+    /// Add members: every `KeyPackage` is verified, the own cap (tier) is applied, then the commit
     /// is staged, checked as a whole and merged (debug mode: no orderer).
     pub(crate) fn add(
         &self,
@@ -347,7 +344,7 @@ impl<'a, 'k, K: MlsKv> Gate<'a, 'k, K> {
         Ok(commit)
     }
 
-    /// (b) Join by Welcome: suite, kind from the authenticated GroupContext, no replacement of an
+    /// (b) Join by Welcome: suite, kind from the authenticated `GroupContext`, no replacement of an
     /// existing group, the absolute leaf cap, every member as a pair, the kind limits and the
     /// roster (one call for the whole tree).
     pub(crate) fn join(&self, welcome: Welcome) -> Result<JoinedGroup, MlsError> {
@@ -375,10 +372,10 @@ impl<'a, 'k, K: MlsKv> Gate<'a, 'k, K> {
         }
         let mut devices = BTreeSet::new();
         for identity in &identities {
-            if let Some((root, device)) = identity.device_key() {
-                if !devices.insert((root.to_owned(), device.to_owned())) {
-                    return Err(credential_rejected("a device may hold only one leaf"));
-                }
+            if let Some((root, device)) = identity.device_key()
+                && !devices.insert((root.to_owned(), device.to_owned()))
+            {
+                return Err(credential_rejected("a device may hold only one leaf"));
             }
         }
         match kind {
@@ -434,12 +431,14 @@ impl<'a, 'k, K: MlsKv> Gate<'a, 'k, K> {
             }
             ProcessedMessageContent::OwnPrivateMessage
             | ProcessedMessageContent::OwnPendingCommit => Ok(ReceivedMessage::Own { epoch }),
-            _ => Err(policy("message content type is not allowed")),
+            ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
+                Err(policy("external join proposals are not allowed"))
+            }
         }
     }
 }
 
-/// The group kind from the authenticated GroupContext: `required_capabilities` must list exactly
+/// The group kind from the authenticated `GroupContext`: `required_capabilities` must list exactly
 /// one rf credential type.
 fn kind_from_context(
     required: Option<&openmls::prelude::RequiredCapabilitiesExtension>,

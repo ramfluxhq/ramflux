@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Group configuration, leaf capabilities and KeyPackage lifetime.
+//! Group configuration, leaf capabilities and `KeyPackage` lifetime.
 
 use openmls::prelude::{
     Capabilities, CredentialType, Extension, Extensions, GroupContext, Lifetime,
@@ -44,7 +44,7 @@ fn group_context_extensions(kind: GroupKind) -> Result<Extensions<GroupContext>,
         .map_err(MlsError::mls)
 }
 
-/// Lifetime of a KeyPackage and of a group creator's leaf: 30 days.
+/// Lifetime of a `KeyPackage` and of a group creator's leaf: 30 days.
 #[must_use]
 pub fn key_package_lifetime() -> Lifetime {
     Lifetime::new(KEY_PACKAGE_LIFETIME_SECS)

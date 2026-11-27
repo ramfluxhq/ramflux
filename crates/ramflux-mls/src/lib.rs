@@ -3,7 +3,7 @@
 
 //! MLS (RFC 9420) foundation for ramflux.
 //!
-//! The crate wraps `openmls` (RustCrypto provider only) behind one facade and one gate:
+//! The crate wraps `openmls` (`RustCrypto` provider only) behind one facade and one gate:
 //!
 //! * `provider`: [`CryptoHandle`] (the single process-wide crypto construction, probed first) and
 //!   [`RfMlsProvider`] (crypto plus the overlay storage).
@@ -56,13 +56,13 @@ pub const CREDENTIAL_TYPE_PSEUDONYM: u16 = 0xF0D2;
 pub const CREDENTIAL_VERSION: u8 = 1;
 /// Largest accepted credential (the device credential embeds its device-set record).
 pub const MAX_CREDENTIAL_BYTES: usize = 16 * 1024;
-/// Largest accepted KeyPackage message.
+/// Largest accepted `KeyPackage` message.
 pub const MAX_KEY_PACKAGE_BYTES: usize = 64 * 1024;
 /// Largest accepted Welcome, commit, proposal or application message.
 pub const MAX_MLS_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Largest value the storage codec decodes.
 pub const MAX_STORED_VALUE_BYTES: usize = 64 * 1024 * 1024;
-/// Lifetime of an own KeyPackage in seconds (30 days).
+/// Lifetime of an own `KeyPackage` in seconds (30 days).
 pub const KEY_PACKAGE_LIFETIME_SECS: u64 = 30 * 86_400;
 /// Number of past epochs whose receive secrets are kept.
 pub const MAX_PAST_EPOCHS: usize = 3;
@@ -83,7 +83,7 @@ pub const GROUP_ID_BYTES: usize = 32;
 pub const RF_LABEL_PREFIX: &str = "rf/";
 /// Highest accepted device-set record per root commitment.
 pub const RF_LABEL_DEVICE_SET: &str = "rf/device_set";
-/// Index of own KeyPackages with their expiry.
+/// Index of own `KeyPackages` with their expiry.
 pub const RF_LABEL_OWN_KP: &str = "rf/own_kp";
 /// Group kind per group id.
 pub const RF_LABEL_GROUP_KIND: &str = "rf/group_kind";

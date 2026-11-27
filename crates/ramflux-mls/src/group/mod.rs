@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! The MLS facade: create, KeyPackage, add, join, send, receive, update, leave, commit pending,
+//! The MLS facade: create, `KeyPackage`, add, join, send, receive, update, leave, commit pending,
 //! remove, export and status.
 //!
 //! Every state-changing operation loads the group, operates, and returns a [`Staged`] output. The
@@ -82,10 +82,10 @@ impl Tier {
     }
 }
 
-/// A fresh KeyPackage.
+/// A fresh `KeyPackage`.
 #[derive(Debug)]
 pub struct KeyPackageOutput {
-    /// TLS-encoded `MLSMessage` carrying the KeyPackage.
+    /// TLS-encoded `MLSMessage` carrying the `KeyPackage`.
     pub bytes: Vec<u8>,
     /// The leaf signature public key.
     pub leaf_sig_pk: [u8; 32],
@@ -133,7 +133,7 @@ pub struct MemberSummary {
 pub struct JoinOutput {
     /// Group id.
     pub group_id: Vec<u8>,
-    /// Kind derived from the Welcome's GroupContext.
+    /// Kind derived from the Welcome's `GroupContext`.
     pub kind: GroupKind,
     /// Epoch.
     pub epoch: u64,
@@ -217,6 +217,14 @@ pub enum ReceivedMessage {
     },
 }
 
+/// The own commit operations the facade routes through the gate.
+#[derive(Clone, Copy)]
+enum OwnOp {
+    Update,
+    CommitPending,
+    Remove(u32),
+}
+
 pub(crate) struct Loaded {
     pub(crate) group: MlsGroup,
     pub(crate) kind: GroupKind,
@@ -274,7 +282,7 @@ fn parse_message(bytes: &[u8], max: usize) -> Result<MlsMessageIn, MlsError> {
         .map_err(|_| MlsError::Mls("malformed MLS message".to_owned()))
 }
 
-/// Parse and validate a KeyPackage message (size, signature, lifetime).
+/// Parse and validate a `KeyPackage` message (size, signature, lifetime).
 pub(crate) fn parse_key_package(
     bytes: &[u8],
     crypto: &CryptoHandle,
@@ -307,7 +315,7 @@ impl<K: MlsKv> Mls<K> {
         }
     }
 
-    /// Install the own device identity (needed for `dm` KeyPackages and groups).
+    /// Install the own device identity (needed for `dm` `KeyPackages` and groups).
     #[must_use]
     pub fn with_device_identity(mut self, identity: DeviceIdentity) -> Self {
         self.identity = Some(identity);
@@ -366,15 +374,11 @@ impl<K: MlsKv> Mls<K> {
         Ok(CredentialWithKey { credential, signature_key: signer.public().to_vec().into() })
     }
 
-    pub(crate) fn store_signer(&self, op: &Op<'_, K>, signer: &LeafSigner) -> Result<(), MlsError> {
+    pub(crate) fn store_signer(op: &Op<'_, K>, signer: &LeafSigner) -> Result<(), MlsError> {
         Ok(op.provider.mls_storage().rf_put(RF_LABEL_LEAF_SIG, signer.public(), signer.secret())?)
     }
 
-    pub(crate) fn load_signer(
-        &self,
-        op: &Op<'_, K>,
-        group: &MlsGroup,
-    ) -> Result<LeafSigner, MlsError> {
+    pub(crate) fn load_signer(op: &Op<'_, K>, group: &MlsGroup) -> Result<LeafSigner, MlsError> {
         let leaf =
             group.own_leaf_node().ok_or_else(|| MlsError::internal("own leaf is missing"))?;
         let secret = op
@@ -385,7 +389,7 @@ impl<K: MlsKv> Mls<K> {
         LeafSigner::from_secret(&secret)
     }
 
-    pub(crate) fn load(&self, op: &Op<'_, K>, group_id: &[u8]) -> Result<Loaded, MlsError> {
+    pub(crate) fn load(op: &Op<'_, K>, group_id: &[u8]) -> Result<Loaded, MlsError> {
         let storage = op.provider.mls_storage();
         let group = MlsGroup::load(op.provider.storage(), &GroupId::from_slice(group_id))?
             .ok_or_else(|| MlsError::NotFound("group".to_owned()))?;
@@ -410,7 +414,6 @@ impl<K: MlsKv> Mls<K> {
     }
 
     fn summarize(
-        &self,
         op: &Op<'_, K>,
         kind: GroupKind,
         group: &MlsGroup,
@@ -437,7 +440,7 @@ impl<K: MlsKv> Mls<K> {
         Ok(members)
     }
 
-    /// A fresh KeyPackage of `kind`. Expired own KeyPackages are deleted first (bounded rows).
+    /// A fresh `KeyPackage` of `kind`. Expired own `KeyPackages` are deleted first (bounded rows).
     ///
     /// # Errors
     /// Missing device identity (`dm`), `device_set_too_large`, provider or storage failure.
@@ -451,7 +454,7 @@ impl<K: MlsKv> Mls<K> {
         let signer = LeafSigner::generate(self.crypto.crypto())?;
         let credential_with_key = self.credential_for(&op, kind, &signer)?;
         let credential_bytes = credential_with_key.credential.serialized_content().len();
-        self.store_signer(&op, &signer)?;
+        Self::store_signer(&op, &signer)?;
         let bundle = KeyPackage::builder()
             .key_package_lifetime(config::key_package_lifetime())
             .leaf_node_capabilities(config::capabilities())
@@ -489,7 +492,7 @@ impl<K: MlsKv> Mls<K> {
         unix_now()?;
         let signer = LeafSigner::generate(self.crypto.crypto())?;
         let credential_with_key = self.credential_for(&op, kind, &signer)?;
-        self.store_signer(&op, &signer)?;
+        Self::store_signer(&op, &signer)?;
         let group_id = self.crypto.crypto().random_vec(GROUP_ID_BYTES).map_err(MlsError::mls)?;
         let group = MlsGroup::new_with_group_id(
             &op.provider,
@@ -512,7 +515,7 @@ impl<K: MlsKv> Mls<K> {
         op.finish(CreateOutput { group_id, epoch, leaf_cap })
     }
 
-    /// Add the members behind the KeyPackage messages: verify, stage, check, merge.
+    /// Add the members behind the `KeyPackage` messages: verify, stage, check, merge.
     ///
     /// # Errors
     /// `too_large`, `credential_rejected`, `policy_rejected`, `not_found` or a provider failure.
@@ -526,18 +529,17 @@ impl<K: MlsKv> Mls<K> {
             .iter()
             .map(|bytes| parse_key_package(bytes, &self.crypto))
             .collect::<Result<Vec<_>, _>>()?;
-        self.add_parsed(op, group_id, &key_packages)
+        Self::add_parsed(op, group_id, &key_packages)
     }
 
-    /// Add already parsed KeyPackages (also used by the debug bulk path).
+    /// Add already parsed `KeyPackages` (also used by the debug bulk path).
     pub(crate) fn add_parsed<'a>(
-        &'a self,
         op: Op<'a, K>,
         group_id: &[u8],
         key_packages: &[KeyPackage],
     ) -> Result<Staged<'a, K, AddOutput>, MlsError> {
-        let mut loaded = self.load(&op, group_id)?;
-        let signer = self.load_signer(&op, &loaded.group)?;
+        let mut loaded = Self::load(&op, group_id)?;
+        let signer = Self::load_signer(&op, &loaded.group)?;
         let (commit, welcome) =
             op.gate(loaded.kind).add(&mut loaded.group, &signer, key_packages, loaded.leaf_cap)?;
         let output = AddOutput {
@@ -566,7 +568,7 @@ impl<K: MlsKv> Mls<K> {
             &group_id,
             kind.as_str().as_bytes(),
         )?;
-        let members = self.summarize(&op, kind, &group)?;
+        let members = Self::summarize(&op, kind, &group)?;
         let output = JoinOutput {
             group_id,
             kind,
@@ -588,8 +590,8 @@ impl<K: MlsKv> Mls<K> {
         aad: &[u8],
     ) -> Result<Staged<'_, K, SendOutput>, MlsError> {
         let op = self.begin()?;
-        let mut loaded = self.load(&op, group_id)?;
-        let signer = self.load_signer(&op, &loaded.group)?;
+        let mut loaded = Self::load(&op, group_id)?;
+        let signer = Self::load_signer(&op, &loaded.group)?;
         loaded.group.set_aad(aad.to_vec());
         let message =
             loaded.group.create_message(&op.provider, &signer, plaintext).map_err(MlsError::mls)?;
@@ -618,7 +620,7 @@ impl<K: MlsKv> Mls<K> {
         };
         let group_id = protocol.group_id().to_vec();
         let op = self.begin()?;
-        let mut loaded = self.load(&op, &group_id)?;
+        let mut loaded = Self::load(&op, &group_id)?;
         let received = op.gate(loaded.kind).process(&mut loaded.group, protocol)?;
         op.finish(received)
     }
@@ -628,7 +630,7 @@ impl<K: MlsKv> Mls<K> {
     /// # Errors
     /// `not_found`, gate rejections or a provider failure.
     pub fn update(&self, group_id: &[u8]) -> Result<Staged<'_, K, CommitOutput>, MlsError> {
-        self.own_commit(group_id, |gate, group, signer| gate.update(group, signer))
+        self.own_commit(group_id, OwnOp::Update)
     }
 
     /// Commit to the stored proposals (second half of a leave).
@@ -636,7 +638,7 @@ impl<K: MlsKv> Mls<K> {
     /// # Errors
     /// `not_found`, gate rejections or a provider failure.
     pub fn commit_pending(&self, group_id: &[u8]) -> Result<Staged<'_, K, CommitOutput>, MlsError> {
-        self.own_commit(group_id, |gate, group, signer| gate.commit_pending(group, signer))
+        self.own_commit(group_id, OwnOp::CommitPending)
     }
 
     /// Remove the member at `leaf`.
@@ -648,27 +650,25 @@ impl<K: MlsKv> Mls<K> {
         group_id: &[u8],
         leaf: u32,
     ) -> Result<Staged<'_, K, CommitOutput>, MlsError> {
-        self.own_commit(group_id, move |gate, group, signer| {
-            gate.remove(group, signer, LeafNodeIndex::new(leaf))
-        })
+        self.own_commit(group_id, OwnOp::Remove(leaf))
     }
 
-    fn own_commit<F>(
+    fn own_commit(
         &self,
         group_id: &[u8],
-        run: F,
-    ) -> Result<Staged<'_, K, CommitOutput>, MlsError>
-    where
-        F: for<'g, 'k> FnOnce(
-            &Gate<'g, 'k, K>,
-            &mut MlsGroup,
-            &LeafSigner,
-        ) -> Result<MlsMessageOut, MlsError>,
-    {
+        operation: OwnOp,
+    ) -> Result<Staged<'_, K, CommitOutput>, MlsError> {
         let op = self.begin()?;
-        let mut loaded = self.load(&op, group_id)?;
-        let signer = self.load_signer(&op, &loaded.group)?;
-        let message = run(&op.gate(loaded.kind), &mut loaded.group, &signer)?;
+        let mut loaded = Self::load(&op, group_id)?;
+        let signer = Self::load_signer(&op, &loaded.group)?;
+        let gate = op.gate(loaded.kind);
+        let message = match operation {
+            OwnOp::Update => gate.update(&mut loaded.group, &signer)?,
+            OwnOp::CommitPending => gate.commit_pending(&mut loaded.group, &signer)?,
+            OwnOp::Remove(leaf) => {
+                gate.remove(&mut loaded.group, &signer, LeafNodeIndex::new(leaf))?
+            }
+        };
         let output = CommitOutput {
             epoch: loaded.group.epoch().as_u64(),
             message: message.to_bytes().map_err(MlsError::mls)?,
@@ -682,8 +682,8 @@ impl<K: MlsKv> Mls<K> {
     /// `not_found` or a provider failure.
     pub fn leave(&self, group_id: &[u8]) -> Result<Staged<'_, K, CommitOutput>, MlsError> {
         let op = self.begin()?;
-        let mut loaded = self.load(&op, group_id)?;
-        let signer = self.load_signer(&op, &loaded.group)?;
+        let mut loaded = Self::load(&op, group_id)?;
+        let signer = Self::load_signer(&op, &loaded.group)?;
         let message = loaded.group.leave_group(&op.provider, &signer).map_err(MlsError::mls)?;
         let output = CommitOutput {
             epoch: loaded.group.epoch().as_u64(),
@@ -704,7 +704,7 @@ impl<K: MlsKv> Mls<K> {
         len: usize,
     ) -> Result<Zeroizing<Vec<u8>>, MlsError> {
         let op = self.begin()?;
-        let loaded = self.load(&op, group_id)?;
+        let loaded = Self::load(&op, group_id)?;
         let secret = loaded
             .group
             .export_secret(self.crypto.crypto(), label, context, len)
@@ -718,7 +718,7 @@ impl<K: MlsKv> Mls<K> {
     /// `not_found` or a storage failure.
     pub fn status(&self, group_id: &[u8]) -> Result<StatusOutput, MlsError> {
         let op = self.begin()?;
-        let loaded = self.load(&op, group_id)?;
+        let loaded = Self::load(&op, group_id)?;
         let tier = op
             .provider
             .mls_storage()
@@ -734,7 +734,7 @@ impl<K: MlsKv> Mls<K> {
             leaf_cap: loaded.leaf_cap,
             own_leaf: loaded.group.own_leaf_index().u32(),
             leaves: gate::leaf_count(&loaded.group),
-            members: self.summarize(&op, loaded.kind, &loaded.group)?,
+            members: Self::summarize(&op, loaded.kind, &loaded.group)?,
             rows: self.kv.row_stats()?,
         })
     }
