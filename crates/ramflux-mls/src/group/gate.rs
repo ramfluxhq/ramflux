@@ -27,19 +27,20 @@ use zeroize::Zeroizing;
 use super::context::{CommitCtx, CommitMeta, WelcomeCtx};
 use super::conversation::{ConversationRole, ExpectedPrincipals, RfConversation};
 use super::policy::{CommitPolicy, RosterPolicy, check_proposal_type, check_sender};
-use super::{ReceivedMessage, config};
+use super::{ReceivedMessage, Tier, config};
 use crate::credential::{self, CredentialPolicy, DeviceAuthority, GroupKind, MemberIdentity};
 use crate::provider::RfMlsProvider;
 use crate::signer::LeafSigner;
 use crate::storage::kv::{MlsKv, MlsKvError};
-use crate::{
-    ABSOLUTE_LEAF_CAP, CREDENTIAL_TYPE_DEVICE, CREDENTIAL_TYPE_PSEUDONYM, MLS_SUITE, MlsError,
-};
+use crate::{CREDENTIAL_TYPE_DEVICE, CREDENTIAL_TYPE_PSEUDONYM, LEAF_CAP, MLS_SUITE, MlsError};
+use ramflux_crypto::large_group::Genesis;
 
 /// What a successful Welcome produced.
 pub(crate) struct JoinedGroup {
     pub(crate) group: MlsGroup,
     pub(crate) kind: GroupKind,
+    /// Tier named by the genesis of a `group` Welcome (`None` for `dm` and `self`).
+    pub(crate) tier: Option<Tier>,
 }
 
 /// Bundle of the references the checks need. Copyable so a join can swap the kind it derived.
@@ -85,7 +86,7 @@ pub(crate) fn leaf_count(group: &MlsGroup) -> usize {
     group.treesync().full_leaves().count()
 }
 
-impl<'k, K: MlsKv> Gate<'_, 'k, K> {
+impl<K: MlsKv> Gate<'_, '_, K> {
     /// Pure pair check (V1): no clock, no directory. Used for every received commit and Welcome.
     fn verify(
         &self,
@@ -382,7 +383,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         group.set_aad(meta.aad.to_vec());
         let (commit, _welcome, _group_info) =
             group.remove_members(self.provider, signer, &[leaf]).map_err(MlsError::mls)?;
-        self.merge_own(group, ABSOLUTE_LEAF_CAP, meta)?;
+        self.merge_own(group, LEAF_CAP, meta)?;
         Ok(commit)
     }
 
@@ -396,7 +397,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         group.set_aad(meta.aad.to_vec());
         let (commit, _welcome, _group_info) =
             group.commit_to_pending_proposals(self.provider, signer).map_err(MlsError::mls)?;
-        self.merge_own(group, ABSOLUTE_LEAF_CAP, meta)?;
+        self.merge_own(group, LEAF_CAP, meta)?;
         Ok(commit)
     }
 
@@ -412,18 +413,21 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
             .self_update(self.provider, signer, LeafNodeParameters::default())
             .map_err(MlsError::mls)?;
         let (commit, _welcome, _group_info) = bundle.into_contents();
-        self.merge_own(group, ABSOLUTE_LEAF_CAP, meta)?;
+        self.merge_own(group, LEAF_CAP, meta)?;
         Ok(commit)
     }
 
     /// (b) Join by Welcome: suite, kind from the authenticated `GroupContext`, the `rf_conversation`
     /// binding of a `dm`/`self` group (role must match the kind, id and principals must match
-    /// `expected` when the caller has one), no replacement of an existing group, the absolute leaf
-    /// cap, every member as a pair, the kind limits and the roster (one call for the whole tree).
+    /// `expected` when the caller has one), no replacement of an existing group, the leaf cap (a
+    /// `group` Welcome must come with its genesis, whose hash is the `group_id` and whose tier
+    /// gives the cap; a `dm` or `self` Welcome takes none), every member as a pair, the kind
+    /// limits and the roster (one call for the whole tree).
     pub(crate) fn join(
         &self,
         welcome: Welcome,
         expected: Option<&ExpectedPrincipals>,
+        genesis: Option<&[u8]>,
     ) -> Result<JoinedGroup, MlsError> {
         // Rule V (W2): leaf-node lifetime validation is skipped; members are checked by V1 only.
         let staged = StagedWelcome::build_from_welcome(
@@ -451,8 +455,25 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         {
             return Err(policy("a welcome for an existing group id is refused"));
         }
-        if staged.members().count() > ABSOLUTE_LEAF_CAP {
-            return Err(policy("welcome exceeds the absolute leaf cap"));
+        let tier = match (kind.is_device_kind(), genesis) {
+            (true, None) => None,
+            (false, Some(bytes)) => {
+                let genesis = Genesis::decode(bytes)
+                    .map_err(|_| policy("the group genesis does not decode"))?;
+                if genesis.group_id().as_slice() != context.group_id().as_slice() {
+                    return Err(policy("the genesis does not match the welcome group id"));
+                }
+                Some(
+                    Tier::from_members(genesis.tier)
+                        .ok_or_else(|| policy("the genesis names an unavailable tier"))?,
+                )
+            }
+            (true, Some(_)) => return Err(policy("a dm or self welcome takes no genesis")),
+            (false, None) => return Err(policy("a group welcome needs its genesis")),
+        };
+        let leaf_cap = tier.map_or(LEAF_CAP, Tier::leaf_cap);
+        if staged.members().count() > leaf_cap {
+            return Err(policy("welcome exceeds the tier leaf cap"));
         }
         let mut identities = Vec::new();
         for member in staged.members() {
@@ -483,7 +504,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
             let welcome_ctx = WelcomeCtx {
                 group_id: context.group_id().as_slice(),
                 expected_group_id: None,
-                leaf_cap: ABSOLUTE_LEAF_CAP,
+                leaf_cap,
             };
             gate.roster.accept_welcome(&welcome_ctx, &identities)?;
         }
@@ -492,7 +513,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         group
             .set_configuration(gate.provider.storage(), &config::join_config(kind))
             .map_err(MlsError::Storage)?;
-        Ok(JoinedGroup { group, kind })
+        Ok(JoinedGroup { group, kind, tier })
     }
 
     /// Process one protocol message: decrypt, check the sender type, and for commits and
@@ -501,6 +522,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
         &self,
         group: &mut MlsGroup,
         message: ProtocolMessage,
+        leaf_cap: usize,
     ) -> Result<ReceivedMessage, MlsError> {
         if group.ciphersuite() != MLS_SUITE {
             return Err(policy("group ciphersuite is not 0x0001"));
@@ -536,7 +558,7 @@ impl<'k, K: MlsKv> Gate<'_, 'k, K> {
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 let group_id = group.group_id().to_vec();
                 let ctx = CommitCtx { group_id: &group_id, epoch, meta: &aad };
-                self.check_commit(group, &staged, sender, ABSOLUTE_LEAF_CAP, &ctx)?;
+                self.check_commit(group, &staged, sender, leaf_cap, &ctx)?;
                 let removed = staged.self_removed();
                 group.merge_staged_commit(self.provider, *staged).map_err(MlsError::mls)?;
                 Ok(ReceivedMessage::Commit { epoch: group.epoch().as_u64(), removed })

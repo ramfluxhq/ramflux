@@ -40,40 +40,35 @@ use crate::provider::{CryptoHandle, RfMlsProvider};
 use crate::signer::LeafSigner;
 use crate::storage::kv::{MlsKv, RowStats, Staged};
 use crate::{
-    ABSOLUTE_LEAF_CAP, GROUP_ID_BYTES, KEY_PACKAGE_LIFETIME_SECS, LEAF_CAP_TIER_1000,
-    LEAF_CAP_TIER_5000, MAX_KEY_PACKAGE_BYTES, MAX_MLS_MESSAGE_BYTES, MLS_SUITE, MlsError,
-    RF_LABEL_GROUP_KIND, RF_LABEL_GROUP_TIER, RF_LABEL_LEAF_SIG,
+    GROUP_ID_BYTES, KEY_PACKAGE_LIFETIME_SECS, LEAF_CAP, MAX_KEY_PACKAGE_BYTES,
+    MAX_MLS_MESSAGE_BYTES, MLS_SUITE, MlsError, RF_LABEL_GROUP_KIND, RF_LABEL_GROUP_TIER,
+    RF_LABEL_LEAF_SIG,
 };
+use ramflux_crypto::large_group::TIER_1000;
 
 /// Number of members `status` lists before truncating.
 pub const STATUS_MEMBER_LIMIT: usize = 50;
 
-/// Capacity tier of a `group`, chosen at creation.
+/// Capacity tier of a `group`, chosen at creation. The beta has one tier; a 5 000 member tier is
+/// refused until it is measured (owner O5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
     /// Up to 1 000 members (leaf cap 3 000).
     Members1000,
-    /// Up to 5 000 members (leaf cap 15 000).
-    Members5000,
 }
 
 impl Tier {
-    /// Parse the member count (`1000` or `5000`).
+    /// Parse the member count (`1000` only).
     #[must_use]
     pub fn from_members(members: u32) -> Option<Self> {
-        match members {
-            1000 => Some(Self::Members1000),
-            5000 => Some(Self::Members5000),
-            _ => None,
-        }
+        (members == TIER_1000).then_some(Self::Members1000)
     }
 
     /// Member count of the tier.
     #[must_use]
     pub fn members(self) -> u32 {
         match self {
-            Self::Members1000 => 1000,
-            Self::Members5000 => 5000,
+            Self::Members1000 => TIER_1000,
         }
     }
 
@@ -81,8 +76,7 @@ impl Tier {
     #[must_use]
     pub fn leaf_cap(self) -> usize {
         match self {
-            Self::Members1000 => LEAF_CAP_TIER_1000,
-            Self::Members5000 => LEAF_CAP_TIER_5000,
+            Self::Members1000 => LEAF_CAP,
         }
     }
 }
@@ -285,7 +279,7 @@ pub(crate) fn unix_now() -> Result<u64, MlsError> {
         .map_err(|_| MlsError::internal("system clock is before 1970"))
 }
 
-fn parse_message(bytes: &[u8], max: usize) -> Result<MlsMessageIn, MlsError> {
+pub(crate) fn parse_message(bytes: &[u8], max: usize) -> Result<MlsMessageIn, MlsError> {
     if bytes.len() > max {
         return Err(MlsError::TooLarge(format!("{} bytes, limit {max}", bytes.len())));
     }
@@ -419,14 +413,15 @@ impl<K: MlsKv> Mls<K> {
                 "loaded group ciphersuite is not 0x0001".to_owned(),
             ));
         }
-        // A joiner cannot authenticate the tier yet and applies the absolute cap.
+        // The tier row is written on create and on join (from the genesis); a group without one
+        // (dm, self) applies the single leaf cap.
         let leaf_cap = storage
             .rf_get(RF_LABEL_GROUP_TIER, group_id)?
             .and_then(|raw| {
                 std::str::from_utf8(&raw).ok().and_then(|text| text.parse::<u32>().ok())
             })
             .and_then(Tier::from_members)
-            .map_or(ABSOLUTE_LEAF_CAP, Tier::leaf_cap);
+            .map_or(LEAF_CAP, Tier::leaf_cap);
         Ok(Loaded { group, kind, leaf_cap })
     }
 
@@ -529,7 +524,7 @@ impl<K: MlsKv> Mls<K> {
         group_id: Option<[u8; GROUP_ID_BYTES]>,
     ) -> Result<Staged<'_, K, CreateOutput>, MlsError> {
         let leaf_cap = match (kind.is_device_kind(), tier) {
-            (true, None) => ABSOLUTE_LEAF_CAP,
+            (true, None) => LEAF_CAP,
             (false, Some(tier)) => tier.leaf_cap(),
             (true, Some(_)) => {
                 return Err(MlsError::PolicyRejected("a dm or self group has no tier".to_owned()));
@@ -626,7 +621,22 @@ impl<K: MlsKv> Mls<K> {
     /// # Errors
     /// `too_large`, `policy_rejected`, `credential_rejected` or a provider failure.
     pub fn join(&self, welcome: &[u8]) -> Result<Staged<'_, K, JoinOutput>, MlsError> {
-        self.join_checked(welcome, None)
+        self.join_checked(welcome, None, None)
+    }
+
+    /// Join the `group` a Welcome describes. `genesis` is the canonical genesis of the group
+    /// (`rf.lg.genesis.v2`): its hash must equal the Welcome's group id and its tier gives the
+    /// leaf cap for the joined tree and for every later received commit.
+    ///
+    /// # Errors
+    /// As [`Self::join`], plus `policy_rejected` for a genesis that does not decode, does not
+    /// match the group id or names an unavailable tier.
+    pub fn join_group(
+        &self,
+        welcome: &[u8],
+        genesis: &[u8],
+    ) -> Result<Staged<'_, K, JoinOutput>, MlsError> {
+        self.join_checked(welcome, None, Some(genesis))
     }
 
     /// Join the group a Welcome describes, requiring the conversation binding and the principals
@@ -639,13 +649,14 @@ impl<K: MlsKv> Mls<K> {
         welcome: &[u8],
         expected: &ExpectedPrincipals,
     ) -> Result<Staged<'_, K, JoinOutput>, MlsError> {
-        self.join_checked(welcome, Some(expected))
+        self.join_checked(welcome, Some(expected), None)
     }
 
     fn join_checked(
         &self,
         welcome: &[u8],
         expected: Option<&ExpectedPrincipals>,
+        genesis: Option<&[u8]>,
     ) -> Result<Staged<'_, K, JoinOutput>, MlsError> {
         let message = parse_message(welcome, MAX_MLS_MESSAGE_BYTES)?;
         let MlsMessageBodyIn::Welcome(welcome) = message.extract() else {
@@ -653,13 +664,21 @@ impl<K: MlsKv> Mls<K> {
         };
         let op = self.begin()?;
         // A join derives the kind from the Welcome; the gate starts with a placeholder.
-        let JoinedGroup { group, kind } = op.gate(GroupKind::Dm).join(welcome, expected)?;
+        let JoinedGroup { group, kind, tier } =
+            op.gate(GroupKind::Dm).join(welcome, expected, genesis)?;
         let group_id = group.group_id().to_vec();
         op.provider.mls_storage().rf_put(
             RF_LABEL_GROUP_KIND,
             &group_id,
             kind.as_str().as_bytes(),
         )?;
+        if let Some(tier) = tier {
+            op.provider.mls_storage().rf_put(
+                RF_LABEL_GROUP_TIER,
+                &group_id,
+                tier.members().to_string().as_bytes(),
+            )?;
+        }
         let members = Self::summarize(&op, kind, &group)?;
         let output = JoinOutput {
             group_id,
@@ -713,7 +732,8 @@ impl<K: MlsKv> Mls<K> {
         let group_id = protocol.group_id().to_vec();
         let op = self.begin()?;
         let mut loaded = Self::load(&op, &group_id)?;
-        let received = op.gate(loaded.kind).process(&mut loaded.group, protocol)?;
+        let received =
+            op.gate(loaded.kind).process(&mut loaded.group, protocol, loaded.leaf_cap)?;
         op.finish(received)
     }
 

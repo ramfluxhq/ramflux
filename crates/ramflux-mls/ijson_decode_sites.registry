@@ -1,4 +1,4 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # path | enclosing fn | ordinal | class | admission provenance or exclusion reason
 crates/ramflux-mls/src/kat.rs | parse_cases | 1 | E | excluded=RFC 9420 known-answer vector file supplied by the operator to the hidden debug command; size bounded before parsing; no Envelope/Ack/Nack is admitted
-crates/ramflux-mls/src/storage/kv.rs | decode | 1 | E | excluded=local account-DB MLS row written by this crate (openmls state and rf rows); value size bounded to 64 MiB before parsing; never peer input and no Envelope/Ack/Nack is admitted
+crates/ramflux-mls/src/storage/kv.rs | decode_json | 1 | E | excluded=local account-DB MLS row (MlsGroupJoinConfig only) written by this crate; value size bounded to 64 MiB before parsing; never peer input and no Envelope/Ack/Nack is admitted

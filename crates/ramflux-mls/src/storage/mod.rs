@@ -176,7 +176,7 @@ impl<K: MlsKv> StorageProvider<CURRENT_VERSION> for MlsStorage<'_, K> {
         group_id: &GroupId,
         config: &MlsGroupJoinConfig,
     ) -> Result<(), Self::Error> {
-        self.rows.write(LABEL_JOIN_CONFIG, key_of(group_id)?, config)
+        self.rows.write_json(LABEL_JOIN_CONFIG, key_of(group_id)?, config)
     }
 
     async fn write_tree<
@@ -372,7 +372,7 @@ impl<K: MlsKv> StorageProvider<CURRENT_VERSION> for MlsStorage<'_, K> {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<MlsGroupJoinConfig>, Self::Error> {
-        self.rows.read(LABEL_JOIN_CONFIG, &key_of(group_id)?)
+        self.rows.read_json(LABEL_JOIN_CONFIG, &key_of(group_id)?)
     }
 
     async fn tree<
