@@ -11,6 +11,7 @@ use ramflux_protocol::message::{AgentAccessPolicy, AgentPersona, EventIdentity};
 use serde::{Deserialize, Serialize};
 
 mod apply;
+pub(crate) mod config;
 mod edit;
 mod policy;
 mod store;
@@ -18,7 +19,7 @@ mod store;
 mod tests;
 mod wire;
 
-pub(crate) use wire::to_wire;
+pub(crate) use wire::{to_wire, to_wire_listed};
 
 pub(crate) use apply::{apply_metadata, metadata_of};
 #[cfg(test)]
@@ -41,11 +42,22 @@ pub(crate) const ROLE_NAMED: &str = "named";
 pub(crate) struct AgentIntent {
     pub(crate) persona: AgentPersona,
     pub(crate) access: AgentAccessPolicy,
-    /// Set only when a limit bound is set, so an intent with no limits serializes as before.
+    /// The model config of the request; present whenever `agent.create` carried a config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) autonomy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) enabled: Option<bool>,
+    /// The PRX config revision the mirror was last written from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_concurrent_turns: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,6 +71,11 @@ impl AgentIntent {
             access,
             provider: None,
             model: None,
+            autonomy: None,
+            prompt: None,
+            tools: None,
+            enabled: None,
+            revision: None,
             max_concurrent_turns: None,
             max_cost_per_day_cents: None,
         }
@@ -79,11 +96,23 @@ pub(crate) struct StoredAgentRecord {
     /// Change sequence of the last write of this record (AGENT-IDENTITY-01 E4, `agent.watch`). Set by
     /// `AgentRecordStore::save`; strictly increasing across the records of one owner.
     pub(crate) change_seq: u64,
-    /// Present only on the desktop that created the agent with a limit bound.
+    /// The desktop's mirror of the PRX config (AGENT-MGMT-01A); PRX owns the real one. Every
+    /// field is absent until it is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) autonomy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) enabled: Option<bool>,
+    /// The PRX config revision the mirror was last written from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_concurrent_turns: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,8 +132,5 @@ pub(crate) fn check_record(record: &StoredAgentRecord) -> Result<(), SdkError> {
         .map_err(|_| SdkError::CustodySetupInvalid)?;
     check_persona(&record.persona)?;
     check_access(&record.access)?;
-    let turns_ok = record.max_concurrent_turns.is_none_or(|value| (1..=1024).contains(&value));
-    let cost_ok =
-        record.max_cost_per_day_cents.is_none_or(|value| (1..=1_000_000_000).contains(&value));
-    if turns_ok && cost_ok { Ok(()) } else { Err(SdkError::CustodySetupInvalid) }
+    if config::record_config_ok(record) { Ok(()) } else { Err(SdkError::CustodySetupInvalid) }
 }

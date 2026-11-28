@@ -14,7 +14,7 @@ mod snapshot;
 pub use cursor::{SyncCursor, format_cursor, parse_cursor};
 pub use frame::{JournalEvent, PONG_FRAME, ServerFrame, ack_frame, decode_server, hello_frame};
 pub use live::{LiveBody, LiveNotice};
-pub use op::{ApprovalCopy, EraseCopy, MirrorOp, TurnBody, TurnCopy};
+pub use op::{ApprovalCopy, EraseCopy, MirrorOp, TurnBody, TurnCopy, TurnOrigin};
 pub use snapshot::{SNAPSHOT_MAX_BODY, SNAPSHOT_PAGE_LIMIT, SnapshotPage, SnapshotRow};
 
 /// Loopback address of the daemon, for the sync WebSocket upgrade.

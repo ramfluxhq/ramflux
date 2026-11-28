@@ -136,6 +136,26 @@ impl Fences {
         token.redacted_view = redacted_view(method);
         Ok(token)
     }
+    /// Whether a request is admitted without any access token. Control methods always are.
+    /// Recovery and local removal are too, but only when the header names an account whose
+    /// epoch is closed: that is the one way out of the lock screen for that account. A missing
+    /// or different header keeps the ordinary token (`scope`), so another locked account
+    /// still refuses it.
+    pub(crate) fn open_for(&self, method: &str, account: Option<&str>) -> Result<bool, SdkError> {
+        if control(method) {
+            return Ok(true);
+        }
+        match account {
+            Some(id) if exit_method(method) => Ok(self.epoch(id)?.blocks_access()),
+            _ => Ok(false),
+        }
+    }
+    /// Drops the epoch of an account whose local data was erased, so it no longer fences
+    /// other accounts or global methods.
+    pub(crate) fn forget(&self, account: &str) -> Result<(), SdkError> {
+        self.state.lock().map_err(|_| locked())?.accounts.remove(account);
+        Ok(())
+    }
     pub(crate) fn any_locked(&self) -> Result<bool, SdkError> {
         Ok(self.state.lock().map_err(|_| locked())?.accounts.values().any(Epoch::blocks_access))
     }
@@ -234,18 +254,30 @@ pub(crate) fn redacted_view(method: &str) -> bool {
 }
 /// Global views do not become account-scoped when a caller adds an unused account identifier.
 pub(crate) fn scope<'a>(method: &str, account: Option<&'a str>) -> Option<&'a str> {
-    if matches!(
-        method,
-        "account.list"
-            | "account.backup.jobs"
-            | "account.backup.cancel"
-            | "account.restore.verify"
-            | "account.restore.install"
-    ) {
+    if method.starts_with("account.recover.")
+        || matches!(
+            method,
+            "account.list"
+                | "account.backup.jobs"
+                | "account.backup.cancel"
+                | "account.restore.verify"
+                | "account.restore.install"
+        )
+    {
         None
     } else {
         account
     }
+}
+/// Methods that leave the lock screen of the app-locked account named in the header.
+fn exit_method(method: &str) -> bool {
+    matches!(
+        method,
+        "account.recover.begin"
+            | "account.recover.confirm"
+            | "account.recover.cancel"
+            | "account.remove_local"
+    )
 }
 pub(crate) fn control(method: &str) -> bool {
     matches!(

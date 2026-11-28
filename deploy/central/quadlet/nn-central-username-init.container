@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# One-shot provisioning: root, no network, copies the role secrets and prepares the volumes.
+# Image digest and full core commit are recorded by the centre; placeholders below.
+[Unit]
+Description=Username centre init (one shot)
+[Container]
+Image=ghcr.io/ramfluxhq/ramflux-federation@sha256:<DIGEST>
+ContainerName=nn-central-username-init
+User=0:0
+Entrypoint=/usr/local/bin/username-start.sh
+Exec=prepare
+Network=none
+DropCapability=ALL
+AddCapability=CHOWN FOWNER DAC_OVERRIDE
+ReadOnly=true
+Volume=nn-central-username-center.volume:/var/lib/ramflux/username/center
+Volume=nn-central-username-witness.volume:/var/lib/ramflux/username/witness
+Volume=nn-central-username-socket.volume:/var/lib/ramflux/username/socket
+Volume=/etc/ramflux-username/witness:/run/username-secrets/witness:ro
+Volume=/etc/ramflux-username/center:/run/username-secrets/center:ro
+[Service]
+Type=oneshot
+RemainAfterExit=no

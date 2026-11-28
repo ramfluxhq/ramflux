@@ -288,10 +288,6 @@ pub enum SdkError {
     AccountNotOpen(String),
     #[error("account restore is pending: {0}")]
     AccountRestorePending(String),
-    #[error("account restore failed for {account_id}: {reason}")]
-    AccountRestoreFailed { account_id: String, reason: String },
-    #[error("account manifest is unreadable")]
-    AccountManifestUnreadable,
     #[error("{code}: {message}")]
     LocalBusRefused { code: String, message: String, body: Box<serde_json::Value> },
     #[error("{message}")]
@@ -310,6 +306,10 @@ pub enum SdkError {
     SurfaceDeliveryTooLarge { bytes: usize, limit: usize },
     #[error("surface checkpoint does not match its owning row")]
     SurfaceCheckpointMismatch,
+    /// The saved central push key set checkpoint is not the current record list format (for
+    /// example one written by an earlier pre-release build). No legacy format is read before v1.
+    #[error("push key set checkpoint gateway.push.keyset.v1 is malformed: {0}")]
+    PushKeysetCheckpointMalformed(String),
     #[error("contact root replacement requires confirmation")]
     ContactConfirmationRequired(Box<crate::ContactRootChange>),
     #[error("contact lookup unavailable: {0}")]
@@ -375,6 +375,9 @@ pub enum SdkError {
     /// The node refused push route control with its typed refusal (not a session fault).
     #[error("push route refused: {0:?}")]
     PushRouteRefused(crate::GatewayPushRouteRefusal),
+    /// The node refused `device.push_route.test`; same bus code as [`Self::PushRouteRefused`].
+    #[error("push test refused: {refusal:?}")]
+    PushTestRefused { refusal: crate::GatewayPushRouteRefusal, retry_after_ms: Option<u64> },
     #[error("own-device authorization refresh failed: {0}")]
     OwnDeviceAuthorizationRefreshFailed(String),
     #[error("gateway session is not established")]
@@ -383,6 +386,9 @@ pub enum SdkError {
     InvalidGatewayCursor(String),
     #[error("local bus error: {0}")]
     LocalBus(String),
+    /// MLS runtime failure; `code` is the typed `ramflux-mls` code (`credential_rejected`, ...).
+    #[error("mls {code}: {detail}")]
+    Mls { code: &'static str, detail: String },
     #[error("local bus peer credential check failed")]
     LocalBusPermissionDenied,
     #[error("capability denied: {0}")]

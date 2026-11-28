@@ -974,6 +974,23 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
             }
             match frame {
                 ramflux_node_core::GatewayClientFrame::Submit { submit } => {
+                    // Diagnostics (C-9): the request id is the join key with the client log.
+                    // It is client-chosen, so only a short token-shaped id is logged.
+                    let request_id = submit.signed_request.request_id.as_str();
+                    let logged_id = if request_id.len() <= 64
+                        && request_id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                    {
+                        request_id
+                    } else {
+                        "invalid"
+                    };
+                    tracing::debug!(
+                        target: "ramflux_gateway_diag",
+                        request_id = %logged_id,
+                        "gateway submit received"
+                    );
                     handle_gateway_submit(&send, &context, &runtime, &submit).await?;
                 }
                 ramflux_node_core::GatewayClientFrame::OwnDeviceFanout { fanout } => {
@@ -1030,6 +1047,9 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
                     )
                     .await;
                 }
+                ramflux_node_core::GatewayClientFrame::PushRouteTest { request } => {
+                    crate::push_test::handle(&send, &context, &runtime, *request).await;
+                }
                 ramflux_node_core::GatewayClientFrame::PushRouteDeregister { request } => {
                     let queue = route_control.get_or_insert_with(|| {
                         crate::push_registration::RouteControlQueue::for_session(
@@ -1071,6 +1091,32 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
                 }
                 ramflux_node_core::GatewayClientFrame::Nack { nack } => {
                     handle_gateway_nack(&send, &context, &runtime, &nack).await?;
+                }
+                ramflux_node_core::GatewayClientFrame::DevicePolicy { device_class, muted } => {
+                    if let Err(error) = crate::device_policy::handle_device_policy(
+                        &context,
+                        &runtime,
+                        device_class,
+                        muted,
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "device policy not recorded");
+                    }
+                }
+                ramflux_node_core::GatewayClientFrame::Activity {} => {
+                    if let Err(error) =
+                        crate::device_policy::handle_activity(&context, &runtime).await
+                    {
+                        tracing::warn!(%error, "device activity not recorded");
+                    }
+                }
+                ramflux_node_core::GatewayClientFrame::NotificationsCleared {} => {
+                    if let Err(error) =
+                        crate::device_policy::handle_notifications_cleared(&context, &runtime).await
+                    {
+                        tracing::warn!(%error, "notifications cleared not recorded");
+                    }
                 }
                 ramflux_node_core::GatewayClientFrame::Heartbeat { now } => {
                     write_gateway_handle(

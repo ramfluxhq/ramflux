@@ -2,11 +2,13 @@
 // Copyright (c) 2026 Span Brain
 
 //! One host event. A submit is signed here and sent only by card.session.submit.
+use super::batch;
 use super::body::{self, MAX_BODY};
+use super::codes::typed;
 use super::gate::card_err;
 use super::guard::{Kept, keep};
 use super::host_view;
-use super::respond::{self, Shown, shown, stale};
+use super::respond::{self, Shown, shown};
 use super::sign;
 use super::store;
 use crate::{RamfluxClient, SdkError};
@@ -62,44 +64,50 @@ fn deliver(drive: &Drive<'_>, event: HostEvent) -> Result<Value, SdkError> {
         if let Some(block) =
             host_view::seal_if_blocked(drive.client, held, drive.state, drive.fallback)?
         {
-            let batch = mounted_batch(held)?;
+            let Some(mounted) = batch::mounted(drive.client, held)? else {
+                return Ok(batch::inactive(drive.session, drive.fallback));
+            };
             return Ok(respond::stopped(
                 drive.session,
                 drive.fallback,
                 block.status,
                 block.reason,
                 block.replacement_ref.as_deref(),
-                batch,
+                Some(mounted),
             ));
         }
         if !held.matches(drive.state) {
-            return Ok(stale(drive.session, drive.fallback));
+            return batch::stale(drive.client, held, drive.session, drive.fallback);
         }
         held.session().enqueue(event).map_err(card_err)?;
         match held.session().next_event().map_err(card_err)? {
-            None => Err(super::super::invalid("card_session_inactive")),
-            Some(EventResult::StaleDropped) => Ok(stale(drive.session, drive.fallback)),
+            None => Err(typed("card_session_inactive")),
+            Some(EventResult::StaleDropped) => {
+                batch::stale(drive.client, held, drive.session, drive.fallback)
+            }
             Some(EventResult::Refused { reason }) => {
                 let replacement =
                     held.session().tree().and_then(|tree| tree.replacement_ref.clone());
                 let status = if reason == "card_superseded" { "superseded" } else { "refused" };
-                let batch = mounted_batch(held)?;
+                let Some(mounted) = batch::mounted(drive.client, held)? else {
+                    return Ok(batch::inactive(drive.session, drive.fallback));
+                };
                 Ok(respond::stopped(
                     drive.session,
                     drive.fallback,
                     status,
                     reason,
                     replacement.as_deref(),
-                    batch,
+                    Some(mounted),
                 ))
             }
             Some(EventResult::Validation { batch }) => {
-                edited(drive.session, drive.fallback, "validation", &batch, None)
+                edited(drive, held, "validation", &batch, None)
             }
             Some(EventResult::Edited { batch }) => {
                 let host_request = link_request(&batch)?;
                 let result = if host_request.is_some() { "open_url" } else { "edited" };
-                edited(drive.session, drive.fallback, result, &batch, host_request)
+                edited(drive, held, result, &batch, host_request)
             }
             Some(EventResult::Submit { action, batch }) => {
                 submit_result(drive, held, &action, &batch)
@@ -108,26 +116,18 @@ fn deliver(drive: &Drive<'_>, event: HostEvent) -> Result<Value, SdkError> {
     })
 }
 
-fn mounted_batch(held: &store::Held) -> Result<Option<Value>, SdkError> {
-    match held.session_ref().shown_batch() {
-        Ok(batch) => Ok(Some(respond::batch_value(&batch)?)),
-        Err(ramflux_card::CardError::Inactive) => Ok(None),
-        Err(error) => Err(card_err(error)),
-    }
-}
-
 fn edited(
-    session: u64,
-    fallback: &str,
+    drive: &Drive<'_>,
+    held: &store::Held,
     result: &str,
     batch: &MutationBatch,
     host_request: Option<Value>,
 ) -> Result<Value, SdkError> {
     Ok(shown(Shown {
         result,
-        session,
-        fallback,
-        batch: Some(respond::batch_value(batch)?),
+        session: drive.session,
+        fallback: drive.fallback,
+        batch: Some(respond::batch_value(drive.client, held.conversation(), batch)?),
         host_request,
         submit: None,
         draft_conflict: false,
@@ -143,7 +143,7 @@ fn submit_result(
 ) -> Result<Value, SdkError> {
     let session = held.session().id();
     let resolved = held.session().resolved().map_err(card_err)?;
-    let batch_value = respond::batch_value(batch)?;
+    let batch_value = respond::batch_value(drive.client, held.conversation(), batch)?;
     match sign::sign_action(drive.client, drive.state, drive.author, &resolved, action) {
         Ok(pending) => {
             let submit = json!({

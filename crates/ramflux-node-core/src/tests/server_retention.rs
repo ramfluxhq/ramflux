@@ -140,7 +140,7 @@ fn server_retention_push_routes_encrypt_rotate_and_revoke_on_current_authority()
     });
     let now = now_unix_seconds();
     let mut route = notify_webpush_route("delivery", "web");
-    route.registered_at = now;
+    route.registered_at_ms = now;
     route.expires_at = now + 600;
     route.token = "opaque-private-provider-token-never-in-redb".into();
     let mut legacy = route.clone();
@@ -191,7 +191,7 @@ fn server_retention_notify_terminal_rows_and_raw_collapse_are_not_exposed()
     let store = NotifyRedbStore::open_without_wal(&path)?;
     let now = now_unix_seconds();
     let mut route = notify_webpush_route("delivery", "web");
-    route.registered_at = now;
+    route.registered_at_ms = now;
     route.expires_at = now + 600;
     store.register_push_route(route)?;
     store.update_provider_credential(&notify_webpush_credential("web"))?;
@@ -247,6 +247,7 @@ fn server_retention_signed_push_control_rejects_forgery_expiry_and_selector_inje
     let body = PushRouteControlBody {
         authority: gateway_registered_key(&gateway_open_frame("phone", "stream"))?,
         registration: PushRouteRegistration {
+            sealed: false,
             provider: PushProviderKind::Fcm,
             token: "opaque-token".into(),
             route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),

@@ -115,19 +115,6 @@ pub(super) fn read(db: &AccountDb) -> Result<Value, SdkError> {
     Ok(result)
 }
 
-pub(super) fn optional_manifest(path: &Path) -> Option<LocalBusPersistedAccount> {
-    if !super::daemon::account_manifest_available(path) {
-        return None;
-    }
-    match read_local_bus_account_manifest(path) {
-        Ok(manifest) => Some(manifest),
-        Err(error) => {
-            tracing::warn!(%error,"account manifest unavailable; optional node and display metadata omitted");
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

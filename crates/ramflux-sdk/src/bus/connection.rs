@@ -9,6 +9,12 @@ use crate::prelude::*;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
+// Teardown after the stop reply; each phase is bounded and named in the stop log.
+/// Backstop only: the wait starts after the shutdown finished and ends when the reply is written.
+const STOP_RESPONSE_MS: u64 = 2000;
+const CONNECTIONS_MS: u64 = 250;
+const BACKGROUND_TASKS_MS: u64 = 250;
+
 pub(super) async fn serve(
     config: LocalBusConfig,
     shutdown: watch::Receiver<bool>,
@@ -46,9 +52,13 @@ pub(super) async fn serve(
     let mut background = JoinSet::new();
     supervisor.hydrate(&mut background)?;
     tracing::info!(socket = %supervisor.config.socket_path.display(), "local bus daemon ready");
-    let result = accept(listener, owner, supervisor, shutdown).await;
-    background.abort_all();
-    while background.join_next().await.is_some() {}
+    let result = accept(listener, owner, Rc::clone(&supervisor), shutdown).await;
+    supervisor
+        .bounded_phase("background_tasks", BACKGROUND_TASKS_MS, async {
+            background.abort_all();
+            while background.join_next().await.is_some() {}
+        })
+        .await;
     result
 }
 
@@ -113,15 +123,27 @@ pub(super) async fn accept<L: BusListener>(
         socket.remove()?;
     }
     if explicit_stop {
+        // The reply carries the shutdown outcome, so the shutdown (its own detached task, started
+        // once by whichever caller came first) must finish before the reply wait begins; the
+        // connections are torn down only after the reply was written and flushed.
+        let _ = supervisor.shutdown().await;
         let mut response = supervisor.stop_response();
-        while !*response.borrow() {
-            if response.changed().await.is_err() {
-                break;
-            }
-        }
+        supervisor
+            .bounded_phase("stop_response", STOP_RESPONSE_MS, async {
+                while !*response.borrow() {
+                    if response.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await;
     }
-    connections.abort_all();
-    while connections.join_next().await.is_some() {}
+    supervisor
+        .bounded_phase("connections", CONNECTIONS_MS, async {
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
+        })
+        .await;
     supervisor.shutdown().await?;
     lease_error.map_or(Ok(()), Err)
 }
@@ -282,12 +304,19 @@ async fn admit_frame(
         Some(Err(error)) => return Ok(Admit::Done(Err(error))),
     };
     let source = incoming.frame()?;
-    let access = if super::app_lock_fence::control(&source.method) {
+    let access = if state
+        .supervisor
+        .app_fences
+        .open_for(&source.method, source.account_id.as_deref())?
+    {
         None
     } else {
         Some(state.supervisor.app_fences.for_method(&source.method, source.account_id.as_deref())?)
     };
-    let refusal = super::io::local_bus_error(source, &super::app_lock_fence::locked());
+    let refusal = super::io::local_bus_error_unlogged(source, &super::app_lock_fence::locked());
+    // The recovering connection receives `account.app_lock.changed` when recovery reopens the fence.
+    let recovering =
+        (source.method == "account.recover.begin").then(|| source.account_id.clone()).flatten();
     if let Some(bytes) = local_method(
         &mut incoming,
         state.supervisor,
@@ -298,6 +327,9 @@ async fn admit_frame(
     )
     .await?
     {
+        if let Some(id) = &recovering {
+            state.supervisor.attach_app_control(state.connection.connection_id, id);
+        }
         tokio::time::timeout(
             Duration::from_secs(10),
             state.secrets.send(SecretResponse { bytes, access, refusal }),
@@ -442,7 +474,25 @@ fn subscription_method(method: &str) -> bool {
         || (cfg!(feature = "c-abi") && method == "subscription.close")
 }
 
+/// A refused open must not leave the attended mark behind: the mark is set before the
+/// account is validated, and a stale mark makes other accounts' app-lock calls unauthorized.
 pub(super) async fn configure_subscription(
+    supervisor: &Supervisor,
+    connection: &mut LocalBusConnectionState,
+    request: &LocalBusFrame,
+) -> Result<(), SdkError> {
+    let previous = connection.attended_account_id.clone();
+    let result = open_subscription(supervisor, connection, request).await;
+    if result.is_err() && request.method != "subscription.close" {
+        if previous.is_none() {
+            supervisor.forget_attended(connection.connection_id);
+        }
+        connection.attended_account_id = previous;
+    }
+    result
+}
+
+async fn open_subscription(
     supervisor: &Supervisor,
     connection: &mut LocalBusConnectionState,
     request: &LocalBusFrame,
@@ -535,6 +585,7 @@ fn ephemeral_subscription_topic(topic: &str) -> bool {
         "state.changed"
             | "account.restore.finished"
             | "mcp.approval.request"
+            | "device.notifications.cleared"
             | ramflux_protocol::message::TRANSIENT_TOPIC
     )
 }
@@ -584,6 +635,11 @@ async fn write_responses<W: AsyncWrite + Unpin>(
                 let Some(mut response) = bytes else { break; };
                 let _delivery = Arc::clone(&supervisor.app_fences.delivery).read_owned().await;
                 if response.access.as_ref().is_some_and(|access| access.check().is_err()) {
+                    crate::diag::events::bus_failure(
+                        &response.refusal.method,
+                        response.refusal.trace_id.as_deref(),
+                        &super::app_lock_fence::locked(),
+                    );
                     response.bytes = zeroize::Zeroizing::new(super::io::encode_local_bus_frame(&response.refusal)?);
                 }
                 tokio::time::timeout(Duration::from_secs(10),super::io::write_encoded_local_bus_frame(&mut writer,&response.bytes)).await.map_err(|_|closed())??;

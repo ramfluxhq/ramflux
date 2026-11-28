@@ -350,7 +350,9 @@ fn reply_body(forget: ForgetWrites) -> Option<Value> {
 impl PrxClient {
     /// Deletes one message. `agent: None` deletes it for every agent it reached in this session;
     /// `Some` deletes it for that agent only. Needs `message_delete_v1`. `ForgetWrites::Forget`
-    /// also needs `message_forget_writes_v1` and is not sent without it.
+    /// also needs `message_forget_writes_v1` and is not sent without it. A message PRX already
+    /// deleted by retention answers 404 `message_unknown`; product callers treat it as already
+    /// deleted.
     ///
     /// # Errors
     /// Returns `Unsupported`, `Api` (`message_unknown` 404 when this session has no record of the
@@ -437,7 +439,9 @@ impl PrxClient {
 
     /// Erase-for-everyone. When `message_forget_writes_v1` is advertised, the delete sends
     /// `forget_writes: true`. Without the token the delete is plain and [`EraseNotice`] tells
-    /// the caller that tool-written memory was not forgotten. `422 forget_family_too_large`
+    /// the caller that tool-written memory was not forgotten. A message PRX already deleted by
+    /// retention answers 404 `message_unknown`; product callers treat it as already deleted.
+    /// `422 forget_family_too_large`
     /// deletes nothing; the caller is told, and the same delete is retried once without the field.
     ///
     /// # Errors

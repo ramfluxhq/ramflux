@@ -17,6 +17,9 @@ http-connect-proxy = ["ramflux-transport/http-connect-proxy"]
 default = []
 # Integration fixture only; production provenance forbids this feature.
 itest-memory-vault = []
+# MLS-0c: hidden `debug.mls.*` bus methods (scratch store, tamper builders, pinned roster, bulk
+# members). Never enabled by production builds (scripts/check-production-features.py).
+itest-mls-debug = ["ramflux-mls/itest-mls-debug"]
 test-support = []
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = []
@@ -43,7 +46,6 @@ itest-rfd-fault = []
 # gate); marker=0 in production.
 itest-bus-fault = []
 # Default-off startup-restore gate for integration tests that pin observable state ordering.
-itest-restore-state = []
 # T25-A5 (OBJ-IPC-01): default-off object-IPC crash seam used only by mvp_s69 to abort() rfd at the
 # upload chunk d->e boundary (durable spool + journal fsync'd, before the ack) and the download
 # after-spool-write boundary. Never enabled by production binaries; requires the runtime opt-in env
@@ -69,6 +71,7 @@ ramflux-prx-client = { workspace = true }
 ramflux-crypto = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-storage = { workspace = true }
+ramflux-mls = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-transport = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
@@ -85,6 +88,7 @@ mime = "0.3"
 blake3 = { version = "1.5", features = ["zeroize"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.11"
 thiserror = "2.0"
 unicode-normalization = "0.1.26"
 time = { version = "0.3.51", features = ["formatting"] }

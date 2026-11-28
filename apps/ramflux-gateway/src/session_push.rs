@@ -820,25 +820,24 @@ pub(crate) async fn established(
     id: Option<&str>,
     ephemeral: bool,
 ) -> anyhow::Result<()> {
+    let push = crate::push_central::established_fields();
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         if let Some(id) = id {
-            crate::session::write_gateway_frame(
-                send,
-                &ramflux_node_core::SessionPushServerFrame::SessionEstablished {
-                    session: ramflux_node_core::SessionPushEstablishedFrame {
-                        session,
-                        capabilities: established_capabilities(ephemeral),
-                        inbox_incarnation_id: id.into(),
-                    },
+            let frame = ramflux_node_core::SessionPushServerFrame::SessionEstablished {
+                session: ramflux_node_core::SessionPushEstablishedFrame {
+                    session,
+                    capabilities: established_capabilities(ephemeral),
+                    inbox_incarnation_id: id.into(),
                 },
-            )
-            .await
+            };
+            let mut value = serde_json::to_value(&frame).map_err(anyhow::Error::from)?;
+            crate::push_central::insert_fields(&mut value, "/session", &push)?;
+            crate::session::write_gateway_frame(send, &value).await
         } else {
-            crate::session::write_gateway_frame(
-                send,
-                &ramflux_node_core::GatewayServerFrame::SessionEstablished { session },
-            )
-            .await
+            let frame = ramflux_node_core::GatewayServerFrame::SessionEstablished { session };
+            let mut value = serde_json::to_value(&frame).map_err(anyhow::Error::from)?;
+            crate::push_central::insert_fields(&mut value, "/session", &push)?;
+            crate::session::write_gateway_frame(send, &value).await
         }
     })
     .await;

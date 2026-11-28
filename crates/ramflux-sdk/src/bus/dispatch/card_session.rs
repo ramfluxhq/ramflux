@@ -8,14 +8,15 @@ use crate::prelude::*;
 pub(crate) async fn dispatch(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
+    connection: u64,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account = request_account_id(request)?.to_owned();
     let method = request.method.clone();
     match method.as_str() {
         "card.session.submit" => submit(request, state, &account).await,
-        "card.session.open" => {
-            local(state, &account, |client| card_session::open(client, &account, &request.body))
-        }
+        "card.session.open" => local(state, &account, |client| {
+            card_session::open(client, &account, connection, &request.body)
+        }),
         "card.session.update" => {
             local(state, &account, |client| card_session::update(client, &account, &request.body))
         }

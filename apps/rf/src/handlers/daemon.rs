@@ -62,16 +62,78 @@ pub(crate) async fn handle_daemon(socket: PathBuf, command: DaemonCommand) -> Re
             if let Some(path) = start.builtin_nodes {
                 config.builtin_nodes = serde_json::from_slice(&std::fs::read(path)?)?;
             }
-            ramflux_sdk::serve_local_bus(config).await?;
-            Ok(())
+            // The process exits explicitly: lingering blocking work must not keep it alive.
+            let code = match ramflux_sdk::serve_local_bus(config).await {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("{error}");
+                    1
+                }
+            };
+            {
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                let _ = std::io::stderr().flush();
+            }
+            std::process::exit(code)
         }
         DaemonAction::Status => {
             let mut bus = LocalBusClient::connect(socket).await?;
             print_json(&bus.request(None, "daemon", "daemon.status", serde_json::json!({})).await?)
         }
-        DaemonAction::Stop => {
-            let mut bus = LocalBusClient::connect(socket).await?;
-            print_json(&bus.request(None, "daemon", "daemon.stop", serde_json::json!({})).await?)
+        DaemonAction::Stop => daemon_stop(socket).await,
+    }
+}
+
+/// Total client-side limit for `rf daemon stop`, from the start of the command.
+const STOP_LIMIT: std::time::Duration = std::time::Duration::from_millis(5000);
+#[cfg(unix)]
+const EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+async fn daemon_stop(socket: PathBuf) -> Result<(), RfError> {
+    let deadline = tokio::time::Instant::now() + STOP_LIMIT;
+    let reply = tokio::time::timeout_at(deadline, async {
+        let mut bus = LocalBusClient::connect(socket).await?;
+        bus.request(None, "daemon", "daemon.stop", serde_json::json!({})).await
+    })
+    .await
+    .map_err(|_| RfError::Message("daemon did not answer daemon.stop within 5 s".into()))??;
+    print_json(&reply)?;
+    #[cfg(unix)]
+    if let Some(pid) = reply.get("pid").and_then(serde_json::Value::as_u64) {
+        let gone = tokio::time::timeout_at(deadline, async {
+            while !process_gone(pid) {
+                tokio::time::sleep(EXIT_POLL).await;
+            }
+        })
+        .await;
+        if gone.is_err() {
+            return Err(RfError::Message(format!("daemon process {pid} still running after 5 s")));
         }
     }
+    Ok(())
+}
+
+/// True when the process no longer exists (a zombie that nobody reaped counts as exited).
+#[cfg(unix)]
+fn process_gone(pid: u64) -> bool {
+    let Some(target) = i32::try_from(pid).ok().and_then(rustix::process::Pid::from_raw) else {
+        return true;
+    };
+    match rustix::process::test_kill_process(target) {
+        Ok(()) => process_is_zombie(pid),
+        Err(error) => error == rustix::io::Errno::SRCH,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_zombie(pid: u64) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+    })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_is_zombie(_pid: u64) -> bool {
+    false
 }

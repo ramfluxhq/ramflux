@@ -37,6 +37,8 @@ pub(super) enum ResultSlot {
 
 #[derive(Default)]
 pub(super) struct OperationState {
+    /// Echoed in the completion as `trace_id` (C-8).
+    pub trace_id: Option<String>,
     pub admitted: bool,
     pub kind: OperationKind,
     pub cancelled: bool,
@@ -72,6 +74,8 @@ pub(super) struct Shared {
     pub closed: std::sync::atomic::AtomicBool,
     pub suspended: std::sync::atomic::AtomicBool,
     pub subscription: Mutex<Option<u64>>,
+    /// Weak so the worker's channel still closes when the client is dropped.
+    pub commands: std::sync::OnceLock<tokio::sync::mpsc::WeakSender<super::runtime::Command>>,
     pub host_key: Mutex<Option<HostKeyFn>>,
     pub credentials: super::credential::Bridge,
 }
@@ -85,9 +89,20 @@ pub(super) struct HostKeyFn {
 }
 
 impl Shared {
+    fn trace_of(&self, id: u64) -> Option<String> {
+        let operations = self.operations.lock().ok()?;
+        let operation = operations.get(&id)?;
+        let state = operation.state.lock().ok()?;
+        state.trace_id.clone()
+    }
     pub fn complete(&self, id: u64, mut value: serde_json::Value) {
         super::native_error::completion(&mut value);
         crate::diag::logging::refusal(&value);
+        if let Some(trace) = self.trace_of(id)
+            && let Some(map) = value.as_object_mut()
+        {
+            map.insert("trace_id".into(), serde_json::json!(trace));
+        }
         let success = value.get("code").and_then(serde_json::Value::as_i64) == Some(0);
         let encoded = Zeroizing::new(
             serde_json::to_vec(&value)
@@ -108,6 +123,7 @@ impl Shared {
                         && *subscription == Some(id))
                 {
                     *subscription = None;
+                    self.close_bus_subscription();
                     self.deactivate_generation();
                 }
                 state.result = Some(encoded);
@@ -142,6 +158,30 @@ impl Shared {
         }
     }
 
+    /// The bus keeps its own subscription and attended mark. Whenever the slot is dropped
+    /// here, tell the bus too, or the connection stays attended with no subscription.
+    pub fn close_bus_subscription(&self) {
+        let Some(commands) = self.commands.get().and_then(tokio::sync::mpsc::WeakSender::upgrade)
+        else {
+            return;
+        };
+        let frame = crate::LocalBusFrame::request(
+            "0",
+            None,
+            "bus",
+            "subscription.close",
+            serde_json::json!({}),
+        );
+        if let Ok(bytes) = crate::bus::inprocess::encode_request(frame) {
+            let _ = commands.try_send(super::runtime::Command::carrier(
+                0,
+                Zeroizing::new(bytes),
+                Arc::new(Operation::default()),
+                None,
+            ));
+        }
+    }
+
     pub fn deactivate_generation(&self) {
         if let Ok(mut events) = self.events.lock() {
             events.active = false;
@@ -154,18 +194,20 @@ impl Shared {
     pub fn push_event(&self, bytes: Vec<u8>, generation: u64) {
         let bytes = Zeroizing::new(bytes);
         let Ok(mut events) = self.events.lock() else { return };
-        if !events.active || generation == 0 || generation != events.generation || events.resync {
+        if !events.active || generation == 0 || events.resync {
+            return;
+        }
+        if generation != events.generation {
+            crate::diag::events::abi_event("abi.event.drop", generation, "stale_generation");
             return;
         }
         if events.queue.len() >= MAX_EVENTS
             || bytes.len() > MAX_EVENT_BYTES.saturating_sub(events.bytes)
         {
-            if generation != events.generation {
-                return;
-            }
             events.queue.clear();
             events.bytes = 0;
             events.resync = true;
+            crate::diag::events::abi_event("abi.event.resync", generation, "credit_exhausted");
             return;
         }
         events.bytes += bytes.len();

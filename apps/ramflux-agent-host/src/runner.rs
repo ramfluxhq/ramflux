@@ -243,6 +243,13 @@ impl<E: EngineProvider> AgentHost<E> {
         else {
             return Ok(());
         };
+        if let (Some(window), Some(sent)) =
+            (self.engine.dedup_window_ms(), message["hlc_ms"].as_u64())
+            && now_ms.saturating_sub(sent) > window
+        {
+            eprintln!("agent host skipped a message older than the PRX dedup window");
+            return Ok(());
+        }
         let text = message["text"].as_str().ok_or(Error::MalformedField("text"))?;
         let sender_display_name = participant::sender_display_name(bus, &message).await?;
         let chat_kind = if conversation["group_id"].is_string() { "group" } else { "direct" };

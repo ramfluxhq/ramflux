@@ -54,6 +54,17 @@ fn journal(root: &Path, id: &str) -> Result<Option<Journal>, SdkError> {
     }
     Ok(Some(value))
 }
+/// The vault refs a recovery in progress replaces: `(previous primary, previous branch)`. Erasing
+/// an account stuck mid-recovery deletes them too, since the journal is their only record.
+///
+/// # Errors
+/// Returns filesystem or decoding errors for an unreadable journal.
+pub(crate) fn previous_vault_refs(
+    root: &Path,
+    id: &str,
+) -> Result<Option<(String, String)>, SdkError> {
+    Ok(journal(root, id)?.map(|value| (value.previous_primary_ref, value.previous_branch_ref)))
+}
 pub(super) fn selected_authority(
     root: &Path,
     id: &str,
@@ -298,6 +309,10 @@ fn replacement_branch(
     ))
 }
 
+fn is_busy(error: &SdkError) -> bool {
+    matches!(error, SdkError::CustodyVault(crate::custody::CustodyVaultReason::Busy))
+}
+
 struct Replacement<'a> {
     ceremony: &'a RecoveryCeremony,
     current: BornAccount,
@@ -331,12 +346,23 @@ fn persist_intent(
     let old_primary = current.stored.primary_vault_ref.clone();
     let old_branch = current.stored.branch_vault_ref.clone();
     let branch_new = new_branch != old_branch;
-    vault.store_new(&new_primary, primary)?;
+    if let Err(error) = vault.store_new(&new_primary, primary) {
+        if is_busy(&error) {
+            // A timed-out create may still land late; the ceremony is dropped, so nobody
+            // would ever use or delete that primary. Best effort, the original error wins.
+            let _ = vault.delete(&new_primary);
+        }
+        return Err(error);
+    }
     let mut branch_written = false;
+    let mut branch_busy = false;
     let mut journal_written = false;
     let result = (|| {
         if branch_new {
-            vault.store_branch(&new_branch, seeds)?;
+            if let Err(error) = vault.store_branch(&new_branch, seeds) {
+                branch_busy = is_busy(&error);
+                return Err(error);
+            }
             branch_written = true;
         }
         current.stored.primary_vault_ref.clone_from(&new_primary);
@@ -379,7 +405,14 @@ fn persist_intent(
         })
     })();
     if result.is_err() && !journal_written {
-        let branch_cleanup = if branch_written { vault.delete(&new_branch) } else { Ok(()) };
+        let branch_cleanup = if branch_written {
+            vault.delete(&new_branch)
+        } else {
+            if branch_busy {
+                let _ = vault.delete(&new_branch);
+            }
+            Ok(())
+        };
         let primary_cleanup = vault.delete(&new_primary);
         branch_cleanup?;
         primary_cleanup?;

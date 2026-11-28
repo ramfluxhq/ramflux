@@ -3,10 +3,12 @@
 
 //! Host slot replies. Link completion is local. Approval ids come from task state.
 use super::approval::{self, Hint};
+use super::batch;
 use super::body::{self, MAX_BODY};
+use super::codes::typed;
 use super::gate::card_err;
 use super::guard::{Kept, keep};
-use super::respond::{self, Shown, shown, stale};
+use super::respond::{self, Shown, shown};
 use super::store;
 use crate::{RamfluxClient, SdkError};
 use ramflux_card::{EventResult, EventToken, HostSlotReply, SlotOutcome, SlotRequest};
@@ -65,15 +67,14 @@ struct Sheet<'a> {
 
 fn finish(sheet: &mut Sheet<'_>, reply: &HostSlotReply) -> Result<Value, SdkError> {
     if !sheet.held.matches(sheet.state) {
-        return Ok(stale(sheet.session, sheet.fallback));
+        return batch::stale(sheet.client, sheet.held, sheet.session, sheet.fallback);
     }
     match slot_kind(sheet.held, reply)? {
-        Kind::Link => finish_link(sheet.held, sheet.session, sheet.fallback, reply),
+        Kind::Link => finish_link(sheet, reply),
         Kind::Approval { request_ref, task_binding } => {
             decide(sheet, reply, &request_ref, task_binding.as_ref())
         }
-        Kind::Image => Err(super::super::invalid("card_session_image_native")),
-        Kind::Modal => Err(super::super::invalid("card_session_refused")),
+        Kind::Image | Kind::Modal => Err(typed("card_session_refused")),
     }
 }
 
@@ -84,55 +85,90 @@ fn decide(
     hint_task: Option<&ramflux_protocol::a2ui::TaskBinding>,
 ) -> Result<Value, SdkError> {
     if reply.token.signed_version != sheet.state.version() {
-        return Ok(stale(sheet.session, sheet.fallback));
+        return batch::stale(sheet.client, sheet.held, sheet.session, sheet.fallback);
     }
     let Some(conversation) = sheet.state.conversation_id() else {
-        return Ok(refused(sheet));
+        return refused(sheet);
     };
     let found = approval::lookup(
         sheet.client,
         &Hint { author: sheet.author, conversation, request_ref: hint_ref, task: hint_task },
     )?;
     let Some(found) = found else {
-        return Ok(refused(sheet));
+        return refused(sheet);
     };
     let fence = format!(
         "{}:{}:{}",
         reply.token.signed_version, reply.token.edit_seq, reply.token.tree_version
     );
     if !sheet.held.consume_binding(&found.request_ref, &reply.slot_id, &fence) {
-        return Ok(stale(sheet.session, sheet.fallback));
+        return batch::stale(sheet.client, sheet.held, sheet.session, sheet.fallback);
+    }
+    let Some(mounted) = batch::mounted(sheet.client, sheet.held)? else {
+        return Ok(batch::inactive(sheet.session, sheet.fallback));
+    };
+    let mut request = json!({
+        "kind": "approval_decision",
+        "outcome": &reply.outcome,
+        "request_ref": found.request_ref,
+        "task_binding": found.task_binding,
+    });
+    if let Some(resolve) = task_resolve(conversation, &found, &reply.outcome)
+        && let Some(object) = request.as_object_mut()
+    {
+        object.insert("task_resolve".into(), resolve);
     }
     Ok(shown(Shown {
         result: "approval_decision",
         session: sheet.session,
         fallback: sheet.fallback,
-        batch: None,
-        host_request: Some(json!({
-            "kind": "approval_decision",
-            "outcome": &reply.outcome,
-            "request_ref": found.request_ref,
-            "task_binding": found.task_binding,
-        })),
+        batch: Some(mounted),
+        host_request: Some(request),
         submit: None,
         draft_conflict: false,
         action_outcome: None,
     }))
 }
 
-fn refused(sheet: &Sheet<'_>) -> Value {
-    respond::view(respond::View {
+/// A complete `task.resolve` body for a confirmed or denied approval. The client sends it
+/// unchanged after `grant.approve|deny`; the SDK calls neither itself.
+fn task_resolve(
+    conversation: &str,
+    found: &approval::Found,
+    outcome: &SlotOutcome,
+) -> Option<Value> {
+    let decision = match outcome {
+        SlotOutcome::Confirm => "resume",
+        SlotOutcome::Deny => "deny",
+        SlotOutcome::Cancel | SlotOutcome::Unavailable => return None,
+    };
+    Some(json!({
+        "conversation_id": conversation,
+        "task_id": found.task_binding.task_id,
+        "step_id": found.task_binding.step_id,
+        "base_revision": found.base_revision,
+        "target": {"kind": "approval", "grant_id": found.grant_id},
+        "decision_id": found.decision_id,
+        "decision": decision,
+    }))
+}
+
+fn refused(sheet: &Sheet<'_>) -> Result<Value, SdkError> {
+    let Some(mounted) = batch::mounted(sheet.client, sheet.held)? else {
+        return Ok(batch::inactive(sheet.session, sheet.fallback));
+    };
+    Ok(respond::view(respond::View {
         result: "refused",
         allowed: true,
         session: Some(sheet.session),
         fallback: sheet.fallback,
         reason: Some("card_session_refused"),
-        batch: None,
+        batch: Some(mounted),
         host_request: None,
         submit: None,
         draft_conflict: false,
         action_outcome: None,
-    })
+    }))
 }
 
 enum Kind {
@@ -152,7 +188,7 @@ fn slot_kind(held: &store::Held, reply: &HostSlotReply) -> Result<Kind, SdkError
                 .find(|slot| slot.id == reply.slot_id && slot.token == reply.token)
         })
         .map(|slot| slot.request.clone())
-        .ok_or_else(|| super::super::invalid("card_session_stale"))?;
+        .ok_or_else(|| typed("card_session_stale"))?;
     let matches_request = match &request {
         SlotRequest::LinkOpen { request_id, .. }
         | SlotRequest::Image { request_id, .. }
@@ -160,7 +196,7 @@ fn slot_kind(held: &store::Held, reply: &HostSlotReply) -> Result<Kind, SdkError
         SlotRequest::Modal { .. } => true,
     };
     if !matches_request {
-        return Err(super::super::invalid("card_session_stale"));
+        return Err(typed("card_session_stale"));
     }
     Ok(match request {
         SlotRequest::LinkOpen { .. } => Kind::Link,
@@ -172,48 +208,49 @@ fn slot_kind(held: &store::Held, reply: &HostSlotReply) -> Result<Kind, SdkError
     })
 }
 
-fn finish_link(
-    held: &mut store::Held,
-    session: u64,
-    fallback: &str,
-    reply: &HostSlotReply,
-) -> Result<Value, SdkError> {
+fn finish_link(sheet: &mut Sheet<'_>, reply: &HostSlotReply) -> Result<Value, SdkError> {
     let result = match &reply.outcome {
         SlotOutcome::Confirm => "opened",
         SlotOutcome::Cancel => "cancelled",
         SlotOutcome::Unavailable => "unavailable",
-        SlotOutcome::Deny => return Err(super::super::invalid("card_session_refused")),
+        SlotOutcome::Deny => return Err(typed("card_session_refused")),
     };
-    match held.session().complete_link(reply).map_err(card_err)? {
-        EventResult::StaleDropped => Ok(stale(session, fallback)),
-        EventResult::Refused { reason } => Ok(respond::view(respond::View {
-            result: "refused",
-            allowed: true,
-            session: Some(session),
-            fallback,
-            reason: Some(reason),
-            batch: None,
-            host_request: None,
-            submit: None,
-            draft_conflict: false,
-            action_outcome: Some(respond::action_outcome(
-                if reason == "card_superseded" { "superseded" } else { "refused" },
-                Some(reason),
-                None,
-            )),
-        })),
+    let (session, fallback) = (sheet.session, sheet.fallback);
+    match sheet.held.session().complete_link(reply).map_err(card_err)? {
+        EventResult::StaleDropped => batch::stale(sheet.client, sheet.held, session, fallback),
+        EventResult::Refused { reason } => {
+            let Some(mounted) = batch::mounted(sheet.client, sheet.held)? else {
+                return Ok(batch::inactive(session, fallback));
+            };
+            Ok(respond::view(respond::View {
+                result: "refused",
+                allowed: true,
+                session: Some(session),
+                fallback,
+                reason: Some(reason),
+                batch: Some(mounted),
+                host_request: None,
+                submit: None,
+                draft_conflict: false,
+                action_outcome: Some(respond::action_outcome(
+                    if reason == "card_superseded" { "superseded" } else { "refused" },
+                    Some(reason),
+                    None,
+                )),
+            }))
+        }
         EventResult::Edited { batch } => Ok(shown(Shown {
             result,
             session,
             fallback,
-            batch: Some(respond::batch_value(&batch)?),
+            batch: Some(respond::batch_value(sheet.client, sheet.held.conversation(), &batch)?),
             host_request: None,
             submit: None,
             draft_conflict: false,
             action_outcome: None,
         })),
         EventResult::Validation { .. } | EventResult::Submit { .. } => {
-            Err(super::super::invalid("card_session_refused"))
+            Err(typed("card_session_refused"))
         }
     }
 }

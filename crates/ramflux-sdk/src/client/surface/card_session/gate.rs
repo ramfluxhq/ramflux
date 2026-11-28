@@ -29,6 +29,17 @@ pub(super) fn refused(reason: &str, fallback: &str) -> serde_json::Value {
     super::respond::refused(reason, fallback)
 }
 
+/// Map an open or resume failure: the resident-VM cap is the typed `card_limit_exceeded`.
+#[cfg(feature = "card-runtime")]
+pub(super) fn open_err(error: ramflux_card::CardError) -> SdkError {
+    match error {
+        ramflux_card::CardError::Limit("resident VMs") => {
+            super::codes::typed(super::codes::LIMIT_EXCEEDED)
+        }
+        other => card_err(other),
+    }
+}
+
 pub(super) fn card_err(error: impl std::fmt::Display) -> SdkError {
     invalid(&error.to_string())
 }

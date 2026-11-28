@@ -4,6 +4,7 @@
 pub mod access;
 mod auto_dial;
 pub(crate) mod call_resolution;
+pub mod device_policy;
 pub mod engine;
 mod ephemeral;
 pub(crate) mod transport_opener;

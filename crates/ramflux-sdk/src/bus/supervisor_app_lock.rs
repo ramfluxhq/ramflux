@@ -6,6 +6,7 @@
 use super::super::lifecycle;
 use super::Supervisor;
 use crate::bus::io::request_account_id;
+use crate::client::device_unlock::CodeThrottle;
 use crate::prelude::*;
 use ramflux_storage::{AppLockPolicy, StorageError, WrappedAccountDbKey};
 use std::sync::Arc;
@@ -43,12 +44,12 @@ impl Supervisor {
     }
 
     pub(in crate::bus) fn admit_app_access(&self, request: &LocalBusFrame) -> Result<(), SdkError> {
-        if super::super::app_lock_fence::control(&request.method) {
+        if self.app_fences.open_for(&request.method, request.account_id.as_deref())? {
             return Ok(());
         }
         self.app_fences.for_method(&request.method, request.account_id.as_deref())?.check()
     }
-    pub(super) fn app_unlocked(&self, id: &str) -> Result<(), SdkError> {
+    pub(in crate::bus) fn app_unlocked(&self, id: &str) -> Result<(), SdkError> {
         let policy = self.index.app_lock_policy(id)?;
         if policy.enabled {
             self.app_fences.transition(id, true, false, "authenticated")?;
@@ -208,6 +209,10 @@ impl Supervisor {
         let armed = self.app_fences.epoch(&account_id)?.deadline;
         let enabled = required_bool(&request.body)?;
         let timeout_ms = required_timeout(&request.body)?;
+        let stored = self.index.app_lock_policy(&account_id)?;
+        if stored.enabled && (!enabled || timeout_ms > stored.timeout_ms) {
+            self.reauthenticate_app_lock(request, connection, &account_id).await?;
+        }
         let policy = if enabled {
             self.write_app_lock(account_id.clone(), true, timeout_ms, None).await?
         } else {
@@ -226,6 +231,42 @@ impl Supervisor {
         }
         self.emit_app_lock_change(request, &account_id)?;
         Ok(super::reply(self.app_lock_body(&policy, &account_id)?))
+    }
+    /// Weakening the lock needs the account code, asked through the connection's private
+    /// credential callback and checked by the ordinary unlock verification, so wrong codes
+    /// share the unlock attempt counter. The code never enters a JSON frame.
+    async fn reauthenticate_app_lock(
+        &self,
+        request: &LocalBusFrame,
+        connection: &LocalBusConnectionState,
+        account_id: &str,
+    ) -> Result<(), SdkError> {
+        if !connection.credential_prompts
+            && !self.config.credential_callback.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(reauth_required());
+        }
+        let Some(call) =
+            super::super::credentials::reauth_call(&self.config.data_root, request, connection)?
+        else {
+            return Err(reauth_required());
+        };
+        let secret = match super::super::credentials::unlock_secret(
+            self.config.data_root.clone(),
+            account_id.to_owned(),
+        )
+        .await
+        {
+            Ok(secret) => secret,
+            Err(SdkError::PairingCode("VaultUnavailable")) => return Err(reauth_required()),
+            Err(error) => return Err(error),
+        };
+        call.require_live()?;
+        let actor = self.accounts.borrow().get(account_id).cloned().ok_or_else(unauthorized)?;
+        actor
+            .unlock_native(super::super::native_account::NativeUnlockSecret::Code(secret), None)
+            .await
+            .map(|_| ())
     }
     pub(in crate::bus) fn attach_app_control(&self, connection: u64, id: &str) {
         if !self.accounts.borrow().contains_key(id) && self.index.account(id).is_err() {
@@ -265,7 +306,14 @@ impl Supervisor {
             .await
             .map_err(|error| SdkError::LocalBus(format!("index reader failed: {error}")))??;
         Ok(super::reply(match policy {
-            PolicyRead::Ready(policy) => self.app_lock_body(&policy, &account_id)?,
+            PolicyRead::Ready(policy, throttle) => {
+                let mut body = self.app_lock_body(&policy, &account_id)?;
+                let fields = body.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?;
+                fields.insert("code_retry_after_ms".into(), throttle.retry_after_ms().into());
+                fields.insert("code_retry_after_secs".into(), throttle.retry_after_secs.into());
+                fields.insert("code_attempts_exhausted".into(), throttle.exhausted.into());
+                body
+            }
             PolicyRead::Unreadable => unavailable_body(),
         }))
     }
@@ -301,7 +349,7 @@ impl Supervisor {
 }
 
 enum PolicyRead {
-    Ready(AppLockPolicy),
+    Ready(AppLockPolicy, CodeThrottle),
     Unreadable,
 }
 
@@ -327,7 +375,10 @@ fn read_policy(
 ) -> Result<PolicyRead, SdkError> {
     index.account(account_id)?;
     match index.app_lock_policy(account_id) {
-        Ok(policy) => Ok(PolicyRead::Ready(policy)),
+        Ok(policy) => {
+            let throttle = crate::client::device_unlock::code_throttle(index, account_id)?;
+            Ok(PolicyRead::Ready(policy, throttle))
+        }
         Err(StorageError::AccountNotFound(missing)) => {
             Err(SdkError::Storage(StorageError::AccountNotFound(missing)))
         }
@@ -406,6 +457,14 @@ fn unauthorized() -> SdkError {
         code: "app_lock_unauthorized".to_owned(),
         message: "app lock policy requires the unlocked account".to_owned(),
         body: Box::new(serde_json::json!({"reason_code": "app_lock_unauthorized"})),
+    }
+}
+
+fn reauth_required() -> SdkError {
+    SdkError::LocalBusRefused {
+        code: "reauth_required".to_owned(),
+        message: "weakening the app lock needs the account code".to_owned(),
+        body: Box::new(serde_json::json!({"reason_code": "reauth_required"})),
     }
 }
 

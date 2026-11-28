@@ -93,14 +93,14 @@ pub(super) fn shown(fields: Shown<'_>) -> Value {
     })
 }
 
-pub(super) fn stale(session: u64, fallback: &str) -> Value {
+pub(super) fn stale(session: u64, fallback: &str, batch: Option<Value>) -> Value {
     view(View {
         result: "stale_dropped",
         allowed: true,
         session: Some(session),
         fallback,
         reason: Some("card_session_stale"),
-        batch: None,
+        batch,
         host_request: None,
         submit: None,
         draft_conflict: false,
@@ -176,20 +176,23 @@ pub(super) fn action_outcome(
 }
 
 #[cfg(feature = "card-runtime")]
-pub(super) fn batch_value(batch: &ramflux_card::MutationBatch) -> Result<Value, crate::SdkError> {
+pub(super) fn batch_value(
+    client: &crate::RamfluxClient,
+    conversation: &str,
+    batch: &ramflux_card::MutationBatch,
+) -> Result<Value, crate::SdkError> {
     let mut value = serde_json::to_value(batch)?;
+    super::images::resolve(client, conversation, &mut value);
     scrub_image_urls(&mut value);
     Ok(value)
 }
 
+/// Image nodes never carry a URL or data URI to the host.
 #[cfg(feature = "card-runtime")]
 fn scrub_image_urls(value: &mut Value) {
     let Some(object) = value.as_object_mut() else {
         return;
     };
-    if object.get("kind").and_then(Value::as_str) == Some("image") {
-        object.insert("attachment".into(), json!({"retrieval": "native_callback"}));
-    }
     if object.get("kind").and_then(Value::as_str) == Some("Image")
         && let Some(attrs) = object.get_mut("attrs")
     {

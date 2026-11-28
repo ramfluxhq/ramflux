@@ -192,6 +192,7 @@ impl Client {
         let observer: Arc<dyn crate::bus::app_lock_fence::Observer> = shared.clone();
         fences.observe(Arc::downgrade(&observer))?;
         let _ = shared.app_fences.set(fences);
+        let _ = shared.commands.set(commands.downgrade());
         Ok(Arc::new(Self {
             diagnostics,
             lifecycle_gate: Mutex::new(()),

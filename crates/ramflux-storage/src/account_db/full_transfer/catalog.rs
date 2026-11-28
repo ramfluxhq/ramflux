@@ -678,6 +678,7 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     messages::RULE_71,      // sql/message_footprint_outbox_stage
     messages::RULE_72,      // sql/message_projection
     messages::RULE_73,      // sql/message_tombstone_projection
+    keys::RULE_161,         // sql/mls_kv/local
     receipts::RULE_74,      // sql/nack_state
     objects::RULE_75,       // sql/object_chunk/local
     objects::RULE_76,       // sql/object_chunk/portable

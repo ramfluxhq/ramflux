@@ -192,6 +192,9 @@ impl AccountRuntime {
                     let _ = reply.send(result);
                 }
             }
+            super::super::actor::PrivateCommand::CardSweep => {
+                crate::client::surface::card_session::sweep_closed(&self.id);
+            }
             super::super::actor::PrivateCommand::AuthorizeBackup { generation, reply } => {
                 let result = self.authorize_backup(generation);
                 let _ = reply.send(result);

@@ -17,6 +17,8 @@ use crate::prelude::*;
 pub const GATEWAY_PUSH_ROUTE_PATH: &str = "/notify/v1/push-route";
 /// Gateway path the deregistration request is signed for.
 pub const GATEWAY_PUSH_ROUTE_DELETE_PATH: &str = "/notify/v1/push-route/delete";
+/// Signed path of the own-device push test (`device.push_route.test`).
+pub const GATEWAY_PUSH_ROUTE_TEST_PATH: &str = "/notify/v1/push-route/test";
 /// Re-register once less than this much node-assigned route lifetime remains.
 pub const GATEWAY_PUSH_ROUTE_RENEW_BEFORE_SECONDS: u64 = 15 * 86_400;
 
@@ -51,6 +53,13 @@ pub struct GatewayPushRouteRegistration {
     pub webpush_p256dh: Option<String>,
     #[serde(default)]
     pub webpush_auth: Option<String>,
+    /// Application identifier the token is sealed with. Host input only: never sent to the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    /// `Some(true)` when the token field is a sealed route (central mode). Absent on direct
+    /// registrations, so their signed body is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<bool>,
 }
 
 /// APNs host the node will use. FCM and Web Push are production only.
@@ -76,6 +85,50 @@ impl std::fmt::Debug for GatewayPushRouteRegistration {
         f.debug_struct("GatewayPushRouteRegistration")
             .field("provider", &self.provider)
             .finish_non_exhaustive()
+    }
+}
+
+/// Own-device push test request. The target is the calling device and one of its own routes.
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayPushRouteTestRequest {
+    /// Route tag of one of the calling device's registered routes.
+    pub route_tag: String,
+}
+
+/// Signed session frame of the push test.
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GatewayPushRouteTestFrame {
+    pub signed_request: ramflux_protocol::SignedRequest,
+    pub body: GatewayPushRouteTestRequest,
+}
+
+/// Node answer of the push test: `queued` means accepted into the wake queue, not delivered.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GatewayPushRouteTestAnswer {
+    pub status: String,
+    pub reason: Option<String>,
+    pub retry_after_ms: Option<u64>,
+}
+
+impl GatewayPushRouteTestAnswer {
+    /// `Ok` for `queued`; a typed refusal otherwise, using the same refusal error as
+    /// `device.push_route.set` plus the retry hint of a rate limit.
+    fn into_result(self) -> Result<(), SdkError> {
+        if self.status == "queued" {
+            return Ok(());
+        }
+        if self.status != "refused" {
+            return Err(SdkError::GatewaySessionRejected("unknown push test answer".into()));
+        }
+        let refusal = match self.reason.as_deref() {
+            Some("rate_limited") => GatewayPushRouteRefusal::RateLimited,
+            Some("unsupported_class") => GatewayPushRouteRefusal::UnsupportedClass,
+            Some("rejected") => GatewayPushRouteRefusal::Rejected,
+            Some("unavailable") => GatewayPushRouteRefusal::Unavailable,
+            _ => GatewayPushRouteRefusal::Unknown,
+        };
+        Err(SdkError::PushTestRefused { refusal, retry_after_ms: self.retry_after_ms })
     }
 }
 
@@ -110,6 +163,12 @@ pub enum GatewayPushRouteRefusal {
     Superseded,
     /// Verifiably not the routes' bound owner: retrying cannot succeed.
     RejectedOwner,
+    /// Local refusal: central mode has no usable key set or pin, so nothing was sent.
+    PushKeysetUnavailable,
+    /// Push test only: one test per device per 30 seconds.
+    RateLimited,
+    /// Push test only: the route's class has no test payload (`VoIP`, Web Push).
+    UnsupportedClass,
     /// A code from a newer node; retried like `unavailable` so it never breaks the session.
     #[serde(other)]
     Unknown,
@@ -124,6 +183,9 @@ impl GatewayPushRouteRefusal {
             Self::ProviderUnavailable => "provider_unavailable",
             Self::Rejected => "rejected",
             Self::RejectedOwner => "rejected_owner",
+            Self::PushKeysetUnavailable => "push_keyset_unavailable",
+            Self::RateLimited => "rate_limited",
+            Self::UnsupportedClass => "unsupported_class",
             Self::Superseded => "superseded",
             Self::Unavailable | Self::Unknown => "unavailable",
         }
@@ -201,7 +263,15 @@ impl PushRouteRetry {
                 self.failures = 0;
                 self.not_before = sent_at.saturating_add(PUSH_ROUTE_PERMANENT_RETRY_SECONDS);
             }
-            GatewayPushRouteRefusal::Unavailable | GatewayPushRouteRefusal::Unknown => {
+            GatewayPushRouteRefusal::PushKeysetUnavailable => {
+                // Contract retry (A1.5): the next connect, with no long wait.
+                self.failures = 0;
+                self.not_before = sent_at;
+            }
+            GatewayPushRouteRefusal::Unavailable
+            | GatewayPushRouteRefusal::Unknown
+            | GatewayPushRouteRefusal::RateLimited
+            | GatewayPushRouteRefusal::UnsupportedClass => {
                 self.failures = self.failures.saturating_add(1);
                 let jitter = ramflux_crypto::random_32().map_or(0, |bytes| bytes[0]);
                 self.not_before =
@@ -265,6 +335,9 @@ impl GatewaySessionEngine {
     /// Returns signing or transport write errors.
     pub async fn register_push_route(&mut self) -> Result<Option<String>, SdkError> {
         let now = now_unix_timestamp().unsigned_abs();
+        if let Some((device_class, muted)) = self.config.device_policy {
+            self.write_frame(&GatewayClientFrame::DevicePolicy { device_class, muted }).await?;
+        }
         let routes: Vec<GatewayPushRouteRegistration> = self
             .config
             .push_routes
@@ -277,7 +350,12 @@ impl GatewaySessionEngine {
             .collect();
         let mut last = None;
         for registration in routes {
-            last = self.send_provider_registration(now, registration).await?;
+            match self.send_provider_registration(now, registration).await {
+                Ok(answer) => last = answer,
+                // A local refusal (no usable key set) skips this route; the others still go.
+                Err(SdkError::PushRouteRefused(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(last)
     }
@@ -336,6 +414,19 @@ impl GatewaySessionEngine {
         body: GatewayPushRouteRegistration,
     ) -> Result<Option<String>, SdkError> {
         let provider = body.provider;
+        let mut body = body;
+        let app = body.app.take();
+        let body = if self.config.push.is_central() {
+            self.config.push.retry_save();
+            crate::push_keyset::seal_registration(
+                &self.config,
+                body,
+                app,
+                crate::push_keyset::unix_millis_now(),
+            )?
+        } else {
+            body
+        };
         let signed_request = self.session_bound_request(GATEWAY_PUSH_ROUTE_PATH, &body)?;
         let request_id = signed_request.request_id.clone();
         self.write_push_route_frame(GatewayClientFrame::PushRouteRegister {
@@ -443,6 +534,82 @@ impl GatewaySessionEngine {
         tokio::time::timeout(PUSH_ROUTE_SEND_TIMEOUT, self.write_frame(&frame))
             .await
             .map_err(|_| SdkError::GatewaySessionRejected("push route send timed out".to_owned()))?
+    }
+
+    /// Sends the own-device push test for `route_tag` and waits for its answer by request id.
+    /// `Ok` means the node queued the test wake, not that a provider delivered it.
+    ///
+    /// # Errors
+    /// Returns transport, signing or session-ending errors, and [`SdkError::PushTestRefused`]
+    /// when the node refuses the test.
+    pub async fn test_push_route(&mut self, route_tag: String) -> Result<(), SdkError> {
+        let body = GatewayPushRouteTestRequest { route_tag };
+        let signed_request = self.session_bound_request(GATEWAY_PUSH_ROUTE_TEST_PATH, &body)?;
+        let request_id = signed_request.request_id.clone();
+        self.write_push_route_frame(GatewayClientFrame::PushRouteTest {
+            request: Box::new(GatewayPushRouteTestFrame { signed_request, body }),
+        })
+        .await?;
+        match tokio::time::timeout(
+            PUSH_ROUTE_REPLY_TIMEOUT,
+            self.await_push_test_reply(&request_id),
+        )
+        .await
+        {
+            Ok(result) => result?.into_result(),
+            Err(_elapsed) => {
+                self.terminal_reason =
+                    Some(crate::bus::connection_manager::DisconnectReason::CallTimeout);
+                Err(SdkError::GatewaySessionRejected(
+                    "push test answer pending; retry on the next session".into(),
+                ))
+            }
+        }
+    }
+
+    async fn await_push_test_reply(
+        &mut self,
+        request_id: &str,
+    ) -> Result<GatewayPushRouteTestAnswer, SdkError> {
+        loop {
+            let frame = self.read_stream_frame("push test answer").await?;
+            if let GatewayServerFrame::PushRouteTested {
+                request_id: id,
+                status,
+                reason,
+                retry_after_ms,
+            } = &frame
+                && id == request_id
+            {
+                return Ok(GatewayPushRouteTestAnswer {
+                    status: status.clone(),
+                    reason: reason.clone(),
+                    retry_after_ms: *retry_after_ms,
+                });
+            }
+            if let GatewayServerFrame::Nack { reason } = &frame {
+                return Err(SdkError::GatewaySessionRejected(reason.clone()));
+            }
+            let terminal = matches!(
+                frame,
+                GatewayServerFrame::Drain { .. } | GatewayServerFrame::Close { .. }
+            );
+            if terminal {
+                self.terminal_reason = Some(if matches!(frame, GatewayServerFrame::Drain { .. }) {
+                    crate::bus::connection_manager::DisconnectReason::Drain
+                } else {
+                    crate::bus::connection_manager::DisconnectReason::Close
+                });
+                self.deferred_frames.push_back(frame);
+                return Err(SdkError::GatewaySessionRejected("gateway session is ending".into()));
+            }
+            if self.deferred_frames.len() >= 64 {
+                return Err(SdkError::GatewaySessionRejected(
+                    "too many unrelated push route frames".into(),
+                ));
+            }
+            self.deferred_frames.push_back(frame);
+        }
     }
 
     /// Reads frames until the answer to `request_id`, buffering deliveries meanwhile. Any other
@@ -600,6 +767,7 @@ impl GatewaySessionEngine {
     }
 
     pub(crate) async fn refresh_push_route_at(&mut self, now: u64) {
+        self.config.push.retry_save();
         self.expire_stale_push_controls(now);
         if self.config.push_route_clear_pending {
             self.refresh_delete_all(now).await;
@@ -679,7 +847,8 @@ pub(super) fn push_route_reply_id(frame: &GatewayServerFrame) -> Option<&str> {
     match frame {
         GatewayServerFrame::PushRouteRegistered { request_id, .. } => request_id.as_deref(),
         GatewayServerFrame::PushRouteRefused { request_id, .. }
-        | GatewayServerFrame::PushRouteDeregistered { request_id, .. } => Some(request_id),
+        | GatewayServerFrame::PushRouteDeregistered { request_id, .. }
+        | GatewayServerFrame::PushRouteTested { request_id, .. } => Some(request_id),
         _ => None,
     }
 }
@@ -781,6 +950,8 @@ mod tests {
             endpoint: Some("https://push.example/sub".into()),
             webpush_p256dh: Some("p256dh".into()),
             webpush_auth: Some("auth".into()),
+            app: None,
+            sealed: None,
         }
     }
 
@@ -975,6 +1146,8 @@ mod tests {
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
+            app: None,
+            sealed: None,
         }
     }
 
@@ -988,6 +1161,8 @@ mod tests {
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
+            app: None,
+            sealed: None,
         }
     }
 
@@ -1012,6 +1187,8 @@ mod tests {
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
+            app: None,
+            sealed: None,
         };
         let value = serde_json::to_value(&body).expect("json");
         assert_eq!(value["provider"], "webpush");

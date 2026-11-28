@@ -8,8 +8,7 @@ use crate::prelude::{
     LocalBusDeviceListResponse, LocalBusFrame, LocalBusGroupRequest,
     LocalBusMessageFrankingEvidenceRequest, LocalBusObjectGetStatusRequest,
     LocalBusObjectPutStatusRequest, LocalBusObjectTransferStatusRequest, LocalMcpAuditRecord,
-    RamfluxClient, SdkError, local_bus_account, local_bus_account_manifest_path,
-    read_local_bus_account_manifest,
+    RamfluxClient, SdkError, local_bus_account,
 };
 use serde_json::{Value, json};
 use std::{
@@ -81,25 +80,6 @@ impl AccountView {
             status["display_name"] = json!(native.record().body.profile.display_name);
             status["principal_kind"] = json!(native.record().body.principal_kind);
             status["authority_blocked"] = json!(native.authority_blocked());
-        } else if let Ok(manifest) = read_local_bus_account_manifest(
-            &local_bus_account_manifest_path(&state.config.data_root, id),
-        ) {
-            status["node_id"] = json!(manifest.node_id);
-            status["client_mode"] = json!(manifest.client_mode);
-            status["local_device_authorized"] = json!(
-                manifest
-                    .devices
-                    .iter()
-                    .any(|device| device.device_id == account.gateway_config.device_id)
-            );
-            status["secure_sessions"] =
-                json!(if client.account_db()?.load_actor_state::<bool>("backup/reestablishing")?
-                    == Some(true)
-                {
-                    "reestablishing"
-                } else {
-                    "ready"
-                });
         }
         Ok(Self {
             account_root: native.as_ref().map(|_| client.account_index().map(|index| index.root().to_path_buf())).transpose()?,

@@ -32,6 +32,7 @@ fn register_as(id: &str, provider: ramflux_node_core::PushProviderKind) -> Route
     RouteIntent::Register(ramflux_node_core::PushRouteRegistrationFrame {
         signed_request: signed(id),
         body: ramflux_node_core::PushRouteRegistration {
+            sealed: false,
             provider,
             token: "t".into(),
             route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),

@@ -21,7 +21,6 @@ async fn native_device_list_uses_the_certified_roster_without_a_legacy_manifest(
         attended_accounts: BTreeSet::new(),
         subscribers: BTreeMap::new(),
     };
-    assert!(!local_bus_account_manifest_path(&root, "native-device-roster").exists());
     let request = LocalBusFrame::request(
         "roster",
         Some("native-device-roster".into()),
@@ -70,7 +69,6 @@ async fn native_device_revoke_refuses_missing_native_config_before_legacy_manife
         attended_accounts: BTreeSet::new(),
         subscribers: BTreeMap::new(),
     };
-    assert!(!local_bus_account_manifest_path(&root, "native-revoke-route").exists());
     let request = LocalBusFrame::request(
         "native-revoke",
         Some("native-revoke-route".into()),
@@ -88,6 +86,5 @@ async fn native_device_revoke_refuses_missing_native_config_before_legacy_manife
         matches!(result, Err(SdkError::NetworkingPending)),
         "native requests must not enter the legacy root/manifest path"
     );
-    assert!(!local_bus_account_manifest_path(&root, "native-revoke-route").exists());
     Ok(())
 }

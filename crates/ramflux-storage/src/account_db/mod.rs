@@ -40,6 +40,7 @@ mod backup_self_sync;
 mod backup_self_sync_tests;
 mod backup_shared_groups;
 pub mod bot;
+pub(crate) mod checkpoint_writer;
 mod contact_consent;
 mod contact_request_retention;
 mod contact_requests;
@@ -60,6 +61,7 @@ mod group_retention;
 mod group_snapshot;
 pub mod groups;
 pub mod history;
+pub mod mls_kv;
 #[cfg(any(test, feature = "test-instrumentation"))]
 mod test_busy;
 pub use attachment_retirement::{NativeGrantAssociation, PendingAttachmentRetirement};

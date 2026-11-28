@@ -34,6 +34,33 @@ pub(crate) async fn handle_device(socket: PathBuf, command: DeviceCommand) -> Re
                 .await?,
         ),
         DeviceAction::Sync(sync) => handle_device_sync(&mut bus, sync).await,
+        DeviceAction::PushPolicy(policy) => print_json(
+            &bus.request(
+                Some(policy.account),
+                "device",
+                "device.push_policy.set",
+                serde_json::json!({"device_class": policy.class, "muted": policy.muted}),
+            )
+            .await?,
+        ),
+        DeviceAction::Activity(selector) => print_json(
+            &bus.request(
+                Some(selector.account),
+                "device",
+                "device.activity.report",
+                serde_json::json!({}),
+            )
+            .await?,
+        ),
+        DeviceAction::NotificationsCleared(selector) => print_json(
+            &bus.request(
+                Some(selector.account),
+                "device",
+                "device.notifications.cleared",
+                serde_json::json!({}),
+            )
+            .await?,
+        ),
     }
 }
 

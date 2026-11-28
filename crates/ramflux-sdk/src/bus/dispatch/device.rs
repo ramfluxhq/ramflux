@@ -12,6 +12,7 @@ pub(crate) async fn dispatch_device_bus_request(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match request.method.as_str() {
         "device.list" => dispatch_device_list(request, state),
+        "push.keyset.get" => dispatch_push_keyset_get(request, state),
         "device.refresh" => {
             super::identity_authority::dispatch_identity_authority(request, state).await
         }
@@ -20,6 +21,13 @@ pub(crate) async fn dispatch_device_bus_request(
             dispatch_device_revoke(request, state, body).await
         }
         "device.push_route.set" => Box::pin(dispatch_push_route_set(request, state)).await,
+        "device.push_route.test" => dispatch_push_route_test(request, state).await,
+        "device.push_policy.set" => {
+            let body: LocalBusPushPolicySetRequest = serde_json::from_value(request.body.clone())?;
+            dispatch_push_policy_set(request, state, body).await
+        }
+        "device.activity.report" => dispatch_activity_report(request, state).await,
+        "device.notifications.cleared" => dispatch_notifications_cleared(request, state).await,
         "device.sync.export" => {
             let body: LocalBusDeviceSyncExportRequest =
                 serde_json::from_value(request.body.clone())?;
@@ -53,6 +61,112 @@ pub(crate) const EMPTY_PUSH_ROUTE_BOOK: &str = r#"{"routes":{},"clears":[],"clea
 #[serde(deny_unknown_fields)]
 struct LocalBusPushRouteSetRequest {
     registration: Option<GatewayPushRouteRegistration>,
+}
+
+/// Checkpoint holding this device's node-local push policy (class and mute).
+pub(crate) const DEVICE_POLICY_CHECKPOINT: &str = "gateway.device_policy.v1";
+
+fn wall_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Minimum spacing of `device.activity.report` sends, in milliseconds (K10).
+const ACTIVITY_MIN_INTERVAL_MS: u64 = 60_000;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalBusPushRouteTestRequest {
+    route_tag: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalBusPushPolicySetRequest {
+    device_class: crate::gateway::protocol::GatewayDeviceClass,
+    muted: bool,
+}
+
+/// The stored device policy, restored into the gateway config at startup.
+pub(crate) fn stored_device_policy(
+    client: &RamfluxClient,
+) -> Result<Option<(crate::gateway::protocol::GatewayDeviceClass, bool)>, SdkError> {
+    match client.projection_checkpoint(DEVICE_POLICY_CHECKPOINT)? {
+        Some(value) => Ok(Some(serde_json::from_str(&value)?)),
+        None => Ok(None),
+    }
+}
+
+/// Own-device push test: the node queues one test wake on the named own route. A refusal is the
+/// same typed `push_route_refused` bus error as `device.push_route.set`, with `details.refusal`
+/// and, for `rate_limited`, `retry_after_ms`.
+async fn dispatch_push_route_test(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: LocalBusPushRouteTestRequest = serde_json::from_value(request.body.clone())?;
+    let account_id = request_account_id(request)?.to_owned();
+    let account = local_bus_account_mut(state, &account_id)?;
+    let mut engine = account.session_client().await?;
+    let outcome = engine.test_push_route(body.route_tag).await;
+    account.apply_session_metadata(engine);
+    outcome?;
+    Ok(local_bus_ok(serde_json::json!({"status": "queued"})))
+}
+
+async fn dispatch_push_policy_set(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+    body: LocalBusPushPolicySetRequest,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?.to_owned();
+    let account = local_bus_account_mut(state, &account_id)?;
+    let encoded = serde_json::to_string(&(body.device_class, body.muted))?;
+    account.client.set_projection_checkpoint(DEVICE_POLICY_CHECKPOINT, &encoded)?;
+    account.gateway_config.device_policy = Some((body.device_class, body.muted));
+    let mut engine = account.session_client().await?;
+    let outcome = engine.send_device_policy(body.device_class, body.muted).await;
+    account.apply_session_metadata(engine);
+    outcome?;
+    Ok(local_bus_ok(serde_json::json!({
+        "device_class": body.device_class,
+        "muted": body.muted,
+    })))
+}
+
+async fn dispatch_activity_report(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?.to_owned();
+    let account = local_bus_account_mut(state, &account_id)?;
+    let now = wall_clock_ms();
+    if account
+        .last_activity_ms
+        .is_some_and(|last| now.saturating_sub(last) < ACTIVITY_MIN_INTERVAL_MS)
+    {
+        return Ok(local_bus_ok(serde_json::json!({"sent": false, "reason": "rate_limited"})));
+    }
+    account.last_activity_ms = Some(now);
+    let mut engine = account.session_client().await?;
+    let outcome = engine.send_activity().await;
+    account.apply_session_metadata(engine);
+    outcome?;
+    Ok(local_bus_ok(serde_json::json!({"sent": true})))
+}
+
+async fn dispatch_notifications_cleared(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?.to_owned();
+    let account = local_bus_account_mut(state, &account_id)?;
+    let mut engine = account.session_client().await?;
+    let outcome = engine.send_notifications_cleared().await;
+    account.apply_session_metadata(engine);
+    outcome?;
+    Ok(local_bus_ok(serde_json::json!({"sent": true})))
 }
 
 /// Checkpoint holding the last push route control sequence, so a restart never reuses one.
@@ -143,6 +257,7 @@ async fn dispatch_push_route_set(
     let outcome = engine.set_push_route(body.registration).await;
     account.apply_session_metadata(engine);
     account.persist_push_route_seq();
+    account.gateway_config.push.retry_save();
     let expires_at = outcome?;
     if cleared {
         account.client.set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, EMPTY_PUSH_ROUTE_BOOK)?;
@@ -151,6 +266,44 @@ async fn dispatch_push_route_set(
         "registered": expires_at.is_some(),
         "deregistered": cleared,
         "expires_at": expires_at,
+    })))
+}
+
+/// Local read of the central push key set state: mode, verified key set and its status.
+fn dispatch_push_keyset_get(
+    request: &LocalBusFrame,
+    state: &LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?;
+    let account = local_bus_account(state, account_id)?;
+    let now = crate::push_keyset::unix_millis_now();
+    let pin = crate::push_keyset::configured_push_centre();
+    let snapshot =
+        account.gateway_config.push.snapshot(pin.as_ref().map(|pin| pin.centre_id.as_str()));
+    let mode = snapshot.mode.clone().unwrap_or_else(|| "unknown".to_owned());
+    let held = snapshot.held.as_ref();
+    let (status, record) = match (&pin, held, now) {
+        (None, _, _) => ("no_pin", None),
+        (Some(_), None, _) => ("missing", None),
+        (Some(_), Some(record), None) => ("no_clock", Some(record)),
+        (Some(_), Some(record), Some(now)) if record.expires_at <= now => ("expired", Some(record)),
+        (Some(pin), Some(record), Some(now)) => {
+            if crate::push_keyset::offer(pin, &record.doc, None, now).is_ok() {
+                ("ok", Some(record))
+            } else {
+                ("invalid", Some(record))
+            }
+        }
+    };
+    Ok(local_bus_ok(serde_json::json!({
+        "mode": mode,
+        "status": status,
+        "centre_id": record.map(|record| record.centre_id.clone()),
+        "seq": record.map(|record| record.seq),
+        "active_kid": record.map(|record| record.active_kid.clone()),
+        "expires_at": record.map(|record| record.expires_at),
+        "saved": !snapshot.save_pending,
+        "last_refusal": snapshot.last_refusal,
     })))
 }
 

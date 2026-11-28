@@ -9,8 +9,8 @@ use crate::SdkError;
 use crate::custody::agent_creation::{
     AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentStep, AgentSteps,
     RebindBinding, advance_all, advance_primary, advance_reassociation, agent_account_id,
-    fresh_plan_ready, is_retired_agent_account, observe_primary, paused_agent_binding,
-    plan_reassociation, rebind_awaits_owner, release_completed_sources,
+    fresh_plan_ready, is_retired_agent_account, observe_primary, overdue_creations,
+    paused_agent_binding, plan_reassociation, rebind_awaits_owner, release_completed_sources,
 };
 use crate::custody::{CustodyConnection, CustodyNetworkConfig};
 use crate::gateway::GatewayQuicEndpointConfig;
@@ -20,6 +20,9 @@ use ramflux_protocol::message as g;
 use std::path::Path;
 use std::time::Duration;
 use zeroize::Zeroizing;
+
+/// Seconds between two sweeps that close overdue agent creation requests.
+pub(super) const EXPIRY_SWEEP_SECS: u32 = 30;
 
 /// Outcome of one advanced request: its id and its state, or the step failure.
 pub(super) type AdvanceOutcome = (String, Result<AgentCreationState, SdkError>);
@@ -406,6 +409,59 @@ impl Supervisor {
                 }
                 Ok(false) => {}
                 Err(error) => tracing::warn!(%error, "agent repair readiness deferred"),
+            }
+        }
+    }
+
+    /// Close every overdue create request of each open human account. The human runtime performs
+    /// the step, so it owns the store write; a failed step leaves the record for the next sweep.
+    pub(super) async fn expire_overdue_creations(&self) {
+        let humans: Vec<String> = self
+            .accounts
+            .borrow()
+            .iter()
+            .filter(|(_, actor)| actor.is_open())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for human in humans {
+            if !self
+                .config
+                .data_root
+                .join("custody_accounts")
+                .join(&human)
+                .join("agent_creation")
+                .is_dir()
+            {
+                continue;
+            }
+            let Ok(now) = super::custody_setup::now() else { continue };
+            let overdue = AgentCreationStore::open(self.config.data_root.clone(), &human)
+                .and_then(|store| overdue_creations(&store, now));
+            let request_ids = match overdue {
+                Ok(ids) => ids,
+                Err(error) => {
+                    tracing::warn!(%error, "agent creation expiry scan deferred");
+                    continue;
+                }
+            };
+            let Some(actor) =
+                self.account_actor(&human).filter(super::actor::AccountActor::is_open)
+            else {
+                continue;
+            };
+            for request_id in request_ids {
+                match actor
+                    .agent_creation_step(AgentStep::Expire { request_id: request_id.clone(), now })
+                    .await
+                {
+                    Ok(record) if record.state == AgentCreationState::Expired => {
+                        tracing::info!(%request_id, state = ?record.state, "agent creation expired");
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%request_id, %error, "agent creation expiry deferred");
+                    }
+                }
             }
         }
     }

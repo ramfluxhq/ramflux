@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Native restore retains public-evidence checks while refusing real writer faults.
-use super::{AccountDbKey, BackupJobs, DataIdentity, Identity, Metadata, RamfluxClient};
+use super::{BackupJobs, DataIdentity, Identity, Metadata, RamfluxClient};
 use crate::storage_failure_fixture::{Fault, TestResult, apply_fault};
 
 fn fixture() -> TestResult<(crate::custody::tests::Root, ramflux_storage::AccountIndex, Metadata)> {
@@ -40,9 +40,7 @@ fn check(fault: Fault) -> TestResult {
     let (root, index, metadata) = fixture()?;
     let _holder = apply_fault(&index, fault)?;
     let jobs = BackupJobs::new(&root.0, index.clone())?;
-    let Identity::Native { native } = &metadata.identity else {
-        return Err("native fixture".into());
-    };
+    let Identity::Native { native } = &metadata.identity;
     let anchor = native.anchor().to_owned();
     let mut client = RamfluxClient::new();
     client.open_account_index(&root.0)?;
@@ -54,13 +52,7 @@ fn check(fault: Fault) -> TestResult {
         Fault::Integrity => "ValidationFailed",
     };
     assert_eq!(crate::bus::io::local_bus_error_code(&error), expected_bus);
-    let preview = jobs.archive_preview(
-        &metadata,
-        &root.0.join("unused"),
-        &AccountDbKey::from_bytes([0; 32]),
-        0,
-        "native-writer-preview",
-    );
+    let preview = jobs.archive_preview(&metadata, 0, "native-writer-preview");
     if matches!(fault, Fault::Integrity) {
         // Native preview checks independent public evidence, without unwrapping local data keys.
         let preview = preview.map_err(|failure| format!("public preview failed: {failure:?}"))?;
@@ -76,9 +68,7 @@ fn check(fault: Fault) -> TestResult {
     let failure = preview.err().ok_or("native preview must refuse writer fault")?;
     assert_eq!(failure.code, expected);
     assert_eq!(failure.retryable, matches!(fault, Fault::Busy));
-    let Identity::Native { native } = &metadata.identity else {
-        return Err("native fixture".into());
-    };
+    let Identity::Native { native } = &metadata.identity;
     let job = jobs.start(crate::backup::BackupJobKind::Restore, "archive.rfb".into())?;
     let error = jobs
         .install_target(&job, native, None, None)
@@ -122,13 +112,7 @@ fn native_preview_index_read_failure_is_unreadable() -> TestResult {
     connection.execute_batch("ALTER TABLE local_account RENAME TO unavailable_local_account")?;
     assert!(matches!(index.known_account_ids(), Err(ramflux_storage::StorageError::Sqlite(_))));
     let error = jobs
-        .archive_preview(
-            &metadata,
-            &root.0.join("unused"),
-            &AccountDbKey::from_bytes([0; 32]),
-            0,
-            "native-index-read-preview",
-        )
+        .archive_preview(&metadata, 0, "native-index-read-preview")
         .err()
         .ok_or("native preview must refuse an unreadable index")?;
     assert_eq!(error.code, crate::backup::BackupFailureCode::Unreadable);

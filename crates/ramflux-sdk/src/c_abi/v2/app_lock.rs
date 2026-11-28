@@ -21,7 +21,9 @@ impl Observer for Shared {
             && let Ok(mut events) = self.events.lock()
             && events.account_id.as_deref().is_none_or(|id| id == account)
         {
-            *subscription = None;
+            if subscription.take().is_some() {
+                self.close_bus_subscription();
+            }
             events.active = false;
             events.queue.clear();
             events.bytes = 0;
@@ -49,8 +51,11 @@ pub(super) fn capture_access(
     method: &str,
     account: Option<&str>,
 ) -> Result<Option<crate::bus::app_lock_fence::Token>, crate::SdkError> {
-    if crate::bus::app_lock_fence::control(method) {
+    let Some(fences) = shared.app_fences.get() else {
+        return Ok(None);
+    };
+    if fences.open_for(method, account)? {
         return Ok(None);
     }
-    shared.app_fences.get().map(|fences| fences.for_method(method, account)).transpose()
+    fences.for_method(method, account).map(Some)
 }

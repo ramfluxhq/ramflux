@@ -39,8 +39,6 @@ policies! {
     "account.app_lock.state" => ("account", false, false, false, false),
     "account.backup.cancel" => ("account", true, false, false, false),
     "account.backup.create" => ("account", true, false, false, false),
-    "account.backup.export" => ("account", true, true, false, true),
-    "account.backup.import" => ("account", true, true, false, false),
     "account.backup.jobs" => ("account", true, false, false, false),
     "conversation.start" => ("conversation", true, true, false, false),
     "contact.requests.reply" => ("contact", true, true, false, false),
@@ -77,6 +75,7 @@ policies! {
     "agent.approval.decide" => ("agent", false, false, false, false),
     "agent.approval.list" => ("agent", false, false, false, false),
     "agent.approval.publish" => ("agent", false, false, false, false),
+    "agent.catalog" => ("agent", false, false, false, false),
     "agent.job.list" => ("agent", false, false, false, false),
     "agent.job.pause" => ("agent", false, false, false, false),
     "agent.job.remove" => ("agent", false, false, false, false),
@@ -90,6 +89,9 @@ policies! {
     "agent.host.manage" => ("agent", false, false, false, false),
     "agent.list" => ("agent", false, false, false, false),
     "agent.operation.get" => ("agent", false, false, false, false),
+    "agent.pause" => ("agent", false, false, false, false),
+    "agent.resume" => ("agent", false, false, false, false),
+    "agent.update" => ("agent", false, false, false, false),
     "agent.persona.edit" => ("agent", false, false, false, false),
     "agent.delete" => ("agent", false, false, false, false),
     "agent.retire" => ("agent", false, false, false, false),
@@ -157,14 +159,21 @@ policies! {
     "daemon.status" => ("daemon", false, false, false, false),
     "daemon.stop" => ("daemon", true, false, false, false),
     "diag.residue" => ("diag", true, false, false, false),
+    "diag.export" => ("diag", true, false, false, false),
+    "diag.snapshot" => ("diag", true, false, false, false),
+    "device.activity.report" => ("device", true, true, false, false),
     "device.list" => ("device", false, true, false, false),
+    "device.notifications.cleared" => ("device", true, true, false, false),
     "device.pair.approve" => ("device", true, true, false, false),
     "device.pair.begin" => ("device", true, true, false, false),
     "device.pair.cancel" => ("device", true, true, false, false),
     "device.pair.confirm" => ("device", true, true, false, false),
     "device.pair.join" => ("device", true, true, false, false),
     "device.pair.status" => ("device", false, true, false, false),
+    "device.push_policy.set" => ("device", true, true, false, false),
     "device.push_route.set" => ("device", true, true, false, false),
+    "device.push_route.test" => ("device", true, true, false, false),
+    "push.keyset.get" => ("push", false, true, false, false),
     "device.refresh" => ("device", true, true, false, false),
     "device.revoke" => ("device", true, true, false, false),
     "device.sync.export" => ("device", true, true, false, true),
@@ -311,6 +320,7 @@ pub(super) fn requires_key_export(name: &str) -> bool {
 pub(super) fn allowed(name: &str) -> bool {
     !DENIED_METHODS.contains(&name)
         && !name.contains("itest")
+        && !name.starts_with("debug.mls.")
         && METHOD_POLICIES.iter().any(|row| row.name == name)
 }
 

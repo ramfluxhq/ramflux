@@ -324,7 +324,7 @@ impl GatewaySessionEngine {
                 read_gateway_server_frame_bytes(&mut *stream).await
             })
             .await?;
-        let (session, mode, ephemeral_negotiated) = match established {
+        let (session, mode, ephemeral_negotiated, push_mode, push_keyset) = match established {
             GatewayServerFrame::SessionEstablished { session } => {
                 let echo = super::session_push::EstablishmentEcho::from_bytes(&established_bytes)?;
                 let mode = super::session_push::negotiate(config.session_push_advertise, &echo)?;
@@ -332,6 +332,8 @@ impl GatewaySessionEngine {
                     gateway_session_state(&session, config.last_seen_inbox_seq),
                     mode,
                     echo.supports_ephemeral(),
+                    echo.push_mode_echo(),
+                    echo.push_keyset_echo(),
                 )
             }
             GatewayServerFrame::Nack { reason } => {
@@ -343,6 +345,12 @@ impl GatewaySessionEngine {
                 )));
             }
         };
+        crate::push_keyset::adopt_establishment(
+            &config,
+            push_mode.as_deref(),
+            push_keyset.as_ref(),
+            crate::push_keyset::unix_millis_now(),
+        );
         config.transport_kind = requested_transport_kind;
         let ephemeral_inbox = crate::ephemeral::session::SessionInbox::new();
         let mut engine = Self {
@@ -764,6 +772,14 @@ impl GatewaySessionEngine {
                     self.buffer_delivery(entry);
                 }
                 GatewayServerFrame::InBandWake { .. } => {}
+                GatewayServerFrame::PushKeyset { key_id, body, sig } => {
+                    let doc = crate::push_keyset::PushKeysetDoc { key_id, body, sig };
+                    crate::push_keyset::adopt_mid_session(
+                        &self.config,
+                        &doc,
+                        crate::push_keyset::unix_millis_now(),
+                    );
+                }
                 GatewayServerFrame::ForwardAck { ack }
                     if ack.envelope_id == expected_envelope_id
                         && ack.target_delivery_id == expected_target_delivery_id =>
@@ -839,6 +855,14 @@ impl GatewaySessionEngine {
                     self.buffer_delivery(entry);
                 }
                 GatewayServerFrame::InBandWake { .. } => {}
+                GatewayServerFrame::PushKeyset { key_id, body, sig } => {
+                    let doc = crate::push_keyset::PushKeysetDoc { key_id, body, sig };
+                    crate::push_keyset::adopt_mid_session(
+                        &self.config,
+                        &doc,
+                        crate::push_keyset::unix_millis_now(),
+                    );
+                }
                 GatewayServerFrame::Nack { reason } => {
                     return Err(SdkError::gateway_nack(reason));
                 }
@@ -936,6 +960,14 @@ impl GatewaySessionEngine {
             match self.read_reply(super::frame_dispatch::ExpectedReply::Resume).await? {
                 GatewayServerFrame::Deliver { entry } => delivered.push(entry),
                 GatewayServerFrame::InBandWake { .. } => {}
+                GatewayServerFrame::PushKeyset { key_id, body, sig } => {
+                    let doc = crate::push_keyset::PushKeysetDoc { key_id, body, sig };
+                    crate::push_keyset::adopt_mid_session(
+                        &self.config,
+                        &doc,
+                        crate::push_keyset::unix_millis_now(),
+                    );
+                }
                 GatewayServerFrame::Resume { entries } => {
                     delivered.extend(self.take_pending_deliveries());
                     delivered.extend(entries);

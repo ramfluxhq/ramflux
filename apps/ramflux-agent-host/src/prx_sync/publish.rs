@@ -242,6 +242,9 @@ fn progress_body(notice: &LiveNotice) -> Option<Value> {
 }
 
 fn final_body(copy: &TurnCopy, text: &str) -> Option<Value> {
+    if copy.origin.is_some() {
+        return None;
+    }
     let run = copy.run_id.as_deref().filter(|id| path_id(id))?;
     if !path_id(&copy.session) {
         return None;

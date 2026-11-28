@@ -41,8 +41,8 @@ fn provider_common_headers_follow_s13_contract() -> Result<(), Box<dyn std::erro
     assert!(message.get("notification").is_none());
     assert!(message.get("data").and_then(|data| data.get("encrypted_hint")).is_none());
     assert_eq!(
-        message.get("data").and_then(|data| data.get("class")).and_then(|value| value.as_str()),
-        Some("message")
+        message.get("data").and_then(|data| data.as_object()).map(serde_json::Map::len),
+        Some(1)
     );
     Ok(())
 }
@@ -527,7 +527,11 @@ fn test_prepared_push(
             endpoint: "https://localhost:443/push".to_owned(),
             webpush_p256dh: None,
             webpush_auth: None,
-            registered_at: 1_760_000_000,
+            registered_at_ms: 1_760_000_000,
+            sealed: false,
+            needs_reseal: false,
+            unserved_until_ms: 0,
+            central_first_send: Vec::new(),
             expires_at: 4_102_444_800,
             route_generation: 0,
             route_tag: "AAAAAAAAAAAAAAAAAAAAAA".into(),

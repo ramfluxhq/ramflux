@@ -79,24 +79,18 @@ pub(in crate::bus) fn capture_identity(
     root: &Path,
     id: &str,
 ) -> Result<Identity, SdkError> {
-    if let Some(native) = &client.born_v3_account {
-        let native = DataIdentity {
-            schema: "ramflux.backup.native_data.v1".into(),
-            local_account_id: id.into(),
-            authority: ramflux_protocol::custody::CustodyAuthority {
-                publication: native.publication(),
-                custodian_publication: native
-                    .custodian_publication(root, crate::custody::network_now()?)?,
-            },
-        };
-        native.validate(id)?;
-        return Ok(Identity::Native { native: Box::new(native) });
-    }
-    Ok(Identity::Legacy {
-        manifest: Box::new(crate::bus::daemon::read_local_bus_account_manifest(
-            &crate::bus::daemon::local_bus_account_manifest_path(root, id),
-        )?),
-    })
+    let native = client.born_v3_account.as_ref().ok_or_else(|| refused("root_conflict"))?;
+    let native = DataIdentity {
+        schema: "ramflux.backup.native_data.v1".into(),
+        local_account_id: id.into(),
+        authority: ramflux_protocol::custody::CustodyAuthority {
+            publication: native.publication(),
+            custodian_publication: native
+                .custodian_publication(root, crate::custody::network_now()?)?,
+        },
+    };
+    native.validate(id)?;
+    Ok(Identity::Native { native: Box::new(native) })
 }
 
 impl BackupJobs {
@@ -196,9 +190,7 @@ impl BackupJobs {
         options: (Option<super::NativeInstallKey>, Option<super::NativeRestoreSetup>),
     ) -> Result<(crate::backup::BackupInstalledAccount, BackupCounts, BackupCounts), SdkError> {
         let (local_key, setup) = options;
-        let Identity::Native { native } = &metadata.identity else {
-            return Err(refused("root_conflict"));
-        };
+        let Identity::Native { native } = &metadata.identity;
         let InstallTarget { id, local_key, _writer } =
             install_step("target", self.install_target(job, native, local_key, setup))?;
         let id = &id;

@@ -19,7 +19,7 @@ fn fence_store(
     let owner = gateway_registered_key(&open)?;
     let now = now_unix_seconds();
     let mut route = notify_webpush_route("skewed-delivery", "web");
-    route.registered_at = now;
+    route.registered_at_ms = now;
     route.expires_at = now + PUSH_ROUTE_TTL_SECONDS;
     Ok((ramflux_test_support::Fixture::new(store, store_directory_0), owner, route))
 }

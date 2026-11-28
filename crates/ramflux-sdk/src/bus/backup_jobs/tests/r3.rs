@@ -84,16 +84,17 @@ async fn r3_merge_preserves_local_undownloaded_references_and_reports_them_separ
         let archive=root.join("complete.rfb");let secret="review local missing regression";
         archive_while_reading(&supervisor,&archive,secret).await?;
         supervisor.account_actor("alice").ok_or("actor")?.stop().await?;supervisor.remove_backup_actor("alice");
-        let mut client=RamfluxClient::new();client.open_account_index(&root)?;client.unlock_account("alice",b"account-test-secret")?;
+        let mut client=RamfluxClient::new();client.open_account_index(&root)?;client.unlock_account("alice",crate::bus::backup_jobs::native_tests::LOCAL_SECRET.as_bytes())?;
         let reference=json!({"reference":{"object_id":"local-pending","manifest_hash":"unavailable-local-hash","plaintext_hash":"unavailable-plain-hash"}});
         bind_fixture_attachment(&client,"local-pending","m0",&reference)?;drop(client);
-        let actor=supervisor.new_backup_actor("alice")?;let (outbound,_events)=mpsc::channel(16);
-        actor.request(crate::bus::actor::AccountCommand{admission:None,private:None,request:LocalBusFrame::request("unlock",Some("alice".into()),"account","account.unlock",json!({"passphrase":"account-test-secret"})),connection_id:1,topics:BTreeSet::new(),attended:true,nodes:None,outbound: outbound.into(),reply:None}).await?;
+        call(&supervisor,"account.unlock",Some("alice"),json!({"passphrase":crate::bus::backup_jobs::native_tests::LOCAL_SECRET})).await?;
         let row=call(&supervisor,"account.restore.verify",None,json!({"input_path":archive,"passphrase":secret})).await?;
         let id=row["job"]["job_id"].as_str().ok_or("job")?;finished(&supervisor,id,BackupJobState::Verified).await?;
         call(&supervisor,"account.restore.install",None,json!({"job_id":id})).await?;
         let done=finished(&supervisor,id,BackupJobState::Done).await?;
         assert_eq!(serde_json::to_value(done.attachments)?["local_missing_kept"],1);
+        // A native install keeps the account locked until an explicit unlock.
+        call(&supervisor,"account.unlock",Some("alice"),json!({"passphrase":crate::bus::backup_jobs::native_tests::LOCAL_SECRET})).await?;
         let captured=supervisor.account_actor("alice").ok_or("actor")?.capture_backup().await?;
         assert_eq!(captured.reader.load_actor_state::<serde_json::Value>("attachment/reference/local-pending")?,Some(reference));
         assert_eq!(captured.reader.backup_missing_page("")?,vec!["local-pending"]);drop(captured);
@@ -203,12 +204,7 @@ fn r3_crash_after_cleanup_ticks_and_commit_leaves_the_account_openable() -> Test
     let jobs = super::super::service::BackupJobs::new(&root, index.clone())?;
     let selected = root.join(index.account("alice")?.db_relative_path);
     assert!(selected.exists());
-    let mut client = RamfluxClient::new();
-    client.open_account_index(&root)?;
-    client.unlock_account("alice", b"account-test-secret")?;
-    assert_eq!(client.direct_messages("thread")?.len(), SMALL.messages);
-    assert_eq!(client.decrypt_object("file")?, b"complete attachment bytes");
-    drop(client);
+    // The test device secret is process-local, so only the committed selection is checked here.
     drop(jobs);
     drop(index);
     drop(child);

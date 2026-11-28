@@ -41,8 +41,12 @@ fn admitted(state: &SharedFederationTrustState, node: &str) -> Result<Peer, Node
     {
         return Err(failure(Refusal::PeeringUnavailable));
     }
+    let key = state.pinned_node_public_key(node).ok_or_else(|| failure(Refusal::PinMismatch))?;
+    // Sanctions apply to both outbound (`local`) and inbound (`inbound`) migration hops.
+    crate::node_directory::sanction::check_peer(node, Some(&key), "migration")
+        .map_err(|_| failure(Refusal::PeeringUnavailable))?;
     Ok(Peer {
-        key: state.pinned_node_public_key(node).ok_or_else(|| failure(Refusal::PinMismatch))?,
+        key,
         endpoint: state
             .route(node)
             .ok_or_else(|| failure(Refusal::PeeringUnavailable))?

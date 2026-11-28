@@ -910,6 +910,14 @@ fn handle_mesh_fast_path_value(
                 inbox_seq = ?response.delivery.inbox_seq,
                 "router mesh mvp0 envelope returned"
             );
+            // Diagnostics (C-9): online delivery versus inbox store, per target device.
+            tracing::debug!(
+                target: "ramflux_router_diag",
+                outcome = %response.delivery.outcome,
+                inbox_seq = ?response.delivery.inbox_seq,
+                target_delivery_id = %response.delivery.target_delivery_id,
+                "router envelope delivery decision"
+            );
             tracing::debug!(
                 target_delivery_id = %response.delivery.target_delivery_id,
                 "router mesh mvp0 envelope ids"

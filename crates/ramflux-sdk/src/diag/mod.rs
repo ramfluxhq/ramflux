@@ -8,6 +8,8 @@ mod residue;
 
 pub use residue::{ResidueDiagnostic, ResidueDirectory, diagnose_plaintext_residue};
 
+pub(crate) mod events;
+pub(crate) mod export;
 pub(crate) mod logging;
 #[cfg(feature = "c-abi")]
 pub(crate) use logging::Session;

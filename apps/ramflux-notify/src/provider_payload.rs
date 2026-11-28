@@ -24,6 +24,8 @@ pub const WEB_ENCRYPTED_BODY_LIMIT: usize = 4096;
 
 const MESSAGE_LOC_KEY: &str = "RF_PUSH_MESSAGE";
 const CALL_LOC_KEY: &str = "RF_PUSH_CALL";
+/// Localization key of the push test alert (plain alert, priority 10, no sound change).
+const TEST_LOC_KEY: &str = "RF_PUSH_TEST";
 const ALERT_SOUND: &str = "default";
 const CALL_INTERRUPTION_LEVEL: &str = "time-sensitive";
 const LOC_ARGS_NONE: &[&str] = &[];
@@ -108,6 +110,7 @@ pub struct ProviderRequestParts {
 pub const fn provider_class_for_internal(class: &NotificationDeliveryClass) -> WakeClass {
     match *class {
         NotificationDeliveryClass::CallWakeNotification => WakeClass::CallWake,
+        NotificationDeliveryClass::PushTestNotification => WakeClass::Test,
         NotificationDeliveryClass::SelfDeviceControlNotification
         | NotificationDeliveryClass::UserContentNotification
         | NotificationDeliveryClass::AiTaskNotification
@@ -126,7 +129,7 @@ pub const fn select_apns_mode(
 ) -> ProviderWireMode {
     match class {
         WakeClass::CallWake if voip_route_available && voip_enabled => ProviderWireMode::ApnsVoip,
-        WakeClass::CallWake | WakeClass::Message => ProviderWireMode::ApnsAlert,
+        WakeClass::CallWake | WakeClass::Message | WakeClass::Test => ProviderWireMode::ApnsAlert,
     }
 }
 
@@ -175,7 +178,7 @@ pub fn build_provider_parts(
             (body, headers)
         }
         ProviderWireMode::Fcm => {
-            let body = fcm_body(input, class_name, collapse, remaining)?;
+            let body = fcm_body(input, collapse, remaining)?;
             (body, Vec::new())
         }
         ProviderWireMode::WebPush => {
@@ -207,6 +210,7 @@ fn class_name(class: WakeClass) -> &'static str {
     match class {
         WakeClass::Message => "message",
         WakeClass::CallWake => "call_wake",
+        WakeClass::Test => "test",
     }
 }
 
@@ -240,8 +244,10 @@ fn collapse_for_class(
             Ok(Some(key))
         }
         (WakeClass::Message, None) => Err(ProviderBuildError::MissingCollapseKey),
-        (WakeClass::CallWake, None) => Ok(None),
-        (WakeClass::CallWake, Some(_)) => Err(ProviderBuildError::UnexpectedCollapseKey),
+        (WakeClass::CallWake | WakeClass::Test, None) => Ok(None),
+        (WakeClass::CallWake | WakeClass::Test, Some(_)) => {
+            Err(ProviderBuildError::UnexpectedCollapseKey)
+        }
     }
 }
 
@@ -291,7 +297,7 @@ fn apns_alert_body(
 ) -> Result<Vec<u8>, ProviderBuildError> {
     let interruption_level = match class {
         WakeClass::CallWake => Some(CALL_INTERRUPTION_LEVEL),
-        WakeClass::Message => None,
+        WakeClass::Message | WakeClass::Test => None,
     };
     serde_json::to_vec(&ApnsAlertBody {
         aps: ApnsAlertAps {
@@ -309,6 +315,7 @@ fn alert_loc_key(class: WakeClass) -> &'static str {
     match class {
         WakeClass::Message => MESSAGE_LOC_KEY,
         WakeClass::CallWake => CALL_LOC_KEY,
+        WakeClass::Test => TEST_LOC_KEY,
     }
 }
 
@@ -316,6 +323,7 @@ fn rf_code(class: WakeClass) -> &'static str {
     match class {
         WakeClass::Message => "m",
         WakeClass::CallWake => "call",
+        WakeClass::Test => "t",
     }
 }
 
@@ -338,7 +346,6 @@ fn apns_voip_body(wake_id: &str, route_tag: &str) -> Result<Vec<u8>, ProviderBui
 
 fn fcm_body(
     input: &ProviderBuildInput<'_>,
-    class_name: &'static str,
     collapse: Option<&str>,
     remaining: u64,
 ) -> Result<Vec<u8>, ProviderBuildError> {
@@ -347,12 +354,7 @@ fn fcm_body(
     serde_json::to_vec(&FcmEnvelope {
         message: FcmMessage {
             token: input.token,
-            data: FcmData {
-                wake_id: input.wake_id,
-                class: class_name,
-                collapse_key: collapse,
-                rf: &rf,
-            },
+            data: FcmData { rf: &rf },
             android: FcmAndroid { priority: "HIGH", ttl, collapse_key: collapse },
         },
     })
@@ -409,11 +411,7 @@ struct WebPlain<'a> {
 
 #[derive(Serialize)]
 struct FcmData<'a> {
-    wake_id: &'a str,
-    class: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    collapse_key: Option<&'a str>,
-    /// JSON object. FCM data values are strings.
+    /// The only data member. JSON object as a string (FCM data values are strings).
     rf: &'a str,
 }
 
@@ -529,7 +527,7 @@ mod tests {
         })?;
         let parsed = json_of(&fcm)?;
         assert!(parsed["message"].get("notification").is_none());
-        assert_eq!(parsed["message"]["data"]["class"], "message");
+        assert_eq!(parsed["message"]["data"].as_object().map(serde_json::Map::len), Some(1));
         assert_eq!(parsed["message"]["android"]["priority"], "HIGH");
         assert_eq!(parsed["message"]["android"]["ttl"], "86400s");
         assert_eq!(parsed["message"]["android"]["collapse_key"], key);

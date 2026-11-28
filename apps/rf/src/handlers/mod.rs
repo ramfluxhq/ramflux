@@ -17,6 +17,8 @@ pub(crate) mod centre;
 pub(crate) mod contact;
 pub(crate) mod conversation_ops;
 pub(crate) mod daemon;
+#[cfg(feature = "itest-mls-debug")]
+pub(crate) mod debug;
 pub(crate) mod device;
 pub(crate) mod diag;
 pub(crate) mod dm;
@@ -64,7 +66,6 @@ pub(crate) use crate::cli::*;
 pub(crate) use crate::utils::*;
 pub(crate) use ramflux_sdk::{
     GatewayQuicEndpointConfig, LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest,
-    LocalBusAccountBackupExportRequest, LocalBusAccountBackupImportRequest,
     LocalBusAccountCreateRequest, LocalBusAccountPassphraseRotateRequest,
     LocalBusAccountUnlockRequest, LocalBusBotInstallRequest, LocalBusBotRevokeRequest,
     LocalBusBotTrustAddRequest, LocalBusCallAnswerRequest, LocalBusCallHangupRequest,

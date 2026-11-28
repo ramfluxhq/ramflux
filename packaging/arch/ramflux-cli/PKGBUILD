@@ -30,12 +30,12 @@ build() {
   export RAMFLUX_PRODUCTION_BUILD=1
   unset RAMFLUX_ITEST_BUILD
   export CARGO_TARGET_DIR="$srcdir/target"
-  RAMFLUX_GIT_SHA="$_product_commit" cargo build --locked --release --manifest-path "ramflux-$pkgver/Cargo.toml" -p ramflux-rf --bin rf
+  RAMFLUX_GIT_SHA="$_product_commit" cargo build --locked --profile ffi-release --manifest-path "ramflux-$pkgver/Cargo.toml" -p ramflux-rf --bin rf
   env -u RAMFLUX_GIT_SHA GIT_CEILING_DIRECTORIES="$srcdir" cargo build --locked --release --manifest-path "ramflux-tui-$pkgver/Cargo.toml" --bin rf-tui
 }
 
 package() {
-  install -Dm755 "$srcdir/target/release/rf" "$pkgdir/usr/bin/rf"
+  install -Dm755 "$srcdir/target/ffi-release/rf" "$pkgdir/usr/bin/rf"
   install -Dm755 "$srcdir/target/release/rf-tui" "$pkgdir/usr/bin/rf-tui"
   install -Dm644 "ramflux-$pkgver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/ramflux-LICENSE"
   install -Dm644 "ramflux-$pkgver/NOTICE" "$pkgdir/usr/share/licenses/$pkgname/ramflux-NOTICE"

@@ -97,6 +97,7 @@ mod schema_receipt_identity;
 mod sqlite_work;
 
 pub use account_db::AccountDb;
+pub use account_db::checkpoint_writer::ProjectionCheckpointWriter;
 pub use account_db::full_transfer::{
     CellRule, CodecRule, EncryptedStageChunk, FamilyRule, FamilySelector, FieldRule,
     FullAppliedDataReceipt, FullBaseSourceEncoding, FullDuplexReceipt, FullForwardReader,
@@ -124,6 +125,9 @@ pub use account_db::large_segments::{
     SegmentStore,
 };
 pub use account_db::mac_subkeys::full::FullImportedMacDomain;
+pub use account_db::mls_kv::{
+    MlsKvCommitError, MlsKvParam, MlsKvStats, MlsKvStore, MlsKvTx, MlsKvWrite,
+};
 pub use account_db::object_retention::{
     ObjectReferenceAdmission, ObjectReferenceOwner, ObjectResourceRetirement, ObjectRetention,
     ObjectRetirementObserver, PreSendObjectHold, PrivacyResourceRegistration,
@@ -150,7 +154,7 @@ pub use clock::{AccountClock, unix_now};
 pub use constants::*;
 pub use encryption::{
     AccountDbKey, AccountKeyWrappingProvider, EncryptionMode, FileVaultSecretSource,
-    LocalVaultKeyWrappingProvider, VaultSecretSource, WrappedAccountDbKey,
+    LocalVaultKeyWrappingProvider, VaultSecretSource, WRAP_AUTH_FAILED, WrappedAccountDbKey,
     unwrap_with_vault_secret, wrap_with_vault_secret,
 };
 pub use error::StorageError;

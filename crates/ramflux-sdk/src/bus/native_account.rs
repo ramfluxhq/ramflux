@@ -47,7 +47,10 @@ pub(super) fn unlock(
 ) -> Result<LocalBusCreatedAccount, SdkError> {
     if let Some(account) = state.accounts.get(id) {
         if let NativeUnlockSecret::Code(passphrase) = &secret {
-            account.client.verify_active_account_secret(id, passphrase.as_bytes())?;
+            account
+                .client
+                .verify_active_account_secret(id, passphrase.as_bytes())
+                .map_err(crate::client::device_unlock::wrong_code)?;
         }
         return response(account);
     }
@@ -64,7 +67,9 @@ pub(super) fn unlock(
         crate::client::device_unlock::DeviceSecret::Load,
     )?;
     match &secret {
-        NativeUnlockSecret::Code(passphrase) => client.unlock_account(id, passphrase.as_bytes())?,
+        NativeUnlockSecret::Code(passphrase) => client
+            .unlock_account(id, passphrase.as_bytes())
+            .map_err(crate::client::device_unlock::wrong_code)?,
         NativeUnlockSecret::Device => client.unlock_account_with_device(id)?,
     }
     if let Some(node_id) = home_node_id {
@@ -80,6 +85,7 @@ pub(super) fn unlock(
         id,
         repair_vault.as_ref(),
     )?;
+    refresh_after_recovery(&mut client, &root, id, repair_vault.as_ref())?;
     if !crate::custody::pairing::recipient::ordinary_session_admitted(&client, id)? {
         return Err(SdkError::PairingCode("PublicationPending"));
     }
@@ -97,6 +103,14 @@ pub(super) fn unlock(
     } else {
         client.owned_device_identity()?.storage_key().to_owned()
     };
+    if native.recovery_publication_pending(&root)?
+        && client.account_db()?.reset_receive_ledger_for_new_target(&delivery)?
+    {
+        tracing::info!(
+            reason_code = "recovery_receive_ledger_reset",
+            "receive ledger reset for the recovered device"
+        );
+    }
     let publication = native.publication();
     let custodian_publication =
         native.custodian_publication(&root, crate::custody::network_now()?)?;
@@ -112,6 +126,74 @@ pub(super) fn unlock(
         )?;
     }
     admit_native_account(state, id, client, anchor, device, delivery)
+}
+
+/// A recovery replaces the device id and vault refs, so the installed marker and adoption row the
+/// account carried before still name the old owners and admission would refuse for good. The
+/// recovered record is the proof: refresh the authority owners from it through the ordinary
+/// verified refresh (keys checked before any write, ordered and crash-resumable).
+fn refresh_after_recovery(
+    client: &mut RamfluxClient,
+    root: &std::path::Path,
+    id: &str,
+    vault: &dyn crate::custody::PrimaryVault,
+) -> Result<(), SdkError> {
+    use crate::custody::pairing::{activate, install_store};
+    let account = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    if !account.recovery_publication_pending(root)? {
+        return Ok(());
+    }
+    let Some(installed) = install_store::read_installed(root, id)? else { return Ok(()) };
+    if installed.state != "installed"
+        || install_store::list_pending(root, id)?.iter().any(|row| row.full_transfer.is_some())
+        || crate::custody::matches_install(account, &installed)?
+        || crate::custody::matches_generation_install(account, &installed)?
+    {
+        return Ok(());
+    }
+    if installed.account_id != account.local_account_id()
+        || installed.account_anchor != account.record().body.account_anchor
+    {
+        return Err(SdkError::PairingCode("PublicationPending"));
+    }
+    let hash = ramflux_protocol::custody::object_hash(account.record())?;
+    let now = crate::custody::network_now()?;
+    let authority = ramflux_protocol::custody::CustodyAuthority {
+        publication: account.publication(),
+        custodian_publication: account.custodian_publication(root, now)?,
+    };
+    {
+        // Only the stale non-generation rows go; the lock is never held around the refresh.
+        let _lock = activate::authority_lock(root, id)?;
+        for row in install_store::list_pending(root, id)? {
+            let own_refresh = row.install_purpose == "authority_refresh"
+                && row.record_hash.as_deref() == Some(hash.as_str());
+            if row.full_transfer.is_none() && !own_refresh {
+                install_store::remove_pending(root, id, &row.operation_id)?;
+            }
+        }
+    }
+    custody_refresh(client, root, id, vault, &authority, now)
+}
+
+fn custody_refresh(
+    client: &mut RamfluxClient,
+    root: &std::path::Path,
+    id: &str,
+    vault: &dyn crate::custody::PrimaryVault,
+    authority: &ramflux_protocol::custody::CustodyAuthority,
+    now: u64,
+) -> Result<(), SdkError> {
+    crate::custody::pairing::refresh_authority(
+        root,
+        client.account_db()?,
+        vault,
+        id,
+        authority,
+        now,
+    )?;
+    client.born_v3_account = Some(Box::new(crate::custody::load_account(root, id, now)?));
+    Ok(())
 }
 
 fn admit_native_account(
@@ -139,15 +221,34 @@ fn admit_native_account(
         target_delivery_id: delivery,
         prekey_http_url: None,
     };
-    let gateway =
+    let mut gateway =
         GatewaySessionConfig::auto(endpoint).with_host_network(&state.config).with_born_v3_account(
             client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?,
         );
+    // Restart restore of the stored push-route book, its control sequence and the device policy.
+    let stored_push = super::dispatch::device::stored_push_route(&client)?;
+    gateway.push_routes = stored_push.routes;
+    gateway.push_route_clears = stored_push.clears;
+    gateway.push_route_clear_pending = stored_push.clear_pending;
+    // Next sequence = max(saved + 1, now in ms): a reset clock never reuses one.
+    gateway.push_route_last_seq = super::dispatch::device::stored_push_route_seq(&client)?;
+    gateway.device_policy = super::dispatch::device::stored_device_policy(&client)?;
     let mut account = LocalBusAccountState::disconnected(client, gateway, anchor);
     account.activation_pending = true;
     account.native_setup = Some(state.config.clone());
     // The owning runtime starts networking after installing its bounded writer channel.
     let result = response(&account)?;
+    // Restart hydrates: rebuild call, bot, MCP, object and upload-spool state from the unlocked
+    // account DB (no-ops on a fresh create). Errors abort the unlock, fail-closed.
+    super::dispatch::call::recover(&mut account)?;
+    super::dispatch::call_bot::hydrate_local_bot_records(&mut account)?;
+    super::dispatch::grant_mcp::hydrate_local_mcp_state(&mut account)?;
+    super::dispatch::object::hydrate_local_object_state(&mut account)?;
+    super::dispatch::object::rehydrate_object_put_spools(
+        &mut account,
+        &state.config.data_root,
+        id,
+    )?;
     account.client.bind_process_media_ownership(state.config.media_ownership())?;
     state.accounts.insert(id.into(), account);
     state.active_account_id = Some(id.into());
@@ -413,6 +514,8 @@ pub(super) async fn configure_pending(account: &mut LocalBusAccountState) -> Res
             vault: super::custody_setup::primary_provider(setup),
         })
         .with_account_identity(&account.client)?;
+    gateway.push.set_node_public_key(profile.node_public_key.clone());
+    crate::push_keyset::restore_keyset(&account.client, &gateway)?;
     let relay = profile.relay_options(root, &gateway.principal_id).await?;
     account.client.account_db()?.persist_actor_state("account/node-id", &profile.node_id)?;
     account.client.account_db()?.persist_actor_state("sync/node-id", &Some(&profile.node_id))?;

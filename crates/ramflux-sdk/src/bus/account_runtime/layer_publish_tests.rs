@@ -149,7 +149,7 @@ fn declared(runtime: &AccountRuntime) -> bool {
 async fn held_publish_keeps_the_real_actor_serving_floor_sends_and_a_stale_session_apply_is_dropped()
 -> TestResult {
     within(Box::pin(async {
-        let mut rig = harness("layer-real-actor").await?;
+        let mut rig = Box::pin(harness("layer-real-actor")).await?;
         let handle = rig.handle.clone();
         let writer = Writer::new(rig.runtime.connection_sender.clone(), handle.generation());
         let started = Arc::new(Notify::new());
@@ -254,7 +254,7 @@ async fn held_pass(
 #[tokio::test]
 async fn lock_or_stop_cancels_the_real_courier_leaving_no_lock_and_a_resumable_row() -> TestResult {
     within(Box::pin(async {
-        let mut rig = harness("layer-real-stop").await?;
+        let mut rig = Box::pin(harness("layer-real-stop")).await?;
         let handle = rig.handle.clone();
         let sender = rig.runtime.connection_sender.clone();
         let context = handle.test_context();

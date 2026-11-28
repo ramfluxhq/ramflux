@@ -321,6 +321,8 @@ pub enum NotificationDeliveryClass {
     A2uiSurfaceNotification,
     CallWakeNotification,
     ConferenceWakeNotification,
+    /// Push test wake (class `t`). Only the calling device's own non-VoIP routes.
+    PushTestNotification,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

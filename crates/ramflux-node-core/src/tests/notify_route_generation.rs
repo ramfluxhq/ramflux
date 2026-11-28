@@ -24,7 +24,7 @@ fn rotated_store(
 fn route_at(token: &str, now: u64) -> DevicePushRoute {
     let mut route = notify_webpush_route("rotated-delivery", "web");
     route.token = token.to_owned();
-    route.registered_at = now;
+    route.registered_at_ms = now;
     route.expires_at = now + PUSH_ROUTE_TTL_SECONDS;
     route
 }

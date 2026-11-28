@@ -274,6 +274,7 @@ fn reject_private(private: PrivateCommand) {
         PrivateCommand::Capture(reply) => {
             let _ = reply.send(Err(error));
         }
+        PrivateCommand::CardSweep => {}
         PrivateCommand::AuthorizeBackup { reply, .. } => {
             let _ = reply.send(Err(error));
         }

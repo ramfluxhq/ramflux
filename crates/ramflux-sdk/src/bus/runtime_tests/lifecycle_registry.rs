@@ -17,7 +17,7 @@ async fn concurrent(before_receipt: bool, changed: bool) -> Case {
     LocalSet::new()
         .run_until(async {
             let root = root("registry-retry");
-            drop(account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?);
+            persisted_native(&root, "alice").await?;
             let gate = Arc::new(TestGate { before_receipt, ..TestGate::default() });
             let mut config = LocalBusConfig::new(root.join("bus.sock"), &root);
             config.lifecycle_gate = Some(gate.clone());
@@ -114,7 +114,7 @@ async fn failed_unlock_clears_in_flight_and_fresh_key_unlocks() -> Case {
     LocalSet::new()
         .run_until(async {
             let root = root("registry-failure");
-            drop(account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?);
+            persisted_native(&root, "alice").await?;
             let supervisor = Supervisor::new(LocalBusConfig::new(root.join("bus.sock"), &root))?;
             let (outbound, _) = mpsc::channel(8);
             let connection = LocalBusConnectionState::new(1, outbound);
@@ -131,10 +131,7 @@ async fn failed_unlock_clears_in_flight_and_fresh_key_unlocks() -> Case {
             assert!(!error.to_string().contains("requires reconciliation"));
             unlock.body["passphrase"] = json!("actor-test-secret");
             unlock.operation_id = Some("fresh-key".into());
-            assert_eq!(
-                supervisor.request(unlock, &connection).await?.body["local_account_id"],
-                "alice"
-            );
+            assert_eq!(supervisor.request(unlock, &connection).await?.body["account_id"], "alice");
             assert!(supervisor.account_is_open("alice"));
             assert_eq!(supervisor.index.account("alice")?.account_state, "active");
             supervisor.shutdown().await?;

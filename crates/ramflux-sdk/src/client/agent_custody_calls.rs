@@ -29,27 +29,38 @@ fn refuse(token: &'static str) -> SdkError {
     SdkError::AgentCreationRefused(token)
 }
 
-fn refuse_bad_limits(config: &g::AgentConfigData) -> Result<(), SdkError> {
-    let Some(limits) = &config.limits else {
-        return Ok(());
-    };
-    let turns_bad = limits.max_concurrent_turns.is_some_and(|value| !(1..=1024).contains(&value));
-    let cost_bad =
-        limits.max_cost_per_day_cents.is_some_and(|value| !(1..=1_000_000_000).contains(&value));
-    if turns_bad || cost_bad { Err(refuse("field_invalid")) } else { Ok(()) }
+/// Refuses a config outside the closed shapes before any effect (AGENT-MGMT-01A).
+fn refuse_bad_config(config: &g::AgentConfigData) -> Result<(), SdkError> {
+    use crate::agent_record::config as fields;
+    let (turns, cost) = config.limits.as_ref().map_or((None, None), |limits| {
+        (limits.max_concurrent_turns, limits.max_cost_per_day_cents)
+    });
+    let autonomy = Some(config.autonomy.as_str()).filter(|text| !text.is_empty());
+    let ok = fields::fields_ok(
+        Some(config.provider.as_str()),
+        Some(config.model.as_str()),
+        autonomy,
+        config.prompt.as_deref(),
+        Some(config.tools.as_slice()),
+    ) && fields::limits_ok(turns, cost);
+    if ok { Ok(()) } else { Err(refuse("field_invalid")) }
 }
 
-fn copy_limits(intent: &mut crate::agent_record::AgentIntent, config: &g::AgentConfigData) {
-    let Some(limits) = &config.limits else {
-        return;
-    };
-    if limits.max_concurrent_turns.is_none() && limits.max_cost_per_day_cents.is_none() {
-        return;
-    }
+/// Keeps the requested config on the intent. An empty autonomy is `full`, an empty tool list is
+/// all of Main's tools, and an absent `enabled` is true; PRX composes an absent prompt.
+fn copy_config(intent: &mut crate::agent_record::AgentIntent, config: &g::AgentConfigData) {
     intent.provider = Some(config.provider.clone());
     intent.model = Some(config.model.clone());
-    intent.max_concurrent_turns = limits.max_concurrent_turns;
-    intent.max_cost_per_day_cents = limits.max_cost_per_day_cents;
+    intent.autonomy =
+        Some(if config.autonomy.is_empty() { "full".to_owned() } else { config.autonomy.clone() });
+    intent.prompt.clone_from(&config.prompt);
+    intent.tools =
+        Some(if config.tools.is_empty() { vec!["*".to_owned()] } else { config.tools.clone() });
+    intent.enabled = Some(config.enabled.unwrap_or(true));
+    if let Some(limits) = &config.limits {
+        intent.max_concurrent_turns = limits.max_concurrent_turns;
+        intent.max_cost_per_day_cents = limits.max_cost_per_day_cents;
+    }
 }
 
 /// The human authority read at one instant, with this device named in it.
@@ -192,7 +203,7 @@ impl RamfluxClient {
         {
             return Err(refuse("metadata_pending"));
         }
-        refuse_bad_limits(config)?;
+        refuse_bad_config(config)?;
         crate::agent_record::check_access(access)?;
         let persona_bytes = serde_json::to_vec(&serde_json::json!({
             "avatar": persona.avatar,
@@ -229,7 +240,7 @@ impl RamfluxClient {
         // Stage E2: the persona and access are kept on the creation record for the agent record.
         let mut intent_record = store.load(&request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
         let mut intent = crate::agent_record::AgentIntent::new(persona.clone(), access.clone());
-        copy_limits(&mut intent, config);
+        copy_config(&mut intent, config);
         intent_record.intent_b64 = Some(encode_base64url(serde_json::to_vec(&intent)?));
         store.save(&intent_record)?;
         let plan =
@@ -250,6 +261,56 @@ impl RamfluxClient {
         })?;
         let record = store.load(&request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
         status_of(&record)
+    }
+
+    /// Closes a create that PRX refused: stage a cancel to the primary first (so its pending
+    /// copy goes), then cancel locally (vault items and request file). A request that is no
+    /// longer `authorization_pending` or `authorized` is left alone.
+    /// # Errors
+    /// Store, send and vault failures; the request then expires by its deadline.
+    pub(crate) fn agent_create_abandon(
+        &self,
+        vault: &dyn PrimaryVault,
+        request_id: &str,
+        now: u64,
+    ) -> Result<g::AgentCustodyStatus, SdkError> {
+        let store = self.agent_creation_store()?;
+        let record = store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
+        if !matches!(
+            record.state,
+            AgentCreationState::AuthorizationPending | AgentCreationState::Authorized
+        ) {
+            return status_of(&record);
+        }
+        let cancel = ramflux_protocol::custody::encode_register_cancel(
+            &ramflux_protocol::custody::RegisterCancel {
+                request_id: request_id.to_owned(),
+                request_hash: record.request_hash.clone(),
+            },
+        )
+        .map_err(|_| SdkError::CustodySetupInvalid)?;
+        let plan = decode_register_plan(&record.plan_bytes()?)
+            .map_err(|_| SdkError::CustodySetupInvalid)?;
+        let human = self.human_authority()?;
+        let target = RootQualifiedDeviceRef::from_custody_record(
+            self.born_v3_account.as_deref().ok_or(SdkError::AccountDbNotUnlocked)?.verified(),
+            &human.primary.device_id,
+        )?;
+        let staged = self.stage_agent_custody(AgentCustodySend {
+            target: &target,
+            owner_anchor: &human.record.body.account_anchor,
+            agent_anchor: &plan.agent_anchor,
+            correlation_id: request_id,
+            custody: g::AgentCustodyPacket {
+                value: Some(g::agent_custody_packet::Value::CancelJson(cancel.clone())),
+            },
+            now,
+        });
+        if let Err(error) = &staged {
+            tracing::warn!(request_id, step = "phone", %error, "agent create cleanup failed");
+        }
+        let closed = crate::custody::agent_creation::cancel(&store, vault, &cancel, now)?;
+        status_of(&closed)
     }
 
     /// `agent.creation.decide` on the current primary: sign approve or deny for a stored request

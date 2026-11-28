@@ -376,6 +376,10 @@ struct EchoSession {
     capabilities: Option<Vec<String>>,
     #[serde(default)]
     inbox_incarnation_id: Option<String>,
+    #[serde(default)]
+    push_mode: Option<String>,
+    #[serde(default)]
+    push_keyset: Option<serde_json::Value>,
 }
 
 /// What the gateway echoed on `session_established`.
@@ -383,9 +387,21 @@ struct EchoSession {
 pub(crate) struct EstablishmentEcho {
     capabilities: Option<Vec<String>>,
     inbox_incarnation_id: Option<String>,
+    push_mode: Option<String>,
+    push_keyset: Option<crate::push_keyset::PushKeysetDoc>,
 }
 
 impl EstablishmentEcho {
+    /// Push mode the gateway echoed, if any.
+    pub(crate) fn push_mode_echo(&self) -> Option<String> {
+        self.push_mode.clone()
+    }
+
+    /// Key set document the gateway relayed, if any and well formed.
+    pub(crate) fn push_keyset_echo(&self) -> Option<crate::push_keyset::PushKeysetDoc> {
+        self.push_keyset.clone()
+    }
+
     pub(crate) fn supports_ephemeral(&self) -> bool {
         crate::ephemeral::echo_holds_ephemeral_send(self.capabilities.as_deref().unwrap_or(&[]))
     }
@@ -398,6 +414,11 @@ impl EstablishmentEcho {
         Ok(Self {
             capabilities: frame.session.capabilities,
             inbox_incarnation_id: frame.session.inbox_incarnation_id,
+            push_mode: frame.session.push_mode,
+            push_keyset: frame
+                .session
+                .push_keyset
+                .and_then(|value| serde_json::from_value(value).ok()),
         })
     }
 }

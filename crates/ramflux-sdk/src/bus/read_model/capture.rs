@@ -15,32 +15,6 @@ pub(crate) fn initialize(account: &LocalBusAccountState) -> Result<(), SdkError>
         &json!({"principal_id":config.principal_id,"device_id":config.device_id}),
     )?;
     initialize_own_identity(account)?;
-    let path = local_bus_account_manifest_path(
-        account.client.account_index()?.root(),
-        &db.local_account_id,
-    );
-    if let Some(manifest) = super::super::sync_status::optional_manifest(&path)
-        && let Some(mut value) = db.client_record("identity", &config.principal_id)?
-    {
-        let profile = account.client.verified_identity_profile(&config.principal_id)?;
-        value["display_name"] =
-            profile.as_ref().map_or_else(|| json!(manifest.label), |p| json!(p.display_name));
-        value["kind_asserted"] = json!(profile.as_ref().map(|p| p.kind));
-        value["kind_verified"] = json!(profile.is_some());
-        value["kind"] = profile.as_ref().map_or_else(
-            || {
-                json!(manifest.kind.unwrap_or_else(|| {
-                    if manifest.client_mode == LocalBusClientMode::HeadlessAi {
-                        "headless_ai".to_owned()
-                    } else {
-                        "human".to_owned()
-                    }
-                }))
-            },
-            |p| json!(p.kind),
-        );
-        db.persist_client_record("identity", &config.principal_id, &value)?;
-    }
     let mut device = db
         .client_record(
             "device",
@@ -97,20 +71,6 @@ pub(crate) fn capture(
     let db = account.client.account_db()?;
     let body = &request.body;
     let own = &account.gateway_config.principal_id;
-    if request.method.as_str() == "account.create" {
-        let root = account.client.account_index()?.root();
-        let path = local_bus_account_manifest_path(root, &db.local_account_id);
-        let mut manifest = read_local_bus_account_manifest(&path)?;
-        let metadata: LocalBusAccountCreateRequest = serde_json::from_value(body.clone())
-            .map_err(|_| SdkError::LocalBus("invalid account request".to_owned()))?;
-        if metadata.label.is_some() {
-            manifest.label = metadata.label;
-        }
-        if let Some(kind) = metadata.kind {
-            manifest.kind = serde_json::to_value(kind)?.as_str().map(str::to_owned);
-        }
-        write_local_bus_account_manifest(root, &manifest)?;
-    }
     if matches!(request.method.as_str(), "contact.safety_number" | "contact.verify")
         && let Some(commitment) =
             response.get("contact_identity_commitment").and_then(Value::as_str)

@@ -315,7 +315,7 @@ async fn unnegotiated_dispatch_and_legacy_establishment() -> anyhow::Result<()> 
     .await?;
     assert_eq!(
         frames.lock().map_err(|_| Retired)?[0],
-        json!({"frame_type":"session_established","session":{"session_id":"session","gateway_id":"gateway","accepted_cursor":null,"resume_token":"resume","resume_window_seconds":300}})
+        json!({"frame_type":"session_established","session":{"session_id":"session","gateway_id":"gateway","accepted_cursor":null,"resume_token":"resume","resume_window_seconds":300,"push_mode":"direct"}})
     );
     Ok(())
 }

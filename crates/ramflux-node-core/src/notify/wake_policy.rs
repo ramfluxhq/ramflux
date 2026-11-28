@@ -37,6 +37,7 @@ pub fn project_wake_v2(signed: &SignedWakeV2, now: u64) -> Result<NotificationWa
         WakeClass::Message => {
             (NotificationDeliveryClass::UserContentNotification, PushPriority::Normal)
         }
+        WakeClass::Test => (NotificationDeliveryClass::PushTestNotification, PushPriority::High),
     };
     Ok(NotificationWake {
         schema: ramflux_protocol::domain::NOTIFICATION_WAKE_V2.to_owned(),

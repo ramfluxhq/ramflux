@@ -20,6 +20,7 @@ mod custody;
 #[cfg(test)]
 mod custody_tests;
 mod data_root;
+mod diag;
 mod exports;
 mod host_key;
 mod input;
@@ -39,6 +40,9 @@ mod username;
 mod wake_fetch;
 
 pub use custody::{RamfluxV2CustodyOperation, RamfluxV2CustodyProvider, RamfluxV2CustodyRequest};
+pub use diag::{
+    ramflux_v2_diag_flush, ramflux_v2_diag_init, ramflux_v2_diag_set_level, ramflux_v2_diag_write,
+};
 pub use exports::ramflux_v2_client_open_with_custody;
 pub use exports::{
     RamfluxV2Status, ramflux_v2_buffer_free, ramflux_v2_card_trust_package,
