@@ -200,7 +200,7 @@ mod tests {
             "a two-byte form of 3 is not minimal"
         );
         assert_eq!(
-            parse_private_message(&message(&[0x80, 0, 0x10, 0], b"")),
+            parse_private_message(&message(&[0x80, 0, 0x40, 0], b"")),
             Err(MlsHeaderError::Truncated),
             "a length past the message"
         );

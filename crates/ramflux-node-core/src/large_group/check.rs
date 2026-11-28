@@ -86,9 +86,9 @@ pub fn epoch_rule(kind: EnvKind, epoch: u64, head_epoch: u64) -> LgResult<()> {
     if ok { Ok(()) } else { Err(LgRefusal::Stale { epoch: head_epoch }) }
 }
 
-/// Spec 2.3 check 5a: the commit's `authenticated_data` is `rf-lg-aad-v1 ‖ canonical header
-/// without the authorisation, `blob_ref` and `welcome_ref``, which must equal the envelope
-/// header's own AAD bytes. The field comes from the one shared MLS header parser.
+/// Spec 2.3 check 5a: the commit's `authenticated_data` is `rf-lg-aad-v1` followed by the
+/// canonical header without the authorisation, `blob_ref` and `welcome_ref`; it must equal the
+/// envelope header's own AAD bytes. The field comes from the one shared MLS header parser.
 ///
 /// # Errors
 /// [`LgRefusal::HeaderMismatch`].

@@ -336,8 +336,8 @@ impl EnvHeader {
         }
     }
 
-    /// Commit authenticated data: `rf-lg-aad-v1 ‖ canonical header without the authorisation,
-    /// `blob_ref` and `welcome_ref``.
+    /// Commit authenticated data: `rf-lg-aad-v1` followed by the canonical header without the
+    /// authorisation, `blob_ref` and `welcome_ref`.
     #[must_use]
     pub fn aad_bytes(&self) -> Vec<u8> {
         let mut enc = Enc::new(LG_AAD_V1.as_bytes());
@@ -993,6 +993,7 @@ mod tests {
         assert!(post.check().is_err(), "four tokens belong to commits only");
         let mut proposal = post_header(Token { te: 1, input: [5; 32], tag: [6; 32] });
         proposal.kind = EnvKind::Proposal;
+        proposal.del_hash = None;
         proposal.bucket = Some(TokenBucket::Commit);
         assert!(proposal.check().is_ok(), "a proposal spends one token");
         proposal.auth = EnvAuth::PSig([0; 64]);
