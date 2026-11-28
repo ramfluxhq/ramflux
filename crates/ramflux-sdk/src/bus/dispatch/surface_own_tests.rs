@@ -1075,16 +1075,10 @@ async fn sibling_control_is_applied_and_acked_without_entering_message_receive_p
 #[tokio::test]
 async fn restored_owned_root_receives_contact_backfill_and_decrypts_a_fresh_peer_bootstrap()
 -> TestResult {
-    Box::pin(restored_contact_bootstrap(false)).await
+    Box::pin(restored_contact_bootstrap()).await
 }
 
-#[tokio::test]
-async fn encrypted_backup_restores_contacts_before_the_first_peer_message_without_sibling_sync()
--> TestResult {
-    Box::pin(restored_contact_bootstrap(true)).await
-}
-
-async fn restored_contact_bootstrap(backup: bool) -> TestResult {
+async fn restored_contact_bootstrap() -> TestResult {
     let root = runtime_tests::root("restored-contact-dm");
     let mut source = runtime_tests::account(
         &root.join("source"),
@@ -1104,31 +1098,28 @@ async fn restored_contact_bootstrap(backup: bool) -> TestResult {
         source.client.friend_link_peer_is_accepted(&peer_root)?,
         "the source account already holds the accepted contact the restore must carry over"
     );
-    if backup {
-        restore_contacts_from_backup(&source, &sibling, &peer_root)?;
-    } else {
-        let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
-        let own = Arc::clone(&gateway.own);
-        source.install_test_session(GatewaySessionEngine::with_test_transport(
-            config.clone(),
-            Box::new(gateway),
-        ));
-        // The live session has selected TCP-TLS; the original Auto endpoint is unavailable.
-        source.gateway_config.transport_kind = GatewaySessionTransportKind::Auto;
-        source.gateway_config.gateway_addr = "127.0.0.1:9".parse()?;
-        assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 0);
-        assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 1);
-        assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
-        let packet = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-        assert!(
-            crate::client::native_test_support::bus::receive_copy(
-                &mut sibling.client,
-                &receiver,
-                &entry(packet, 1)
-            )
-            .await?
-        );
-    }
+    let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
+    let own = Arc::clone(&gateway.own);
+    source.install_test_session(GatewaySessionEngine::with_test_transport(
+        config.clone(),
+        Box::new(gateway),
+    ));
+    // The live session has selected TCP-TLS; the original Auto endpoint is unavailable.
+    source.gateway_config.transport_kind = GatewaySessionTransportKind::Auto;
+    source.gateway_config.gateway_addr = "127.0.0.1:9".parse()?;
+    assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 0);
+    assert_eq!(crate::bus::own_contact_backfill::drive(&source).await?, 1);
+    assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
+    let packet = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
+    assert!(
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            &receiver,
+            &entry(packet, 1)
+        )
+        .await?
+    );
+
     sibling.client.require_cached_root_authority(
         HeadUse::NewAuthorization,
         &sibling.client.device_identity_for_root(&peer_root, "device-peer-one")?,
@@ -1182,25 +1173,6 @@ async fn restored_contact_bootstrap(backup: bool) -> TestResult {
     directory.abort();
     drop((source, state, peer));
     std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-
-/// The account's contact snapshot restores the accepted contact on a freshly enrolled device of the
-/// same root before any sibling backfill tick or peer message. The legacy seed-manifest file wrapper
-/// (`account.backup.export` / `import`) cannot carry a born-v3 account, so the snapshot is applied
-/// through the client API that the retired wrapper called.
-fn restore_contacts_from_backup(
-    source: &LocalBusAccountState,
-    sibling: &LocalBusAccountState,
-    peer_root: &str,
-) -> TestResult {
-    let contacts = source.client.backup_contacts()?;
-    assert!(!contacts.is_empty(), "the source account must snapshot its accepted contact");
-    assert!(!sibling.client.friend_link_peer_is_accepted(peer_root)?);
-    let report = sibling.client.restore_backup_contacts(&contacts)?;
-    assert_eq!(report.restored, 1, "the accepted contact is restored once");
-    assert!(report.skipped.is_empty(), "no contact may be skipped");
-    assert!(sibling.client.friend_link_peer_is_accepted(peer_root)?);
     Ok(())
 }
 

@@ -130,21 +130,20 @@ pub use bus::shared_snapshot::{
 };
 pub use bus::{
     AccountNetworkingReason, HostKeyProvider, LocalBusA2iAcknowledgeRequest,
-    LocalBusA2iAppendRequest, LocalBusAccountBackupExportRequest,
-    LocalBusAccountBackupImportRequest, LocalBusAccountCreateRequest,
-    LocalBusAccountCreateResponse, LocalBusAccountPassphraseRotateRequest,
-    LocalBusAccountUnlockRequest, LocalBusBackupContactRestoreReport, LocalBusBackupContactSkip,
-    LocalBusBackupContactSkipReason, LocalBusBotInstallRequest, LocalBusBotRevokeRequest,
-    LocalBusBotTrustAddRequest, LocalBusCallAnswerRequest, LocalBusCallHangupRequest,
-    LocalBusCallInviteRequest, LocalBusClient, LocalBusClientMode, LocalBusConfig,
-    LocalBusContactAddRequest, LocalBusContactFederatedRequest, LocalBusContactLinkRequest,
-    LocalBusContactRemoveRequest, LocalBusContactSafetyRequest,
-    LocalBusConversationDisappearingExpireRequest, LocalBusConversationDisappearingSetRequest,
-    LocalBusConversationMuteRequest, LocalBusConversationRequest, LocalBusCreatedAccount,
-    LocalBusCreatedAccountState, LocalBusCreationClient, LocalBusDeviceListResponse,
-    LocalBusDeviceRecord, LocalBusDeviceRevokeRequest, LocalBusDeviceSyncExportRequest,
-    LocalBusErrorBody, LocalBusFederationRoute, LocalBusFrame, LocalBusFrameKind,
-    LocalBusGrantRequest, LocalBusGrantRevokeRequest, LocalBusGrantStandingApprovalCreateRequest,
+    LocalBusA2iAppendRequest, LocalBusAccountCreateRequest, LocalBusAccountCreateResponse,
+    LocalBusAccountPassphraseRotateRequest, LocalBusAccountUnlockRequest,
+    LocalBusBackupContactRestoreReport, LocalBusBackupContactSkip, LocalBusBackupContactSkipReason,
+    LocalBusBotInstallRequest, LocalBusBotRevokeRequest, LocalBusBotTrustAddRequest,
+    LocalBusCallAnswerRequest, LocalBusCallHangupRequest, LocalBusCallInviteRequest,
+    LocalBusClient, LocalBusClientMode, LocalBusConfig, LocalBusContactAddRequest,
+    LocalBusContactFederatedRequest, LocalBusContactLinkRequest, LocalBusContactRemoveRequest,
+    LocalBusContactSafetyRequest, LocalBusConversationDisappearingExpireRequest,
+    LocalBusConversationDisappearingSetRequest, LocalBusConversationMuteRequest,
+    LocalBusConversationRequest, LocalBusCreatedAccount, LocalBusCreatedAccountState,
+    LocalBusCreationClient, LocalBusDeviceListResponse, LocalBusDeviceRecord,
+    LocalBusDeviceRevokeRequest, LocalBusDeviceSyncExportRequest, LocalBusErrorBody,
+    LocalBusFederationRoute, LocalBusFrame, LocalBusFrameKind, LocalBusGrantRequest,
+    LocalBusGrantRevokeRequest, LocalBusGrantStandingApprovalCreateRequest,
     LocalBusGrantStandingApprovalRevokeRequest, LocalBusGroupCreateRequest,
     LocalBusGroupMemberAddRequest, LocalBusGroupMemberKickRequest,
     LocalBusGroupMemberRemoveRequest, LocalBusGroupMemberRoute, LocalBusGroupNameSetRequest,
@@ -165,9 +164,6 @@ pub use bus::{
     LocalMcpStandingApprovalSigningBody, MediaOwnership, SessionLeasePriority, TaskApprovalBinding,
     serve_local_bus, serve_local_bus_until,
 };
-#[cfg(feature = "itest-restore-state")]
-#[doc(hidden)]
-pub use bus::{LocalBusStartupRestoreGate, LocalBusStartupRestoreGateControl};
 pub use client::RamfluxClient;
 pub use client::account::account_db_key_encryption_key;
 pub use client::call::{InProcessMediaReceipt, InProcessMediaStatus};

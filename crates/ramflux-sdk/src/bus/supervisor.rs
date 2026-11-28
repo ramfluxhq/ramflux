@@ -10,6 +10,9 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
+/// Upper bound for the push-route clear that `account.remove_local` sends before erasing.
+const REMOVE_PUSH_CLEAR_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[path = "supervisor_app_lifecycle.rs"]
 mod app_lifecycle;
 #[path = "supervisor_app_lock.rs"]
@@ -19,11 +22,13 @@ mod device_unlock;
 #[path = "supervisor_shutdown.rs"]
 mod shutdown;
 
+/// Pre-native account manifests live here. The daemon never reads them.
+const IGNORED_LEGACY_ACCOUNTS_DIR: &str = "local_bus_accounts";
+
 #[derive(Clone)]
 enum RestoreState {
     // Removing or replacing this state wakes reads waiting for startup unlock.
     Pending(watch::Sender<()>),
-    Failed(String),
 }
 
 pub(super) struct Supervisor {
@@ -217,25 +222,27 @@ impl Supervisor {
         Ok(supervisor)
     }
 
-    fn hydrate_paths(&self) -> Result<BTreeMap<std::path::PathBuf, String>, SdkError> {
-        let directory = self.config.data_root.join("local_bus_accounts");
-        let mut paths = self
-            .index
-            .known_account_ids()?
-            .into_iter()
-            .map(|id| (local_bus_account_manifest_path(&self.config.data_root, &id), id))
-            .collect::<BTreeMap<_, _>>();
-        if directory.exists() {
-            for entry in std::fs::read_dir(directory)? {
-                let path = entry?.path();
-                if path.extension().and_then(std::ffi::OsStr::to_str) == Some("json")
+    /// Native custody accounts to reopen. Any other id in the index or in the old
+    /// manifest directory is an unsupported pre-native account: it is reported
+    /// once with its id only, never parsed, listed or deleted.
+    fn hydrate_paths(&self) -> Result<Vec<String>, SdkError> {
+        let mut ids = self.index.known_account_ids()?;
+        let directory = self.config.data_root.join(IGNORED_LEGACY_ACCOUNTS_DIR);
+        if directory.is_dir() {
+            for entry in std::fs::read_dir(&directory)? {
+                let entry = entry?;
+                let path = entry.path();
+                if entry.file_type()?.is_file()
+                    && path.extension().and_then(std::ffi::OsStr::to_str) == Some("json")
                     && let Some(id) = path.file_stem().and_then(std::ffi::OsStr::to_str)
                 {
-                    paths.entry(path.clone()).or_insert_with(|| id.to_owned());
+                    ids.push(id.to_owned());
                 }
             }
         }
-        Ok(paths)
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
     }
 
     pub(super) fn hydrate(
@@ -244,89 +251,21 @@ impl Supervisor {
     ) -> Result<(), SdkError> {
         self.reconcile_app_lock_wraps();
         self.start_app_timer();
-        for (path, account_id) in self.hydrate_paths()? {
+        for account_id in self.hydrate_paths()? {
             if crate::custody::account_exists(&self.config.data_root, &account_id)? {
                 if let Err(error) = self.hydrate_native(account_id, tasks) {
                     tracing::warn!(%error, "native account reopen was not scheduled");
                 }
                 continue;
             }
-            let Ok(manifest) = read_local_bus_account_manifest(&path) else {
-                self.restore_states.borrow_mut().insert(
-                    account_id.clone(),
-                    RestoreState::Failed("manifest_unreadable".to_owned()),
-                );
-                tracing::warn!(
-                    %account_id,
-                    reason_code = "manifest_unreadable",
-                    "account manifest is unreadable"
-                );
-                continue;
-            };
-            if self.index.app_lock_policy(&manifest.local_account_id)?.enabled {
+            if self.index.account(&account_id).is_ok_and(|row| row.account_state == "removed") {
                 continue;
             }
-            if self
-                .index
-                .account(&manifest.local_account_id)
-                .is_ok_and(|account| account.account_state == "locked")
-            {
-                continue;
-            }
-            self.restore_states.borrow_mut().insert(
-                manifest.local_account_id.clone(),
-                RestoreState::Pending(watch::channel(()).0),
+            tracing::warn!(
+                %account_id,
+                reason_code = "legacy_account_ignored",
+                "account is not a native custody account and is ignored"
             );
-            let supervisor = Rc::clone(self);
-            tasks.spawn_local(async move {
-                #[cfg(any(test, feature = "itest-restore-state"))]
-                if let Some(gate) = &supervisor.config.startup_restore_gate {
-                    gate.wait(&manifest.local_account_id).await;
-                }
-                let (outbound, _receiver) = mpsc::channel(1);
-                let connection = LocalBusConnectionState::new(0, outbound);
-                let request = LocalBusFrame::request(
-                    "restore",
-                    Some(manifest.local_account_id.clone()),
-                    "account",
-                    "account.unlock",
-                    serde_json::json!({"passphrase":manifest.account_secret}),
-                );
-                let body = match supervisor.request(request.clone(), &connection).await {
-                    Ok(_) => {
-                        supervisor.restore_states.borrow_mut().remove(&manifest.local_account_id);
-                        serde_json::json!({"state":"unlocked"})
-                    }
-                    Err(error) => {
-                        let opened = supervisor
-                            .accounts
-                            .borrow()
-                            .get(&manifest.local_account_id)
-                            .is_some_and(AccountActor::is_open);
-                        if opened {
-                            supervisor
-                                .restore_states
-                                .borrow_mut()
-                                .remove(&manifest.local_account_id);
-                            serde_json::json!({"state":"unlocked"})
-                        } else {
-                            supervisor.restore_states.borrow_mut().insert(
-                                manifest.local_account_id.clone(),
-                                RestoreState::Failed(local_bus_error_code(&error).to_owned()),
-                            );
-                            tracing::warn!(%error, "account restore failed");
-                            serde_json::json!({"state":"failed", "error":local_bus_error(&request, &error).error})
-                        }
-                    }
-                };
-                supervisor.broadcast(&[local_bus_event(
-                    &request,
-                    &manifest.local_account_id,
-                    "account",
-                    "account.restore.finished",
-                    body,
-                )]);
-            });
         }
         Ok(())
     }
@@ -423,9 +362,6 @@ impl Supervisor {
             .borrow()
             .upgrade()
             .ok_or_else(|| SdkError::LocalBus("supervisor is stopping".to_owned()))?;
-        if request.method == "account.backup.import" {
-            request.account_id = Some(super::lifecycle::import_account_id(&request).await?);
-        }
         let receipt = super::lifecycle::fingerprint(self.config.data_root.clone(), &request)
             .await?
             .ok_or_else(|| SdkError::LocalBus("missing lifecycle key".into()))?;
@@ -538,23 +474,11 @@ impl Supervisor {
         let secret =
             super::credentials::unlock_secret(self.config.data_root.clone(), id.to_owned()).await?;
         call.require_live()?;
-        let existing = self.accounts.borrow().get(id).cloned();
-        let actor = if let Some(actor) = existing {
-            actor
-        } else {
-            let actor = AccountActor::start(
-                id.to_owned(),
-                self.config.clone(),
-                self.nodes.borrow().clone(),
-                self.index.clone(),
-                self.events.clone(),
-            )?;
-            self.accounts.borrow_mut().insert(id.to_owned(), actor.clone());
-            actor
-        };
+        let (actor, started) = self.actor_for_unlock(id)?;
         let result = actor
             .unlock_native(super::native_account::NativeUnlockSecret::Code(secret), None)
-            .await?;
+            .await;
+        let result = self.discard_on_failure(id, &actor, started, result).await?;
         self.restore_states.borrow_mut().remove(id);
         self.set_active(id).await?;
         self.set_unlocked(id, true).await?;
@@ -569,9 +493,6 @@ impl Supervisor {
         connection: &LocalBusConnectionState,
         prepared: Option<super::lifecycle::Receipt>,
     ) -> Result<ActorResponse, SdkError> {
-        if request.method == "account.backup.import" && prepared.is_none() {
-            request.account_id = Some(super::lifecycle::import_account_id(&request).await?);
-        }
         if let Some(body) = super::custody_setup::guard_account(&self.config.data_root, &request)? {
             return Ok(reply(body));
         }
@@ -734,10 +655,9 @@ impl Supervisor {
 
     async fn route_account(
         &self,
-        mut request: LocalBusFrame,
+        request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
-        self.prepare_import(&mut request, connection).await?;
         let id = account_actor_id(&request)?;
         if request.method == "account.unlock" {
             // AGENT-IDENTITY-01 E0 unlock guard (decision r21): a passphrase unlock of a paused agent
@@ -757,6 +677,7 @@ impl Supervisor {
         let creating = opens_account(&request.method);
         let creating_pairing = super::pairing::creates_recipient(&self.config, &request)?;
         self.require_restore_ready(&id, creating)?;
+        let mut started = false;
         let actor = if let Some(actor) = actor {
             actor
         } else if creating || creating_pairing {
@@ -770,6 +691,7 @@ impl Supervisor {
                 self.events.clone(),
             )?;
             self.accounts.borrow_mut().insert(id.clone(), actor.clone());
+            started = true;
             actor
         } else {
             return Err(self.account_unavailable(&id));
@@ -805,7 +727,12 @@ impl Supervisor {
                 }
                 Ok(response)
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                if unlocking {
+                    self.discard_started_actor(&id, &actor, started).await;
+                }
+                Err(error)
+            }
         };
         if creating && response.is_ok() {
             self.restore_states.borrow_mut().remove(&id);
@@ -916,26 +843,14 @@ impl Supervisor {
         // activated or unlocked; the rebind publication owns its connection.
         self.refuse_unusable_agent(id)?;
         self.start_event_router();
-        let existing = self.accounts.borrow().get(id).cloned();
-        let actor = if let Some(actor) = existing {
-            actor
-        } else {
-            let actor = AccountActor::start(
-                id.into(),
-                self.config.clone(),
-                self.nodes.borrow().clone(),
-                self.index.clone(),
-                self.events.clone(),
-            )?;
-            self.accounts.borrow_mut().insert(id.into(), actor.clone());
-            actor
-        };
+        let (actor, started) = self.actor_for_unlock(id)?;
         let result = actor
             .unlock_native(
                 super::native_account::NativeUnlockSecret::Code(passphrase),
                 home_node_id,
             )
-            .await?;
+            .await;
+        let result = self.discard_on_failure(id, &actor, started, result).await?;
         self.set_active(id).await?;
         self.set_unlocked(id, true).await?;
         Ok(result)
@@ -961,7 +876,13 @@ impl Supervisor {
         if !present && !self.accounts.borrow().contains_key(&id) {
             return Err(super::account_local::missing());
         }
-        if self.accounts.borrow().contains_key(&id) {
+        let actor = self.accounts.borrow().get(&id).cloned();
+        if let Some(actor) = actor {
+            // Only an account that is open already holds its keys; a locked one is never opened
+            // here, and then no network call is made.
+            if actor.is_open() {
+                self.clear_push_route_for_remove(&id, &actor).await;
+            }
             self.lock_account_session(&id).await?;
             self.clear_device_wrap(&id).await?;
         }
@@ -978,6 +899,37 @@ impl Supervisor {
             accounts.remove(&id);
         });
         Ok(reply(serde_json::json!({"local_account_id": id, "removed": true})))
+    }
+
+    /// Asks the node to drop every push route of the account before it is erased. Best effort:
+    /// a failure or the 5 s limit never blocks the erase; the node route then lapses at expiry.
+    async fn clear_push_route_for_remove(&self, id: &str, actor: &AccountActor) {
+        let (outbound, _receiver) = mpsc::channel(1);
+        let connection = LocalBusConnectionState::new(0, outbound);
+        let clear = LocalBusFrame::request(
+            "remove-local-push-clear",
+            Some(id.to_owned()),
+            "device",
+            "device.push_route.set",
+            serde_json::json!({"registration": null}),
+        );
+        let outcome = tokio::time::timeout(
+            REMOVE_PUSH_CLEAR_LIMIT,
+            actor.request(command(clear, &connection)),
+        )
+        .await;
+        match outcome {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(reason_code = "push_clear_failed", %error, "push route clear failed before erase");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    reason_code = "push_clear_failed",
+                    "push route clear timed out before erase"
+                );
+            }
+        }
     }
 
     async fn account_list(&self) -> Result<ActorResponse, SdkError> {
@@ -998,7 +950,7 @@ impl Supervisor {
         super::account_local::include_open(&mut known, &open);
         let active = active.filter(|id| open.contains(id));
         let restore_states = self.restore_states.borrow().clone();
-        for (row, manifest_unreadable) in &mut known {
+        for row in &mut known {
             if row.get("custody_v3_observed").and_then(serde_json::Value::as_bool) == Some(true) {
                 let networking = row.get("state").cloned().unwrap_or(serde_json::Value::Null);
                 if let Some(map) = row.as_object_mut() {
@@ -1008,28 +960,15 @@ impl Supervisor {
             let id = super::account_local::row_id(row).to_owned();
             let state = match restore_states.get(&id) {
                 Some(RestoreState::Pending(_)) => "restore_pending",
-                Some(RestoreState::Failed(_)) => "restore_failed",
-                None if *manifest_unreadable => "restore_failed",
                 None if open.iter().any(|account| account == &id) => "unlocked",
                 None => "locked",
             };
             if let Some(map) = row.as_object_mut() {
                 map.insert("state".to_owned(), serde_json::Value::from(state));
-                if let Some(RestoreState::Failed(reason)) = restore_states.get(&id) {
-                    map.insert(
-                        "restore_error_code".to_owned(),
-                        serde_json::Value::from(reason.clone()),
-                    );
-                } else if *manifest_unreadable {
-                    map.insert(
-                        "restore_error_code".to_owned(),
-                        serde_json::Value::from("manifest_unreadable"),
-                    );
-                }
             }
             super::account_local::attach_from_state(row);
         }
-        let mut details = known.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
+        let mut details = known;
         self.redact_app_accounts(&mut details, true)?;
         let mut accounts = super::account_local::picker(&details);
         self.redact_app_accounts(&mut accounts, false)?;
@@ -1040,31 +979,72 @@ impl Supervisor {
         })))
     }
 
-    async fn prepare_import(
-        &self,
-        request: &mut LocalBusFrame,
-        connection: &LocalBusConnectionState,
-    ) -> Result<(), SdkError> {
-        if request.method == "account.backup.import" {
-            let id = request_account_id(request)?.to_owned();
-            let old = self.accounts.borrow().get(&id).cloned();
-            if let Some(actor) = old {
-                let lock = LocalBusFrame::request(
-                    "import-lock",
-                    Some(id.clone()),
-                    "account",
-                    "account.lock",
-                    serde_json::json!({}),
-                );
-                actor.request(command(lock, connection)).await?;
-                actor.stop().await?;
-                self.attended.borrow_mut().retain(|_, account| account != &id);
-                self.subscribers.borrow_mut().retain(|_, subscriber| subscriber.account_id != id);
-                self.accounts.borrow_mut().remove(&id);
-            }
-            request.account_id = Some(id);
+    /// The registered actor for `id`, or a newly started one. The flag says this call started it.
+    pub(super) fn actor_for_unlock(&self, id: &str) -> Result<(AccountActor, bool), SdkError> {
+        if let Some(actor) = self.accounts.borrow().get(id).cloned() {
+            return Ok((actor, false));
         }
-        Ok(())
+        let actor = AccountActor::start(
+            id.to_owned(),
+            self.config.clone(),
+            self.nodes.borrow().clone(),
+            self.index.clone(),
+            self.events.clone(),
+        )?;
+        self.accounts.borrow_mut().insert(id.to_owned(), actor.clone());
+        Ok((actor, true))
+    }
+
+    /// Passes `result` through; on an error discards the actor this call started.
+    pub(super) async fn discard_on_failure<T>(
+        &self,
+        id: &str,
+        actor: &AccountActor,
+        started: bool,
+        result: Result<T, SdkError>,
+    ) -> Result<T, SdkError> {
+        if result.is_err() {
+            self.discard_started_actor(id, actor, started).await;
+        }
+        result
+    }
+
+    /// Removes `actor` from the account, subscriber and attended maps once it has been stopped.
+    pub(super) fn forget_stopped_actor(&self, id: &str, actor: &AccountActor) {
+        let mut accounts = self.accounts.borrow_mut();
+        if accounts.get(id).is_some_and(|current| current.same(actor)) {
+            accounts.remove(id);
+        }
+        drop(accounts);
+        self.subscribers.borrow_mut().retain(|_, subscriber| subscriber.account_id != id);
+        self.attended.borrow_mut().retain(|_, account| account != id);
+    }
+
+    /// Reclaims the shell of a failed unlock so the next attempt starts a fresh actor. Only an
+    /// actor this call started, still the registered entry and not open, is touched; the checks
+    /// and the removal run with no await between them. A concurrent waiter that joined the
+    /// discarded actor gets the retryable `account actor stopped` error with no attempt counted.
+    pub(super) async fn discard_started_actor(
+        &self,
+        id: &str,
+        actor: &AccountActor,
+        started: bool,
+    ) {
+        if !started || actor.is_open() {
+            return;
+        }
+        {
+            let mut accounts = self.accounts.borrow_mut();
+            if !accounts.get(id).is_some_and(|current| current.same(actor)) {
+                return;
+            }
+            accounts.remove(id);
+        }
+        self.subscribers.borrow_mut().retain(|_, subscriber| subscriber.account_id != id);
+        self.attended.borrow_mut().retain(|_, account| account != id);
+        if let Err(stop) = actor.stop().await {
+            tracing::warn!(%stop, "failed unlock actor did not stop cleanly");
+        }
     }
 
     /// Closes an open account session the way the `account.lock` route does: the lock request, then
@@ -1083,7 +1063,14 @@ impl Supervisor {
             "account.lock",
             serde_json::json!({}),
         );
-        actor.request(command(lock, &connection)).await?;
+        // A shell actor left by a failed counted attempt was never opened: the lock then finds
+        // nothing to close, which is the state a lock asks for. An open actor still fails.
+        let was_closed = !actor.is_open();
+        match actor.request(command(lock, &connection)).await {
+            Ok(_) => {}
+            Err(SdkError::AccountNotOpen(_)) if was_closed => {}
+            Err(error) => return Err(error),
+        }
         actor.stop().await?;
         self.set_unlocked(id, false).await?;
         self.accounts.borrow_mut().remove(id);
@@ -1131,23 +1118,6 @@ impl Supervisor {
     pub(super) fn clear_restore_state(&self, id: &str) {
         self.restore_states.borrow_mut().remove(id);
     }
-    #[cfg(test)]
-    pub(super) fn mark_restore_failed(&self, id: &str, reason: &str) {
-        self.restore_states
-            .borrow_mut()
-            .insert(id.to_owned(), RestoreState::Failed(reason.to_owned()));
-    }
-    pub(super) fn new_backup_actor(&self, id: &str) -> Result<AccountActor, SdkError> {
-        let actor = AccountActor::start(
-            id.into(),
-            self.config.clone(),
-            self.nodes.borrow().clone(),
-            self.index.clone(),
-            self.events.clone(),
-        )?;
-        self.accounts.borrow_mut().insert(id.into(), actor.clone());
-        Ok(actor)
-    }
     pub(super) fn account_actor(&self, id: &str) -> Option<AccountActor> {
         self.accounts.borrow().get(id).cloned()
     }
@@ -1155,9 +1125,6 @@ impl Supervisor {
     fn account_unavailable(&self, id: &str) -> SdkError {
         match self.restore_states.borrow().get(id) {
             Some(RestoreState::Pending(_)) => SdkError::AccountRestorePending(id.to_owned()),
-            Some(RestoreState::Failed(reason)) => {
-                SdkError::AccountRestoreFailed { account_id: id.to_owned(), reason: reason.clone() }
-            }
             None => not_open(id),
         }
     }
@@ -1435,13 +1402,18 @@ impl Drop for Supervisor {
 #[inline(never)]
 fn spawn_agent_repairs(owner: std::rc::Weak<Supervisor>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_local(async move {
+        let mut tick = 0_u32;
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
+            tick = tick.wrapping_add(1);
             let Some(supervisor) = owner.upgrade() else { break };
             if *supervisor.stop_requested.borrow() {
                 break;
             }
             Box::pin(supervisor.maintain_agent_repairs()).await;
+            if tick.is_multiple_of(super::agent_advance::EXPIRY_SWEEP_SECS) {
+                Box::pin(supervisor.expire_overdue_creations()).await;
+            }
         }
     })
 }
@@ -1500,7 +1472,7 @@ fn reply(body: serde_json::Value) -> ActorResponse {
 }
 
 fn opens_account(method: &str) -> bool {
-    matches!(method, "account.create" | "account.unlock" | "account.backup.import")
+    matches!(method, "account.create" | "account.unlock")
 }
 
 fn account_actor_id(request: &LocalBusFrame) -> Result<String, SdkError> {

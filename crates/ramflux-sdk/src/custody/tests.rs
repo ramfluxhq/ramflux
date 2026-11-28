@@ -421,7 +421,6 @@ fn custody_confirmed_authority_reloads_with_latch_and_without_phrase_or_master_o
         vault.load_primary(&stored.primary_vault_ref)?.public_key(),
         loaded.record().body.master_certificate.body.self_signing_public_key
     );
-    assert!(!root.0.join("local_bus_accounts").exists());
     let mut bad: serde_json::Value = serde_json::from_slice(&bytes)?;
     bad["custody_v3_observed"] = serde_json::Value::Bool(false);
     std::fs::write(&path, serde_json::to_vec(&bad)?)?;
@@ -441,7 +440,6 @@ fn custody_vault_failure_removes_the_reservation_and_creates_no_legacy_manifest(
         Err(ramflux_storage::StorageError::AccountNotFound(_))
     ));
     assert!(load_account(&root.0, "failed", 100).is_err());
-    assert!(!root.0.join("local_bus_accounts").exists());
     let _again = CreationCeremony::begin(&root.0, input("failed"), 100)?;
     Ok(())
 }

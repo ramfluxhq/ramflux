@@ -310,6 +310,7 @@ impl Supervisor {
                 let mut body = self.app_lock_body(&policy, &account_id)?;
                 let fields = body.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?;
                 fields.insert("code_retry_after_ms".into(), throttle.retry_after_ms().into());
+                fields.insert("code_retry_after_secs".into(), throttle.retry_after_secs.into());
                 fields.insert("code_attempts_exhausted".into(), throttle.exhausted.into());
                 body
             }

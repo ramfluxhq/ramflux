@@ -54,6 +54,17 @@ fn journal(root: &Path, id: &str) -> Result<Option<Journal>, SdkError> {
     }
     Ok(Some(value))
 }
+/// The vault refs a recovery in progress replaces: `(previous primary, previous branch)`. Erasing
+/// an account stuck mid-recovery deletes them too, since the journal is their only record.
+///
+/// # Errors
+/// Returns filesystem or decoding errors for an unreadable journal.
+pub(crate) fn previous_vault_refs(
+    root: &Path,
+    id: &str,
+) -> Result<Option<(String, String)>, SdkError> {
+    Ok(journal(root, id)?.map(|value| (value.previous_primary_ref, value.previous_branch_ref)))
+}
 pub(super) fn selected_authority(
     root: &Path,
     id: &str,

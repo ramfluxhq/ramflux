@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Named same-root Sync adapters reuse native contact import and sticky restrictions.
-use super::{Contact, OwnContactReceiveMode};
+use super::Contact;
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::message as g;
 
@@ -58,6 +58,7 @@ impl Contact {
         )?
         .encode_to_vec())
     }
+    #[cfg(test)]
     pub(super) fn decode(body: &[u8]) -> Result<Option<Self>, SdkError> {
         use prost::Message as _;
         if g::validation::scan_message("Control", body, g::registry::COMPILED_LAYER).is_err() {
@@ -147,11 +148,7 @@ impl RamfluxClient {
         value: &g::OwnContactTombstone,
     ) -> Result<(), SdkError> {
         self.authorize_generated_contact_tombstone(value)?;
-        self.apply_own_contact_tombstone(
-            &link(value.link.as_ref())?,
-            value.decided_at,
-            OwnContactReceiveMode::Sibling,
-        )?;
+        self.apply_own_contact_tombstone(&link(value.link.as_ref())?)?;
         Ok(())
     }
 }

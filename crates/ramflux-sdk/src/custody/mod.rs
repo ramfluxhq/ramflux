@@ -35,7 +35,7 @@ pub(crate) use store::{
     reconcile_incomplete_markers, remove_custody_tree, reserve_pairing_account,
     retarget_agent_custodian, stored_custodian_id, with_anchor_ceremony,
 };
-pub(crate) use store::{finish_recovery, pending_restore};
+pub(crate) use store::{finish_recovery, pending_restore, previous_vault_refs};
 #[cfg(feature = "c-abi")]
 pub(crate) use vault::agent_key_unavailable;
 #[cfg(target_os = "linux")]

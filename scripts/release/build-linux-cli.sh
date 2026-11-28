@@ -28,8 +28,8 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}"
 mkdir -p "$CARGO_TARGET_DIR" "$dist"
 CARGO_TARGET_DIR="$(cd "$CARGO_TARGET_DIR" && pwd)"
 dist="$(cd "$dist" && pwd)"
-RAMFLUX_GIT_SHA="$product_sha" cargo build --locked --release --target "$target" -p ramflux-rf --bin rf
-rf="$CARGO_TARGET_DIR/$target/release/rf"
+RAMFLUX_GIT_SHA="$product_sha" cargo build --locked --profile ffi-release --target "$target" -p ramflux-rf --bin rf
+rf="$CARGO_TARGET_DIR/$target/ffi-release/rf"
 env -u RAMFLUX_GIT_SHA GIT_CEILING_DIRECTORIES="$root" cargo build --locked --release --target "$target" --manifest-path "$tui/Cargo.toml" --bin rf-tui
 rf_tui="$CARGO_TARGET_DIR/$target/release/rf-tui"
 "$rf" --version

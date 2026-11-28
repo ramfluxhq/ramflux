@@ -510,6 +510,11 @@ impl AccountActor {
         self.readers.lock().map_err(|_| stopped())?.clone().ok_or_else(stopped)
     }
 
+    /// Whether both handles drive the same running actor.
+    pub(super) fn same(&self, other: &Self) -> bool {
+        self.sender.same_channel(&other.sender)
+    }
+
     pub(super) fn is_open(&self) -> bool {
         self.readers.lock().is_ok_and(|readers| readers.is_some())
     }
