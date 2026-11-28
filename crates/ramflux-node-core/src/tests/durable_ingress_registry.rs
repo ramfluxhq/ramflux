@@ -231,7 +231,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
     assert_eq!(
         (ingress_count, sink_count, non_ingress_count),
-        (20, 7, 46),
+        (20, 7, 45),
         "registry counts match the classified live functions"
     );
     for (entry, class) in DURABLE_INGRESS {
