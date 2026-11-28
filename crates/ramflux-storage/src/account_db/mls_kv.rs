@@ -5,7 +5,8 @@
 //!
 //! The table is local to the device: backups, transfers and merges never carry it. Reads return
 //! `Zeroizing` buffers. A flush is ONE immediate transaction that applies the MLS rows in order and
-//! then runs the caller's closure, so the caller's rows commit or roll back together with them.
+//! then runs the caller's closure, so the caller's rows commit or roll back together with them. When
+//! an account transaction is already open the flush joins it in a savepoint.
 //! After a flush that changed epoch secrets the WAL is truncated so deleted secrets do not linger.
 use super::{AccountDb, StorageError};
 use zeroize::Zeroizing;
@@ -59,7 +60,7 @@ pub struct MlsKvStats {
 
 /// The transaction a flush hands to the caller's closure; it lives only inside the flush.
 pub struct MlsKvTx<'a> {
-    tx: &'a rusqlite::Transaction<'a>,
+    tx: &'a rusqlite::Connection,
 }
 
 impl MlsKvTx<'_> {
@@ -147,8 +148,7 @@ impl MlsKvStore {
     /// checkpoint falls back to the background checkpoint schedule).
     ///
     /// # Errors
-    /// [`MlsKvCommitError::Storage`] for database failures (also when an outer transaction is
-    /// open), [`MlsKvCommitError::Caller`] for an error of `caller`.
+    /// [`MlsKvCommitError::Storage`] for database failures, [`MlsKvCommitError::Caller`] for an error of `caller`.
     pub fn commit_batch<E, F>(
         &self,
         writes: Vec<MlsKvWrite>,
@@ -161,24 +161,28 @@ impl MlsKvStore {
     {
         let outcome = self
             .connection
-            .call_immediate_result(move |tx| {
-                for write in &writes {
-                    match write {
-                        MlsKvWrite::Put { label, key, value } => {
-                            tx.prepare_cached(WRITE_SQL)?.execute(rusqlite::params![
-                                label,
-                                key,
-                                value.as_slice()
-                            ])?;
+            .call(move |db| {
+                if db.is_autocommit() {
+                    let transaction =
+                        db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                    return match flush(&transaction, &writes, caller) {
+                        Ok(()) => {
+                            transaction.commit()?;
+                            Ok(Ok(()))
                         }
-                        MlsKvWrite::Delete { label, key } => {
-                            tx.prepare_cached(DELETE_SQL)?
-                                .execute(rusqlite::params![label, key])?;
-                        }
-                    }
+                        Err(error) => Ok(Err(error)),
+                    };
                 }
-                let mut handle = MlsKvTx { tx };
-                caller(&mut handle).map_err(FlushError::Caller)
+                // An outer account transaction is open: the flush joins it in a savepoint, so the
+                // MLS rows commit or roll back together with the caller's own writes.
+                let savepoint = db.savepoint()?;
+                match flush(&savepoint, &writes, caller) {
+                    Ok(()) => {
+                        savepoint.commit()?;
+                        Ok(Ok(()))
+                    }
+                    Err(error) => Ok(Err(error)),
+                }
             })
             .map_err(|error| MlsKvCommitError::Storage(error.into()))?;
         // A rusqlite error inside the writes arrives through `FlushError::Sqlite`.
@@ -202,6 +206,34 @@ impl MlsKvStore {
             self.connection.request_background_checkpoint();
         }
     }
+}
+
+/// Apply `writes` in order, then the caller's closure, on `connection` (a transaction or a
+/// savepoint of the caller's choosing).
+fn flush<E, F>(
+    connection: &rusqlite::Connection,
+    writes: &[MlsKvWrite],
+    caller: F,
+) -> Result<(), FlushError<E>>
+where
+    F: FnOnce(&mut MlsKvTx<'_>) -> Result<(), E>,
+{
+    for write in writes {
+        match write {
+            MlsKvWrite::Put { label, key, value } => {
+                connection.prepare_cached(WRITE_SQL)?.execute(rusqlite::params![
+                    label,
+                    key,
+                    value.as_slice()
+                ])?;
+            }
+            MlsKvWrite::Delete { label, key } => {
+                connection.prepare_cached(DELETE_SQL)?.execute(rusqlite::params![label, key])?;
+            }
+        }
+    }
+    let mut handle = MlsKvTx { tx: connection };
+    caller(&mut handle).map_err(FlushError::Caller)
 }
 
 enum FlushError<E> {

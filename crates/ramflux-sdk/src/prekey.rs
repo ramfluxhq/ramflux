@@ -88,6 +88,7 @@ pub(crate) fn sdk_publish_prekey_bundle(
     )
 }
 
+#[allow(dead_code, reason = "MLS: allowance removed in D15")]
 pub(crate) fn sdk_fetch_prekey_bundle(
     gateway_url: &str,
     device_id: &str,

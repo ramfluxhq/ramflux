@@ -80,7 +80,7 @@ fn claimed_scope(
     // The ordinary producer correctly refuses this claimed foreign scope. An
     // adversary can still seal and sign it with its own real pair credentials.
     let sealed = source.client.account_db()?.write_transaction(|| {
-        let (mut session, header, bundle) = source.client.prepared_send_pair(
+        let (_session, _header, _bundle) = source.client.prepared_send_pair(
             &source.config,
             &message,
             material,
@@ -93,9 +93,6 @@ fn claimed_scope(
             SealPair {
                 local: &source.config.device_id,
                 remote: target.client.owned_device_identity()?.storage_key(),
-                session: &mut session,
-                header,
-                bundle,
             },
         )
     })?;

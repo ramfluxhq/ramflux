@@ -97,6 +97,8 @@ type HeldManifests = std::cell::RefCell<BTreeMap<String, crate::SdkDeviceManifes
 
 pub struct RamfluxClient {
     pub(crate) typing_receiver: std::cell::RefCell<typing::TypingReceiver>,
+    /// Sealed DM messages kept for retries (seal once, spec §3.3 S-6).
+    pub(crate) seal_cache: std::cell::RefCell<crate::mls::channel::SealCache>,
     pub(crate) typing_sender: std::cell::RefCell<typing::sender::TypingSender>,
     pub(crate) self_sync_live_generation: std::cell::Cell<Option<u64>>,
     pub(crate) self_sync_restore_clock:
@@ -158,6 +160,7 @@ impl Default for RamfluxClient {
             #[cfg(test)]
             native_bus_fixture: None,
             typing_receiver: std::cell::RefCell::default(),
+            seal_cache: std::cell::RefCell::default(),
             typing_sender: std::cell::RefCell::default(),
             self_sync_live_generation: std::cell::Cell::new(None),
             self_sync_restore_clock: std::cell::RefCell::default(),

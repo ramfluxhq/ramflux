@@ -34,14 +34,9 @@ impl RamfluxClient {
                 target_delivery_id: envelope.target_delivery_id.clone(),
                 envelope: envelope.clone(),
             };
-            let opened = self.open_ephemeral_inner(&entry, local)?;
+            let (opened, session, bundle_hash) = self.open_ephemeral_inner(&entry, local)?;
             let result = self.admit_ephemeral_inner(&opened, &entry)?;
-            self.persist_pair(
-                &opened.local_device,
-                &opened.remote_device,
-                &opened.bundle_hash,
-                &opened.session,
-            )?;
+            self.persist_pair(&opened.local_device, &opened.remote_device, &bundle_hash, &session)?;
             Ok::<_, SdkError>((result, opened.remote_device.storage_key().to_owned()))
         })?;
         self.typing_sender.borrow_mut().received(&result.1);
@@ -52,7 +47,7 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
         local: &str,
-    ) -> Result<Opened, SdkError> {
+    ) -> Result<(Opened, ramflux_crypto::DmSession, [u8; 32]), SdkError> {
         let envelope = &entry.envelope;
         if envelope.delivery_mode.as_deref() != Some("ephemeral") {
             return Err(invalid("ephemeral endpoint requires ephemeral mode"));
@@ -106,7 +101,12 @@ impl RamfluxClient {
         if !self.raw_reparse_scope_allowed(&remote_device, &routing.conversation_id)? {
             return Err(invalid("ephemeral direct root binding conflict"));
         }
-        Ok(Opened { routing, body, decrypted, session, bundle_hash, local_device, remote_device })
+        let framed = zeroize::Zeroizing::new(decrypted.plaintext.clone());
+        Ok((
+            Opened { routing, body, framed, group_id: Vec::new(), local_device, remote_device },
+            session,
+            bundle_hash,
+        ))
     }
 
     fn check_ephemeral_identity(

@@ -43,6 +43,7 @@ impl SdkDmFrankingMetadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[allow(dead_code, reason = "MLS: allowance removed in D16")]
 pub(crate) struct SdkReceivedFrankingMetadata {
     pub(crate) sender_device_id_hash: String,
     pub(crate) message_event_id: String,

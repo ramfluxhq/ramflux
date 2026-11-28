@@ -5,9 +5,8 @@
 use super::committed::Committed;
 use super::{
     GatewayInboxEntry, GatewayPlaintextDelivery, GatewaySessionAccess, Kind, MessageMetadata,
-    Opened, RamfluxClient, Routing, SdkError, associated_data_from_outer, decode, invalid,
+    Opened, RamfluxClient, Routing, SdkError, decode, invalid,
 };
-use crate::client::dm::franking_report_metadata_for_delivery;
 use crate::client::identity_authority::HeadUse;
 
 pub(crate) struct Delivery {
@@ -333,14 +332,6 @@ impl RamfluxClient {
         }
         let opened = self.open_authorized_routed_entry(engine, entry, native_prepared).await?;
         let body = opened.body.clone();
-        let envelope = decode(&entry.envelope)?;
-        let aad = associated_data_from_outer(
-            &entry.envelope,
-            &entry.envelope.source_device_id,
-            opened.local_device.device_id(),
-            &opened.bundle_hash,
-        )?;
-        let metadata = routed_message_metadata(&opened, entry, &envelope, &aad)?;
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         let held = opened.routing.kind == Kind::Direct
             && self.pending_contact_root(source.root_commitment())?
@@ -355,7 +346,7 @@ impl RamfluxClient {
                 opened: &opened,
                 entry,
                 body: &body,
-                metadata: metadata.as_ref(),
+                metadata: None,
                 slots: &consumed_slots,
                 references: Vec::new(),
                 receipt: &commit,
@@ -627,48 +618,11 @@ impl RamfluxClient {
         if !code.starts_with("generated_") && code != "typing_durable" {
             return Ok(());
         }
-        let opened = match self.open_routed(entry, local) {
-            Ok(opened) => opened,
-            Err(error @ SdkError::Storage(_)) => return Err(error),
-            Err(_) => return Ok(()), // No authenticated, C-checked transport state to commit.
-        };
-        self.commit_routed_pair_context(&opened, entry, &opened.body)
-    }
-
-    fn commit_routed_pair_context(
-        &self,
-        opened: &Opened,
-        entry: &GatewayInboxEntry,
-        body: &[u8],
-    ) -> Result<(), SdkError> {
-        if self.friend_rejection_reason(opened.remote_device.root_commitment())?.is_none() {
-            self.commit_bootstrap_sequence(
-                &opened.local_device,
-                &opened.remote_device,
-                decode(&entry.envelope)?.x3dh.as_ref(),
-                &opened.session.session_id,
-            )?;
-            self.persist_pair(
-                &opened.local_device,
-                &opened.remote_device,
-                &opened.bundle_hash,
-                &opened.session,
-            )?;
-            let reset = opened.routing.kind == Kind::Control
-                && Self::decode_generated_inner(body).is_ok_and(|(_, content)| {
-                    matches!(content.value,
-                        Some(ramflux_protocol::message::content::Value::Control(control))
-                            if matches!(control.operation, 1 | 2))
-                });
-            self.confirm_pair(
-                &opened.local_device,
-                &opened.remote_device,
-                &opened.session,
-                reset,
-                decode(&entry.envelope)?.x3dh.is_some(),
-            )?;
+        // Opening persists the MLS state of the consumed message; nothing else is committed.
+        match self.open_routed(entry, local) {
+            Err(error @ SdkError::Storage(_)) => Err(error),
+            Ok(_) | Err(_) => Ok(()), // No authenticated, C-checked transport state to commit.
         }
-        Ok(())
     }
 
     fn remember_typing_conversation(
@@ -680,7 +634,10 @@ impl RamfluxClient {
             && let Some(tag) = &entry.envelope.collapse_tag
         {
             self.account_db()?.persist_actor_state(
-                &format!("dm-pair/collapse-scope/{}/{tag}", opened.session.session_id),
+                &format!(
+                    "dm-pair/collapse-scope/{}/{tag}",
+                    ramflux_protocol::encode_base64url(&opened.group_id)
+                ),
                 &opened.routing.conversation_id,
             )?;
         }
@@ -769,7 +726,6 @@ impl RamfluxClient {
             self.project_routed(opened, entry, body, metadata)?
         };
         self.finish_generated_projection(opened, entry)?;
-        self.commit_routed_pair_context(opened, entry, body)?;
         self.remember_typing_conversation(opened, entry)?;
 
         for slot in slots {
@@ -862,25 +818,6 @@ impl RamfluxClient {
             },
         )?;
         self.persist_routed_seen(entry)
-    }
-}
-
-fn routed_message_metadata(
-    opened: &Opened,
-    entry: &GatewayInboxEntry,
-    envelope: &crate::dm::SdkDmEncryptedEnvelope,
-    aad: &[u8],
-) -> Result<Option<MessageMetadata>, SdkError> {
-    if opened.routing.kind == Kind::Direct {
-        franking_report_metadata_for_delivery(
-            &opened.routing.conversation_id,
-            entry,
-            envelope,
-            &opened.decrypted,
-            Some(aad),
-        )
-    } else {
-        Ok(None)
     }
 }
 

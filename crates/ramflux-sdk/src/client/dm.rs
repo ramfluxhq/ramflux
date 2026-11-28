@@ -769,6 +769,7 @@ impl RamfluxClient {
     }
 }
 
+#[allow(dead_code, reason = "MLS: allowance removed in D16")]
 pub(crate) fn franking_report_metadata_for_delivery(
     conversation_id: &str,
     entry: &GatewayInboxEntry,

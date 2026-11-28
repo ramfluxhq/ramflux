@@ -10,6 +10,7 @@ use super::{
 use crate::client::identity_authority::HeadUse;
 use crate::prekey::sdk_fetch_prekey_bundle;
 
+#[allow(dead_code, reason = "MLS: allowance removed in D14")]
 pub(super) fn persisted_pair_snapshot(
     client: &RamfluxClient,
     local: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -233,6 +234,7 @@ impl RamfluxClient {
         let bundle = recipient_prekey_bundle(self, engine, message, recipient).await?;
         self.new_send_pair(&local, message, bundle)
     }
+    #[allow(dead_code, reason = "MLS: allowance removed in D14")]
     pub(crate) fn send_pair_session_from_url(
         &self,
         local: &ramflux_crypto::RootQualifiedDeviceRef,

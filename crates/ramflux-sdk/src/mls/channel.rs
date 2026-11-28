@@ -7,7 +7,6 @@
 //! new epoch seals afresh.
 //!
 //! The cache is in memory and bounded; a miss after a restart only costs one more ratchet step.
-#![allow(dead_code, reason = "MLS: allowance removed in D4a")]
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -76,19 +75,16 @@ impl SealCache {
     }
 
     /// Forget every message of `group_id` (switch-over, removal).
+    #[allow(dead_code, reason = "MLS: allowance removed in D5")]
     pub(crate) fn evict_group(&mut self, group_id: &[u8]) {
         self.entries.retain(|key, _| key.group_id != group_id);
         self.order.retain(|key| key.group_id != group_id);
     }
 
     /// Entries held.
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    /// True when nothing is cached.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 }
 
@@ -120,6 +116,78 @@ pub(crate) fn seal_once<K: MlsKv>(
     let output = mls.send(group_id, plaintext, &[])?.commit_plain().map_err(MlsError::from)?;
     cache.put(SealKey::new(group_id, output.epoch, plaintext), output.message.clone());
     Ok(Sealed { message: output.message, epoch: output.epoch, cached: false })
+}
+
+/// The bounded outer header of a `PrivateMessage` (RFC 9420 6): the group the message belongs to
+/// and the epoch it was protected in, read without any key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OuterHeader {
+    /// Group id.
+    pub(crate) group_id: Vec<u8>,
+    /// Epoch of the message.
+    pub(crate) epoch: u64,
+}
+
+/// Most bytes the header parser reads.
+const OUTER_HEADER_MAX_BYTES: usize = 64;
+const MLS10: u16 = 1;
+const WIRE_FORMAT_PRIVATE_MESSAGE: u16 = 2;
+const CONTENT_TYPE_APPLICATION: u8 = 1;
+
+fn header_error() -> SdkError {
+    SdkError::Mls {
+        code: "decrypt_failed",
+        detail: "the message is not a well-formed MLS private message".to_owned(),
+    }
+}
+
+/// Read `{group_id, epoch}` of an application `PrivateMessage` (the same bounded layout the
+/// orderer parses: version, wire format, group id, epoch, content type).
+///
+/// # Errors
+/// A truncated header, another wire format or content type than an application `PrivateMessage`.
+pub(crate) fn outer_header(message: &[u8]) -> Result<OuterHeader, SdkError> {
+    let mut cursor =
+        HeaderCursor { rest: message.get(..OUTER_HEADER_MAX_BYTES).unwrap_or(message) };
+    if cursor.u16()? != MLS10 || cursor.u16()? != WIRE_FORMAT_PRIVATE_MESSAGE {
+        return Err(header_error());
+    }
+    let first = cursor.u8()?;
+    let group_len = match first >> 6 {
+        0 => usize::from(first),
+        1 => (usize::from(first & 0x3f) << 8) | usize::from(cursor.u8()?),
+        _ => return Err(header_error()),
+    };
+    let group_id = cursor.take(group_len)?.to_vec();
+    let epoch = cursor.u64()?;
+    if cursor.u8()? != CONTENT_TYPE_APPLICATION {
+        return Err(header_error());
+    }
+    Ok(OuterHeader { group_id, epoch })
+}
+
+struct HeaderCursor<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> HeaderCursor<'a> {
+    fn take(&mut self, count: usize) -> Result<&'a [u8], SdkError> {
+        let (head, tail) = self.rest.split_at_checked(count).ok_or_else(header_error)?;
+        self.rest = tail;
+        Ok(head)
+    }
+
+    fn u8(&mut self) -> Result<u8, SdkError> {
+        self.take(1)?.first().copied().ok_or_else(header_error)
+    }
+
+    fn u16(&mut self) -> Result<u16, SdkError> {
+        Ok(u16::from_be_bytes(self.take(2)?.try_into().map_err(|_| header_error())?))
+    }
+
+    fn u64(&mut self) -> Result<u64, SdkError> {
+        Ok(u64::from_be_bytes(self.take(8)?.try_into().map_err(|_| header_error())?))
+    }
 }
 
 #[cfg(test)]

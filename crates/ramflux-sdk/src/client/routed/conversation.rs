@@ -66,7 +66,7 @@ impl RamfluxClient {
             return Err(SdkError::LocalBusPermissionDenied);
         }
         message.message_id = ramflux_protocol::encode_base64url(&identity.id);
-        let (mut session, header, bundle) = self.send_pair_session(engine, &message).await?;
+        self.send_authority_gate(engine, &message, true).await?;
         let recipient = Self::qualified_recipient(&message)?;
         let envelope = self.account_db()?.write_transaction(|| {
             self.bind_outgoing_delivery(&local, &message, &route.kind)?;
@@ -74,13 +74,7 @@ impl RamfluxClient {
                 &message,
                 wire,
                 route,
-                SealPair {
-                    local: &engine.config().device_id,
-                    remote: &recipient,
-                    session: &mut session,
-                    header,
-                    bundle,
-                },
+                SealPair { local: &engine.config().device_id, remote: &recipient },
                 Some((g::outer::CANDIDATE_ENVELOPE_SCHEMA, 2)),
             )?;
             crate::dm::gateway_generated_envelope_from_sealed(

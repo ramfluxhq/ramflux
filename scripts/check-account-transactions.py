@@ -37,6 +37,7 @@ ALLOW = {
     ('account_db/pairing/schema.rs', 'install'): 'exclusive account-open schema initialization before the managed connection worker starts',
     ('account_db/pairing/schema.rs', 'install_full_adoption_columns'): 'exclusive account-open schema migration before the managed connection worker starts',
     ('account_db/local_search/compact.rs', 'compact'): 'private unpublished encrypted snapshot compaction; VACUUM is outside transactions, locator remapping commits only in the private candidate',
+    ('account_db/mls_kv.rs', 'commit_batch'): 'MLS flush: its own immediate transaction when idle, a savepoint inside the open managed account transaction otherwise',
     ('database.rs', 'deferred_transaction'): 'managed deferred entrypoint',
     ('database.rs', 'immediate_transaction'): 'managed immediate entrypoint',
     ('database.rs', 'transaction'): 'sole managed transaction acquisition boundary',
