@@ -215,11 +215,18 @@ fn recheck_late_create(reference: &str, secret: &[u8]) -> Result<(), SdkError> {
 /// reference only. Anything other than Busy stops the wait: the original Busy
 /// is still what the caller returns.
 fn delete_orphaned_create(reference: &str) {
-    let deadline = Instant::now() + LATE_DELETE_BOUND;
+    // `Instant + Duration` panics when the sum does not fit. A 20 s bound always
+    // fits on a live clock; if it does not, one best-effort delete and stop.
+    let Some(deadline) = Instant::now().checked_add(LATE_DELETE_BOUND) else {
+        // INTENTIONAL: the caller still returns the original Busy.
+        let _ = remove(reference);
+        return;
+    };
     while Instant::now() < deadline {
         match remove(reference) {
             // The 2 s proxy timeout already waited out this attempt.
             Err(error) if is_busy(&error) => {}
+            // Absent, deleted, or a non-Busy failure. Stop; the caller returns Busy.
             Ok(()) | Err(_) => return,
         }
     }
