@@ -147,6 +147,10 @@ fn classify<'item>(
 const RECHECK_ATTEMPTS: u32 = 3;
 const RECHECK_PAUSE: Duration = Duration::from_millis(500);
 const RECHECK_WINDOW: Duration = Duration::from_secs(5);
+/// Extra wait after the recheck bound. A 15 s create is still inside the daemon
+/// when the bound ends (~7 s after `CreateItem`); each failed attempt blocks on the
+/// crate's 2 s proxy timeout, so this covers that create with margin.
+const LATE_DELETE_BOUND: Duration = Duration::from_secs(20);
 
 fn is_busy(error: &SdkError) -> bool {
     matches!(error, SdkError::CustodyVault(CustodyVaultReason::Busy))
@@ -201,6 +205,33 @@ fn recheck_late_create(reference: &str, secret: &[u8]) -> Result<(), SdkError> {
     Err(reason(CustodyVaultReason::Busy))
 }
 
+/// Drop the item a timed-out create may still be writing.
+///
+/// gnome-keyring runs one secret call at a time. A delete opened while that
+/// `CreateItem` is in progress is queued behind it, but the crate's 2 s proxy
+/// timeout drops the connection at `OpenSession`, so Item.Delete is never sent
+/// and the create then lands as an orphan. Retry on a fresh connection until
+/// the daemon answers (the create has finished); that attempt deletes this
+/// reference only. Anything other than Busy stops the wait: the original Busy
+/// is still what the caller returns.
+fn delete_orphaned_create(reference: &str) {
+    // `Instant + Duration` panics when the sum does not fit. A 20 s bound always
+    // fits on a live clock; if it does not, one best-effort delete and stop.
+    let Some(deadline) = Instant::now().checked_add(LATE_DELETE_BOUND) else {
+        // INTENTIONAL: the caller still returns the original Busy.
+        let _ = remove(reference);
+        return;
+    };
+    while Instant::now() < deadline {
+        match remove(reference) {
+            // The 2 s proxy timeout already waited out this attempt.
+            Err(error) if is_busy(&error) => {}
+            // Absent, deleted, or a non-Busy failure. Stop; the caller returns Busy.
+            Ok(()) | Err(_) => return,
+        }
+    }
+}
+
 fn insert(reference: &str, secret: &[u8]) -> Result<(), SdkError> {
     reference_ok(reference)?;
     secret_ok(secret)?;
@@ -220,7 +251,16 @@ fn insert(reference: &str, secret: &[u8]) -> Result<(), SdkError> {
         Hit::Locked => Err(reason(CustodyVaultReason::Locked)),
         Hit::Corrupt => Err(reason(CustodyVaultReason::Corrupt)),
     });
-    if create_busy { recheck_late_create(reference, secret) } else { created }
+    if !create_busy {
+        return created;
+    }
+    match recheck_late_create(reference, secret) {
+        Err(error) if is_busy(&error) => {
+            delete_orphaned_create(reference);
+            Err(error)
+        }
+        other => other,
+    }
 }
 
 fn load(reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
