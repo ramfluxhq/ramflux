@@ -3,6 +3,8 @@
 
 //! Create, invites, member submit, and the roster-add commit.
 
+#![allow(clippy::too_many_arguments)]
+
 use ed25519_dalek::{Signer, SigningKey};
 use ramflux_crypto::large_group::{
     ElectCandidate, EnvAuth, EnvHeader, EnvKind, Envelope, Genesis, LgReader, LgWriter, SignedReq,
@@ -86,6 +88,7 @@ pub(crate) async fn open_frame(
     })
 }
 
+#[allow(clippy::similar_names)]
 pub(crate) async fn create(
     client: &crate::RamfluxClient,
     parts: &Parts<'_>,
@@ -189,6 +192,7 @@ pub(crate) async fn create(
     Ok(super::CreateResult { group_id, epoch: mls_out.epoch })
 }
 
+#[allow(clippy::similar_names)]
 pub(crate) async fn invite_put(
     parts: &Parts<'_>,
     group_id: &[u8; 32],
@@ -449,7 +453,7 @@ pub(crate) async fn elect(parts: &Parts<'_>, group: &mut GroupRow, now_ms: u64) 
     }
     let candidates = [ElectCandidate { leaf: group.own_leaf, admin: true }];
     let order = election_order(&group.group_id, group.epoch, &candidates).map_err(|error| fail("internal", error.to_string()))?;
-    let position = order.iter().position(|item| item.leaf == group.own_leaf).map_or(0, |index| index);
+    let position = order.iter().position(|item| item.leaf == group.own_leaf).unwrap_or(0);
     if now_ms < group.created_at_ms.saturating_add(election_delay_ms(position)) {
         return Ok(());
     }
@@ -465,19 +469,13 @@ pub(crate) async fn elect(parts: &Parts<'_>, group: &mut GroupRow, now_ms: u64) 
             push_warning(group, "host_unusual");
             continue;
         }
-        let plain = match open_with_keys(group, &retired, &row.sealed, now_ms) {
-            Ok(plain) => plain,
-            Err(_) => {
-                push_warning(group, "host_unusual");
-                continue;
-            }
+        let Ok(plain) = open_with_keys(group, &retired, &row.sealed, now_ms) else {
+            push_warning(group, "host_unusual");
+            continue;
         };
-        let opened = match parse_opened(&plain) {
-            Ok(opened) => opened,
-            Err(_) => {
-                push_warning(group, "host_unusual");
-                continue;
-            }
+        let Ok(opened) = parse_opened(&plain) else {
+            push_warning(group, "host_unusual");
+            continue;
         };
         if opened.p != row.p || roster_checks(&group.group_id, &opened, &row.join_pk_id).is_err() {
             push_warning(group, "host_unusual");

@@ -4,6 +4,8 @@
 //! Group host wire helpers. The four-line open binding is copied from the node; production code
 //! does not call node-core.
 
+#![allow(clippy::too_many_arguments)]
+
 use ramflux_crypto::large_group::{LgReader, LgWriter};
 use ramflux_protocol::domain::LG_OPEN_V1;
 
@@ -25,10 +27,12 @@ pub(crate) fn fail(code: &'static str, detail: impl Into<String>) -> SdkError {
     SdkError::Mls { code, detail: detail.into() }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn kv_err(error: ramflux_mls::MlsKvError) -> SdkError {
     fail("internal", error.to_string())
 }
 
+#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn storage_err(error: impl ToString) -> SdkError {
     fail("internal", error.to_string())
 }
@@ -276,7 +280,7 @@ mod tests {
     fn roster_plain_ends_with_key_ack() {
         let ack = [0x5A; 64];
         let plain = roster_plain(&[1; 32], b"cred", b"chain", 0, ROLE_MEMBER, &[2; 32], &[], &ack);
-        assert_eq!(plain.len() >= 64, true);
+        assert!(plain.len() >= 64);
         assert_eq!(&plain[plain.len() - 64..], &ack);
         let parsed = parse_roster_p(&plain).expect("roster");
         assert_eq!(parsed.p, [1; 32]);
@@ -295,8 +299,8 @@ mod tests {
         let (del1, auth1) = attach_fields(&later);
         assert_eq!(del0, del_hash);
         assert_eq!(auth0, token);
-        assert!(del1.is_empty());
-        assert!(auth1.is_empty());
+        assert_eq!(del1, [] as [u8; 0]);
+        assert_eq!(auth1, [] as [u8; 0]);
     }
 
     fn attach_fields(body: &[u8]) -> (Vec<u8>, Vec<u8>) {

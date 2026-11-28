@@ -212,6 +212,7 @@ impl<'a> GroupEngine<'a> {
         apply::apply(&parts, group_id, now_ms).await
     }
 
+    #[allow(clippy::unused_self)]
     pub(crate) fn member_live(&self, group_id: &[u8; 32]) -> bool {
         session::member_live(group_id)
     }

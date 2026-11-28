@@ -69,7 +69,7 @@ pub(crate) fn body_event(kind: &str, group_id: &[u8; 32], body: Value) -> GroupE
     }
 }
 
-pub(crate) fn membership_event(group_id: &[u8; 32], changes: Value, by: Option<Value>) -> GroupEvent {
+pub(crate) fn membership_event(group_id: &[u8; 32], changes: &Value, by: Option<&Value>) -> GroupEvent {
     body_event("membership", group_id, json!({ "changes": changes, "by": by }))
 }
 
@@ -77,12 +77,12 @@ pub(crate) fn settings_event(
     group_id: &[u8; 32],
     name: Option<&str>,
     approval: Option<bool>,
-    by: Option<Value>,
+    by: Option<&Value>,
 ) -> GroupEvent {
     body_event("settings", group_id, json!({ "name": name, "approval": approval, "by": by }))
 }
 
-pub(crate) fn void_event(group_id: &[u8; 32], voided_log_seq: u64, epoch: u64, by: Option<Value>) -> GroupEvent {
+pub(crate) fn void_event(group_id: &[u8; 32], voided_log_seq: u64, epoch: u64, by: Option<&Value>) -> GroupEvent {
     body_event("void", group_id, json!({ "voided_log_seq": voided_log_seq, "epoch": epoch, "by": by }))
 }
 

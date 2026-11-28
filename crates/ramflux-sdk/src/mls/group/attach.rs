@@ -70,8 +70,8 @@ pub(crate) fn seal(post_id: &str, plain: &[u8]) -> Result<SealedAttach, SdkError
         let len_us = usize::try_from(len).map_err(|_| fail("internal", "segment length"))?;
         let end = offset.saturating_add(len_us);
         let piece = padded_bytes.get(offset..end).ok_or_else(|| fail("internal", "segment bounds"))?;
-        let sealed = sealer.seal(index, piece).map_err(|error| fail("internal", error.to_string()))?;
-        cipher.extend_from_slice(&sealed);
+        let segment = sealer.seal(index, piece).map_err(|error| fail("internal", error.to_string()))?;
+        cipher.extend_from_slice(&segment);
         offset = end;
     }
     let blob_ref = *blake3::hash(&cipher).as_bytes();

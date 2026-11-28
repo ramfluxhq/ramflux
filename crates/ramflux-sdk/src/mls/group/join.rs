@@ -3,6 +3,8 @@
 
 //! Invite, own-device and rejoin. `join_key_stale` is an internal re-seal, never a result.
 
+#![allow(clippy::too_many_arguments)]
+
 use ed25519_dalek::{Signer, SigningKey};
 use openmls_traits::crypto::OpenMlsCrypto;
 use openmls_traits::types::{HpkeAeadType, HpkeCiphertext, HpkeConfig, HpkeKdfType, HpkeKemType};
@@ -223,7 +225,8 @@ async fn post_join(
     ident_call(endpoint, root, group_id, "join", body).await
 }
 
-#[allow(clippy::too_many_arguments)]
+type JoinPlain<'a> = &'a dyn Fn(&[u8; 32]) -> Result<Vec<u8>, SdkError>;
+
 async fn send_attempts(
     endpoint: &str,
     root: &std::path::Path,
@@ -233,7 +236,7 @@ async fn send_attempts(
     minted: &Minted,
     auth_of: impl Fn(&[u8; 32]) -> Vec<u8>,
     mut join_pk: [u8; 32],
-    plain_of: &dyn Fn(&[u8; 32]) -> Result<Vec<u8>, SdkError>,
+    plain_of: JoinPlain<'_>,
     seed: Option<&[u8; 32]>,
     store: &Store,
     group: Option<&GroupRow>,
@@ -277,11 +280,11 @@ async fn send_attempts(
             now_ms,
         )
         .await?;
-        if reply.status == "join_key_stale" {
-            if let Some(next) = reply.join_pk.as_deref() {
-                join_pk = b64_fixed(next)?;
-                continue;
-            }
+        if reply.status == "join_key_stale"
+            && let Some(next) = reply.join_pk.as_deref()
+        {
+            join_pk = b64_fixed(next)?;
+            continue;
         }
         if reply.status == "join_rate_limited" || reply.status == "quota" {
             tokio::time::sleep(std::time::Duration::from_secs(RETRY_AFTER_S)).await;
@@ -317,10 +320,11 @@ pub(crate) async fn join_invite(
     if parts.expires_at <= now_ms {
         return Ok(refused("invite_expired", json!({ "expired_at": parts.expires_at })));
     }
-    if let Some(group) = store.group(&parts.group_id)? {
-        if group.member && !group.removed {
-            return Ok(refused("already_member", json!({ "group_id": b64(&parts.group_id) })));
-        }
+    if let Some(group) = store.group(&parts.group_id)?
+        && group.member
+        && !group.removed
+    {
+        return Ok(refused("already_member", json!({ "group_id": b64(&parts.group_id) })));
     }
     let existing = store.pending()?.into_iter().find(|row| row.link == link && row.group_id == parts.group_id);
     if let Some(row) = existing {
@@ -371,10 +375,10 @@ pub(crate) async fn join_invite(
     };
     if reply.status != "ok" {
         let mapped = map_host(&reply.status, ramflux_crypto::large_group::LEAF_CAP);
-        if let super::JoinOutcome::Refused { reason, .. } = &mapped {
-            if reason == "join_key_stale" {
-                return Ok(refused("rate_limited", json!({ "retry_after_s": RETRY_AFTER_S })));
-            }
+        if let super::JoinOutcome::Refused { reason, .. } = &mapped
+            && reason == "join_key_stale"
+        {
+            return Ok(refused("rate_limited", json!({ "retry_after_s": RETRY_AFTER_S })));
         }
         return Ok(mapped);
     }
@@ -420,7 +424,7 @@ pub(crate) fn data_root(client: &crate::RamfluxClient) -> Result<std::path::Path
 
 fn outcome_err(error: SdkError, fallback: &str) -> super::JoinOutcome {
     match error {
-        SdkError::Mls { code, detail } if code == "rate_limited" => {
+        SdkError::Mls { code: "rate_limited", detail } => {
             let retry = detail.split(':').nth(1).and_then(|text| text.parse().ok()).unwrap_or(RETRY_AFTER_S);
             refused("rate_limited", json!({ "retry_after_s": retry }))
         }
@@ -589,7 +593,7 @@ pub(crate) async fn welcome_poll(
     group.epoch = joined.epoch;
     group.te = page.te;
     group.leaf_count = u32::try_from(joined.leaves).unwrap_or(u32::MAX);
-    group.own_leaf = mls.status(group_id).map(|status| status.own_leaf).unwrap_or(0);
+    group.own_leaf = mls.status(group_id).map_or(0, |status| status.own_leaf);
     if let Ok(genesis) = ramflux_crypto::large_group::Genesis::decode(&group.genesis) {
         group.token_root_pk = genesis.token_root_pk;
         group.approval = genesis.approval;

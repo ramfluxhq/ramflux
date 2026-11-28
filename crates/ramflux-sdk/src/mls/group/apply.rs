@@ -48,17 +48,17 @@ pub(crate) async fn apply(parts: &Parts<'_>, group_id: &[u8; 32], now_ms: u64) -
         group.leaf_count = u32::try_from(status.leaves).map_err(|_| fail("internal", "leaf count"))?;
     }
     let _ = post::flush_delayed(parts, &group, now_ms).await;
-    if let Err(error) = resubmit(parts, &mut group, now_ms).await {
-        if !soft(&error) {
-            parts.store.put_group_merged(&group)?;
-            return Err(error);
-        }
+    if let Err(error) = resubmit(parts, &mut group, now_ms).await
+        && !soft(&error)
+    {
+        parts.store.put_group_merged(&group)?;
+        return Err(error);
     }
-    if let Err(error) = commit::elect(parts, &mut group, now_ms).await {
-        if !soft(&error) {
-            parts.store.put_group_merged(&group)?;
-            return Err(error);
-        }
+    if let Err(error) = commit::elect(parts, &mut group, now_ms).await
+        && !soft(&error)
+    {
+        parts.store.put_group_merged(&group)?;
+        return Err(error);
     }
     parts.store.put_group_merged(&group)?;
     Ok(events)
@@ -111,7 +111,8 @@ fn apply_one(
                                 .iter()
                                 .map(|p| json!({ "op": "add", "p": b64(p) }))
                                 .collect::<Vec<_>>();
-                            events.push(events::membership_event(&group.group_id, serde_json::Value::Array(changes), None));
+                            let changes = serde_json::Value::Array(changes);
+                            events.push(events::membership_event(&group.group_id, &changes, None));
                         }
                         ramflux_mls::ReceivedMessage::Proposal { .. } | ramflux_mls::ReceivedMessage::Own { .. } => {
                             note_sent(parts, group, header.post_id, entry.seq, entry.appended_at_ms)?;
@@ -138,7 +139,7 @@ fn record_plain(
 ) -> Result<(), SdkError> {
     match entry.envelope.header.kind {
         EnvKind::Void => {
-            let voided = parse_void_payload(&entry.envelope.payload).map_or(entry.seq, |seq| seq);
+            let voided = parse_void_payload(&entry.envelope.payload).unwrap_or(entry.seq);
             events.push(events::void_event(&group.group_id, voided, entry.envelope.header.epoch, None));
         }
         EnvKind::Roll => {
@@ -152,7 +153,7 @@ fn record_plain(
             }
         }
         EnvKind::Leave => {
-            events.push(events::membership_event(&group.group_id, json!([{"op": "leave"}]), None));
+            events.push(events::membership_event(&group.group_id, &json!([{"op": "leave"}]), None));
         }
         _ => {}
     }
@@ -175,7 +176,7 @@ fn record_application(
             .iter()
             .find(|row| row.post_id == post_id)
             .and_then(|row| row.log_seq)
-            .map_or(entry.seq, |seq| seq);
+            .unwrap_or(entry.seq);
         events.push(events::post_deleted_event(&group.group_id, &post_id, post_log_seq, entry.seq));
         return Ok(());
     }
@@ -209,7 +210,7 @@ fn note_sent(
     };
     row.log_seq = Some(log_seq);
     row.appended_at = Some(appended_at);
-    row.state = "sent".to_owned();
+    "sent".clone_into(&mut row.state);
     parts.store.put_history(&group.group_id, &rows)
 }
 

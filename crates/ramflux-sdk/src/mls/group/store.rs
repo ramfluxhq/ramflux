@@ -23,6 +23,7 @@ const PRIVACY_U: &str = "rf/lg/privacy_u";
 const UPSERT: &str = "INSERT INTO mls_kv(label,key,value) VALUES(?1,?2,?3) \
     ON CONFLICT(label,key) DO UPDATE SET value=excluded.value";
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct GroupRow {
     pub group_id: [u8; 32],
@@ -216,10 +217,10 @@ impl Store {
     /// Write `row`, keeping a higher `open_spent` already stored by `open_frame`.
     pub(crate) fn put_group_merged(&self, row: &GroupRow) -> Result<(), SdkError> {
         let mut row = row.clone();
-        if let Some(fresh) = self.group(&row.group_id)? {
-            if fresh.open_spent > row.open_spent {
-                row.open_spent = fresh.open_spent;
-            }
+        if let Some(fresh) = self.group(&row.group_id)?
+            && fresh.open_spent > row.open_spent
+        {
+            row.open_spent = fresh.open_spent;
         }
         self.put_group(&row)
     }

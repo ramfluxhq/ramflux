@@ -3,6 +3,8 @@
 
 //! Posts, cards, attachments and tombstones. Privacy delay uses the caller's `now_ms`.
 
+#![allow(clippy::too_many_arguments)]
+
 use ramflux_crypto::large_group::{
     CARD_JSON_MAX, EnvKind, LgWriter, ROLL_U_MAX_MS, TokenBucket, privacy_delay_applies, random_array,
     settle_at_ms,
@@ -110,9 +112,8 @@ pub(crate) async fn delete_own(
     let id = b64_fixed::<16>(post_id)?;
     let plain = commit::padded(Vec::new())?;
     let mut secrets = take(parts.store, &group, &parts.root, TokenBucket::Post, 1, now_ms, &group.owner_seed).await?;
-    let secret = match secrets.pop() {
-        Some(secret) => secret,
-        None => return Ok(super::rate_limited_state("post")),
+    let Some(secret) = secrets.pop() else {
+        return Ok(super::rate_limited_state("post"));
     };
     let envelope = commit::seal_application(parts, &group, EnvKind::Tombstone, id, &plain, &secret, None)?;
     commit::remember_outbox(parts.store, &group, envelope.clone(), "tombstone")?;
@@ -179,11 +180,9 @@ async fn deliver(
     now_ms: u64,
     existing: bool,
 ) -> Result<SendState, SdkError> {
-    if !existing {
-        if let Some(held) = privacy_hold(parts, group, now_ms)? {
-            store_pending(parts, group, &post_id, kind_name, content, attachments, &held)?;
-            return Ok(held);
-        }
+    if !existing && let Some(held) = privacy_hold(parts, group, now_ms)? {
+        store_pending(parts, group, &post_id, kind_name, content, attachments, &held)?;
+        return Ok(held);
     }
     let mut secrets = match take(parts.store, group, &parts.root, TokenBucket::Post, 1, now_ms, &group.owner_seed).await {
         Ok(secrets) => secrets,
@@ -202,10 +201,10 @@ async fn deliver(
             Ok(SendState::Sent { log_seq: receipt.log_seq })
         }
         Err(error) => {
-            if !rate_limited(&error) {
-                store_queued(parts, group, &post_id, kind_name, content, attachments, &error)?;
-            } else {
+            if rate_limited(&error) {
                 parts.store.clear_outbox(&group.group_id)?;
+            } else {
+                store_queued(parts, group, &post_id, kind_name, content, attachments, &error)?;
             }
             as_send(error)
         }
@@ -350,7 +349,7 @@ fn upsert(parts: &Parts<'_>, group_id: &[u8; 32], row: HistoryRow) -> Result<(),
 fn mark_deleted(parts: &Parts<'_>, group_id: &[u8; 32], post_id: &str) -> Result<(), SdkError> {
     let mut rows = parts.store.history(group_id)?;
     if let Some(row) = rows.iter_mut().find(|row| row.post_id == post_id) {
-        row.state = "deleted".to_owned();
+        "deleted".clone_into(&mut row.state);
     }
     parts.store.put_history(group_id, &rows)
 }

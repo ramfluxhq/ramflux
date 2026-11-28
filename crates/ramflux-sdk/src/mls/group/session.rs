@@ -24,7 +24,7 @@ pub(crate) struct GroupSocket {
 }
 
 pub(crate) fn member_live(group_id: &[u8; 32]) -> bool {
-    LIVE.lock().ok().is_some_and(|live| live.contains(group_id))
+    LIVE.lock().is_ok_and(|live| live.contains(group_id))
 }
 
 fn reserve(group_id: &[u8; 32]) -> Result<(), SdkError> {
@@ -128,10 +128,7 @@ async fn read_opened(
             crate::gateway::engine::read_gateway_server_frame_bytes(&mut *stream).await?;
         match frame {
             GatewayServerFrame::GroupOpened { status } => return Ok(status),
-            GatewayServerFrame::Nack { reason } => {
-                return Err(fail("internal", reason));
-            }
-            GatewayServerFrame::Close { reason } => {
+            GatewayServerFrame::Nack { reason } | GatewayServerFrame::Close { reason } => {
                 return Err(fail("internal", reason));
             }
             _ => {}
@@ -159,8 +156,9 @@ impl GroupSocket {
                 GatewayServerFrame::GroupLogGrew { log_seq } => {
                     self.last_log_seq = Some(log_seq);
                 }
-                GatewayServerFrame::Nack { reason } => return Err(fail("internal", reason)),
-                GatewayServerFrame::Close { reason } => return Err(fail("internal", reason)),
+                GatewayServerFrame::Nack { reason } | GatewayServerFrame::Close { reason } => {
+                    return Err(fail("internal", reason));
+                }
                 _ => {}
             }
         }
@@ -181,12 +179,9 @@ pub(crate) fn status_code(status: &str) -> &'static str {
         "already_joined" => "already_member",
         "pending_full" => "queue_full",
         "leaf_cap" => "group_full",
-        "quota" => "rate_limited",
-        "paced" => "rate_limited",
+        "quota" | "paced" => "rate_limited",
         "bad_request" => "bad_request",
         "unauthorized" => "unauthorized",
-        "session_scope" => "internal",
-        "internal" => "internal",
         _ => "internal",
     }
 }

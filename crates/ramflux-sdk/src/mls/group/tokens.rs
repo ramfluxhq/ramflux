@@ -3,6 +3,8 @@
 
 //! Four token buckets. Open quota is stored and shown; it is not a local refusal.
 
+#![allow(clippy::too_many_arguments)]
+
 use std::path::Path;
 
 use ramflux_crypto::large_group::{
@@ -34,7 +36,7 @@ pub(crate) fn limited(bucket: TokenBucket, retry_after_s: Option<u64>) -> SdkErr
     }
 }
 
-fn list<'a>(wallet: &'a mut Wallet, bucket: TokenBucket) -> &'a mut Vec<TokenPart> {
+fn list(wallet: &mut Wallet, bucket: TokenBucket) -> &mut Vec<TokenPart> {
     match bucket {
         TokenBucket::Post => &mut wallet.post,
         TokenBucket::Commit => &mut wallet.commit,
