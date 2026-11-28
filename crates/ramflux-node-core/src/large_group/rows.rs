@@ -159,6 +159,8 @@ pub struct HeadRow {
     pub undo_removed: Vec<([u8; 32], PsetRow)>,
     /// Registered push routes.
     pub route_count: u32,
+    /// Elements the token root key has evaluated (issuance and redemption), for the 2^30 bound.
+    pub evals: u64,
 }
 
 impl HeadRow {
@@ -195,7 +197,7 @@ impl HeadRow {
         for (p, row) in &self.undo_removed {
             enc.fixed(p).var(&row.encode());
         }
-        enc.u32(self.route_count);
+        enc.u32(self.route_count).u64(self.evals);
         enc.finish()
     }
 
@@ -236,6 +238,7 @@ impl HeadRow {
             undo_removed.push((p, PsetRow::decode(dec.var(64).map_err(bad)?)?));
         }
         let route_count = dec.u32().map_err(bad)?;
+        let evals = dec.u64().map_err(bad)?;
         dec.finish().map_err(bad)?;
         Ok(Self {
             genesis,
@@ -264,6 +267,7 @@ impl HeadRow {
             voidable_epoch,
             undo_removed,
             route_count,
+            evals,
         })
     }
 }
@@ -393,12 +397,12 @@ impl InviteRow {
     }
 }
 
-/// Issuance counters of one pseudonym in one bucket (`lg_tokens`): batch times inside the last
-/// 24 h and the refill batches after rolls.
+/// Issuance counters of one pseudonym in one bucket (`lg_tokens`): paid batches (time and token
+/// count) inside the last 24 h and the refill batches after rolls.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IssueRow {
-    /// Times of paid batches in the last 24 h.
-    pub batches: Vec<u64>,
+    /// `(time, tokens)` of paid batches in the last 24 h.
+    pub batches: Vec<(u64, u32)>,
     /// Times of free refill batches in the last 24 h.
     pub free: Vec<u64>,
     /// Token epoch of the last free refill.
@@ -406,10 +410,19 @@ pub struct IssueRow {
 }
 
 impl IssueRow {
+    /// Tokens the paid batches of the last 24 h hold.
+    #[must_use]
+    pub fn paid_tokens(&self) -> u32 {
+        self.batches.iter().fold(0_u32, |sum, (_, tokens)| sum.saturating_add(*tokens))
+    }
+
     pub(super) fn encode(&self) -> Vec<u8> {
         let mut enc = Enc::default();
         enc.u32(self.last_free_te);
-        put_u64_list(&mut enc, &self.batches);
+        enc.u32(count(self.batches.len()));
+        for (at, tokens) in &self.batches {
+            enc.u64(*at).u32(*tokens);
+        }
         put_u64_list(&mut enc, &self.free);
         enc.finish()
     }
@@ -417,7 +430,11 @@ impl IssueRow {
     pub(super) fn decode(bytes: &[u8]) -> LgResult<Self> {
         let mut dec = Dec::new(bytes);
         let last_free_te = dec.u32().map_err(bad)?;
-        let batches = get_u64_list(&mut dec, 256)?;
+        let n = read_count(&mut dec, 256)?;
+        let mut batches = Vec::with_capacity(n);
+        for _ in 0..n {
+            batches.push((dec.u64().map_err(bad)?, dec.u32().map_err(bad)?));
+        }
         let free = get_u64_list(&mut dec, 256)?;
         dec.finish().map_err(bad)?;
         Ok(Self { batches, free, last_free_te })
@@ -435,6 +452,9 @@ pub struct BlobMeta {
     pub received: u32,
     /// Bytes stored.
     pub bytes: u64,
+    /// Bytes the first chunk declared (`total_bytes`): reserved against the group's pending cap
+    /// from chunk 0 until the blob is referenced or expires.
+    pub declared_bytes: u64,
     /// All chunks stored and the hash matches `blob_ref`.
     pub complete: bool,
     /// An entry or a Welcome names it; it lives and dies with that row.
@@ -448,6 +468,7 @@ impl BlobMeta {
             .u32(self.total)
             .u32(self.received)
             .u64(self.bytes)
+            .u64(self.declared_bytes)
             .u8(u8::from(self.complete))
             .u8(u8::from(self.referenced));
         enc.finish()
@@ -460,6 +481,7 @@ impl BlobMeta {
             total: dec.u32().map_err(bad)?,
             received: dec.u32().map_err(bad)?,
             bytes: dec.u64().map_err(bad)?,
+            declared_bytes: dec.u64().map_err(bad)?,
             complete: dec.u8().map_err(bad)? == 1,
             referenced: dec.u8().map_err(bad)? == 1,
         };

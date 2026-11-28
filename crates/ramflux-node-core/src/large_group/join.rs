@@ -7,8 +7,10 @@
 //! `rejoin` requests (member session, one commit token) go to the member queue. Each queue holds
 //! at most 1 000 pending requests, the group takes 1 per second with a burst of 10, and a request
 //! expires after 24 h. A commit may add only pseudonyms that have a pending entry (the join tie,
-//! checked in `entries`). The host reads the pseudonym `P` from the `KeyPackage`'s leaf signature key;
-//! everything else of the request stays sealed to the join key.
+//! checked in `entries`; a pending row older than 24 h does not count). The host reads the
+//! pseudonym `P` from the `KeyPackage`'s leaf signature key; everything else of the request stays
+//! sealed to the join key. A Welcome is stored by the commit that adds the joiner (`entries`) and
+//! found by `P`.
 
 use ramflux_crypto::large_group::{
     JoinKind, JoinRequest, JoinSession, LgReader as Dec, LgWriter as Enc, SignedReq, Token,
@@ -17,7 +19,7 @@ use ramflux_crypto::large_group::{
 use ramflux_protocol::domain::LG_JOIN_V1;
 
 use super::check::{JOIN_QUEUE_MAX, key_package_signature_key};
-use super::host::{Authority, Cx, LargeGroupHost, verify_plain};
+use super::host::{Cx, LargeGroupHost, verify_plain};
 use super::refusal::{LgRefusal, LgResult};
 use super::rows::{BlobMeta, InviteRow, JoinRow, QUEUE_MEMBER, QUEUE_OUTSIDER, WelcomeRow, key};
 use crate::RouterRedbStore;
@@ -25,8 +27,6 @@ use crate::router_store::lg_store::LgTable;
 
 /// Most pending requests one `join.pending` answer lists per queue.
 const PENDING_PAGE: usize = 100;
-/// A Welcome is stored for the joiners of commits no older than this (7 d).
-const WELCOME_ENTRY_MAX_AGE_MS: u64 = super::check::WELCOME_TTL_MS;
 
 /// A pending join request as `join.pending` lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,18 +45,11 @@ pub struct PendingJoin {
     pub sealed: Vec<u8>,
 }
 
-/// A Welcome to store: the commit it belongs to and the blob holding it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WelcomePut {
-    /// `log_seq` of the commit that added the joiners.
-    pub commit_seq: u64,
-    /// Complete pending blob with the Welcome.
-    pub blob_ref: [u8; 32],
-}
-
 /// What `welcome.get` returns: where to pull the Welcome from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WelcomeInfo {
+    /// `log_seq` of the commit that added the joiner.
+    pub commit_seq: u64,
     /// Blob holding the Welcome (`blob.get`).
     pub blob_ref: [u8; 32],
     /// Chunks of the blob.
@@ -118,6 +111,7 @@ impl LargeGroupHost {
             if *blake3::hash(&head.join_pk).as_bytes() != req.join_pk_id {
                 return Err(LgRefusal::JoinKeyStale);
             }
+            cx.drop_stale_join(gid, &mut head, &p)?;
             if cx.pset(gid, &p)?.is_some() || cx.pending_queue(gid, &p)?.is_some() {
                 return Err(LgRefusal::AlreadyJoined);
             }
@@ -211,62 +205,13 @@ impl LargeGroupHost {
         })
     }
 
-    /// Store the Welcome of the commit at `commit_seq` (a blob of at most 16 MiB already uploaded
-    /// and complete). Authority: an admin's signature or one commit token over
-    /// `welcome_put_body(commit_seq, blob_ref)`; the commit must be a retained commit that added
-    /// pseudonyms, at most 7 days old.
+    /// `welcome.get`: a joiner (P-signed, op `welcome.get`, empty body) learns where its Welcome
+    /// is; the host finds it by `P` and nothing else is asked. The host counts the joiner as
+    /// served; the row and blob go once every joiner was served (after a short grace) or after 7
+    /// days.
     ///
     /// # Errors
-    /// `unauthorized`, `not_found`, `blob_missing`, `bad_request`.
-    pub fn welcome_put(
-        &self,
-        store: &RouterRedbStore,
-        now: u64,
-        gid: &[u8; 32],
-        put: &WelcomePut,
-        auth: Authority<'_>,
-    ) -> LgResult<()> {
-        let WelcomePut { commit_seq, blob_ref } = put;
-        self.run(store, now, |cx| {
-            let mut head = cx.head(gid)?;
-            let body = welcome_put_body(*commit_seq, blob_ref);
-            cx.authorize_op(gid, &mut head, "welcome.put", &body, auth)?;
-            let bytes = cx
-                .tx
-                .get(LgTable::Log, &key(gid, &[&commit_seq.to_be_bytes()]))?
-                .ok_or(LgRefusal::NotFound)?;
-            let entry = super::rows::LogRow::decode(&bytes)?;
-            let envelope = ramflux_crypto::large_group::Envelope::decode(&entry.envelope)?;
-            let added = envelope.header.added_p;
-            if envelope.header.kind != ramflux_crypto::large_group::EnvKind::Commit
-                || added.is_empty()
-                || entry.appended_ms.saturating_add(WELCOME_ENTRY_MAX_AGE_MS) < cx.now
-            {
-                return Err(LgRefusal::BadRequest);
-            }
-            let welcome_key = key(gid, &[&commit_seq.to_be_bytes()]);
-            if cx.tx.get(LgTable::Welcome, &welcome_key)?.is_some() {
-                return Err(LgRefusal::BadRequest);
-            }
-            cx.blob_reference(gid, blob_ref)?;
-            let row = WelcomeRow {
-                created_ms: cx.now,
-                drained_ms: 0,
-                blob_ref: *blob_ref,
-                joiners: added.clone(),
-                remaining: added,
-            };
-            cx.tx.put(LgTable::Welcome, &welcome_key, &row.encode())?;
-            cx.put_head(gid, &head)
-        })
-    }
-
-    /// `welcome.get`: a joiner (P-signed, op `welcome.get`, body = the commit's `log_seq`, 8
-    /// bytes) learns where its Welcome is. The host counts the joiner as served; the row and blob
-    /// go once every joiner was served (after a short grace) or after 7 days.
-    ///
-    /// # Errors
-    /// `unauthorized`, `not_found`.
+    /// `unauthorized`, `not_found`, `bad_request` (a body).
     pub fn welcome_get(
         &self,
         store: &RouterRedbStore,
@@ -274,11 +219,18 @@ impl LargeGroupHost {
         req: &SignedReq,
     ) -> LgResult<WelcomeInfo> {
         req.verify("welcome.get").map_err(|_| LgRefusal::Unauthorized)?;
-        let seq_bytes: [u8; 8] =
-            req.body.as_slice().try_into().map_err(|_| LgRefusal::BadRequest)?;
+        if !req.body.is_empty() {
+            return Err(LgRefusal::BadRequest);
+        }
         let gid = req.gid;
         self.run(store, now, |cx| {
-            let welcome_key = key(&gid, &[&seq_bytes]);
+            let index = cx.tx.get(LgTable::Welcome, &welcome_index_key(&gid, &req.p))?;
+            let seq_bytes: [u8; 8] = index
+                .ok_or(LgRefusal::NotFound)?
+                .as_slice()
+                .try_into()
+                .map_err(|_| LgRefusal::Internal)?;
+            let welcome_key = welcome_row_key(&gid, u64::from_be_bytes(seq_bytes));
             let bytes = cx.tx.get(LgTable::Welcome, &welcome_key)?.ok_or(LgRefusal::NotFound)?;
             let mut row = WelcomeRow::decode(&bytes)?;
             if !row.joiners.contains(&req.p) {
@@ -297,17 +249,32 @@ impl LargeGroupHost {
                 .map(|bytes| BlobMeta::decode(&bytes))
                 .transpose()?
                 .ok_or(LgRefusal::NotFound)?;
-            Ok(WelcomeInfo { blob_ref: row.blob_ref, total: meta.total, bytes: meta.bytes })
+            Ok(WelcomeInfo {
+                commit_seq: u64::from_be_bytes(seq_bytes),
+                blob_ref: row.blob_ref,
+                total: meta.total,
+                bytes: meta.bytes,
+            })
         })
     }
 }
 
-/// The request body a `welcome.put` authority covers.
-#[must_use]
-pub fn welcome_put_body(commit_seq: u64, blob_ref: &[u8; 32]) -> Vec<u8> {
-    let mut enc = Enc::default();
-    enc.u64(commit_seq).fixed(blob_ref);
-    enc.finish()
+const WELCOME_ROW: u8 = 0;
+const WELCOME_INDEX: u8 = 1;
+
+/// Key of the Welcome row of the commit at `commit_seq`.
+pub(super) fn welcome_row_key(gid: &[u8; 32], commit_seq: u64) -> Vec<u8> {
+    key(gid, &[&[WELCOME_ROW], &commit_seq.to_be_bytes()])
+}
+
+/// Prefix of every Welcome row of a group (the index rows are not under it).
+pub(super) fn welcome_row_prefix(gid: &[u8; 32]) -> Vec<u8> {
+    key(gid, &[&[WELCOME_ROW]])
+}
+
+/// Key of the `(group, P) -> commit_seq` index row.
+fn welcome_index_key(gid: &[u8; 32], p: &[u8; 32]) -> Vec<u8> {
+    key(gid, &[&[WELCOME_INDEX], p])
 }
 
 impl Cx<'_> {
@@ -336,13 +303,69 @@ impl Cx<'_> {
         Ok((invite_key, invite))
     }
 
-    /// Drop the Welcome stored for a voided commit.
+    /// Store the Welcome of the commit at `commit_seq` (the blob is already owned by the commit):
+    /// the row, and one index row per joiner so that `welcome.get` finds it by `P`.
+    pub(super) fn welcome_store(
+        &self,
+        gid: &[u8; 32],
+        commit_seq: u64,
+        blob_ref: &[u8; 32],
+        joiners: &[[u8; 32]],
+    ) -> LgResult<()> {
+        let row = WelcomeRow {
+            created_ms: self.now,
+            drained_ms: 0,
+            blob_ref: *blob_ref,
+            joiners: joiners.to_vec(),
+            remaining: joiners.to_vec(),
+        };
+        self.tx.put(LgTable::Welcome, &welcome_row_key(gid, commit_seq), &row.encode())?;
+        for p in joiners {
+            self.tx.put(LgTable::Welcome, &welcome_index_key(gid, p), &commit_seq.to_be_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Delete the Welcome row of `commit_seq`, its blob and the index rows that still point at it.
     pub(super) fn welcome_discard(&self, gid: &[u8; 32], commit_seq: u64) -> LgResult<()> {
-        let welcome_key = key(gid, &[&commit_seq.to_be_bytes()]);
+        let welcome_key = welcome_row_key(gid, commit_seq);
         if let Some(bytes) = self.tx.get(LgTable::Welcome, &welcome_key)? {
             let row = WelcomeRow::decode(&bytes)?;
             self.blob_delete(gid, &row.blob_ref)?;
+            for p in &row.joiners {
+                let index = welcome_index_key(gid, p);
+                if self.tx.get(LgTable::Welcome, &index)?.as_deref()
+                    == Some(commit_seq.to_be_bytes().as_slice())
+                {
+                    self.tx.del(LgTable::Welcome, &index)?;
+                }
+            }
             self.tx.del(LgTable::Welcome, &welcome_key)?;
+        }
+        Ok(())
+    }
+
+    /// Delete the pending join rows of `p` that are 24 h old or older (a stale row must neither
+    /// block a new request nor satisfy a commit's join tie) and keep the queue counters.
+    fn drop_stale_join(
+        &self,
+        gid: &[u8; 32],
+        head: &mut super::rows::HeadRow,
+        p: &[u8; 32],
+    ) -> LgResult<()> {
+        for queue in [QUEUE_MEMBER, QUEUE_OUTSIDER] {
+            let row_key = key(gid, &[&[queue], p]);
+            let Some(bytes) = self.tx.get(LgTable::Join, &row_key)? else {
+                continue;
+            };
+            if super::check::join_expired(JoinRow::decode(&bytes)?.created_ms, self.now) {
+                self.tx.del(LgTable::Join, &row_key)?;
+                if queue == QUEUE_MEMBER {
+                    head.pending_member = head.pending_member.saturating_sub(1);
+                } else {
+                    head.pending_outsider = head.pending_outsider.saturating_sub(1);
+                }
+            }
         }
         Ok(())
     }

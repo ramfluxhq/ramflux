@@ -298,6 +298,30 @@ pub(crate) fn parse_key_package(
     }
 }
 
+/// The leaf signature key (the pseudonym `P` of a group joiner) of a TLS-encoded `MLSMessage`
+/// carrying a `KeyPackage`, read without verifying signatures or lifetime: the node host only needs
+/// the key to tie a join request to a commit's added pseudonyms, and only the adding member
+/// validates the `KeyPackage` (rule V). The message is parsed with the openmls types; the eight
+/// fixed bytes (MLS 1.0, `mls_key_package`, MLS 1.0, the ramflux suite) must match.
+///
+/// # Errors
+/// [`MlsError::TooLarge`] over the `KeyPackage` bound, [`MlsError::Mls`] for a malformed message,
+/// [`MlsError::PolicyRejected`] for another version, wire format, suite or key length.
+pub fn key_package_signature_key(bytes: &[u8]) -> Result<[u8; 32], MlsError> {
+    const FIXED: [u8; 8] = [0, 1, 0, 5, 0, 1, 0, 1];
+    if bytes.get(..FIXED.len()) != Some(&FIXED[..]) {
+        return Err(MlsError::PolicyRejected("not an MLS 1.0 KeyPackage message".to_owned()));
+    }
+    match parse_message(bytes, MAX_KEY_PACKAGE_BYTES)?.extract() {
+        MlsMessageBodyIn::KeyPackage(key_package) => {
+            key_package.unverified_credential().signature_key.as_slice().try_into().map_err(|_| {
+                MlsError::PolicyRejected("leaf signature key is not 32 bytes".to_owned())
+            })
+        }
+        _ => Err(MlsError::PolicyRejected("message is not a KeyPackage".to_owned())),
+    }
+}
+
 fn validate_key_package(
     key_package: KeyPackageIn,
     crypto: &CryptoHandle,

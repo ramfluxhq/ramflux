@@ -4546,6 +4546,7 @@ dependencies = [
  "postcard",
  "ramflux-core",
  "ramflux-crypto",
+ "ramflux-mls",
  "ramflux-protocol",
  "ramflux-test-support",
  "redb",

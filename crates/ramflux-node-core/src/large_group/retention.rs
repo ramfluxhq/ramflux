@@ -13,6 +13,7 @@ use ramflux_crypto::large_group::{EnvKind, Envelope};
 
 use super::check::{DAY_MS, POSTS_MAX, entry_expired, route_expired, welcome_expired};
 use super::host::{Cx, LargeGroupHost};
+use super::join::welcome_row_prefix;
 use super::key_file;
 use super::refusal::{LgRefusal, LgResult};
 use super::rows::{HeadRow, LogRow, QUEUE_MEMBER, QUEUE_OUTSIDER, RouteRow, WelcomeRow, key};
@@ -124,12 +125,15 @@ impl Cx<'_> {
     }
 
     fn sweep_welcomes(&self, gid: &[u8; 32]) -> LgResult<()> {
-        let prefix = key(gid, &[]);
+        let prefix = welcome_row_prefix(gid);
         for (row_key, value) in self.tx.scan(LgTable::Welcome, &prefix, &prefix, ROW_BATCH)? {
             let row = WelcomeRow::decode(&value)?;
             if welcome_expired(row.created_ms, row.drained_ms, self.now) {
-                self.blob_delete(gid, &row.blob_ref)?;
-                self.tx.del(LgTable::Welcome, &row_key)?;
+                let seq_bytes: [u8; 8] = row_key
+                    .get(prefix.len()..)
+                    .and_then(|tail| tail.try_into().ok())
+                    .ok_or(LgRefusal::Internal)?;
+                self.welcome_discard(gid, u64::from_be_bytes(seq_bytes))?;
             }
         }
         Ok(())

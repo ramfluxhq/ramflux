@@ -20,11 +20,11 @@ pub const SETTLE_REPLY_DELAY_MS: u64 = 30_000;
 pub const SKEW_MS: u64 = 30_000;
 /// Upper bound of the per-client per-epoch uniform draw `U(0, 60 s)`.
 pub const ROLL_U_MAX_MS: u64 = 60_000;
-const MIN_LEAVE_ROLL_GAP_MS: u64 = 10 * 60_000;
+/// Revoke rolls (admin removals and leaves) are at least this far apart: at most 48 a day.
+pub const REVOKE_ROLL_GAP_MS: u64 = 30 * 60_000;
 const HOUR_MS: u64 = 60 * 60_000;
 const DAY_MS: u64 = 24 * HOUR_MS;
 const DAILY_MIN_GAP_MS: u64 = 23 * HOUR_MS;
-const MAX_REVOKE_PER_HOUR: usize = 6;
 const MAX_SPENT_FULL_PER_DAY: usize = 2;
 const MAX_LEDGER_RECORDS: usize = 64;
 
@@ -108,8 +108,8 @@ pub struct RollRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RollRefusal {
     BadReferences,
-    LeaveRollTooSoon,
-    RevokeCapPerHour,
+    /// A revoke roll less than 30 minutes after the previous one.
+    RevokeTooSoon,
     DailyTooSoon,
     SpentFullCapPerDay,
 }
@@ -155,18 +155,8 @@ impl RollWindow {
                     .filter(|r| r.kind.is_revoke())
                     .map(|r| r.started_at_ms)
                     .max();
-                if candidate.kind == RollKind::RevokeLeave
-                    && last_revoke.is_some_and(|t| now.saturating_sub(t) < MIN_LEAVE_ROLL_GAP_MS)
-                {
-                    return Err(RollRefusal::LeaveRollTooSoon);
-                }
-                let in_hour = self
-                    .accepted
-                    .iter()
-                    .filter(|r| r.kind.is_revoke() && now.saturating_sub(r.started_at_ms) < HOUR_MS)
-                    .count();
-                if in_hour >= MAX_REVOKE_PER_HOUR {
-                    return Err(RollRefusal::RevokeCapPerHour);
+                if last_revoke.is_some_and(|t| now.saturating_sub(t) < REVOKE_ROLL_GAP_MS) {
+                    return Err(RollRefusal::RevokeTooSoon);
                 }
             }
             RollKind::Daily => {
@@ -261,4 +251,62 @@ pub fn election_order(
 pub fn election_delay_ms(position: usize) -> u64 {
     let window = u64::try_from(position / ELECT_WINDOW_SIZE).unwrap_or(u64::MAX);
     window.saturating_mul(ELECT_WINDOW_MS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn revoke(kind: RollKind, at: u64) -> RollRecord {
+        RollRecord { kind, started_at_ms: at, refs_valid: true }
+    }
+
+    #[test]
+    fn revoke_rolls_are_thirty_minutes_apart() {
+        let mut window = RollWindow::new();
+        assert_eq!(window.accept(revoke(RollKind::RevokeAdmin, 1_000)), Ok(()), "the first");
+        assert_eq!(
+            window.accept(revoke(RollKind::RevokeLeave, 1_000 + REVOKE_ROLL_GAP_MS - 1)),
+            Err(RollRefusal::RevokeTooSoon),
+            "a leave roll 30 min minus 1 ms later is refused"
+        );
+        assert_eq!(
+            window.accept(revoke(RollKind::RevokeAdmin, 1_000 + REVOKE_ROLL_GAP_MS)),
+            Ok(()),
+            "exactly 30 min later passes"
+        );
+        let mut now = 1_000 + REVOKE_ROLL_GAP_MS;
+        let mut accepted = 2_u32;
+        for _ in 0..100 {
+            now += REVOKE_ROLL_GAP_MS;
+            if now >= 1_000 + DAY_MS {
+                break;
+            }
+            window.accept(revoke(RollKind::RevokeAdmin, now)).expect("test: spaced roll passes");
+            accepted += 1;
+        }
+        assert!(accepted <= 48, "at most 48 revoke rolls in a day, got {accepted}");
+    }
+
+    #[test]
+    fn revoke_gap_does_not_touch_daily_and_spent_full() {
+        let mut window = RollWindow::new();
+        window.accept(revoke(RollKind::RevokeAdmin, 0)).expect("test: revoke");
+        assert_eq!(window.accept(revoke(RollKind::Daily, 1)), Ok(()), "daily ignores revokes");
+        assert_eq!(
+            window.accept(revoke(RollKind::Daily, 2)),
+            Err(RollRefusal::DailyTooSoon),
+            "daily still needs 23 h"
+        );
+        assert_eq!(window.accept(revoke(RollKind::SpentFull, 3)), Ok(()), "spent_full one");
+        assert_eq!(window.accept(revoke(RollKind::SpentFull, 4)), Ok(()), "spent_full two");
+        assert_eq!(
+            window.accept(revoke(RollKind::SpentFull, 5)),
+            Err(RollRefusal::SpentFullCapPerDay),
+            "spent_full is capped at 2 a day"
+        );
+        let mut bad = revoke(RollKind::RevokeLeave, 10 * DAY_MS);
+        bad.refs_valid = false;
+        assert_eq!(window.accept(bad), Err(RollRefusal::BadReferences), "bad references");
+    }
 }

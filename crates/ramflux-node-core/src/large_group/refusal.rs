@@ -92,6 +92,10 @@ pub enum LgRefusal {
         /// The first retained `log_seq`.
         floor_seq: u64,
     },
+    /// The token root key has evaluated 2^30 elements: no more tokens are issued (the root is
+    /// fixed in the beta; rotation is the post-beta card `TOKEN-ROOT-ROTATE`).
+    #[error("token_root_exhausted")]
+    TokenRootExhausted,
     /// A bounded host resource is full (routes, uploads, admin chain).
     #[error("limit")]
     Limit,
@@ -135,6 +139,7 @@ impl LgRefusal {
             Self::AlreadyJoined => "already_joined",
             Self::Quota => "quota",
             Self::Pruned { .. } => "pruned",
+            Self::TokenRootExhausted => "token_root_exhausted",
             Self::Limit => "limit",
             Self::BadRequest => "bad_request",
             Self::KeyFile => "key_file",
