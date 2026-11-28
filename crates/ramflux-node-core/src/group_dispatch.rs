@@ -22,8 +22,8 @@ use crate::large_group::host::{Authority, InviteSpec, LargeGroupHost};
 use crate::large_group::refusal::{LgRefusal, LgResult};
 use crate::large_group::route::{RouteMode, RouteRegistration};
 
-/// Longest route delete secret.
-const DEL_SECRET_MAX: usize = 64;
+/// Exact route delete secret length; the existing wire length prefix is retained.
+const DEL_SECRET_BYTES: usize = 32;
 /// Largest genesis a `create` carries (the host refuses more).
 const GENESIS_MAX: usize = 4_096;
 /// Chunk size of a blob upload (every chunk but the last).
@@ -168,7 +168,7 @@ fn ident(
         "route.delete" => {
             let mut dec = Dec::new(body);
             let rt: [u8; 16] = dec.fixed()?;
-            let secret = dec.var(DEL_SECRET_MAX)?;
+            let secret = dec.var(DEL_SECRET_BYTES)?;
             dec.finish()?;
             host.route_delete(store, now, gid, &rt, secret)?;
             Ok(Vec::new())

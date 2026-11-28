@@ -21,7 +21,7 @@ const SWEEP_BATCH: usize = 64;
 /// Calls one sweep tick makes at most (`SWEEP_BATCH` groups each).
 const SWEEP_CALLS_MAX: usize = 64;
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -65,6 +65,7 @@ pub(crate) fn start(
     config: &ramflux_node_core::NodeServiceConfig,
     router: Arc<RouterHandle>,
 ) -> anyhow::Result<()> {
+    let push = ramflux_node_core::load_node_push_config(std::env::args().skip(1))?;
     let state = ramflux_node_core::effective_redb_path(config);
     let dir = state
         .parent()
@@ -76,6 +77,7 @@ pub(crate) fn start(
     )
     .map_err(|refusal| anyhow::anyhow!("group host unavailable: {refusal}"))?;
     router.install_group_host(Arc::new(host))?;
+    crate::group_wakes::start(push, Arc::clone(&router))?;
     if let Err(error) = ramflux_node_core::spawn_service_worker("router-group-sweep", move |_| {
         while ramflux_node_core::service_shutdown_sleep(SWEEP_INTERVAL) {
             sweep_once(&router);

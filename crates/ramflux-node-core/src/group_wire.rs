@@ -24,7 +24,7 @@
 //! | `attach.delete` | member | `blob_ref[32], del_secret[32]` | empty |
 //! | `route.register` | member | `rt[16], var sealed, mention_key[32], mode u8, del_hash[32]` | empty |
 //! | `join` | both | `JoinRequest` (kind decides the session) | queue `u8` |
-//! | `route.delete` | ident | `rt[16], var del_secret` | empty |
+//! | `route.delete` | ident | `rt[16], var del_secret` (exactly 32 secret bytes) | empty |
 //! | `create.prepare` | ident (zero group) | empty | `prep_id[16], host_head_pk[32], token_root_pk[32]` |
 //! | `create` | ident (zero group) | `prep_id[16], var genesis, owner_sig[64]` | `group_id[32]` |
 //! | `tokens` | ident | `SignedReq` | `TokenReply` |

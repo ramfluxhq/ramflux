@@ -39,3 +39,11 @@ public_listen_addr = "0.0.0.0:443"
 [signaling]
 turn_udp_addr = "0.0.0.0:3478"
 turn_tcp_addr = "0.0.0.0:3478"
+
+# Group wakes use the existing central push handoff when this section is enabled.
+# Federation and router must run as the same uid and share these paths. The state file is
+# mode 0600 and the handoff socket's parent directory is mode 0700.
+# [push_central]
+# enabled = true
+# state_file = "/var/lib/ramflux/push_central.json"
+# handoff_socket = "/var/lib/ramflux/push/handoff.sock"

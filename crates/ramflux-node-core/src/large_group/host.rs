@@ -119,6 +119,7 @@ pub struct LargeGroupHost {
     pub(super) config: HostConfig,
     keys: Mutex<HashMap<[u8; 32], Arc<HostKeySet>>>,
     buckets: Mutex<HashMap<[u8; 32], JoinBucket>>,
+    pub(super) wakes: Mutex<super::wakes::WakeQueue>,
 }
 
 /// One operation in flight: the open write transaction and the host time.
@@ -139,6 +140,7 @@ impl LargeGroupHost {
             config,
             keys: Mutex::new(HashMap::new()),
             buckets: Mutex::new(HashMap::new()),
+            wakes: Mutex::new(super::wakes::WakeQueue::default()),
         })
     }
 

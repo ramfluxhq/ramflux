@@ -94,7 +94,13 @@ impl LargeGroupHost {
             return Err(LgRefusal::SessionScope);
         }
         self.settle(store, now, session_gid)?;
-        self.run(store, now, |cx| cx.submit(&envelope))
+        let receipt = self.run(store, now, |cx| cx.submit(&envelope))?;
+        // `run` returns only after commit and writer release. Refused entries never reach
+        // matching, and a dropped wake cannot change the successful append receipt.
+        if envelope.header.kind == EnvKind::Post {
+            self.enqueue_post_wakes(store, now, &envelope);
+        }
+        Ok(receipt)
     }
 }
 

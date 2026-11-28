@@ -5,7 +5,7 @@
 //! fresh 16-byte tag `rt`, the roster's `mention_key`, a push token sealed to this node, a mode
 //! and `del_hash = BLAKE3(del_secret)`. A route row has no account, device or pseudonym, and its
 //! registration time is only the UTC day (`registered_day`); a route not renewed within 7 to 8
-//! days is dropped. Wake queueing (jitter, coalescing, the centre call) is not here.
+//! days is dropped. Wake queueing lives in `wakes`; the router performs the centre call.
 
 use super::check::{DAY_MS, route_expired};
 use super::host::LargeGroupHost;
@@ -63,6 +63,8 @@ pub struct WakeTarget {
     pub sealed_token: Vec<u8>,
     /// The route's mode.
     pub mode: u8,
+    /// Digest of the complete stored row, for a read-only check immediately before handoff.
+    pub(super) snapshot: [u8; 32],
 }
 
 impl LargeGroupHost {
@@ -105,7 +107,7 @@ impl LargeGroupHost {
     /// `route.delete{rt, del_secret}` (ident session; no token, no pseudonym).
     ///
     /// # Errors
-    /// `not_found`, `unauthorized` (wrong secret).
+    /// `not_found`, `bad_request` (secret not 32 bytes), `unauthorized` (wrong secret).
     pub fn route_delete(
         &self,
         store: &RouterRedbStore,
@@ -114,6 +116,9 @@ impl LargeGroupHost {
         rt: &[u8; 16],
         del_secret: &[u8],
     ) -> LgResult<()> {
+        if del_secret.len() != 32 {
+            return Err(LgRefusal::BadRequest);
+        }
         self.run(store, now, |cx| {
             let mut head = cx.head(gid)?;
             let route_key = key(gid, &[rt]);
@@ -134,7 +139,7 @@ impl LargeGroupHost {
     /// queues the wakes.
     ///
     /// # Errors
-    /// Store failures.
+    /// Store failures, or `bad_request` when there are not exactly eight tags.
     #[allow(clippy::unused_self, reason = "uniform host API")]
     pub fn wake_targets(
         &self,
@@ -144,6 +149,9 @@ impl LargeGroupHost {
         post_id: &[u8; 16],
         tags: &[[u8; 16]],
     ) -> LgResult<Vec<WakeTarget>> {
+        if tags.len() != ramflux_crypto::large_group::TAG_SLOTS {
+            return Err(LgRefusal::BadRequest);
+        }
         let today = now / DAY_MS;
         store.lg_read(|view| {
             let prefix = key(gid, &[]);
@@ -165,11 +173,36 @@ impl LargeGroupHost {
                     tags.contains(&tag)
                 };
                 if row.mode == MODE_ALL || (row.mode == MODE_MENTIONS_REPLIES && mentioned) {
-                    out.push(WakeTarget { rt, sealed_token: row.sealed_token, mode: row.mode });
+                    out.push(WakeTarget {
+                        rt,
+                        sealed_token: row.sealed_token,
+                        mode: row.mode,
+                        snapshot: *blake3::hash(&value).as_bytes(),
+                    });
                 }
             }
             Ok(Ok(out))
         })?
+    }
+
+    /// A deleted, expired or replaced route cannot receive an already queued wake. This is a
+    /// read-only snapshot check; handoff answers never mutate route registrations.
+    pub(super) fn wake_target_live(
+        store: &RouterRedbStore,
+        now: u64,
+        gid: &[u8; 32],
+        target: &WakeTarget,
+    ) -> LgResult<bool> {
+        let Some(value) =
+            store.lg_read(|view| view.get(LgTable::Route, &key(gid, &[&target.rt])))?
+        else {
+            return Ok(false);
+        };
+        if !constant_time_eq(blake3::hash(&value).as_bytes(), &target.snapshot) {
+            return Ok(false);
+        }
+        let row = RouteRow::decode(&value)?;
+        Ok(!route_expired(row.registered_day, now / DAY_MS))
     }
 }
 

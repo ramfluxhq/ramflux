@@ -14,6 +14,7 @@ mod durable_mode;
 mod entry_admission_tests;
 mod forward_http;
 mod group_routes;
+mod group_wakes;
 mod handlers;
 mod home_migration;
 mod identity_authority;

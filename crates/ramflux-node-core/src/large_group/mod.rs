@@ -20,3 +20,4 @@ pub mod retention;
 pub mod roll;
 pub mod route;
 pub mod rows;
+pub mod wakes;
