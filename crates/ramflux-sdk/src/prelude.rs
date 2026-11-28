@@ -47,19 +47,14 @@ pub(crate) use tokio::sync::{Mutex, mpsc, watch};
 pub(crate) use tokio::task::LocalSet;
 
 pub(crate) use crate::bus::daemon::{
-    LocalBusDispatchResult, dispatch_local_bus_request, local_bus_account_manifest_path,
-    read_local_bus_account_manifest, restore_local_bus_account_offline,
-    restore_local_bus_account_with_passphrase, set_owner_only_dir_permissions,
-    set_owner_only_file_permissions, write_local_bus_account_manifest,
+    LocalBusDispatchResult, dispatch_local_bus_request, set_owner_only_dir_permissions,
+    set_owner_only_file_permissions,
 };
 pub(crate) use crate::bus::dispatch::*;
 pub(crate) use crate::bus::io::{
     local_bus_error, local_bus_error_code, local_bus_event, local_bus_response, local_bus_trace,
     read_local_bus_frame, request_account_id, write_local_bus_frame,
 };
-pub(crate) use crate::bus::protocol::LocalBusPersistedAccount;
-#[cfg(test)]
-pub(crate) use crate::bus::protocol::default_device_capability_scope;
 pub(crate) use crate::bus::state::{
     LocalBusAccountState, LocalBusConnectionState, LocalBusDaemonState, LocalBusSubscriber,
 };

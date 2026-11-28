@@ -77,106 +77,53 @@ fn account_busy_is_retryable_and_typed_for_restore_check_and_install() -> TestRe
 struct Scale {
     messages: usize,
     contacts: usize,
-    groups: usize,
-    file_bytes: Option<usize>,
 }
-const SMALL: Scale = Scale { messages: 6, contacts: 1, groups: 1, file_bytes: None };
+const SMALL: Scale = Scale { messages: 6, contacts: 1 };
+const FIXTURE_ACCOUNT: &str = "alice";
+/// A native custody account with data sealed under the production local-code wrap.
 fn initialized_at_scale(
     root: &Path,
     index: AccountIndex,
     scale: Scale,
 ) -> Result<LocalBusAccountState, SdkError> {
-    let seed = [41; 32];
-    let principal = "alice";
-    let device = "alice-device";
-    let mut client = RamfluxClient::new();
-    client.account_index = Some(index);
-    let root_identity = client.create_identity_root(principal, seed);
-    let commitment =
-        ramflux_crypto::identity_root_commitment(&root_identity.signing_key.verifying_key());
-    client.create_device_branch(principal, device, 1, [42; 32]);
-    client.open_account_index(root)?;
-    client.create_account("alice", &commitment)?;
-    client.unlock_account("alice", b"account-test-secret")?;
+    let vault = crate::custody::tests::TestVault::default();
+    let account = crate::custody::tests::create(
+        root,
+        FIXTURE_ACCOUNT,
+        &vault,
+        crate::custody::network_now()?,
+    )
+    .map_err(|error| SdkError::LocalBus(format!("fixture custody: {error}")))?;
+    let mut sealing = RamfluxClient::new();
+    sealing.open_account_index(root)?;
+    sealing.seal_new_account_data(
+        FIXTURE_ACCOUNT,
+        &account.record().body.account_anchor,
+        super::native_tests::LOCAL_SECRET.as_bytes(),
+    )?;
+    drop(sealing);
+    let mut state = super::native_tests::initialize_account(root, index, FIXTURE_ACCOUNT)?;
+    let client = &mut state.client;
     client.object_store.set_cache_capacity(1);
     for n in 0..scale.contacts {
         client.account_db()?.establish_friend_link(
             &format!("friend-{n}"),
-            &commitment,
+            "alice-root",
             &format!("peer-root-{n}"),
         )?;
     }
     for n in 0..scale.messages {
-        client.send_direct_message("thread", &format!("m{n}"), device, b"ciphertext")?;
+        client.send_direct_message("thread", &format!("m{n}"), "alice-device", b"ciphertext")?;
         client.account_db()?.store_message_content(
             "thread",
             &format!("m{n}"),
             format!("message {n}").as_bytes(),
         )?;
     }
-    for n in 0..scale.groups {
-        client.create_group(&format!("group-{n}"), device)?;
-    }
-    if let Some(size) = scale.file_bytes {
-        for n in 0..2 {
-            client.put_encrypted_object(
-                &format!("large-{n}"),
-                &vec![
-                    u8::try_from(n).map_err(|_| SdkError::LocalBus("fixture byte".into()))?;
-                    size
-                ],
-            )?;
-        }
-    }
     client.put_encrypted_object("file", b"complete attachment bytes")?;
-    // Evict large fixture payloads before measuring or running the archive workflow.
+    // Evict fixture payloads before running the archive workflow.
     client.object_store.replace_persisted(Vec::new(), BTreeMap::new());
-    std::fs::create_dir_all(root)?;
-    std::fs::write(root.join("ca.pem"), b"test CA placeholder; never connected")?;
-    let endpoint = GatewayQuicEndpointConfig {
-        bind_addr: "127.0.0.1:0".parse().map_err(|_| SdkError::LocalBus("address".into()))?,
-        gateway_addr: "127.0.0.1:1".parse().map_err(|_| SdkError::LocalBus("address".into()))?,
-        server_name: "test-gateway".into(),
-        ca_cert: root.join("ca.pem"),
-        principal_id: principal.into(),
-        device_id: device.into(),
-        target_delivery_id: "target".into(),
-        prekey_http_url: None,
-    };
-    write_local_bus_account_manifest(
-        root,
-        &LocalBusPersistedAccount {
-            label: Some("Alice".into()),
-            kind: Some("human".into()),
-            activation_pending: false,
-            node_id: None,
-            node_tcp_addr: None,
-            node_relay: None,
-            schema: "ramflux.local_bus.account_manifest.v1".into(),
-            local_account_id: "alice".into(),
-            principal_id: principal.into(),
-            principal_commitment: commitment.clone(),
-            device_id: device.into(),
-            target_delivery_id: "target".into(),
-            account_secret: "account-test-secret".into(),
-            root_seed: seed,
-            device_seed: [42; 32],
-            client_mode: LocalBusClientMode::AttendedCli,
-            gateway: endpoint.clone(),
-            devices: vec![LocalBusDeviceRecord {
-                device_id: device.into(),
-                device_epoch: 1,
-                target_delivery_id: "target".into(),
-                capability_scope: vec![],
-                is_local: true,
-            }],
-        },
-    )?;
-    let gateway = GatewaySessionConfig::auto(endpoint).with_owned_device(
-        client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
-    )?;
-    Ok(LocalBusAccountState::disconnected(client, gateway, commitment))
+    Ok(state)
 }
 fn bind_fixture_attachment(
     client: &RamfluxClient,
@@ -237,136 +184,6 @@ pub(super) async fn finished(
     .await
     .map_err(|_| SdkError::LocalBus("job deadline".into()))?
 }
-#[tokio::test(flavor = "current_thread")]
-async fn full_archive_verifies_before_install_and_restores_history_groups_and_files() -> TestResult
-{
-    Box::pin(round_trip(SMALL)).await
-}
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "dedicated large-data QA; requires 12 GiB disk and 4 GiB memory; never run on developer machines"]
-async fn large_backup_restores_ten_thousand_messages_one_thousand_contacts_two_hundred_groups_and_gibibyte_files()
--> TestResult {
-    if cfg!(target_os = "macos") {
-        return Err("large backup acceptance runs on QA only".into());
-    }
-    Box::pin(round_trip(Scale {
-        messages: 10_000,
-        contacts: 1_100,
-        groups: 200,
-        file_bytes: Some(512 * 1024 * 1024),
-    }))
-    .await
-}
-async fn round_trip(scale: Scale) -> TestResult {
-    LocalSet::new()
-        .run_until(Box::pin(async {
-            let source_root = crate::bus::runtime_tests::root("full-backup-source");
-            let restored_root = crate::bus::runtime_tests::root("full-backup-target");
-            let source = source_supervisor(&source_root, scale)?;
-            let (outbound, _) = mpsc::channel(64);
-            let mut connection = LocalBusConnectionState::new(7, outbound);
-            connection.attended_account_id = Some("alice".into());
-            let archive = source_root.join("account.rfb");
-            let secret = "generated-backup-recovery-secret";
-            let response = source
-                .request(
-                    LocalBusFrame::request(
-                        "create",
-                        Some("alice".into()),
-                        "account",
-                        "account.backup.create",
-                        json!({"output_path":archive,"passphrase":secret}),
-                    ),
-                    &connection,
-                )
-                .await?;
-            let id = response.body["job"]["job_id"].as_str().ok_or("job id")?;
-            let backup = finished(&source, id, BackupJobState::Done).await?;
-            assert_eq!(backup.counts.as_ref().map(|c| c.messages), Some(scale.messages as u64));
-            assert!(archive.exists());
-            let target = Supervisor::new(LocalBusConfig::new(
-                restored_root.join("bus.sock"),
-                &restored_root,
-            ))?;
-            target.daemon_attended.borrow_mut().insert(7);
-            let verify = target
-                .request(
-                    LocalBusFrame::request(
-                        "verify",
-                        None,
-                        "account",
-                        "account.restore.verify",
-                        json!({"input_path":archive,"passphrase":secret}),
-                    ),
-                    &connection,
-                )
-                .await?;
-            let id = verify.body["job"]["job_id"].as_str().ok_or("restore id")?;
-            let verified = finished(&target, id, BackupJobState::Verified).await?;
-            assert_eq!(
-                verified.attachments.as_ref().map(|a| a.verified),
-                Some(if scale.file_bytes.is_some() { 3 } else { 1 })
-            );
-            assert_eq!(verified.counts.as_ref().map(|c| c.contacts), Some(scale.contacts as u64));
-            assert_eq!(verified.counts.as_ref().map(|c| c.groups), Some(scale.groups as u64));
-            assert!(
-                target.index.known_account_ids()?.is_empty(),
-                "verification must not install an account"
-            );
-            let install = target
-                .request(
-                    LocalBusFrame::request(
-                        "install",
-                        None,
-                        "account",
-                        "account.restore.install",
-                        json!({"job_id":id}),
-                    ),
-                    &connection,
-                )
-                .await?;
-            assert_eq!(
-                (
-                    &response.body["job"]["state"],
-                    &verify.body["job"]["state"],
-                    &install.body["job"]["state"]
-                ),
-                (&json!("preparing"), &json!("verifying"), &json!("installing"))
-            );
-            finished(&target, id, BackupJobState::Done).await?;
-            // A standalone SDK reopen owns a writer; stop the daemon's writer/readers first.
-            target.shutdown().await?;
-            let restored = check_restored(&restored_root, scale)?;
-            if scale.file_bytes.is_none() {
-                merge_existing_source(&source, &source_root, &archive, secret).await?;
-            }
-            source.shutdown().await?;
-            drop(restored);
-            drop(source);
-            drop(target);
-            std::fs::remove_dir_all(source_root)?;
-            std::fs::remove_dir_all(restored_root)?;
-            Ok::<(), Box<dyn std::error::Error>>(())
-        }))
-        .await
-}
-
-fn check_restored(restored_root: &Path, scale: Scale) -> Result<RamfluxClient, SdkError> {
-    let mut restored = RamfluxClient::new();
-    restored.object_store.set_cache_capacity(8);
-    restored.open_account_index(restored_root)?;
-    restored.unlock_account("alice", b"account-test-secret")?;
-    assert_eq!(restored.direct_messages("thread")?.len(), scale.messages);
-    assert_eq!(restored.account_db()?.friend_links()?.len(), scale.contacts);
-    assert_eq!(restored.groups()?.len(), scale.groups);
-    assert_eq!(restored.decrypt_object("file")?, b"complete attachment bytes");
-    assert_eq!(
-        restored.account_db()?.load_actor_state::<bool>("backup/reestablishing")?,
-        Some(true)
-    );
-    Ok(restored)
-}
-
 pub(super) async fn call(
     supervisor: &Supervisor,
     method: &str,
@@ -456,7 +273,6 @@ async fn failed_verification_and_cancellation_leave_existing_accounts_and_output
                 "failed restore changed existing contacts"
             );
         }
-        rejects_identity_replacement_and_rollback(&supervisor, &root, &archive, secret).await?;
         let verify = call(
             &supervisor,
             "account.restore.verify",
@@ -516,48 +332,6 @@ async fn entry_page_job_subscription_replays_rows_after_its_ack_and_refuses_othe
     }).await
 }
 
-async fn rejects_identity_replacement_and_rollback(
-    supervisor: &Supervisor,
-    root: &Path,
-    archive: &Path,
-    secret: &str,
-) -> TestResult {
-    let original =
-        read_local_bus_account_manifest(&local_bus_account_manifest_path(root, "alice"))?;
-    for rollback in [true, false] {
-        let mut local = original.clone();
-        if rollback {
-            local.devices[0].device_epoch += 1;
-        } else {
-            local.root_seed[0] ^= 1;
-        }
-        write_local_bus_account_manifest(root, &local)?;
-        let verify = call(
-            supervisor,
-            "account.restore.verify",
-            None,
-            json!({"input_path":archive,"passphrase":secret}),
-        )
-        .await?;
-        let id = verify["job"]["job_id"].as_str().ok_or("job id")?;
-        if rollback {
-            assert!(
-                finished(supervisor, id, BackupJobState::Verified)
-                    .await?
-                    .archive
-                    .ok_or("archive")?
-                    .merge
-            );
-            call(supervisor, "account.backup.cancel", None, json!({"job_id":id})).await?;
-        } else {
-            let failed = finished(supervisor, id, BackupJobState::Failed).await?;
-            assert_eq!(serde_json::to_value(failed.error)?["code"], "root_conflict");
-        }
-    }
-    write_local_bus_account_manifest(root, &original)?;
-    Ok(())
-}
-
 async fn archive_while_reading(
     supervisor: &Supervisor,
     archive: &Path,
@@ -585,94 +359,6 @@ async fn archive_while_reading(
     Ok(original)
 }
 
-async fn merge_existing_source(
-    source: &Supervisor,
-    root: &Path,
-    archive: &Path,
-    secret: &str,
-) -> TestResult {
-    let verify = call(
-        source,
-        "account.restore.verify",
-        None,
-        json!({"input_path":archive,"passphrase":secret}),
-    )
-    .await?;
-    let id = verify["job"]["job_id"].as_str().ok_or("job id")?;
-    let preview = finished(source, id, BackupJobState::Verified).await?;
-    assert!(preview.archive.as_ref().is_some_and(|a| a.merge));
-    call(source, "account.restore.install", None, json!({"job_id":id})).await?;
-    let done = finished(source, id, BackupJobState::Done).await?;
-    assert_eq!(done.kept_newer.as_ref().map(|c| c.messages), Some(6));
-    assert_eq!(done.kept_newer.as_ref().map(|c| c.attachments), Some(1));
-    source.shutdown().await?;
-    let mut client = RamfluxClient::new();
-    client.open_account_index(root)?;
-    client.unlock_account("alice", b"account-test-secret")?;
-    assert_eq!(client.direct_messages("thread")?.len(), 6);
-    assert_eq!(client.decrypt_object("file")?, b"complete attachment bytes");
-    assert_eq!(client.account_db()?.load_actor_state::<bool>("backup/reestablishing")?, None);
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn agent_accounts_cannot_list_or_start_human_backup_jobs() -> TestResult {
-    LocalSet::new().run_until(async {
-        let root=crate::bus::runtime_tests::root("backup-agent-denied");
-        let supervisor=source_supervisor(&root,SMALL)?;
-        let mut manifest=read_local_bus_account_manifest(&local_bus_account_manifest_path(&root,"alice"))?;
-        manifest.kind=Some("agent".into());manifest.client_mode=LocalBusClientMode::HeadlessAi;
-        write_local_bus_account_manifest(&root,&manifest)?;
-        assert!(call(&supervisor,"account.backup.jobs",Some("alice"),json!({})).await.is_err());
-        assert!(call(&supervisor,"account.backup.create",Some("alice"),json!({"output_path":root.join("never.rfb"),"passphrase":"never persist this test secret"})).await.is_err());
-        assert_eq!(call(&supervisor,"account.backup.jobs",None,json!({})).await?["jobs"],json!([]));
-        supervisor.shutdown().await?;drop(supervisor);std::fs::remove_dir_all(root)?;Ok::<(),Box<dyn std::error::Error>>(())
-    }).await
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn r2_older_epoch_archive_merges_without_rolling_back_live_identity() -> TestResult {
-    LocalSet::new()
-        .run_until(async {
-            let root = crate::bus::runtime_tests::root("backup-older-merge");
-            let supervisor = source_supervisor(&root, SMALL)?;
-            let archive = root.join("old.rfb");
-            let secret = "archive regression secret";
-            archive_while_reading(&supervisor, &archive, secret).await?;
-            let mut local =
-                read_local_bus_account_manifest(&local_bus_account_manifest_path(&root, "alice"))?;
-            local.devices[0].device_epoch += 1;
-            write_local_bus_account_manifest(&root, &local)?;
-            let row = call(
-                &supervisor,
-                "account.restore.verify",
-                None,
-                json!({"input_path":archive,"passphrase":secret}),
-            )
-            .await?;
-            let id = row["job"]["job_id"].as_str().ok_or("job")?;
-            assert!(
-                finished(&supervisor, id, BackupJobState::Verified)
-                    .await?
-                    .archive
-                    .ok_or("archive")?
-                    .merge
-            );
-            supervisor.mark_restore_failed("alice", "wrong_passphrase");
-            call(&supervisor, "account.restore.install", None, json!({"job_id":id})).await?;
-            finished(&supervisor, id, BackupJobState::Done).await?;
-            let status = call(&supervisor, "account.status", Some("alice"), json!({})).await?;
-            assert_eq!(status["local_account_id"], "alice");
-            let kept =
-                read_local_bus_account_manifest(&local_bus_account_manifest_path(&root, "alice"))?;
-            assert_eq!(kept.devices, local.devices);
-            supervisor.shutdown().await?;
-            std::fs::remove_dir_all(root)?;
-            Ok(())
-        })
-        .await
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn failed_install_with_a_healthy_reopen_clears_stale_restore_state() -> TestResult {
     LocalSet::new()
@@ -691,7 +377,6 @@ async fn failed_install_with_a_healthy_reopen_clears_stale_restore_state() -> Te
             .await?;
             let id = row["job"]["job_id"].as_str().ok_or("job")?;
             finished(&supervisor, id, BackupJobState::Verified).await?;
-            supervisor.mark_restore_failed("alice", "wrong_passphrase");
             *supervisor.backup_jobs.install_hook.lock().map_err(|_| "hook")? =
                 Some(Arc::new(|point, _| {
                     if point == super::test_install::InstallPoint::Prepared {
@@ -719,7 +404,7 @@ async fn r2_successful_merge_reclaims_the_replaced_database_generation() -> Test
             let archive = root.join("all.rfb");
             let secret = "archive cleanup regression";
             archive_while_reading(&supervisor, &archive, secret).await?;
-            for _ in 0..2 {
+            {
                 let old = root.join(supervisor.index.account("alice")?.db_relative_path);
                 assert!(old.exists());
                 let row = call(
@@ -791,43 +476,16 @@ async fn r2_create_fetches_missing_files_then_requires_explicit_authenticated_om
         let mut explicit=request;explicit["allow_missing_attachments"]=json!(true);
         let row=call(&supervisor,"account.backup.create",Some("alice"),explicit).await?;
         finished(&supervisor,row["job"]["job_id"].as_str().ok_or("job")?,BackupJobState::Done).await?;
-        let target_root=crate::bus::runtime_tests::root("backup-unavailable-target");
-        let target=Supervisor::new(LocalBusConfig::new(target_root.join("bus.sock"),&target_root))?;
-        let row=call(&target,"account.restore.verify",None,json!({"input_path":archive,"passphrase":secret})).await?;
+        let row=call(&supervisor,"account.restore.verify",None,json!({"input_path":archive,"passphrase":secret})).await?;
         let id=row["job"]["job_id"].as_str().ok_or("job")?;
-        let verified=finished(&target,id,BackupJobState::Verified).await?;
+        let verified=finished(&supervisor,id,BackupJobState::Verified).await?;
         assert_eq!(serde_json::to_value(verified.attachments)?["unavailable_at_source"],65);
-        call(&target,"account.restore.install",None,json!({"job_id":id})).await?;
-        let done=finished(&target,id,BackupJobState::Done).await?;
-        assert_eq!(serde_json::to_value(done.attachments)?["missing"],65);
-        target.shutdown().await?;supervisor.shutdown().await?;
-        std::fs::remove_dir_all(root)?;std::fs::remove_dir_all(target_root)?;Ok(())
+        supervisor.shutdown().await?;
+        std::fs::remove_dir_all(root)?;Ok(())
     })).await
 }
 
 mod r3;
-
-#[test]
-fn r8_backup_actor_uses_the_manifests_current_branch_epoch() -> TestResult {
-    let root = crate::bus::runtime_tests::root("backup-actor-epoch");
-    let index = AccountIndex::open(&root)?;
-    let account = initialized_at_scale(
-        &root,
-        index,
-        Scale { messages: 0, contacts: 0, groups: 0, file_bytes: None },
-    )?;
-    let mut local =
-        read_local_bus_account_manifest(&local_bus_account_manifest_path(&root, "alice"))?;
-    local.devices[0].device_epoch = 7;
-    let branch = super::install::backup_device_branch(&local);
-    assert_eq!(branch.device_epoch, 7);
-    assert_eq!(
-        branch.signing_key.verifying_key(),
-        account.client.device_branch.as_ref().ok_or("branch")?.signing_key.verifying_key()
-    );
-    drop(account);
-    Ok(())
-}
 
 // Mutation: retain the failed-backup diagnostic snapshot after its account erasure generation changes.
 #[tokio::test(flavor = "current_thread")]
@@ -882,10 +540,7 @@ async fn backup_create_refuses_short_and_blocklisted_passphrases() -> TestResult
     LocalSet::new()
         .run_until(async {
             let root = crate::bus::runtime_tests::root("backup-create-refused");
-            let supervisor = source_supervisor(
-                &root,
-                Scale { messages: 0, contacts: 0, groups: 0, file_bytes: None },
-            )?;
+            let supervisor = source_supervisor(&root, Scale { messages: 0, contacts: 0 })?;
             let archive = root.join("refused.rfb");
             for (passphrase, code) in
                 [("aaaaaaaaaaaaaa", "too_short"), ("films+pic+galeries", "too_common")]

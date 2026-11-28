@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Encrypted archive payload framing; recovery secrets never enter a plaintext staging file.
-use crate::{SdkError, bus::protocol::LocalBusPersistedAccount};
+use crate::SdkError;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -22,11 +22,6 @@ pub(super) struct Metadata {
 impl Drop for Metadata {
     fn drop(&mut self) {
         self.database_key.zeroize();
-        if let Identity::Legacy { manifest } = &mut self.identity {
-            manifest.root_seed.zeroize();
-            manifest.device_seed.zeroize();
-            manifest.account_secret.zeroize();
-        }
     }
 }
 impl Metadata {
@@ -39,57 +34,24 @@ impl Metadata {
 #[serde(untagged, deny_unknown_fields)]
 pub(in crate::bus) enum Identity {
     Native { native: Box<super::native::DataIdentity> },
-    Legacy { manifest: Box<LocalBusPersistedAccount> },
 }
 impl Identity {
     pub fn account_id(&self) -> &str {
         match self {
-            Self::Legacy { manifest } => &manifest.local_account_id,
             Self::Native { native } => &native.local_account_id,
         }
     }
-    pub fn label(&self) -> Option<String> {
+    pub fn label(&self) -> String {
         match self {
-            Self::Legacy { manifest } => manifest.label.clone(),
             Self::Native { native } => {
-                Some(native.authority.publication.record.body.profile.display_name.clone())
+                native.authority.publication.record.body.profile.display_name.clone()
             }
         }
     }
-    pub fn legacy(&self) -> Result<&LocalBusPersistedAccount, SdkError> {
-        match self {
-            Self::Legacy { manifest } => Ok(manifest),
-            Self::Native { .. } => Err(SdkError::CustodyModeDowngrade),
-        }
-    }
-    pub fn legacy_mut(&mut self) -> Result<&mut LocalBusPersistedAccount, SdkError> {
-        match self {
-            Self::Legacy { manifest } => Ok(manifest),
-            Self::Native { .. } => Err(SdkError::CustodyModeDowngrade),
-        }
-    }
     fn validate(&self, account: &str) -> Result<(), SdkError> {
-        if let Self::Native { native } = self {
-            return native.validate(account);
+        match self {
+            Self::Native { native } => native.validate(account),
         }
-        let manifest = self.legacy()?;
-        if manifest.local_account_id != account
-            || manifest.local_account_id.is_empty()
-            || (Path::new(&manifest.local_account_id).components().count() != 1
-                || Path::new(&manifest.local_account_id)
-                    .components()
-                    .any(|part| !matches!(part, std::path::Component::Normal(_))))
-            || manifest.local_account_id == ".."
-        {
-            return Err(SdkError::LocalBus("invalid archive account".into()));
-        }
-        let root = ramflux_crypto::public_key_base64url_from_seed(&manifest.root_seed);
-        if crate::prekey::identity_root_public_key_commitment(&root)?
-            != manifest.principal_commitment
-        {
-            return Err(SdkError::LocalBus("archive root commitment mismatch".into()));
-        }
-        Ok(())
     }
 }
 

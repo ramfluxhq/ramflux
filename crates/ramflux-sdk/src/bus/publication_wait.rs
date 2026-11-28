@@ -149,7 +149,7 @@ fn ordinary(method: &str) -> bool {
     {
         return false;
     }
-    method != "account.unlock" && method != "account.backup.import"
+    method != "account.unlock"
 }
 
 fn publication_pending(error: &SdkError) -> bool {

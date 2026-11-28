@@ -35,25 +35,6 @@ pub(crate) fn node_error(message: &str) -> SdkError {
     SdkError::LocalBus(message.to_owned())
 }
 
-pub(crate) async fn profile_relay_options(
-    id: &str,
-    relay: &NodeRelay,
-    ca: &Path,
-    principal: &str,
-) -> Result<RelayTransferOptions, SdkError> {
-    Ok(RelayTransferOptions {
-        relay_endpoint: format!("quic://{}", relay.quic_addr),
-
-        interrupt_after_chunks: None,
-        relay_quic_peer_addr: Some(resolve_node_addr(&relay.quic_addr).await?.to_string()),
-        relay_quic_server_name: Some(relay.server_name.clone()),
-        relay_quic_ca_cert: Some(ca.to_path_buf()),
-        relay_owner_home_node_id: Some(id.to_owned()),
-        relay_owner_principal_id: Some(principal.to_owned()),
-        relay_audience_node_id: Some(id.to_owned()),
-    })
-}
-
 #[cfg(test)]
 mod tests;
 

@@ -112,27 +112,10 @@ fn disabled_builtin_remains_disabled_after_restart_and_requires_pin() -> Result<
     Ok(())
 }
 
-fn manifest() -> Result<LocalBusPersistedAccount, SdkError> {
+fn gateway() -> Result<GatewayQuicEndpointConfig, SdkError> {
     Ok(serde_json::from_value(serde_json::json!({
-        "schema":"ramflux.local_bus.account_manifest.v1", "node_id":"node.example.com",
-        "local_account_id":"bound", "principal_id":"principal", "principal_commitment":"commitment", "device_id":"device", "target_delivery_id":"target", "account_secret":"test secret", "root_seed":vec![1;32], "device_seed":vec![2;32], "client_mode":"headless_ai",
-        "gateway":{"bind_addr":"0.0.0.0:0", "gateway_addr":"127.0.0.1:1", "server_name":"override", "ca_cert":"override.pem", "principal_id":"principal", "device_id":"device", "target_delivery_id":"target", "prekey_http_url":null}
+        "bind_addr":"0.0.0.0:0", "gateway_addr":"127.0.0.1:1", "server_name":"override", "ca_cert":"override.pem", "principal_id":"principal", "device_id":"device", "target_delivery_id":"target", "prekey_http_url":null
     }))?)
-}
-
-#[test]
-fn node_removal_is_refused_for_a_closed_bound_account() -> Result<(), SdkError> {
-    let root = TestRoot::new()?;
-    let manifest = manifest()?;
-    write_local_bus_account_manifest(&root.0, &manifest)?;
-    assert!(
-        crate::bus::dispatch::node::refuse_bound_node_removal(&root.0, "node.example.com").is_err()
-    );
-    crate::bus::dispatch::node::refuse_bound_node_removal(&root.0, "other.example.com")?;
-    let backup = serde_json::to_value(manifest)?;
-    assert!(backup.get("enabled").is_none());
-    assert!(backup.get("default_node_id").is_none());
-    Ok(())
 }
 
 #[test]
@@ -151,7 +134,7 @@ fn profile_endpoints_take_priority_over_environment_and_development_options()
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let profile = NodeProfile::from_record(record(1)?, 1500);
-        let endpoint = profile.gateway_config(&root.0, manifest()?.gateway).await?;
+        let endpoint = profile.gateway_config(&root.0, gateway()?).await?;
         assert_eq!(endpoint.gateway_addr.to_string(), profile.gateway.quic_addr);
         assert_eq!(endpoint.server_name, profile.gateway.server_name);
         assert_eq!(std::fs::read_to_string(&endpoint.ca_cert)?, profile.ca_cert_pem);
@@ -239,31 +222,6 @@ fn loading_saved_discovery_urls_persists_origins_without_changing_pins() -> Resu
     assert_eq!(persisted.profiles["node.example.com"].discovery_url, "https://node.example.com");
     assert!(super::discovery_origin("https://user:password@node.example.com").is_err());
     assert!(super::discovery_origin("file:///tmp/node").is_err());
-    Ok(())
-}
-
-#[test]
-fn bound_node_probe_does_not_open_a_replacement_account_session() -> Result<(), SdkError> {
-    let root = TestRoot::new()?;
-    let manifest = manifest()?;
-    write_local_bus_account_manifest(&root.0, &manifest)?;
-    let account = LocalBusAccountState::disconnected(
-        RamfluxClient::new(),
-        GatewaySessionConfig::quic(manifest.gateway),
-        "commitment".into(),
-    );
-    let state = LocalBusDaemonState {
-        config: LocalBusConfig::new(root.0.join("bus.sock"), &root.0),
-        account_index: None,
-        nodes: NodeStore::default(),
-        accounts: std::collections::BTreeMap::from([("bound".into(), account)]),
-        active_account_id: Some("bound".into()),
-        attended_accounts: std::collections::BTreeSet::new(),
-        subscribers: std::collections::BTreeMap::new(),
-    };
-    let result = super::probe::probe_bound_session(&state, "node.example.com")?;
-    assert_eq!(result, "not_probed");
-    assert!(state.accounts["bound"].engine.is_none());
     Ok(())
 }
 

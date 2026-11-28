@@ -310,8 +310,6 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::AccountNotOpen(_) => "AccountNotOpen",
         SdkError::ReplayMismatch => "ReplayMismatch",
         SdkError::AccountRestorePending(_) => "AccountRestorePending",
-        SdkError::AccountRestoreFailed { .. } => "AccountRestoreFailed",
-        SdkError::AccountManifestUnreadable => "ManifestUnreadable",
         SdkError::TaskRefused { reason, .. } => reason.as_str(),
         SdkError::InvalidOfflineRetention(_) => "InvalidOfflineRetention",
         SdkError::PassphrasePolicy(error) => error.code(),

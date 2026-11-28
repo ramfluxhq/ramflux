@@ -5,14 +5,7 @@ use super::*;
 fn seeded(root: &Path, count: u64) -> AccountInitializer {
     let root = root.to_path_buf();
     Box::new(move |index| {
-        let account = account_with_counter(
-            &root,
-            "bob",
-            None,
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicUsize::new(0)),
-            Some(index),
-        )?;
+        let account = native_state(&root, "bob", index)?;
         for n in 1..=count {
             account.client.account_db()?.append_journal(
                 &format!("seed:{n}"),
@@ -31,6 +24,7 @@ async fn replay_is_ordered_resumes_without_duplicates_and_rejects_cursor_below_f
     LocalSet::new()
         .run_until(async {
             let root = root("stream-replay");
+            persisted_native(&root, "bob").await?;
             let supervisor =
                 supervisor(&root, BTreeMap::from([("bob".to_owned(), seeded(&root, 4))]))?;
             let (mut one, server) = client(Rc::clone(&supervisor), 1).await?;
@@ -96,6 +90,7 @@ async fn slow_subscription_reports_lagged_and_retains_replayable_events() -> Res
     LocalSet::new()
         .run_until(async {
             let root = root("stream-lagged");
+            persisted_native(&root, "bob").await?;
             let supervisor =
                 supervisor(&root, BTreeMap::from([("bob".to_owned(), seeded(&root, 200))]))?;
             let (tx, mut rx) = mpsc::channel(4);
@@ -151,6 +146,7 @@ async fn two_subscribers_share_one_driver_and_lock_stops_it() -> Result<(), SdkE
     LocalSet::new()
         .run_until(async {
             let root = root("stream-driver");
+            persisted_native(&root, "bob").await?;
             let supervisor =
                 supervisor(&root, BTreeMap::from([("bob".to_owned(), seeded(&root, 1))]))?;
             let (mut one, server1) = client(Rc::clone(&supervisor), 1).await?;
@@ -198,6 +194,7 @@ async fn unlock_restarts_driver_with_persisted_journal_sequence() -> Result<(), 
     LocalSet::new()
         .run_until(async {
             let root = root("stream-unlock");
+            persisted_native(&root, "bob").await?;
             let supervisor =
                 supervisor(&root, BTreeMap::from([("bob".to_owned(), seeded(&root, 1))]))?;
             let (mut bus, server) = client(Rc::clone(&supervisor), 1).await?;
@@ -258,79 +255,6 @@ async fn unlock_restarts_driver_with_persisted_journal_sequence() -> Result<(), 
             server.abort();
             let _ = server.await;
             drop(supervisor);
-            std::fs::remove_dir_all(root)?;
-            Ok(())
-        })
-        .await
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn idle_driver_samples_keep_one_transition_per_topic_across_restart_and_name_the_bound_node()
--> Result<(), SdkError> {
-    LocalSet::new()
-        .run_until(async {
-            let root = root("idle-driver-transitions");
-            for restart in 0..2 {
-                let (send, receive) = oneshot::channel();
-                let account_root = root.clone();
-                let initialize: AccountInitializer = Box::new(move |index| {
-                    let account = account_with_counter(
-                        &account_root,
-                        "bob",
-                        None,
-                        Arc::new(AtomicBool::new(false)),
-                        Arc::new(AtomicUsize::new(0)),
-                        Some(index),
-                    )?;
-                    let path = local_bus_account_manifest_path(&account_root, "bob");
-                    let mut manifest = read_local_bus_account_manifest(&path)?;
-                    manifest.node_id = Some("node-one".into());
-                    write_local_bus_account_manifest(&account_root, &manifest)?;
-                    send.send(account.client.account_db()?.open_reader()?)
-                        .map_err(|_| failure("observer dropped"))?;
-                    Ok(account)
-                });
-                let supervisor = supervisor(&root, BTreeMap::from([("bob".into(), initialize)]))?;
-                let db = receive.await.map_err(|_| failure("reader missing"))?;
-                let (bus, server) = client(Rc::clone(&supervisor), 1).await?;
-                bus.request_frame(request(
-                    "start-router",
-                    "bob",
-                    "account.list",
-                    serde_json::json!({}),
-                ))
-                .await?;
-                let tick = db.load_actor_state::<u64>("sync/tick")?.unwrap_or_default();
-                tokio::time::timeout(Duration::from_secs(10), async {
-                    while db.load_actor_state::<u64>("sync/tick")?.unwrap_or_default() < tick + 3 {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                    Ok::<_, SdkError>(())
-                })
-                .await
-                .map_err(|_| failure("sync ticks did not progress"))??;
-                let events = db.journal_after(0, 128)?;
-                assert_eq!(
-                    events.iter().filter(|e| e.topic == "sync.status").count(),
-                    1,
-                    "idle samples after restart {restart}"
-                );
-                let health = events.iter().filter(|e| e.topic == "node.health").collect::<Vec<_>>();
-                assert_eq!(health.len(), 1);
-                assert_eq!(health[0].body["node_id"], "node-one");
-                let current: serde_json::Value = db
-                    .load_actor_state("sync/status")?
-                    .ok_or_else(|| failure("current sync sample"))?;
-                assert_eq!(current["state"], "idle");
-                assert_eq!(health[0].body["state"], "connected");
-                assert!(current["last_run"].as_i64().is_some_and(|at| at >= health[0].at));
-                supervisor.shutdown().await?;
-                drop(bus);
-                server.abort();
-                let _ = server.await;
-                drop(db);
-                drop(supervisor);
-            }
             std::fs::remove_dir_all(root)?;
             Ok(())
         })

@@ -5,7 +5,7 @@
 use super::{
     Duration, LocalBusDaemonState, LocalBusDispatchResult, LocalBusFrame, NodeProfile, Path,
     SdkError, Serialize, SocketAddr, fetch_client_record, local_bus_ok, node_error,
-    now_unix_timestamp, read_local_bus_account_manifest, resolve_node_addr,
+    now_unix_timestamp, resolve_node_addr,
 };
 use crate::bus::io::local_bus_error_body;
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource};
@@ -82,14 +82,7 @@ pub(crate) async fn dispatch_probe(
     let node_version = record.version.clone();
     let fresh = NodeProfile::from_record(record, now);
     let ca = fresh.write_ca(&state.config.data_root)?;
-    let mut gateway = probe_gateway(&fresh, &ca).await;
-    gateway.session = match probe_bound_session(state, id) {
-        Ok(session) => session,
-        Err(error) => {
-            gateway.errors["session"] = serde_json::json!(local_bus_error_body(&error));
-            "failed"
-        }
-    };
+    let gateway = probe_gateway(&fresh, &ca).await;
     let relay = probe_relay(&fresh, &ca).await;
     let prekey = tokio::time::timeout(PROBE_TIMEOUT, probe_prekey_tls(&fresh)).await;
     let prekey_ok = matches!(prekey, Ok(Ok(())));
@@ -105,29 +98,6 @@ pub(crate) async fn dispatch_probe(
         "discovery": {"status": status, "expires_at": expires_at, "version": node_version}, "gateway": gateway,
         "relay": {"status": if relay_ok {"ok"} else {"failed"}, "error": relay_error},
         "prekey": {"status": if prekey_ok {"ok"} else {"failed"}, "error": prekey_error}, "checked_at": now})))
-}
-
-pub(super) fn probe_bound_session(
-    state: &LocalBusDaemonState,
-    id: &str,
-) -> Result<&'static str, SdkError> {
-    let dir = crate::bus::daemon::local_bus_accounts_dir(&state.config.data_root);
-    if dir.exists() {
-        for entry in std::fs::read_dir(dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("json") {
-                continue;
-            }
-            let manifest = read_local_bus_account_manifest(&path)?;
-            if manifest.node_id.as_deref() != Some(id) {
-                continue;
-            }
-            // An authenticated Open would replace the account actor's live registration.
-            // Transport/application health is already checked with the non-registering probe.
-            return Ok("not_probed");
-        }
-    }
-    Ok("requires_account")
 }
 
 async fn probe_relay(profile: &NodeProfile, ca: &Path) -> Result<bool, SdkError> {

@@ -647,7 +647,7 @@ when adopting this SDK commit; ABI majors remain SDK 2 and Card 4.
 ### Receipt capacity and key exports (policy version 2)
 
 The export permission applies only to `account.export_agent_credentials`,
-`account.backup.export`, `group.sender_key.export`, `device.sync.export`,
+`group.sender_key.export`, `device.sync.export`,
 `account.create.show_once` and `account.custody.show_once`. Ordinary reads and
 conversation operations work with the default configuration; `secret_output`
 remains confidential-data handling metadata.

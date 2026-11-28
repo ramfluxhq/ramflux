@@ -49,63 +49,11 @@ pub struct LocalBusConfig {
     #[cfg(test)]
     pub(crate) test_network_command_gate:
         Option<std::sync::Arc<super::native_account_tests::local_first::NetworkGate>>,
-    #[cfg(any(test, feature = "itest-restore-state"))]
-    #[doc(hidden)]
-    pub startup_restore_gate: Option<LocalBusStartupRestoreGate>,
     /// Loopback PRX client. Absent means agent limits, history erase and purge are skipped.
     pub(crate) prx: Option<std::sync::Arc<ramflux_prx_client::PrxClient>>,
     /// Fixed when this config is constructed. Not a host-supplied JSON field.
     media_ownership: MediaOwnership,
     pub(crate) media_control: Option<super::media::InProcessMediaControl>,
-}
-
-#[cfg(any(test, feature = "itest-restore-state"))]
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct LocalBusStartupRestoreGate {
-    account_id: String,
-    entered: std::sync::Arc<tokio::sync::Notify>,
-    release: watch::Receiver<bool>,
-}
-
-#[cfg(any(test, feature = "itest-restore-state"))]
-#[doc(hidden)]
-pub struct LocalBusStartupRestoreGateControl {
-    entered: std::sync::Arc<tokio::sync::Notify>,
-    release: watch::Sender<bool>,
-}
-
-#[cfg(any(test, feature = "itest-restore-state"))]
-impl LocalBusStartupRestoreGate {
-    #[must_use]
-    pub fn new(account_id: impl Into<String>) -> (Self, LocalBusStartupRestoreGateControl) {
-        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
-        let (release, receiver) = watch::channel(false);
-        (
-            Self { account_id: account_id.into(), entered: entered.clone(), release: receiver },
-            LocalBusStartupRestoreGateControl { entered, release },
-        )
-    }
-
-    pub(crate) async fn wait(&self, account_id: &str) {
-        if self.account_id != account_id {
-            return;
-        }
-        self.entered.notify_one();
-        let mut release = self.release.clone();
-        while !*release.borrow() && release.changed().await.is_ok() {}
-    }
-}
-
-#[cfg(any(test, feature = "itest-restore-state"))]
-impl LocalBusStartupRestoreGateControl {
-    pub async fn entered(&self) {
-        self.entered.notified().await;
-    }
-
-    pub fn release(&self) {
-        self.release.send_replace(true);
-    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
@@ -323,59 +271,10 @@ pub struct LocalBusDeviceSyncExportRequest {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusAccountBackupExportRequest {
-    pub output_path: String,
-    pub passphrase: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusAccountBackupImportRequest {
-    pub input_path: String,
-    pub passphrase: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusAccountPassphraseRotateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_passphrase: Option<String>,
     pub new_passphrase: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub(crate) struct LocalBusPersistedAccount {
-    #[serde(default)]
-    pub(crate) label: Option<String>,
-    #[serde(default)]
-    pub(crate) kind: Option<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub(crate) activation_pending: bool,
-    #[serde(default)]
-    pub(crate) node_id: Option<String>,
-    pub(crate) schema: String,
-    pub(crate) local_account_id: String,
-    pub(crate) principal_id: String,
-    pub(crate) principal_commitment: String,
-    pub(crate) device_id: String,
-    pub(crate) target_delivery_id: String,
-    // This manifest is local at-rest private client state. Headless daemon restart
-    // needs these recovery materials before any keychain/passphrase provider exists,
-    // so protect it like an SSH private key: data-root/accounts dir 0700, file 0600.
-    pub(crate) account_secret: String,
-    pub(crate) root_seed: [u8; 32],
-    pub(crate) device_seed: [u8; 32],
-    pub(crate) client_mode: LocalBusClientMode,
-    pub(crate) gateway: GatewayQuicEndpointConfig,
-    #[serde(default)]
-    pub(crate) node_tcp_addr: Option<SocketAddr>,
-    #[serde(default)]
-    pub(crate) node_relay: Option<NodeRelay>,
-    #[serde(default)]
-    pub(crate) devices: Vec<LocalBusDeviceRecord>,
-}
-
-#[cfg(test)]
-pub(crate) fn default_device_capability_scope() -> Vec<String> {
-    vec!["device.delivery.bind".to_owned(), "own_device.sync".to_owned()]
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -1131,8 +1030,6 @@ impl LocalBusConfig {
             test_session_connector: None,
             #[cfg(test)]
             test_network_command_gate: None,
-            #[cfg(any(test, feature = "itest-restore-state"))]
-            startup_restore_gate: None,
             prx: None,
             media_ownership: MediaOwnership::External,
             media_control: None,
@@ -1175,14 +1072,6 @@ impl LocalBusConfig {
             .map_err(|_| crate::SdkError::PrxCall("prx_rejected"))?;
         self.prx = Some(std::sync::Arc::new(client));
         Ok(self)
-    }
-
-    #[cfg(any(test, feature = "itest-restore-state"))]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn with_startup_restore_gate(mut self, gate: LocalBusStartupRestoreGate) -> Self {
-        self.startup_restore_gate = Some(gate);
-        self
     }
 }
 
