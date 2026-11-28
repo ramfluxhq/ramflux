@@ -46,7 +46,7 @@ crates/ramflux-sdk/src/bus/backup_jobs/service.rs | fail_install | 1 | E | exclu
 crates/ramflux-sdk/src/bus/backup_jobs/service.rs | fail_install | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/backup_jobs/workers.rs | archive_counts | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/client_prompt.rs | replyable | 1 | C | admission=crates/ramflux-sdk/src/bus/io.rs#read_local_bus_frame#1,crates/ramflux-sdk/src/bus/io.rs#read_json_after_discriminator#1
-crates/ramflux-sdk/src/bus/connection.rs | configure_subscription | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/connection.rs | open_subscription | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/control_state.rs | commit | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/couriers/surface.rs | prepare | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/creation_client.rs | exchange_for | 1 | D | admitted-before-persist; stored row is not an ingress decoder

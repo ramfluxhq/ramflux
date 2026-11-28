@@ -1283,6 +1283,10 @@ impl Supervisor {
         self.streams.borrow_mut().insert(id, task);
     }
 
+    pub(super) fn forget_attended(&self, id: u64) {
+        self.attended.borrow_mut().remove(&id);
+    }
+
     pub(super) fn clear_stream(&self, id: u64) {
         if let Some(previous) = self.streams.borrow_mut().remove(&id) {
             previous.abort();

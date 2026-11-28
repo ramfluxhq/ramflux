@@ -74,6 +74,8 @@ pub(super) struct Shared {
     pub closed: std::sync::atomic::AtomicBool,
     pub suspended: std::sync::atomic::AtomicBool,
     pub subscription: Mutex<Option<u64>>,
+    /// Weak so the worker's channel still closes when the client is dropped.
+    pub commands: std::sync::OnceLock<tokio::sync::mpsc::WeakSender<super::runtime::Command>>,
     pub host_key: Mutex<Option<HostKeyFn>>,
     pub credentials: super::credential::Bridge,
 }
@@ -121,6 +123,7 @@ impl Shared {
                         && *subscription == Some(id))
                 {
                     *subscription = None;
+                    self.close_bus_subscription();
                     self.deactivate_generation();
                 }
                 state.result = Some(encoded);
@@ -152,6 +155,30 @@ impl Shared {
             events.generation = generation;
             events.active = generation != 0;
             events.account_id = account_id;
+        }
+    }
+
+    /// The bus keeps its own subscription and attended mark. Whenever the slot is dropped
+    /// here, tell the bus too, or the connection stays attended with no subscription.
+    pub fn close_bus_subscription(&self) {
+        let Some(commands) = self.commands.get().and_then(tokio::sync::mpsc::WeakSender::upgrade)
+        else {
+            return;
+        };
+        let frame = crate::LocalBusFrame::request(
+            "0",
+            None,
+            "bus",
+            "subscription.close",
+            serde_json::json!({}),
+        );
+        if let Ok(bytes) = crate::bus::inprocess::encode_request(frame) {
+            let _ = commands.try_send(super::runtime::Command::carrier(
+                0,
+                Zeroizing::new(bytes),
+                Arc::new(Operation::default()),
+                None,
+            ));
         }
     }
 
