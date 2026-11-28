@@ -76,12 +76,9 @@ pub const KEY_PACKAGE_LIFETIME_SECS: u64 = 30 * 86_400;
 pub const MAX_PAST_EPOCHS: usize = 3;
 /// Padding block size of private messages.
 pub const PADDING_SIZE: usize = 32;
-/// Leaf cap of the 1 000 member tier.
-pub const LEAF_CAP_TIER_1000: usize = 3_000;
-/// Leaf cap of the 5 000 member tier.
-pub const LEAF_CAP_TIER_5000: usize = 15_000;
-/// Absolute leaf cap applied to every received commit and Welcome.
-pub const ABSOLUTE_LEAF_CAP: usize = LEAF_CAP_TIER_5000;
+/// Leaf cap of the 1 000 member tier (the only tier of the beta), applied on create, join and
+/// receive. The value is owned by `ramflux-crypto`; it is not repeated here.
+pub const LEAF_CAP: usize = ramflux_crypto::large_group::LEAF_CAP as usize;
 /// Largest number of distinct principals in a direct-message group.
 pub const DM_MAX_PRINCIPALS: usize = 2;
 /// Largest number of principals in a `self` group.

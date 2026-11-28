@@ -38,6 +38,12 @@ impl From<serde_json::Error> for MlsKvError {
     }
 }
 
+impl From<postcard::Error> for MlsKvError {
+    fn from(error: postcard::Error) -> Self {
+        Self::Codec(error.to_string())
+    }
+}
+
 /// One buffered write.
 #[derive(Debug)]
 pub enum WriteOp {
@@ -261,7 +267,7 @@ impl<'k, K: MlsKv> RowStore<'k, K> {
         Ok(std::mem::take(&mut *self.overlay()?).into_batch())
     }
 
-    /// Typed read of a JSON row.
+    /// Typed read of a postcard row.
     ///
     /// # Errors
     /// Backend failure, size bound or codec failure.
@@ -276,7 +282,7 @@ impl<'k, K: MlsKv> RowStore<'k, K> {
         }
     }
 
-    /// Typed read of a list row (a JSON array of JSON-encoded elements).
+    /// Typed read of a list row (a postcard sequence of postcard-encoded elements).
     ///
     /// # Errors
     /// Backend failure, size bound or codec failure.
@@ -290,7 +296,7 @@ impl<'k, K: MlsKv> RowStore<'k, K> {
         elements.iter().map(|element| decode(element)).collect()
     }
 
-    /// Encode and buffer a JSON row.
+    /// Encode and buffer a postcard row.
     ///
     /// # Errors
     /// Codec failure.
@@ -301,6 +307,35 @@ impl<'k, K: MlsKv> RowStore<'k, K> {
         value: &V,
     ) -> Result<(), MlsKvError> {
         self.put(label, key, encode(value)?)
+    }
+
+    /// Encode and buffer a JSON row (self-describing openmls types only, for example
+    /// `MlsGroupJoinConfig`, whose `PastEpochDeletionPolicy` is an untagged enum).
+    ///
+    /// # Errors
+    /// Codec failure.
+    pub fn write_json<V: Serialize + ?Sized>(
+        &self,
+        label: &str,
+        key: Vec<u8>,
+        value: &V,
+    ) -> Result<(), MlsKvError> {
+        self.put(label, key, encode_json(value)?)
+    }
+
+    /// Typed read of a JSON row written by [`Self::write_json`].
+    ///
+    /// # Errors
+    /// Backend failure, size bound or codec failure.
+    pub fn read_json<V: DeserializeOwned>(
+        &self,
+        label: &str,
+        key: &[u8],
+    ) -> Result<Option<V>, MlsKvError> {
+        match self.get(label, key)? {
+            Some(raw) => Ok(Some(decode_json(&raw)?)),
+            None => Ok(None),
+        }
     }
 
     /// Append one element to a list row.
@@ -343,22 +378,44 @@ impl<'k, K: MlsKv> RowStore<'k, K> {
     }
 }
 
-/// Encode a value as JSON into a zeroizing buffer.
+/// Encode a value with postcard into a zeroizing buffer. The buffer is the only copy: it is
+/// moved into the overlay and from there into the transaction.
 ///
 /// # Errors
 /// Codec failure.
 pub fn encode<V: Serialize + ?Sized>(value: &V) -> Result<Zeroizing<Vec<u8>>, MlsKvError> {
-    let mut buffer = Zeroizing::new(Vec::new());
-    serde_json::to_writer(&mut *buffer, value)?;
-    Ok(buffer)
+    Ok(Zeroizing::new(postcard::to_allocvec(value)?))
 }
 
-/// Decode a JSON value after the size bound check. This is the only JSON decode site of the
+/// Decode a postcard value after the size bound check. This is the only value decode site of the
 /// storage layer.
 ///
 /// # Errors
 /// [`MlsKvError::TooLarge`] above [`MAX_STORED_VALUE_BYTES`], or a codec failure.
 pub fn decode<V: DeserializeOwned>(bytes: &[u8]) -> Result<V, MlsKvError> {
+    if bytes.len() > MAX_STORED_VALUE_BYTES {
+        return Err(MlsKvError::TooLarge(bytes.len()));
+    }
+    Ok(postcard::from_bytes(bytes)?)
+}
+
+/// Encode a value as JSON into a zeroizing buffer. Only for the few openmls types whose
+/// `Deserialize` is self-describing (untagged enums) and therefore cannot be read back from
+/// postcard: see [`RowStore::write_json`].
+///
+/// # Errors
+/// Codec failure.
+fn encode_json<V: Serialize + ?Sized>(value: &V) -> Result<Zeroizing<Vec<u8>>, MlsKvError> {
+    let mut buffer = Zeroizing::new(Vec::new());
+    serde_json::to_writer(&mut *buffer, value)?;
+    Ok(buffer)
+}
+
+/// Decode a JSON value after the size bound check (the counterpart of [`encode_json`]).
+///
+/// # Errors
+/// [`MlsKvError::TooLarge`] above [`MAX_STORED_VALUE_BYTES`], or a codec failure.
+fn decode_json<V: DeserializeOwned>(bytes: &[u8]) -> Result<V, MlsKvError> {
     if bytes.len() > MAX_STORED_VALUE_BYTES {
         return Err(MlsKvError::TooLarge(bytes.len()));
     }
