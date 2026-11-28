@@ -281,6 +281,7 @@ impl BackupDatabase {
             super::large_segments::retirement::merge_floors(&self.db)?;
             self.merge_object_erasure(progress)?;
             let preserved_actor = projected_actor(candidate);
+            super::message_footprint::ensure_archive_actor_table(&self.db)?;
             let refused_items = self.merge_original_header_agreement()?;
             let self_sync_floors = self.merge_message_register_floors()?;
             self.merge_username_restrictions()?;
