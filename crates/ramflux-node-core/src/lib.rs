@@ -163,7 +163,7 @@ pub use gateway_state::*;
 pub use group_dispatch::{dispatch as run_group_op, refusal_reply as group_refusal_reply};
 pub use group_wire::{
     BlobPutHead, CREATE_SCOPE as GROUP_CREATE_SCOPE, GROUP_BODY_B64_MAX, GROUP_BODY_MAX_BYTES,
-    GROUP_HOST_ROUTER_PATH, GroupDirectKind, GroupHostCall, GroupHostReply, UploadCap,
+    GROUP_HOST_ROUTER_PATH, GroupDirectKind, GroupHostCall, GroupHostReply, UploadCap, UploadClass,
     blob_put_head as group_blob_put_head, decode_b64 as group_decode_b64,
     decode_body as group_decode_body, frame_op_allowed as group_frame_op_allowed,
 };

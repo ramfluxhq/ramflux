@@ -19,6 +19,9 @@
 //! | `blob.get` | member | `blob_ref[32], idx u32` | chunk bytes |
 //! | `submit` | member | `Envelope` (token auth) | `log_seq u64, appended_at u64, head[32], sig[64]` |
 //! | `blob.put` | member | `blob_ref[32], idx u32, total u32, total_bytes u64, var auth, var chunk` | `received u32, complete u8` |
+//! | `attach.put` | member | `blob_ref[32], idx u32, total u32, total_bytes u64, var del_hash (idx 0: 32 bytes, else empty), var auth (idx 0), var chunk` | `received u32, complete u8` |
+//! | `attach.get` | member | `blob_ref[32], idx u32` | chunk bytes |
+//! | `attach.delete` | member | `blob_ref[32], del_secret[32]` | empty |
 //! | `route.register` | member | `rt[16], var sealed, mention_key[32], mode u8, del_hash[32]` | empty |
 //! | `join` | both | `JoinRequest` (kind decides the session) | queue `u8` |
 //! | `route.delete` | ident | `rt[16], var del_secret` | empty |
@@ -49,8 +52,19 @@ pub const SESSION_UPLOADS_MAX: usize = 64;
 /// The scope of `create.prepare` and `create`: the group does not exist yet.
 pub const CREATE_SCOPE: [u8; 32] = [0; 32];
 
-const MEMBER_OPS: &[&str] =
-    &["status", "read", "subscribe", "blob.get", "submit", "blob.put", "route.register", "join"];
+const MEMBER_OPS: &[&str] = &[
+    "status",
+    "read",
+    "subscribe",
+    "blob.get",
+    "submit",
+    "blob.put",
+    "attach.put",
+    "attach.get",
+    "attach.delete",
+    "route.register",
+    "join",
+];
 const IDENT_OPS: &[&str] = &[
     "route.delete",
     "create.prepare",
@@ -126,6 +140,9 @@ pub struct GroupHostReply {
     /// First retained entry (`pruned`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub floor_seq: Option<u64>,
+    /// Current join key, base64url of 32 bytes (`join_key_stale`; the code stays the same).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_pk: Option<String>,
     /// Reply body, base64url (empty when the op has none).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub body: String,
@@ -190,40 +207,50 @@ pub fn blob_put_head(body: &[u8]) -> Option<BlobPutHead> {
     Some(BlobPutHead { blob_ref, idx, total_bytes })
 }
 
-/// The pending uploads of one session against the 32 MiB cap. Lives in the session task only.
+/// Which store an upload goes to; the same `blob_ref` may be pending in both.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum UploadClass {
+    /// `blob.put` (group blobs: welcomes, media of the log).
+    Blob,
+    /// `attach.put` (attachment class).
+    Attach,
+}
+
+/// The pending uploads of one session against the 32 MiB cap, `blob.put` and `attach.put`
+/// together. Lives in the session task only.
 #[derive(Debug, Default)]
 pub struct UploadCap {
-    pending: BTreeMap<[u8; 32], u64>,
+    pending: BTreeMap<(UploadClass, [u8; 32]), u64>,
     reserved: u64,
 }
 
 impl UploadCap {
     /// Reserves `total_bytes` for a new upload at chunk 0; `false` when it does not fit or the
     /// upload is already pending.
-    pub fn begin(&mut self, blob_ref: [u8; 32], total_bytes: u64) -> bool {
+    pub fn begin(&mut self, class: UploadClass, blob_ref: [u8; 32], total_bytes: u64) -> bool {
         let next = self.reserved.saturating_add(total_bytes);
         if next > SESSION_UPLOAD_CAP_BYTES
             || self.pending.len() >= SESSION_UPLOADS_MAX
-            || self.pending.contains_key(&blob_ref)
+            || self.pending.contains_key(&(class, blob_ref))
         {
             return false;
         }
-        self.pending.insert(blob_ref, total_bytes);
+        self.pending.insert((class, blob_ref), total_bytes);
         self.reserved = next;
         true
     }
 
     /// Releases an upload that completed or was refused.
-    pub fn finish(&mut self, blob_ref: &[u8; 32]) {
-        if let Some(bytes) = self.pending.remove(blob_ref) {
+    pub fn finish(&mut self, class: UploadClass, blob_ref: &[u8; 32]) {
+        if let Some(bytes) = self.pending.remove(&(class, *blob_ref)) {
             self.reserved = self.reserved.saturating_sub(bytes);
         }
     }
 
-    /// Whether `blob_ref` is pending in this session.
+    /// Whether `blob_ref` is pending in this session in `class`.
     #[must_use]
-    pub fn holds(&self, blob_ref: &[u8; 32]) -> bool {
-        self.pending.contains_key(blob_ref)
+    pub fn holds(&self, class: UploadClass, blob_ref: &[u8; 32]) -> bool {
+        self.pending.contains_key(&(class, *blob_ref))
     }
 }
 
@@ -233,7 +260,18 @@ mod tests {
 
     #[test]
     fn session_split_keeps_tokens_and_signatures_apart() {
-        for op in ["status", "read", "blob.get", "submit", "blob.put", "route.register", "join"] {
+        for op in [
+            "status",
+            "read",
+            "blob.get",
+            "submit",
+            "blob.put",
+            "attach.put",
+            "attach.get",
+            "attach.delete",
+            "route.register",
+            "join",
+        ] {
             assert!(frame_op_allowed(GroupDirectKind::Member, op), "member {op}");
         }
         for op in ["tokens", "welcome.get", "create", "route.delete", "invite.put", "join.pending"]
@@ -243,6 +281,8 @@ mod tests {
         }
         assert!(!frame_op_allowed(GroupDirectKind::Ident, "read"));
         assert!(!frame_op_allowed(GroupDirectKind::Ident, "blob.put"));
+        assert!(!frame_op_allowed(GroupDirectKind::Ident, "attach.put"));
+        assert!(!frame_op_allowed(GroupDirectKind::Ident, "attach.delete"));
         assert!(!frame_op_allowed(GroupDirectKind::Member, "open"));
         assert!(router_op_allowed(GroupDirectKind::Member, "open"));
         assert!(!router_op_allowed(GroupDirectKind::Ident, "open"));
@@ -280,19 +320,34 @@ mod tests {
     fn upload_cap_reserves_declared_bytes_and_releases_them() {
         let mut cap = UploadCap::default();
         let half = SESSION_UPLOAD_CAP_BYTES / 2;
-        assert!(cap.begin([1; 32], half));
-        assert!(!cap.begin([1; 32], 1), "same upload twice");
-        assert!(cap.begin([2; 32], half));
-        assert!(!cap.begin([3; 32], 1), "cap reached");
-        cap.finish(&[1; 32]);
-        assert!(cap.begin([3; 32], half));
-        assert!(cap.holds(&[3; 32]) && !cap.holds(&[1; 32]));
+        assert!(cap.begin(UploadClass::Blob, [1; 32], half));
+        assert!(!cap.begin(UploadClass::Blob, [1; 32], 1), "same upload twice");
+        assert!(cap.begin(UploadClass::Blob, [2; 32], half));
+        assert!(!cap.begin(UploadClass::Blob, [3; 32], 1), "cap reached");
+        cap.finish(UploadClass::Blob, &[1; 32]);
+        assert!(cap.begin(UploadClass::Blob, [3; 32], half));
+        assert!(cap.holds(UploadClass::Blob, &[3; 32]) && !cap.holds(UploadClass::Blob, &[1; 32]));
         let mut many = UploadCap::default();
         for index in 0..SESSION_UPLOADS_MAX {
             let mut blob_ref = [0_u8; 32];
             blob_ref[0] = u8::try_from(index).expect("test: index fits");
-            assert!(many.begin(blob_ref, 1));
+            assert!(many.begin(UploadClass::Blob, blob_ref, 1));
         }
-        assert!(!many.begin([200; 32], 1), "too many pending uploads");
+        assert!(!many.begin(UploadClass::Blob, [200; 32], 1), "too many pending uploads");
+    }
+
+    #[test]
+    fn attach_and_blob_uploads_share_one_cap_but_not_one_key() {
+        let mut cap = UploadCap::default();
+        let half = SESSION_UPLOAD_CAP_BYTES / 2;
+        assert!(cap.begin(UploadClass::Blob, [4; 32], half));
+        assert!(cap.begin(UploadClass::Attach, [4; 32], half), "same ref, other class");
+        assert!(!cap.begin(UploadClass::Attach, [5; 32], 1), "declared bytes of both count");
+        assert!(cap.holds(UploadClass::Attach, &[4; 32]));
+        cap.finish(UploadClass::Attach, &[4; 32]);
+        assert!(
+            !cap.holds(UploadClass::Attach, &[4; 32]) && cap.holds(UploadClass::Blob, &[4; 32])
+        );
+        assert!(cap.begin(UploadClass::Attach, [5; 32], half));
     }
 }

@@ -15,6 +15,7 @@ use std::time::Duration;
 use ramflux_node_core::{
     GROUP_BODY_B64_MAX, GROUP_HOST_ROUTER_PATH, GatewayClientFrame as Client,
     GatewayServerFrame as Server, GroupDirectKind, GroupHostCall, GroupHostReply, UploadCap,
+    UploadClass,
 };
 use ramflux_transport::TransportError;
 
@@ -190,30 +191,40 @@ async fn answer(
             }
             reply
         }
-        "blob.put" => blob_put(context, state, body).await,
+        "blob.put" => upload(context, state, UploadClass::Blob, body).await,
+        "attach.put" => upload(context, state, UploadClass::Attach, body).await,
         _ => call(context, state.kind, &state.group_id, op, body).await,
     }
 }
 
-/// Chunk 0 reserves its declared bytes against the session cap; later chunks must belong to an
-/// upload this session began.
-async fn blob_put(context: &GatewayQuicContext, state: &mut State, body: String) -> GroupHostReply {
+/// Chunk 0 reserves its declared bytes against the session cap (`blob.put` and `attach.put` share
+/// it); later chunks must belong to an upload of the same class this session began.
+async fn upload(
+    context: &GatewayQuicContext,
+    state: &mut State,
+    class: UploadClass,
+    body: String,
+) -> GroupHostReply {
     let Some(head) = ramflux_node_core::group_decode_body(&body)
         .and_then(|bytes| ramflux_node_core::group_blob_put_head(&bytes))
     else {
         return GroupHostReply::status("bad_request");
     };
+    let op = match class {
+        UploadClass::Blob => "blob.put",
+        UploadClass::Attach => "attach.put",
+    };
     if head.idx == 0 {
-        if !state.uploads.begin(head.blob_ref, head.total_bytes) {
+        if !state.uploads.begin(class, head.blob_ref, head.total_bytes) {
             return GroupHostReply::status("upload_cap");
         }
-    } else if !state.uploads.holds(&head.blob_ref) {
+    } else if !state.uploads.holds(class, &head.blob_ref) {
         return GroupHostReply::status("blob_bad");
     }
-    let reply = call(context, state.kind, &state.group_id, "blob.put", body).await;
+    let reply = call(context, state.kind, &state.group_id, op, body).await;
     let complete = reply_bytes(&reply).and_then(|bytes| bytes.get(4).copied()) == Some(1);
     if reply.status != "ok" || complete {
-        state.uploads.finish(&head.blob_ref);
+        state.uploads.finish(class, &head.blob_ref);
     }
     reply
 }

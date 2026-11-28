@@ -15,6 +15,7 @@ use crate::group_wire::{
     CREATE_SCOPE, GroupDirectKind, GroupHostCall, GroupHostReply, decode_b64, decode_body,
     router_op_allowed,
 };
+use crate::large_group::attach::AttachPut;
 use crate::large_group::blobs::BlobPut;
 use crate::large_group::entries::AppendReceipt;
 use crate::large_group::host::{Authority, InviteSpec, LargeGroupHost};
@@ -38,6 +39,9 @@ pub fn refusal_reply(refusal: &LgRefusal) -> GroupHostReply {
         LgRefusal::Stale { epoch } => reply.epoch = Some(*epoch),
         LgRefusal::Paced { retry_at_ms } => reply.retry_at_ms = Some(*retry_at_ms),
         LgRefusal::Pruned { floor_seq } => reply.floor_seq = Some(*floor_seq),
+        LgRefusal::JoinKeyStale { join_pk } => {
+            reply.join_pk = Some(ramflux_protocol::encode_base64url(join_pk));
+        }
         _ => {}
     }
     reply
@@ -127,6 +131,22 @@ fn member(
             Ok(receipt(&host.submit(store, now, gid, body)?))
         }
         "blob.put" => blob_put(host, store, now, gid, body),
+        "attach.put" => attach_put(host, store, now, gid, body),
+        "attach.get" => {
+            let mut dec = Dec::new(body);
+            let blob_ref: [u8; 32] = dec.fixed()?;
+            let idx = dec.u32()?;
+            dec.finish()?;
+            host.attach_get(store, gid, &blob_ref, idx)
+        }
+        "attach.delete" => {
+            let mut dec = Dec::new(body);
+            let blob_ref: [u8; 32] = dec.fixed()?;
+            let del_secret: [u8; 32] = dec.fixed()?;
+            dec.finish()?;
+            host.attach_delete(store, now, gid, &blob_ref, &del_secret)?;
+            Ok(Vec::new())
+        }
         "route.register" => {
             route_register(host, store, now, gid, body)?;
             Ok(Vec::new())
@@ -297,6 +317,39 @@ fn blob_put(
     Ok(enc.finish())
 }
 
+fn attach_put(
+    host: &LargeGroupHost,
+    store: &RouterRedbStore,
+    now: u64,
+    gid: &[u8; 32],
+    body: &[u8],
+) -> LgResult<Vec<u8>> {
+    let mut dec = Dec::new(body);
+    let blob_ref: [u8; 32] = dec.fixed()?;
+    let idx = dec.u32()?;
+    let total = dec.u32()?;
+    let total_bytes = dec.u64()?;
+    let del_hash = dec.var(32)?;
+    let auth = dec.var(TOKEN_LEN)?;
+    let chunk = dec.var(CHUNK_MAX)?;
+    dec.finish()?;
+    // Chunk 0 carries `del_hash` and the one `attach` token; later chunks carry neither.
+    let (del_hash, token) = if idx == 0 {
+        let del_hash: [u8; 32] = del_hash.try_into().map_err(|_| LgRefusal::BadRequest)?;
+        let token = Token::from_bytes(auth).map_err(|_| LgRefusal::BadRequest)?;
+        (Some(del_hash), Some(token))
+    } else if del_hash.is_empty() && auth.is_empty() {
+        (None, None)
+    } else {
+        return Err(LgRefusal::BadRequest);
+    };
+    let put = AttachPut { blob_ref, idx, total, total_bytes, del_hash, chunk };
+    let progress = host.attach_put(store, now, gid, &put, token.as_ref())?;
+    let mut enc = Enc::default();
+    enc.u32(progress.received).u8(u8::from(progress.complete));
+    Ok(enc.finish())
+}
+
 fn route_register(
     host: &LargeGroupHost,
     store: &RouterRedbStore,
@@ -317,4 +370,21 @@ fn route_register(
     dec.finish()?;
     let registration = RouteRegistration { rt, sealed_token: sealed, mention_key, mode, del_hash };
     host.route_register(store, now, gid, &registration)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_key_stale_reply_carries_the_current_key() {
+        let reply = refusal_reply(&LgRefusal::JoinKeyStale { join_pk: [7; 32] });
+        assert_eq!(reply.status, "join_key_stale");
+        assert_eq!(
+            reply.join_pk.as_deref().and_then(decode_b64::<32>),
+            Some([7; 32]),
+            "the key is on the wire as base64url"
+        );
+        assert_eq!(refusal_reply(&LgRefusal::NotFound).join_pk, None);
+    }
 }
