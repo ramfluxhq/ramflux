@@ -1476,7 +1476,7 @@ pub(crate) async fn write_gateway_client_frame(
 }
 
 /// Reads one frame and keeps its bytes for the second (echo) decode of the establishment.
-async fn read_gateway_server_frame_bytes(
+pub(crate) async fn read_gateway_server_frame_bytes(
     stream: &mut (dyn ramflux_transport::GatewaySessionTransport + Send),
 ) -> Result<(GatewayServerFrame, Vec<u8>), SdkError> {
     let body = ramflux_transport::GatewaySessionFrameSource::recv_frame(stream)
@@ -1487,6 +1487,22 @@ async fn read_gateway_server_frame_bytes(
         .map_err(ramflux_transport::TransportError::from)
         .map_err(SdkError::from)?;
     Ok((frame, body))
+}
+
+/// Anonymous group session. `first` is `GroupOpen` or `GroupIdent` and is the first frame on the
+/// socket. Authenticated [`GatewaySessionEngine::connect`] is unchanged.
+///
+/// # Errors
+/// Discovery, transport, or a refused group handshake.
+#[allow(dead_code)] // G6 is the caller. G5 only opens the socket.
+pub(crate) async fn connect_group(
+    endpoint: &str,
+    data_root: &std::path::Path,
+    first: GatewayClientFrame,
+    group_id: [u8; 32],
+    member: bool,
+) -> Result<crate::mls::group::session::GroupSocket, SdkError> {
+    crate::mls::group::session::open(endpoint, data_root, first, group_id, member).await
 }
 
 #[cfg(test)]

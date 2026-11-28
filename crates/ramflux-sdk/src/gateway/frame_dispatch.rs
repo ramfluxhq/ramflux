@@ -43,6 +43,9 @@ pub(crate) enum FrameKind {
     Resync,
     CallResolved,
     GrantRenewed,
+    GroupOpened,
+    GroupReply,
+    GroupLogGrew,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +96,9 @@ impl FrameKind {
             GatewayServerFrame::Close { .. } => Self::Close,
             GatewayServerFrame::CallResolved { .. } => Self::CallResolved,
             GatewayServerFrame::GrantRenewed { .. } => Self::GrantRenewed,
+            GatewayServerFrame::GroupOpened { .. } => Self::GroupOpened,
+            GatewayServerFrame::GroupReply { .. } => Self::GroupReply,
+            GatewayServerFrame::GroupLogGrew { .. } => Self::GroupLogGrew,
         }
     }
 
@@ -116,7 +122,8 @@ impl FrameKind {
             | Self::PushKeyset
             | Self::Resync
             | Self::Ephemeral
-            | Self::CallResolved => FrameClass::Event,
+            | Self::CallResolved
+            | Self::GroupLogGrew => FrameClass::Event,
             Self::Drain | Self::Close => FrameClass::Terminal,
             Self::SessionEstablished => FrameClass::Unexpected,
             Self::VoiceLease
@@ -139,7 +146,9 @@ impl FrameKind {
             | Self::Nack
             | Self::Heartbeat
             | Self::EphemeralResult
-            | Self::GrantRenewed => FrameClass::Reply,
+            | Self::GrantRenewed
+            | Self::GroupOpened
+            | Self::GroupReply => FrameClass::Reply,
         }
     }
 }

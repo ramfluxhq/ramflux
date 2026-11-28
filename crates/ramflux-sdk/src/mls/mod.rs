@@ -10,6 +10,8 @@ pub(crate) mod key_packages;
 mod kv_adapter;
 pub(crate) mod lifecycle;
 pub(crate) mod order;
+#[allow(dead_code)]
+pub(crate) mod group;
 
 use std::sync::{Arc, OnceLock};
 

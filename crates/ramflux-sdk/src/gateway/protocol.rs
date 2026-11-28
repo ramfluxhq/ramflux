@@ -675,6 +675,23 @@ pub enum GatewayClientFrame {
     Activity {},
     /// Notification state is empty on this device (K12).
     NotificationsCleared {},
+    /// First frame of a group member session. Anonymous: no account, device, `Open` or `Auth`.
+    GroupOpen {
+        group_id: String,
+        open_token: String,
+        nonce: String,
+    },
+    /// First frame of a group ident session. `group_id` is all-zero for create.
+    GroupIdent {
+        group_id: String,
+    },
+    /// One group operation. `body` is base64url and empty when the op has none.
+    Group {
+        request_id: String,
+        op: String,
+        #[serde(default)]
+        body: String,
+    },
 }
 
 /// Device class as the node stores it (closed set, node-local; never sent to the centre).
@@ -817,6 +834,36 @@ pub enum GatewayServerFrame {
     GrantRenewed {
         expires_at: u64,
     },
+    /// Answer to `GroupOpen` or `GroupIdent`.
+    GroupOpened {
+        status: String,
+    },
+    /// Answer to one `Group` operation.
+    GroupReply {
+        request_id: String,
+        reply: GroupHostReply,
+    },
+    /// A subscribed member session: the log grew; the client reads it.
+    GroupLogGrew {
+        log_seq: u64,
+    },
+}
+
+/// Router reply carried by [`GatewayServerFrame::GroupReply`]. Duplicated here so the SDK does not
+/// depend on node-core. Field names match `group_wire::GroupHostReply`.
+#[derive(Clone, Debug, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct GroupHostReply {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_pk: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]

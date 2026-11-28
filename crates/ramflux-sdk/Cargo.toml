@@ -69,6 +69,9 @@ ramflux-crypto = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-storage = { workspace = true }
 ramflux-mls = { workspace = true }
+# The group engine calls `OpenMlsCrypto::hpke_seal` (the MLS KAT shape). The trait is not
+# re-exported by ramflux-mls. Same pin as that crate; no second HPKE implementation.
+openmls_traits = "=0.7.0-rc.1"
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-transport = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
