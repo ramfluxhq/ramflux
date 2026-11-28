@@ -148,7 +148,7 @@ const RECHECK_ATTEMPTS: u32 = 3;
 const RECHECK_PAUSE: Duration = Duration::from_millis(500);
 const RECHECK_WINDOW: Duration = Duration::from_secs(5);
 /// Extra wait after the recheck bound. A 15 s create is still inside the daemon
-/// when the bound ends (~7 s after CreateItem); each failed attempt blocks on the
+/// when the bound ends (~7 s after `CreateItem`); each failed attempt blocks on the
 /// crate's 2 s proxy timeout, so this covers that create with margin.
 const LATE_DELETE_BOUND: Duration = Duration::from_secs(20);
 
@@ -208,8 +208,8 @@ fn recheck_late_create(reference: &str, secret: &[u8]) -> Result<(), SdkError> {
 /// Drop the item a timed-out create may still be writing.
 ///
 /// gnome-keyring runs one secret call at a time. A delete opened while that
-/// CreateItem is in progress is queued behind it, but the crate's 2 s proxy
-/// timeout drops the connection at OpenSession, so Item.Delete is never sent
+/// `CreateItem` is in progress is queued behind it, but the crate's 2 s proxy
+/// timeout drops the connection at `OpenSession`, so Item.Delete is never sent
 /// and the create then lands as an orphan. Retry on a fresh connection until
 /// the daemon answers (the create has finished); that attempt deletes this
 /// reference only. Anything other than Busy stops the wait: the original Busy
@@ -218,10 +218,9 @@ fn delete_orphaned_create(reference: &str) {
     let deadline = Instant::now() + LATE_DELETE_BOUND;
     while Instant::now() < deadline {
         match remove(reference) {
-            Ok(()) => return,
             // The 2 s proxy timeout already waited out this attempt.
             Err(error) if is_busy(&error) => {}
-            Err(_) => return,
+            Ok(()) | Err(_) => return,
         }
     }
 }
