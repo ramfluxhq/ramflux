@@ -446,7 +446,10 @@ pub(crate) async fn validate_native_frame(
     let capability = match frame {
         Frame::OwnDeviceFanout { .. } => "sync",
         Frame::VoiceLease { .. } => "call",
-        Frame::PrekeyPublish { .. } | Frame::IdentityRegister { .. } => "register",
+        Frame::PrekeyPublish { .. }
+        | Frame::IdentityRegister { .. }
+        | Frame::KeyPackagePublish { .. }
+        | Frame::KeyPackageStatus {} => "register",
         _ => "message",
     };
     anyhow::ensure!(
@@ -1092,18 +1095,11 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
                 ramflux_node_core::GatewayClientFrame::Nack { nack } => {
                     handle_gateway_nack(&send, &context, &runtime, &nack).await?;
                 }
-                // Answered by the gateway part of the MLS DM track (D2); until then a typed refusal.
-                ramflux_node_core::GatewayClientFrame::KeyPackagePublish { .. }
+                frame @ (ramflux_node_core::GatewayClientFrame::KeyPackagePublish { .. }
                 | ramflux_node_core::GatewayClientFrame::KeyPackageStatus {}
                 | ramflux_node_core::GatewayClientFrame::KeyPackageFetch { .. }
-                | ramflux_node_core::GatewayClientFrame::DmOrder { .. } => {
-                    write_gateway_handle(
-                        &send,
-                        &ramflux_node_core::GatewayServerFrame::Nack {
-                            reason: "mls_dm_frames_unsupported".to_owned(),
-                        },
-                    )
-                    .await?;
+                | ramflux_node_core::GatewayClientFrame::DmOrder { .. }) => {
+                    crate::mls_dm::handle(&send, &context, &runtime, frame).await?;
                 }
                 ramflux_node_core::GatewayClientFrame::DevicePolicy { device_class, muted } => {
                     if let Err(error) = crate::device_policy::handle_device_policy(

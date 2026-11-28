@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REPLY_BYTES: usize = 1024 * 1024;
+/// A `since` answer: up to 4 MiB of commits in base64url plus framing.
+const DM_ORDER_MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) struct Client {
     endpoint: String,
@@ -56,6 +58,40 @@ impl Client {
                 headers: &[],
                 body: &body,
                 max_response_bytes: MAX_REPLY_BYTES,
+                deadline,
+            })
+            .map_err(forward_error)?;
+        if !(200..300).contains(&response.status) {
+            return Err(NodeCoreError::ItestHttp(format!(
+                "federation mesh refused (HTTP {})",
+                response.status
+            )));
+        }
+        ramflux_protocol::parse_i_json(&response.body).map_err(forward_error)
+    }
+}
+
+impl Client {
+    /// Hand a `dm_order` call for a remote orderer to the same-node federation service.
+    pub(crate) fn forward_dm_order(
+        &self,
+        request: &ramflux_node_core::DmOrderForward,
+    ) -> Result<ramflux_node_core::FederatedDmOrderResponse, NodeCoreError> {
+        let deadline = Instant::now() + FORWARD_TIMEOUT;
+        let body = serde_json::to_vec(request).map_err(forward_error)?;
+        if body.len() > ramflux_node_core::DM_ORDER_BODY_MAX_BYTES {
+            return Err(forward_error("dm_order forward exceeds body budget"));
+        }
+        let response = self
+            .http
+            .post_raw(&RawMeshPost {
+                endpoint: &self.endpoint,
+                path: ramflux_node_core::DM_ORDER_FORWARD_PATH,
+                tls: &self.tls,
+                server_name: "ramflux-federation",
+                headers: &[],
+                body: &body,
+                max_response_bytes: DM_ORDER_MAX_REPLY_BYTES,
                 deadline,
             })
             .map_err(forward_error)?;

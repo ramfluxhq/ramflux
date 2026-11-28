@@ -222,7 +222,7 @@ fn prekey_http_error(error: reqwest::Error) -> SdkError {
 /// Any HTTP response means the handshake finished. The node CA authenticates
 /// gateway and relay only; it is not a prekey issuer.
 async fn probe_prekey_tls(profile: &NodeProfile) -> Result<(), SdkError> {
-    let url = reqwest::Url::parse(&profile.prekey_http_url)
+    let url = reqwest::Url::parse(&profile.key_package_http_url)
         .map_err(|error| node_error(&error.to_string()))?;
     if url.scheme() != "https" {
         return Err(node_error("prekey probe requires HTTPS"));

@@ -19,7 +19,7 @@ PUBLIC_KEY_DER_PREFIX = bytes.fromhex("302a300506032b6570032100")
 STRING_FIELDS = {
     "schema", "node_id", "node_public_key", "node_ca_cert_pem", "gateway_quic_addr",
     "gateway_tcp_addr", "gateway_server_name", "relay_quic_addr", "relay_server_name",
-    "prekey_http_url", "signaling_turn_addr", "version", "signature",
+    "key_package_http_url", "signaling_turn_addr", "version", "signature",
 }
 LIST_FIELDS = {"protocol_versions", "client_capabilities"}
 INTEGER_FIELDS = {"updated_at", "expires_at"}

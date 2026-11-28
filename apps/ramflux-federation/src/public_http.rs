@@ -440,6 +440,39 @@ fn public_response(
     response.map(Some)
 }
 
+/// Public key package fetch of a peer's client (MLS-SPEC 3.5); the replacement of the prekey route.
+const KEY_PACKAGES_PREFIX: &str = "/v1/key-packages/";
+
+/// Per source address limit of the public fetch; the address lives only in this in-memory limiter.
+static KEY_PACKAGE_FETCH_LIMITS: std::sync::LazyLock<ramflux_node_core::KeyPackageFetchLimits> =
+    std::sync::LazyLock::new(ramflux_node_core::KeyPackageFetchLimits::new);
+
+/// An anchor is 43 base64url characters.
+fn anchor_ok(anchor: &str) -> bool {
+    anchor.len() == 43
+        && anchor.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn key_packages(
+    router: &RouterMeshClient,
+    source: std::net::IpAddr,
+    path: &str,
+) -> Result<HttpResponse, ramflux_node_core::NodeCoreError> {
+    let anchor = path.trim_start_matches(KEY_PACKAGES_PREFIX);
+    if !anchor_ok(anchor) {
+        return Ok(HttpResponse::text("400 Bad Request", "invalid anchor"));
+    }
+    let now = crate::now_unix_seconds()?;
+    if KEY_PACKAGE_FETCH_LIMITS.admit(Some(&source.to_string()), None, now).is_err() {
+        return Ok(HttpResponse::text("429 Too Many Requests", "too many requests"));
+    }
+    let call =
+        ramflux_node_core::KeyPackageFetchCall { anchor: anchor.to_owned(), requester: None };
+    let response: ramflux_node_core::KeyPackageFetchResponse =
+        crate::router_post_json(router, ramflux_node_core::KEY_PACKAGE_FETCH_PATH, &call)?;
+    HttpResponse::json(&response)
+}
+
 fn ordinary_public_response(
     context: &FederationPublicHttpContext,
     request: &ramflux_node_core::NodeHttpRequest,
@@ -461,6 +494,9 @@ fn ordinary_public_response(
         {
             let response: serde_json::Value = router_get_json(router, path)?;
             HttpResponse::json(&response)?
+        }
+        ("GET", path) if path.starts_with(KEY_PACKAGES_PREFIX) => {
+            key_packages(router, source, path)?
         }
         (method, path) if crate::pairing_http::pairing_route(method, path) => {
             match &context.pairing {
@@ -484,5 +520,20 @@ mod limits_tests {
                 assert!(crate::http_connections::connection_limit(public, Some(invalid)).is_err());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod key_package_route_tests {
+    use super::anchor_ok;
+
+    #[test]
+    fn only_a_43_character_base64url_anchor_is_forwarded() {
+        assert!(anchor_ok(&"A".repeat(43)));
+        assert!(anchor_ok(&format!("{}-_", "a".repeat(41))));
+        assert!(!anchor_ok(&"A".repeat(42)));
+        assert!(!anchor_ok(&"A".repeat(44)));
+        assert!(!anchor_ok(&format!("{}/", "A".repeat(42))));
+        assert!(!anchor_ok(""));
     }
 }

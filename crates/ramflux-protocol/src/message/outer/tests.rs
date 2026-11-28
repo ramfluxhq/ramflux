@@ -333,10 +333,10 @@ fn unsigned_discovery_record() -> WellKnownClientRecord {
         gateway_server_name: "ramflux-gateway".to_owned(),
         relay_quic_addr: "node.example.com:17447".to_owned(),
         relay_server_name: "ramflux-relay".to_owned(),
-        prekey_http_url: "https://node.example.com".to_owned(),
+        key_package_http_url: "https://node.example.com".to_owned(),
         signaling_turn_addr: "node.example.com:3478".to_owned(),
         protocol_versions: vec!["v1".to_owned(), MESSAGE_SCHEMA_V1_PROFILE.to_owned()],
-        client_capabilities: vec!["prekey".to_owned()],
+        client_capabilities: vec!["key_package".to_owned()],
         version: "0.2.0 (abcdef123456)".to_owned(),
         updated_at: 1000,
         expires_at: 2000,
@@ -373,7 +373,8 @@ fn candidate_profile_discovery_requires_verified_canonical_token()
 
     let mut alternate = unsigned_discovery_record();
     alternate.protocol_versions = vec!["v1".to_owned()];
-    alternate.client_capabilities = vec!["prekey".to_owned(), MESSAGE_SCHEMA_V1_PROFILE.to_owned()];
+    alternate.client_capabilities =
+        vec!["key_package".to_owned(), MESSAGE_SCHEMA_V1_PROFILE.to_owned()];
     sign_discovery(&mut alternate, 3)?;
     assert_eq!(
         protocol_err_display(discover_verified_message_schema(&alternate, 1500))?,

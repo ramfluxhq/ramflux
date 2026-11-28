@@ -200,7 +200,7 @@ impl TestNode {
                 server_name: "localhost".into(),
             },
             relay: crate::NodeRelay { quic_addr: address.clone(), server_name: "localhost".into() },
-            prekey_http_url: "https://node.test".into(),
+            key_package_http_url: "https://node.test".into(),
             signaling_turn_addr: String::new(),
             protocol_versions: Vec::new(),
             client_capabilities: capable(),

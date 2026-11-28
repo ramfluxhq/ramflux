@@ -115,7 +115,7 @@ impl Fixture {
             gateway_server_name: "destination.example".into(),
             relay_quic_addr: "destination.example:444".into(),
             relay_server_name: "destination.example".into(),
-            prekey_http_url: "https://destination.example/prekeys".into(),
+            key_package_http_url: "https://destination.example/prekeys".into(),
             signaling_turn_addr: "destination.example:3478".into(),
             protocol_versions: vec!["v3".into()],
             client_capabilities: vec!["home_migration".into()],

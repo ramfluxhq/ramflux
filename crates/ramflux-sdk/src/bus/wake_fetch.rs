@@ -170,7 +170,7 @@ async fn connection_config(
         principal_id: native.record().body.principal_id.clone(),
         device_id: device,
         target_delivery_id: target.clone(),
-        prekey_http_url: Some(profile.prekey_http_url.clone()),
+        prekey_http_url: Some(profile.key_package_http_url.clone()),
     })
     .with_host_network(config)
     .with_native_custody(GatewayCustodyConfig {

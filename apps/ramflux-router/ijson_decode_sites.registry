@@ -54,3 +54,9 @@ apps/ramflux-router/src/ingress_decode.rs | open_submitted | 1 | A | strict=deco
 apps/ramflux-router/src/ingress_decode.rs | open_verified_source | 1 | B | strict=parse_i_json; admission=authenticated forwarded envelope wrapper
 apps/ramflux-router/src/ingress_decode.rs | open_verified_source | 2 | C | admission=apps/ramflux-router/src/ingress_decode.rs#open_verified_source#1
 apps/ramflux-router/src/cross_node_submit.rs | respond | 1 | A | strict=parse_i_json; admission=authenticated gateway cross-node envelope submit
+apps/ramflux-router/src/cross_node_forward.rs | forward_dm_order | 1 | A | strict=parse_i_json; admission=same-node federation reply of a signed dm_order call
+apps/ramflux-router/src/dm_routes.rs | dm_order | 1 | A | strict=parse_i_json; admission=authenticated gateway session dm_order call
+apps/ramflux-router/src/dm_routes.rs | dm_order_inbound | 1 | A | strict=parse_i_json; admission=same-node federation after peer signature verification
+apps/ramflux-router/src/dm_routes.rs | key_package_fetch | 1 | A | strict=parse_i_json; admission=authenticated gateway session or same-node federation public fetch
+apps/ramflux-router/src/dm_routes.rs | key_package_publish | 1 | A | strict=parse_i_json; admission=authenticated gateway session key package publish
+apps/ramflux-router/src/dm_routes.rs | key_package_status | 1 | A | strict=parse_i_json; admission=authenticated gateway session key package status

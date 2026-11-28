@@ -44,7 +44,7 @@ fn node(node_id: &str, capable: bool) -> crate::NodeProfile {
             quic_addr: "127.0.0.1:1".to_owned(),
             server_name: node_id.to_owned(),
         },
-        prekey_http_url: format!("https://{node_id}"),
+        key_package_http_url: format!("https://{node_id}"),
         signaling_turn_addr: String::new(),
         protocol_versions: Vec::new(),
         client_capabilities: if capable {

@@ -17,7 +17,7 @@ fn client_record(
         gateway_server_name: "ramflux-gateway".into(),
         relay_quic_addr: "127.0.0.1:9001".into(),
         relay_server_name: "ramflux-relay".into(),
-        prekey_http_url: "https://example.test".into(),
+        key_package_http_url: "https://example.test".into(),
         signaling_turn_addr: "127.0.0.1:9002".into(),
         protocol_versions: vec!["v3".into()],
         client_capabilities: vec![crate::HOME_MIGRATION_CAPABILITY.into()],

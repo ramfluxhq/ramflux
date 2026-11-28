@@ -68,7 +68,7 @@ impl Network {
                 server_name: "localhost".into(),
             },
             relay: NodeRelay { quic_addr: relay, server_name: "ramflux-relay".into() },
-            prekey_http_url: stack.discovery_url.clone(),
+            key_package_http_url: stack.discovery_url.clone(),
             signaling_turn_addr: String::new(),
             protocol_versions: vec!["ramflux.v1".into()],
             client_capabilities: vec![],

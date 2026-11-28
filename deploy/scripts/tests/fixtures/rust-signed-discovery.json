@@ -8,12 +8,12 @@
   "gateway_server_name": "ramflux-gateway",
   "relay_quic_addr": "node.example.org:17447",
   "relay_server_name": "ramflux-relay",
-  "prekey_http_url": "https://node.example.org",
+  "key_package_http_url": "https://node.example.org",
   "signaling_turn_addr": "node.example.org:3478",
   "protocol_versions": ["v1"],
-  "client_capabilities": ["prekey"],
+  "client_capabilities": ["key_package"],
   "version": "0.2.0 (abcdef123456)",
   "updated_at": 1000,
   "expires_at": 2000,
-  "signature": "_O_f9HYfzDU7ThXzD-f5ybpt9dF7F5h4-lutXRdjVj8E3Rsv_lSUDgBse5MzYBYJlqWmvI7H5uDFStiwQtzUBw"
+  "signature": "Nz4aCT_OT0UOXrCXiHXX_NIO9Nj3C4ihVETQDJNV6UTny_r0OFBoa7Tg3T5dvqcA5BLBcVTZd3E7IT8vyvcaCQ"
 }

@@ -31,7 +31,7 @@ mod tests {
 
     #[test]
     fn advertised_capability_passes_the_check() {
-        let advertised = vec!["prekey".to_owned(), CAPABILITY.to_owned()];
+        let advertised = vec!["key_package".to_owned(), CAPABILITY.to_owned()];
         assert!(
             require_agent_custody_authorization(&advertised).is_ok(),
             "an advertised agent custody capability must pass"
@@ -40,7 +40,7 @@ mod tests {
 
     #[test]
     fn absent_capability_is_typed_unsupported_and_names_no_secret() {
-        let absent = vec!["prekey".to_owned(), "object_relay".to_owned()];
+        let absent = vec!["key_package".to_owned(), "object_relay".to_owned()];
         let refusal = require_agent_custody_authorization(&absent);
         assert!(
             matches!(refusal, Err(SdkError::AgentCustodyUnsupported)),

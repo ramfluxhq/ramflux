@@ -47,10 +47,16 @@ fn policy(method: &str, path: &str) -> RoutePolicy {
     match (method, path) {
         ("POST", ENVELOPE_PATH) => RoutePolicy::AnonymousSigned,
         ("GET", "/healthz" | "/mvp9/federation/trust-snapshot") => RoutePolicy::LocalPeer(SERVICES),
-        ("POST", ramflux_node_core::MIGRATION_PEER_PATH | crate::attachment_renewal::PEER_PATH) => {
-            RoutePolicy::RemoteFederation
-        }
-        ("POST", ramflux_node_core::HOME_SUBMIT_FORWARD_PATH) => RoutePolicy::SameNodeRouter,
+        (
+            "POST",
+            ramflux_node_core::MIGRATION_PEER_PATH
+            | crate::attachment_renewal::PEER_PATH
+            | ramflux_node_core::DM_ORDER_PEER_PATH,
+        ) => RoutePolicy::RemoteFederation,
+        (
+            "POST",
+            ramflux_node_core::HOME_SUBMIT_FORWARD_PATH | ramflux_node_core::DM_ORDER_FORWARD_PATH,
+        ) => RoutePolicy::SameNodeRouter,
         ("POST", "/internal/retention/gc_sweep") => RoutePolicy::LocalPeer(&["ramflux-retention"]),
         _ => RoutePolicy::LocalPeer(&[]),
     }

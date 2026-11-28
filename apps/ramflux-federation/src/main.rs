@@ -4,6 +4,7 @@
 mod admin_http;
 mod attachment_renewal;
 mod discovery;
+mod dm_order;
 #[cfg(test)]
 mod durable_ingress_registry;
 mod durable_mode;

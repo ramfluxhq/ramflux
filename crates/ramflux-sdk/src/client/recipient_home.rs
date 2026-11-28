@@ -218,10 +218,10 @@ pub(crate) async fn public_prekey_base(
     if crate::contact_node_fingerprint(&record.node_public_key)? != pinned_fingerprint {
         return Err(crate::ContactReason::NodeFingerprintMismatch.into());
     }
-    if record.prekey_http_url.is_empty() {
+    if record.key_package_http_url.is_empty() {
         return Err(SdkError::LocalBus("pinned home has no public prekey endpoint".into()));
     }
-    Ok(record.prekey_http_url)
+    Ok(record.key_package_http_url)
 }
 
 /// Public prekey base, or `None` when `session_directory` selects the local gateway.

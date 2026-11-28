@@ -34,10 +34,10 @@ fn record(seed: u8) -> Result<WellKnownClientRecord, SdkError> {
         gateway_server_name: "gateway.example.com".to_owned(),
         relay_quic_addr: "127.0.0.1:17447".to_owned(),
         relay_server_name: "relay.example.com".to_owned(),
-        prekey_http_url: "https://node.example.com".to_owned(),
+        key_package_http_url: "https://node.example.com".to_owned(),
         signaling_turn_addr: "node.example.com:3478".to_owned(),
         protocol_versions: vec!["v1".to_owned()],
-        client_capabilities: vec!["prekey".to_owned()],
+        client_capabilities: vec!["key_package".to_owned()],
         version: "0.2.0 (abcdef123456)".to_owned(),
         updated_at: 1000,
         expires_at: 2000,
@@ -253,7 +253,7 @@ fn signed_record(capabilities: Vec<String>) -> Result<WellKnownClientRecord, Sdk
     discovered.gateway_quic_addr = "127.0.0.1:1".to_owned();
     discovered.gateway_tcp_addr = "127.0.0.1:1".to_owned();
     discovered.relay_quic_addr = "127.0.0.1:1".to_owned();
-    discovered.prekey_http_url = "https://127.0.0.1:1".to_owned();
+    discovered.key_package_http_url = "https://127.0.0.1:1".to_owned();
     discovered.updated_at = now;
     discovered.expires_at = now.saturating_add(3600);
     discovered.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
@@ -348,7 +348,7 @@ async fn probe_json_includes_fetched_client_capabilities() -> Result<(), SdkErro
 async fn fetched_client_capabilities() -> Result<(), SdkError> {
     let capabilities = vec![
         "opaque_delivery".to_owned(),
-        "prekey".to_owned(),
+        "key_package".to_owned(),
         "object_relay".to_owned(),
         ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.to_owned(),
         ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.to_owned(),

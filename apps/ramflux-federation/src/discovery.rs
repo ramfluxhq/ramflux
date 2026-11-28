@@ -71,7 +71,7 @@ pub(crate) fn federation_discovery_surface(
 fn base_client_capabilities(served_gateway: &[String]) -> Vec<String> {
     let mut capabilities = vec![
         "opaque_delivery".to_owned(),
-        "prekey".to_owned(),
+        "key_package".to_owned(),
         "object_relay".to_owned(),
         ramflux_protocol::AGENT_CUSTODY_AUTHORIZATION_CAPABILITY.to_owned(),
     ];
@@ -126,7 +126,7 @@ impl FederationDiscoverySurface {
                 "RAMFLUX_CLIENT_RELAY_SERVER_NAME",
                 "ramflux-relay".to_owned(),
             ),
-            prekey_http_url: value(
+            key_package_http_url: value(
                 "RAMFLUX_CLIENT_PREKEY_HTTP_URL",
                 format!("https://{}", self.node_id),
             ),
@@ -434,7 +434,7 @@ mod gateway_capability_tests {
         let ephemeral = ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY;
         let absent = client_capabilities(&serde_json::json!({}), None)?;
         assert!(has(&absent, "opaque_delivery"), "base opaque_delivery stays");
-        assert!(has(&absent, "prekey"), "base prekey stays");
+        assert!(has(&absent, "key_package"), "base key_package stays");
         assert!(has(&absent, "object_relay"), "base object_relay stays");
         assert!(
             lacks_gateway_features(&absent, push, ephemeral),
@@ -476,7 +476,7 @@ mod gateway_capability_tests {
             Some(&serde_json::json!([ephemeral, push, push, "not-a-capability"])),
         )?;
         assert!(has(&served, "opaque_delivery"), "base opaque_delivery stays when features are on");
-        assert!(has(&served, "prekey"), "base prekey stays when features are on");
+        assert!(has(&served, "key_package"), "base key_package stays when features are on");
         assert!(has(&served, "object_relay"), "base object_relay stays when features are on");
         assert!(has(&served, push), "session push is published once");
         assert!(has(&served, ephemeral), "ephemeral is published once with session push");

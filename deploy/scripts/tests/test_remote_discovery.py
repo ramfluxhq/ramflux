@@ -66,10 +66,10 @@ class RemoteDiscoveryTests(unittest.TestCase):
                 "gateway_server_name": "ramflux-gateway",
                 "relay_quic_addr": "node.example.org:17447",
                 "relay_server_name": "ramflux-relay",
-                "prekey_http_url": "https://node.example.org",
+                "key_package_http_url": "https://node.example.org",
                 "signaling_turn_addr": "node.example.org:3478",
                 "protocol_versions": ["v1"],
-                "client_capabilities": ["prekey"],
+                "client_capabilities": ["key_package"],
                 "version": "0.2.0 (abcdef123456)",
                 "updated_at": 1000,
                 "expires_at": 2000,
@@ -150,7 +150,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
             "gateway_server_name": "ramflux-gateway",
             "relay_quic_addr": "node.example.org:17447",
             "relay_server_name": "ramflux-relay",
-            "prekey_http_url": "https://node.example.org",
+            "key_package_http_url": "https://node.example.org",
             "signaling_turn_addr": "node.example.org:3478",
             "protocol_versions": ["v1"],
             "client_capabilities": capabilities,
@@ -185,7 +185,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
             self.assertIn("RAMFLUX_VERSION=demo-v2\n", runtime)
             self.assertNotIn(signed, runtime)
             advertised = [
-                "opaque_delivery", "prekey", "object_relay", "device_pairing_v2", *applied,
+                "opaque_delivery", "key_package", "object_relay", "device_pairing_v2", *applied,
             ]
             record_path, public_key = self.sign_record(root, advertised, signed)
             output = io.StringIO()
@@ -195,7 +195,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
 
             missing = root / "missing"
             missing.mkdir()
-            missing_path, missing_key = self.sign_record(missing, ["prekey"], signed)
+            missing_path, missing_key = self.sign_record(missing, ["key_package"], signed)
             with self.assertRaisesRegex(
                 SystemExit, "discovery capabilities do not match the applied deployment"
             ):
@@ -204,7 +204,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
             wrong_order = root / "order"
             wrong_order.mkdir()
             reversed_caps = [
-                "opaque_delivery", "prekey", "object_relay",
+                "opaque_delivery", "key_package", "object_relay",
                 "gateway.ephemeral.v1", "gateway.session_push.v1",
             ]
             order_path, order_key = self.sign_record(wrong_order, reversed_caps, signed)

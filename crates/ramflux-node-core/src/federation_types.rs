@@ -262,6 +262,91 @@ pub struct FederatedDmOrderResponse {
 /// Version of [`FederatedDmOrderRequest`].
 pub const FEDERATED_DM_ORDER_VERSION: u8 = 1;
 
+/// Path of the `dm_order` call between the federation services of two nodes.
+pub const DM_ORDER_PEER_PATH: &str = "/federation/v1/dm-order";
+
+/// Same-node router-to-federation handoff of a `dm_order` call whose orderer is another node.
+pub const DM_ORDER_FORWARD_PATH: &str = "/internal/cross-node/dm-order";
+
+/// Largest `dm_order` body between services: a 1 MiB commit in base64url plus framing.
+pub const DM_ORDER_BODY_MAX_BYTES: usize = 1_572_864;
+
+/// Gateway to router: one `dm_order` operation of an authenticated local session. The gateway
+/// already checked the device (Active, not revoked, lease valid) for `anchor`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DmOrderCall {
+    /// Account anchor of the authenticated session.
+    pub anchor: String,
+    /// Node that orders the group; absent or this node means the local orderer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orderer_node: Option<String>,
+    /// The operation.
+    pub op: crate::DmOrderOp,
+}
+
+/// Router to federation: forward one operation to the orderer node `target_node`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DmOrderForward {
+    /// The orderer node.
+    pub target_node: String,
+    /// Account anchor the submitting device belongs to.
+    pub anchor: String,
+    /// The operation.
+    pub op: crate::DmOrderOp,
+}
+
+/// Federation to router on the orderer node: an operation from a pinned peer, already verified.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DmOrderInbound {
+    /// Account anchor the submitting device belongs to.
+    pub anchor: String,
+    /// The pinned peer node that signed the call.
+    pub origin_node: String,
+    /// The operation.
+    pub op: crate::DmOrderOp,
+}
+
+/// Gateway to router: publish the key packages of one device.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct KeyPackagePublishCall {
+    /// Account anchor of the authenticated session.
+    pub anchor: String,
+    /// Device of the authenticated session.
+    pub device_id: String,
+    /// The key packages.
+    pub request: crate::KeyPackagePublishRequest,
+}
+
+/// Gateway to router: what one device has stored.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct KeyPackageStatusCall {
+    /// Account anchor of the authenticated session.
+    pub anchor: String,
+    /// Device of the authenticated session.
+    pub device_id: String,
+}
+
+/// Gateway or federation to router: fetch one key package per device of `anchor`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct KeyPackageFetchCall {
+    /// Account whose key packages are wanted.
+    pub anchor: String,
+    /// Authenticated requesting account (gateway only); absent on the public endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<String>,
+}
+
+/// Router paths of the key package and `dm_order` calls.
+pub const DM_ORDER_ROUTER_PATH: &str = "/mvp1/dm-order";
+/// Router path of an already verified `dm_order` call from a pinned peer.
+pub const DM_ORDER_INBOUND_PATH: &str = "/mvp1/dm-order/inbound";
+/// Router path of a key package publish.
+pub const KEY_PACKAGE_PUBLISH_PATH: &str = "/mvp1/key-package/publish";
+/// Router path of a key package status.
+pub const KEY_PACKAGE_STATUS_PATH: &str = "/mvp1/key-package/status";
+/// Router path of a key package fetch.
+pub const KEY_PACKAGE_FETCH_PATH: &str = "/mvp1/key-package/fetch";
+
 /// Same-node router-to-federation mTLS handoff; never served by an admin listener.
 pub const HOME_SUBMIT_FORWARD_PATH: &str = "/internal/cross-node/forward";
 

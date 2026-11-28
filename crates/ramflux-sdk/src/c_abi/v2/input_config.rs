@@ -56,7 +56,7 @@ impl<'a> Profile<'a> {
                 i::string(v, "node_id")?,
                 i::string(v, "node_public_key")?,
                 i::string(v, "ca_cert_pem")?,
-                i::string(v, "prekey_http_url")?,
+                i::string(v, "key_package_http_url")?,
                 default_string(v, "signaling_turn_addr")?,
             ],
             gateway: (
@@ -120,7 +120,7 @@ impl OwnedProfile {
             node_id,
             node_public_key,
             ca_cert_pem,
-            prekey_http_url,
+            key_package_http_url,
             signaling_turn_addr,
         ] = std::mem::take(&mut self.strings);
         let [quic_addr, tcp_addr, server_name] = std::mem::take(&mut self.gateway);
@@ -130,7 +130,7 @@ impl OwnedProfile {
             node_id,
             node_public_key,
             ca_cert_pem,
-            prekey_http_url,
+            key_package_http_url,
             signaling_turn_addr,
             pin_source: self.pin,
             gateway: NodeGateway { quic_addr, tcp_addr, server_name },

@@ -25,6 +25,7 @@ mod issued_probe;
 #[cfg(feature = "itest-http")]
 mod itest_http;
 mod mesh_delivery;
+mod mls_dm;
 mod notify_wake;
 mod object_issue;
 mod pre_auth;

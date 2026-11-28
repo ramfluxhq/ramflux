@@ -160,7 +160,7 @@ fn session_config(
         principal_id: reference.account_anchor.clone(),
         device_id: reference.device_id.clone(),
         target_delivery_id: delivery,
-        prekey_http_url: Some(node.prekey_http_url.clone()),
+        prekey_http_url: Some(node.key_package_http_url.clone()),
     })
     .with_native_custody(GatewayCustodyConfig {
         account_root: local.root.path().into(),
