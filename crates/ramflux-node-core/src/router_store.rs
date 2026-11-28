@@ -47,6 +47,8 @@ mod identity_registry;
 pub(crate) mod incarnation;
 pub(crate) mod incarnation_state;
 pub mod key_packages;
+#[allow(dead_code, reason = "MLS: allowance removed in G4")]
+pub(crate) mod lg_store;
 mod migration_barrier;
 pub mod publication;
 mod retention;
@@ -724,6 +726,7 @@ impl RouterRedbStore {
         }
         dm_order::initialize(&write_txn)?;
         key_packages::initialize(&write_txn)?;
+        lg_store::initialize(&write_txn)?;
         mailbox_keys::initialize(&write_txn)?;
         migration_barrier::initialize_snapshot_index(&write_txn)?;
         expiry_index::upgrade(&write_txn)?;
