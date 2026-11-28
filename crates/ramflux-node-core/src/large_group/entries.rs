@@ -27,7 +27,7 @@ use crate::router_store::lg_store::LgTable;
 
 /// What `submit` answers: the entry's place in the head chain.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Appended {
+pub struct AppendReceipt {
     /// Position of the entry.
     pub log_seq: u64,
     /// Host time of the append.
@@ -87,7 +87,7 @@ impl LargeGroupHost {
         now: u64,
         session_gid: &[u8; 32],
         bytes: &[u8],
-    ) -> LgResult<Appended> {
+    ) -> LgResult<AppendReceipt> {
         let envelope = Envelope::decode(bytes).map_err(|_| LgRefusal::BadRequest)?;
         // 1: session scope (before anything else is read).
         if envelope.header.group_id != *session_gid {
@@ -99,7 +99,7 @@ impl LargeGroupHost {
 }
 
 impl Cx<'_> {
-    fn submit(&self, env: &Envelope) -> LgResult<Appended> {
+    fn submit(&self, env: &Envelope) -> LgResult<AppendReceipt> {
         let gid = env.header.group_id;
         let mut head = self.head(&gid)?;
         // 2: authorisation.
@@ -117,7 +117,8 @@ impl Cx<'_> {
             }
             EnvKind::Post | EnvKind::Tombstone | EnvKind::Proposal | EnvKind::State => {
                 self.reference_blob(&gid, env)?;
-                let row = self.append_entry(&gid, &mut head, env.header.clone(), env.payload.clone())?;
+                let row =
+                    self.append_entry(&gid, &mut head, env.header.clone(), env.payload.clone())?;
                 if env.header.kind == EnvKind::Post {
                     head.post_count = head.post_count.saturating_add(1);
                 }
@@ -128,7 +129,7 @@ impl Cx<'_> {
             EnvKind::Roll => return Err(LgRefusal::Unauthorized),
         };
         self.put_head(&gid, &head)?;
-        Ok(Appended {
+        Ok(AppendReceipt {
             log_seq: head.log_seq,
             appended_at_ms: row.appended_ms,
             head: row.head,
@@ -236,7 +237,8 @@ impl Cx<'_> {
         // commit, the leave ground a stored `leave`.
         let mut undo = Vec::with_capacity(header.removed.len());
         for (index, removal) in header.removed.iter().enumerate() {
-            let duplicate = header.removed.get(..index).is_some_and(|b| b.iter().any(|r| r.p == removal.p));
+            let duplicate =
+                header.removed.get(..index).is_some_and(|b| b.iter().any(|r| r.p == removal.p));
             let row = self.pset(gid, &removal.p)?;
             let Some(row) = row.filter(|_| !duplicate) else {
                 return Err(LgRefusal::CommitBadRemoves);
@@ -329,12 +331,7 @@ impl Cx<'_> {
     /// `void{seq}` by an admin: only the head commit; the epoch returns to the voided commit's
     /// epoch and the leaf set to what it was before it. No row is rewritten; the joins the commit
     /// consumed are not restored (those joiners ask again).
-    fn append_void(
-        &self,
-        gid: &[u8; 32],
-        head: &mut HeadRow,
-        env: &Envelope,
-    ) -> LgResult<LogRow> {
+    fn append_void(&self, gid: &[u8; 32], head: &mut HeadRow, env: &Envelope) -> LgResult<LogRow> {
         let target = parse_void_payload(&env.payload).map_err(|_| LgRefusal::BadRequest)?;
         if target == 0 || target != head.voidable_seq || env.header.epoch != head.epoch {
             return Err(LgRefusal::Stale { epoch: head.epoch });
@@ -358,7 +355,12 @@ impl Cx<'_> {
     }
 
     /// Delete pending join rows of `queue` older than 24 h and recount the queue.
-    pub(super) fn expire_joins(&self, gid: &[u8; 32], head: &mut HeadRow, queue: u8) -> LgResult<()> {
+    pub(super) fn expire_joins(
+        &self,
+        gid: &[u8; 32],
+        head: &mut HeadRow,
+        queue: u8,
+    ) -> LgResult<()> {
         let prefix = key(gid, &[&[queue]]);
         let rows = self.tx.scan(
             LgTable::Join,

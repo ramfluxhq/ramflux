@@ -62,14 +62,9 @@ pub(super) fn roll_due(head: &HeadRow, now: u64) -> bool {
 impl LargeGroupHost {
     /// Write any due roll in a transaction of its own, so a later refusal of the caller's request
     /// cannot undo it.
-    pub(super) fn settle(
-        &self,
-        store: &RouterRedbStore,
-        now: u64,
-        gid: &[u8; 32],
-    ) -> LgResult<()> {
+    pub(super) fn settle(&self, store: &RouterRedbStore, now: u64, gid: &[u8; 32]) -> LgResult<()> {
         let due = store
-            .lg_read(|view| Ok(view.get(LgTable::Head, gid)?))?
+            .lg_read(|view| view.get(LgTable::Head, gid))?
             .map(|bytes| HeadRow::decode(&bytes))
             .transpose()?
             .is_some_and(|head| roll_due(&head, now));

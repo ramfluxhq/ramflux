@@ -135,7 +135,7 @@ fn sync_dir(dir: &Path) -> LgResult<()> {
 /// Writes `keys` under `name` through a staged file and a hard link; never replaces a file.
 pub(super) fn publish(dir: &Path, name: &str, keys: &HostKeys) -> LgResult<()> {
     let suffix = random_array::<8>()?;
-    let stage = dir.join(format!("{name}.{}.tmp", ramflux_protocol::encode_base64url(&suffix)));
+    let stage = dir.join(format!("{name}.{}.tmp", ramflux_protocol::encode_base64url(suffix)));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]

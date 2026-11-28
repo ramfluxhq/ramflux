@@ -100,7 +100,8 @@ impl LargeGroupHost {
             let mut head = cx.head(gid)?;
             let existing = cx.find_meta(gid, &put.blob_ref)?;
             let mut meta = if let Some((meta, pending)) = existing {
-                if !pending || meta.complete || meta.total != put.total || meta.received != put.idx {
+                if !pending || meta.complete || meta.total != put.total || meta.received != put.idx
+                {
                     return Err(LgRefusal::BlobBad);
                 }
                 meta
@@ -122,7 +123,8 @@ impl LargeGroupHost {
                     referenced: false,
                 }
             };
-            meta.bytes = meta.bytes.saturating_add(u64::try_from(put.chunk.len()).unwrap_or(u64::MAX));
+            meta.bytes =
+                meta.bytes.saturating_add(u64::try_from(put.chunk.len()).unwrap_or(u64::MAX));
             if meta.bytes > BLOB_MAX_BYTES {
                 return Err(LgRefusal::BlobBad);
             }
@@ -143,6 +145,7 @@ impl LargeGroupHost {
     ///
     /// # Errors
     /// `not_found` when the blob is unknown, incomplete or the chunk does not exist.
+    #[allow(clippy::unused_self, reason = "uniform host API")]
     pub fn blob_get(
         &self,
         store: &RouterRedbStore,
@@ -195,7 +198,7 @@ impl Cx<'_> {
 
     /// An entry or Welcome takes ownership of a complete pending blob (a blob has one owner).
     pub(super) fn blob_reference(&self, gid: &[u8; 32], blob_ref: &[u8; 32]) -> LgResult<()> {
-        let (mut meta, pending) = self
+        let (mut meta, _) = self
             .find_meta(gid, blob_ref)?
             .filter(|(meta, pending)| meta.complete && *pending)
             .ok_or(LgRefusal::BlobMissing)?;

@@ -3,7 +3,7 @@
 
 //! The pure rules of the group host (MLS-SPEC r1.1 2.3 to 2.6): outer MLS header checks, the epoch
 //! rule, commit authenticated data, pacing and the commit cap `C`, the join tie and the join
-//! bucket, KeyPackage pseudonym extraction and the retention cut-offs. Nothing here touches a
+//! bucket, `KeyPackage` pseudonym extraction and the retention cut-offs. Nothing here touches a
 //! table or a clock: `now` is always an argument, and no rule decides validity of MLS content by
 //! time (rule V); time feeds only pacing, quotas and retention.
 
@@ -116,10 +116,7 @@ pub fn authenticated_data<'a>(mls: &'a [u8], outer: &MlsOuterHeader) -> LgResult
         return Err(mismatch());
     }
     // group id bytes, epoch (8), content type (1)
-    pos = pos
-        .checked_add(prefix)
-        .and_then(|at| at.checked_add(9))
-        .ok_or_else(mismatch)?;
+    pos = pos.checked_add(prefix).and_then(|at| at.checked_add(9)).ok_or_else(mismatch)?;
     let len = read_varint(mls, &mut pos).ok_or_else(mismatch)?;
     let end = pos.checked_add(len).ok_or_else(mismatch)?;
     mls.get(pos..end).ok_or_else(mismatch)
@@ -187,10 +184,8 @@ impl JoinBucket {
 
     /// Take one request's worth; `false` when the bucket is empty.
     pub fn take(&mut self, now: u64) -> bool {
-        let refilled = self
-            .milli
-            .saturating_add(now.saturating_sub(self.last_ms))
-            .min(JOIN_BURST_MILLI);
+        let refilled =
+            self.milli.saturating_add(now.saturating_sub(self.last_ms)).min(JOIN_BURST_MILLI);
         self.last_ms = now;
         if refilled < JOIN_COST_MILLI {
             self.milli = refilled;
@@ -223,12 +218,12 @@ pub fn join_tie(found: &[Option<u8>], approval_on: bool, by_admin: bool) -> LgRe
     Ok((member, outsider))
 }
 
-/// The leaf signature key of a serialized KeyPackage: `protocol_version (2) ‖ cipher_suite (2) ‖
+/// The leaf signature key of a serialized `KeyPackage`: `protocol_version (2) ‖ cipher_suite (2) ‖
 /// init_key<V> ‖ LeafNode{encryption_key<V> ‖ signature_key<V> …}`. The host needs the pseudonym
 /// `P` to tie a join request to an `added_P` without reading the roster.
 ///
 /// # Errors
-/// [`LgRefusal::BadRequest`] when the bytes are not an Ed25519 KeyPackage prefix.
+/// [`LgRefusal::BadRequest`] when the bytes are not an Ed25519 `KeyPackage` prefix.
 pub fn key_package_signature_key(key_package: &[u8]) -> LgResult<[u8; 32]> {
     let bad = || LgRefusal::BadRequest;
     let mut pos = 4_usize;

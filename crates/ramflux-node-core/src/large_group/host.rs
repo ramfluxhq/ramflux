@@ -21,9 +21,7 @@ use ramflux_crypto::large_group::{
 use super::check::{COMMIT_CAP_24H_DEFAULT, JoinBucket};
 use super::key_file::{self, HostKeys};
 use super::refusal::{LgRefusal, LgResult};
-use super::rows::{
-    HeadRow, InviteRow, LogRow, PsetRow, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, key,
-};
+use super::rows::{HeadRow, InviteRow, LogRow, PsetRow, ROLE_ADMIN, ROLE_MEMBER, ROLE_OWNER, key};
 use crate::RouterRedbStore;
 use crate::router_store::lg_store::{LgTable, LgTx, LgWrite};
 
@@ -94,7 +92,7 @@ pub struct GroupStatus {
 }
 
 /// Loaded keys of one group.
-pub(super) struct GroupKeys {
+pub(super) struct HostKeySet {
     pub(super) keys: HostKeys,
     pub(super) root: LgTokenRootKey,
 }
@@ -113,7 +111,7 @@ pub enum Authority<'a> {
 pub struct LargeGroupHost {
     pub(super) key_dir: PathBuf,
     pub(super) config: HostConfig,
-    keys: Mutex<HashMap<[u8; 32], Arc<GroupKeys>>>,
+    keys: Mutex<HashMap<[u8; 32], Arc<HostKeySet>>>,
     buckets: Mutex<HashMap<[u8; 32], JoinBucket>>,
 }
 
@@ -160,14 +158,14 @@ impl LargeGroupHost {
         buckets.entry(*gid).or_insert_with(|| JoinBucket::new(now)).take(now)
     }
 
-    pub(super) fn group_keys(&self, gid: &[u8; 32]) -> LgResult<Arc<GroupKeys>> {
+    pub(super) fn group_keys(&self, gid: &[u8; 32]) -> LgResult<Arc<HostKeySet>> {
         let mut cache = self.keys.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(found) = cache.get(gid) {
             return Ok(Arc::clone(found));
         }
         let keys = key_file::load(&self.key_dir, &key_file::group_name(gid))?;
         let root = keys.token_root()?;
-        let loaded = Arc::new(GroupKeys { keys, root });
+        let loaded = Arc::new(HostKeySet { keys, root });
         cache.insert(*gid, Arc::clone(&loaded));
         Ok(loaded)
     }
@@ -268,8 +266,9 @@ impl LargeGroupHost {
     ///
     /// # Errors
     /// `not_found` for an unknown group.
+    #[allow(clippy::unused_self, reason = "uniform host API")]
     pub fn status(&self, store: &RouterRedbStore, gid: &[u8; 32]) -> LgResult<GroupStatus> {
-        store.lg_read(|view| Ok(view.get(LgTable::Head, gid)?))?.map_or(
+        store.lg_read(|view| view.get(LgTable::Head, gid))?.map_or(
             Err(LgRefusal::NotFound),
             |bytes| {
                 let head = HeadRow::decode(&bytes)?;
@@ -290,6 +289,7 @@ impl LargeGroupHost {
     ///
     /// # Errors
     /// `not_found`; `pruned` when `from_seq` is below the first retained entry.
+    #[allow(clippy::unused_self, reason = "uniform host API")]
     pub fn read(
         &self,
         store: &RouterRedbStore,
@@ -489,10 +489,8 @@ impl InviteSpec {
 }
 
 fn log_view(row_key: &[u8], value: &[u8]) -> LgResult<LogView> {
-    let seq_bytes: [u8; 8] = row_key
-        .get(32..40)
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or(LgRefusal::Internal)?;
+    let seq_bytes: [u8; 8] =
+        row_key.get(32..40).and_then(|bytes| bytes.try_into().ok()).ok_or(LgRefusal::Internal)?;
     let row = LogRow::decode(value)?;
     Ok(LogView {
         seq: u64::from_be_bytes(seq_bytes),
@@ -520,7 +518,10 @@ impl Cx<'_> {
     }
 
     pub(super) fn pset(&self, gid: &[u8; 32], p: &[u8; 32]) -> LgResult<Option<PsetRow>> {
-        self.tx.get(LgTable::Pset, &key(gid, &[p]))?.map(|bytes| PsetRow::decode(&bytes)).transpose()
+        self.tx
+            .get(LgTable::Pset, &key(gid, &[p]))?
+            .map(|bytes| PsetRow::decode(&bytes))
+            .transpose()
     }
 
     /// Add a leaf pseudonym; keeps the count and the set hash in `head` (the caller stores it).
@@ -596,8 +597,12 @@ impl Cx<'_> {
         let envelope = ramflux_crypto::large_group::Envelope { header, payload };
         let chain = envelope.chain_hash(appended, seq);
         let new_head = next_head(&head.last_head, seq, &chain);
-        let sig =
-            host_head_sign(&self.host.group_keys(gid)?.keys.head_signing_seed()?, gid, seq, &new_head);
+        let sig = host_head_sign(
+            &self.host.group_keys(gid)?.keys.head_signing_seed()?,
+            gid,
+            seq,
+            &new_head,
+        );
         let row = LogRow {
             kind: envelope.header.kind.code(),
             epoch: envelope.header.epoch,

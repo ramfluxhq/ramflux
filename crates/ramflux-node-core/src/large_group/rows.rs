@@ -322,7 +322,7 @@ pub struct JoinRow {
     pub kind: u8,
     /// `BLAKE3(join_pk)` the request was sealed to.
     pub join_pk_id: [u8; 32],
-    /// The KeyPackage bytes.
+    /// The `KeyPackage` bytes.
     pub key_package: Vec<u8>,
     /// The HPKE blob (opaque to the host).
     pub sealed: Vec<u8>,

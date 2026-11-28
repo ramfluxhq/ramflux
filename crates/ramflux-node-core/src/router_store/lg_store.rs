@@ -146,10 +146,8 @@ impl LgTx<'_> {
         limit: usize,
     ) -> Result<usize, NodeCoreError> {
         let mut table = self.txn.open_table(table.def()).map_err(error)?;
-        let keys: Vec<Vec<u8>> = collect(&table, prefix, prefix, limit)?
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect();
+        let keys: Vec<Vec<u8>> =
+            collect(&table, prefix, prefix, limit)?.into_iter().map(|(key, _)| key).collect();
         for key in &keys {
             table.remove(key.as_slice()).map_err(error)?;
         }

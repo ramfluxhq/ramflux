@@ -15,9 +15,7 @@ use super::check::{DAY_MS, POSTS_MAX, entry_expired, route_expired, welcome_expi
 use super::host::{Cx, LargeGroupHost};
 use super::key_file;
 use super::refusal::{LgRefusal, LgResult};
-use super::rows::{
-    HeadRow, LogRow, QUEUE_MEMBER, QUEUE_OUTSIDER, RouteRow, WelcomeRow, key,
-};
+use super::rows::{HeadRow, LogRow, QUEUE_MEMBER, QUEUE_OUTSIDER, RouteRow, WelcomeRow, key};
 use crate::RouterRedbStore;
 use crate::router_store::lg_store::LgTable;
 
@@ -47,9 +45,8 @@ impl LargeGroupHost {
             next.push(0);
             next
         });
-        let groups = store.lg_read(|view| {
-            Ok(view.scan(LgTable::Head, &[], &start, max_groups.saturating_add(1))?)
-        })?;
+        let groups = store
+            .lg_read(|view| view.scan(LgTable::Head, &[], &start, max_groups.saturating_add(1)))?;
         let mut last = None;
         for (gid_bytes, _) in groups.iter().take(max_groups) {
             let gid: [u8; 32] = gid_bytes.as_slice().try_into().map_err(|_| LgRefusal::Internal)?;
@@ -154,7 +151,8 @@ impl Cx<'_> {
     fn sweep_spent(&self, gid: &[u8; 32], head: &HeadRow) -> LgResult<()> {
         let prefix = key(gid, &[]);
         for (row_key, _) in self.tx.scan(LgTable::Spent, &prefix, &prefix, ROW_BATCH)? {
-            let Some(te_bytes) = row_key.get(32..36).and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            let Some(te_bytes) =
+                row_key.get(32..36).and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
             else {
                 continue;
             };

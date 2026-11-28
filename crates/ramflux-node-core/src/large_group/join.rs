@@ -7,7 +7,7 @@
 //! `rejoin` requests (member session, one commit token) go to the member queue. Each queue holds
 //! at most 1 000 pending requests, the group takes 1 per second with a burst of 10, and a request
 //! expires after 24 h. A commit may add only pseudonyms that have a pending entry (the join tie,
-//! checked in `entries`). The host reads the pseudonym `P` from the KeyPackage's leaf signature key;
+//! checked in `entries`). The host reads the pseudonym `P` from the `KeyPackage`'s leaf signature key;
 //! everything else of the request stays sealed to the join key.
 
 use ramflux_crypto::large_group::{
@@ -19,9 +19,7 @@ use ramflux_protocol::domain::LG_JOIN_V1;
 use super::check::{JOIN_QUEUE_MAX, key_package_signature_key};
 use super::host::{Authority, Cx, LargeGroupHost, verify_plain};
 use super::refusal::{LgRefusal, LgResult};
-use super::rows::{
-    BlobMeta, InviteRow, JoinRow, QUEUE_MEMBER, QUEUE_OUTSIDER, WelcomeRow, key,
-};
+use super::rows::{BlobMeta, InviteRow, JoinRow, QUEUE_MEMBER, QUEUE_OUTSIDER, WelcomeRow, key};
 use crate::RouterRedbStore;
 use crate::router_store::lg_store::LgTable;
 
@@ -33,7 +31,7 @@ const WELCOME_ENTRY_MAX_AGE_MS: u64 = super::check::WELCOME_TTL_MS;
 /// A pending join request as `join.pending` lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingJoin {
-    /// The joiner's pseudonym (the KeyPackage's leaf signature key).
+    /// The joiner's pseudonym (the `KeyPackage`'s leaf signature key).
     pub p: [u8; 32],
     /// The queue it waits in.
     pub queue: u8,
@@ -41,10 +39,19 @@ pub struct PendingJoin {
     pub kind: u8,
     /// Join key it is sealed to.
     pub join_pk_id: [u8; 32],
-    /// The KeyPackage.
+    /// The `KeyPackage`.
     pub key_package: Vec<u8>,
     /// The sealed roster entry.
     pub sealed: Vec<u8>,
+}
+
+/// A Welcome to store: the commit it belongs to and the blob holding it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WelcomePut {
+    /// `log_seq` of the commit that added the joiners.
+    pub commit_seq: u64,
+    /// Complete pending blob with the Welcome.
+    pub blob_ref: [u8; 32],
 }
 
 /// What `welcome.get` returns: where to pull the Welcome from.
@@ -216,13 +223,14 @@ impl LargeGroupHost {
         store: &RouterRedbStore,
         now: u64,
         gid: &[u8; 32],
-        commit_seq: u64,
-        blob_ref: &[u8; 32],
+        put: &WelcomePut,
         auth: Authority<'_>,
     ) -> LgResult<()> {
+        let WelcomePut { commit_seq, blob_ref } = put;
         self.run(store, now, |cx| {
             let mut head = cx.head(gid)?;
-            cx.authorize_op(gid, &mut head, "welcome.put", &welcome_put_body(commit_seq, blob_ref), auth)?;
+            let body = welcome_put_body(*commit_seq, blob_ref);
+            cx.authorize_op(gid, &mut head, "welcome.put", &body, auth)?;
             let bytes = cx
                 .tx
                 .get(LgTable::Log, &key(gid, &[&commit_seq.to_be_bytes()]))?

@@ -135,6 +135,7 @@ impl LargeGroupHost {
     ///
     /// # Errors
     /// Store failures.
+    #[allow(clippy::unused_self, reason = "uniform host API")]
     pub fn wake_targets(
         &self,
         store: &RouterRedbStore,
