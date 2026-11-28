@@ -330,6 +330,28 @@ pub enum GatewayClientFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         orderer_node: Option<String>,
     },
+    /// First frame of a group `member` session (MLS-SPEC r1.2 2.1): spends one `open` token bound
+    /// to `rf-lg-open-v1 || group_id || nonce`. Anonymous: no account, device or `Open`/`Auth`.
+    GroupOpen {
+        /// Base64url of the 32-byte group id.
+        group_id: String,
+        /// Base64url of the 68-byte `open`-bucket token.
+        open_token: String,
+        /// Base64url of the 32-byte session nonce the token is bound to.
+        nonce: String,
+    },
+    /// First frame of a group `ident` session: one signed or invite-authorised op.
+    GroupIdent {
+        /// Base64url of the 32-byte group id (all zero for `create.prepare` and `create`).
+        group_id: String,
+    },
+    /// One op of a group session; `body` is base64url, at most 768 KiB decoded.
+    Group {
+        request_id: String,
+        op: String,
+        #[serde(default)]
+        body: String,
+    },
     RelayTokenV3Issue {
         request: Box<GatewayRelayTokenV3IssueRequest>,
     },
@@ -431,6 +453,19 @@ pub enum GatewayServerFrame {
     },
     DmOrder {
         reply: crate::DmOrderReply,
+    },
+    /// Answer to `GroupOpen` / `GroupIdent`: `ok`, or the refusal code (the session then closes).
+    GroupOpened {
+        status: String,
+    },
+    /// Answer to one `Group` op.
+    GroupReply {
+        request_id: String,
+        reply: crate::GroupHostReply,
+    },
+    /// A subscribed member session: the group's log grew to `log_seq`; read to fetch it.
+    GroupLogGrew {
+        log_seq: u64,
     },
     PrekeyPublished {
         response: PrekeyResponse,

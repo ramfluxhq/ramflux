@@ -24,6 +24,7 @@ pub(crate) struct TokioRouterRuntime {
     forward_timeout: Duration,
     dm_order: ramflux_node_core::DmOrderService,
     key_package_limits: ramflux_node_core::KeyPackageFetchLimits,
+    group_host: std::sync::OnceLock<Arc<ramflux_node_core::large_group::host::LargeGroupHost>>,
     custody: std::sync::OnceLock<Arc<ramflux_node_core::CustodyService>>,
     migration_drain: std::sync::OnceLock<crate::migration_drain::MigrationDrain>,
     migration_courier: std::sync::OnceLock<crate::migration_courier::MigrationCourier>,
@@ -87,6 +88,7 @@ impl TokioRouterRuntime {
             forward_timeout,
             dm_order: ramflux_node_core::DmOrderService::new(),
             key_package_limits: ramflux_node_core::KeyPackageFetchLimits::new(),
+            group_host: std::sync::OnceLock::new(),
             custody: std::sync::OnceLock::new(),
             migration_courier: std::sync::OnceLock::new(),
             migration_drain: std::sync::OnceLock::new(),
@@ -198,6 +200,22 @@ impl RouterHandle {
     pub(crate) fn key_package_limits(&self) -> &ramflux_node_core::KeyPackageFetchLimits {
         let Self::Tokio(runtime) = self;
         &runtime.key_package_limits
+    }
+
+    /// The group host, once `group_routes::start` installed it.
+    pub(crate) fn group_host(
+        &self,
+    ) -> Option<&ramflux_node_core::large_group::host::LargeGroupHost> {
+        let Self::Tokio(runtime) = self;
+        runtime.group_host.get().map(AsRef::as_ref)
+    }
+
+    pub(crate) fn install_group_host(
+        &self,
+        host: Arc<ramflux_node_core::large_group::host::LargeGroupHost>,
+    ) -> anyhow::Result<()> {
+        let Self::Tokio(runtime) = self;
+        runtime.group_host.set(host).map_err(|_| anyhow::anyhow!("group host already installed"))
     }
 
     pub(crate) fn forward_dm_order(

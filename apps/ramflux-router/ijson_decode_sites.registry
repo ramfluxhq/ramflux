@@ -5,6 +5,7 @@ apps/ramflux-router/src/attachment_renew_home.rs | route | 1 | E | excluded=targ
 apps/ramflux-router/src/attachment_source.rs | requester_of | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/attachment_source.rs | route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/forward_http.rs | post | 1 | B | strict=parse_i_json; admission=B ingress boundary
+apps/ramflux-router/src/group_routes.rs | route | 1 | A | strict=parse_i_json; admission=authenticated gateway group session op (anonymous, no source)
 apps/ramflux-router/src/handlers.rs | authenticated_principal_mesh_response | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/handlers.rs | forward_authority_response | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/handlers.rs | handle_itest_directory_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

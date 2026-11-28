@@ -509,6 +509,15 @@ pub(crate) fn handle_mesh_request_value(
     )? {
         return Ok(response);
     }
+    if let Some(response) = crate::group_routes::route(
+        peer_service_id,
+        &request.method,
+        &request.path,
+        &request.body,
+        router,
+    )? {
+        return Ok(response);
+    }
     handle_mesh_request_inner(request, router, peer_service_id)
 }
 

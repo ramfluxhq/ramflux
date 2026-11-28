@@ -47,7 +47,6 @@ mod identity_registry;
 pub(crate) mod incarnation;
 pub(crate) mod incarnation_state;
 pub mod key_packages;
-#[allow(dead_code, reason = "MLS: allowance removed in G4")]
 pub(crate) mod lg_store;
 mod migration_barrier;
 pub mod publication;
