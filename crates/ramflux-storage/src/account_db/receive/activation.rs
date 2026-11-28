@@ -163,6 +163,25 @@ impl AccountDb {
         Ok(result)
     }
 
+    /// Applies the restore strip to a live Activated DB whose delivery target changed (a phrase
+    /// recovery replaced the device id) and has no epoch yet. Messages, tombstones and
+    /// `erased-input:` bindings stay; the next connect installs the new target's epoch.
+    /// Returns `false` and writes nothing when Inactive or the target already has an epoch.
+    ///
+    /// # Errors
+    /// Returns storage or SQLite errors; a crash before COMMIT leaves the old state.
+    pub fn reset_receive_ledger_for_new_target(&self, target: &str) -> Result<bool, StorageError> {
+        self.write_transaction(|| {
+            if self.receive_activation()? != ReceiveActivation::Activated
+                || self.epoch_exists_for(target)?
+            {
+                return Ok(false);
+            }
+            self.connection.call(|db| Ok(super::ledger_backup::sanitize_backup(db)))??;
+            Ok(true)
+        })
+    }
+
     fn epoch_exists_for(&self, target: &str) -> Result<bool, StorageError> {
         let table: i64 = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='gateway_receive_epoch')",

@@ -235,13 +235,20 @@ fn delete_secrets(
     vault: &dyn crate::custody::PrimaryVault,
     id: &str,
 ) -> Result<(), SdkError> {
-    crate::client::device_unlock::delete_device_secret(vault, id)?;
+    match crate::client::device_unlock::delete_device_secret(vault, id) {
+        Ok(()) | Err(SdkError::CustodyVault(crate::custody::CustodyVaultReason::Missing)) => {}
+        Err(error) => return Err(error),
+    }
     // An account stuck mid-recovery still owns the refs the recovery replaces; only its journal
     // records them. A malformed journal must not block the erase.
     match crate::custody::previous_vault_refs(root, id) {
         Ok(Some((primary, branch))) => {
-            delete_ref(vault, &primary)?;
-            delete_ref(vault, &branch)?;
+            // The recovery may already have deleted these; a stale ref never aborts the erase.
+            for stale in [&primary, &branch] {
+                if let Err(error) = delete_ref(vault, stale) {
+                    tracing::warn!(%error, account_id = %id, "previous vault ref not deleted during erase");
+                }
+            }
         }
         Ok(None) => {}
         Err(error) => {
@@ -264,7 +271,11 @@ fn delete_ref(vault: &dyn crate::custody::PrimaryVault, reference: &str) -> Resu
     if reference.is_empty() {
         return Ok(());
     }
-    vault.delete(reference)
+    match vault.delete(reference) {
+        // A missing item is already deleted.
+        Err(SdkError::CustodyVault(crate::custody::CustodyVaultReason::Missing)) => Ok(()),
+        other => other,
+    }
 }
 
 fn forget_database(index: &AccountIndex, id: &str) -> Result<(), SdkError> {

@@ -103,6 +103,14 @@ pub(super) fn unlock(
     } else {
         client.owned_device_identity()?.storage_key().to_owned()
     };
+    if native.recovery_publication_pending(&root)?
+        && client.account_db()?.reset_receive_ledger_for_new_target(&delivery)?
+    {
+        tracing::info!(
+            reason_code = "recovery_receive_ledger_reset",
+            "receive ledger reset for the recovered device"
+        );
+    }
     let publication = native.publication();
     let custodian_publication =
         native.custodian_publication(&root, crate::custody::network_now()?)?;
