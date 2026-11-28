@@ -8,23 +8,23 @@
 use ed25519_dalek::{Signer, SigningKey};
 use ramflux_crypto::large_group::{
     ElectCandidate, EnvAuth, EnvHeader, EnvKind, Envelope, Genesis, LgReader, LgWriter, SignedReq,
-    TIER_1000, TAG_SLOTS, Token, TokenBucket, TokenSecret, blob_put_body, election_delay_ms,
+    TAG_SLOTS, TIER_1000, Token, TokenBucket, TokenSecret, blob_put_body, election_delay_ms,
     election_order, op_bind, post_padded_len,
 };
 use ramflux_mls::{CommitMeta, GroupKind, Tier, key_package_signature_key};
 
 use super::host::{
-    CHUNK_BYTES, GENESIS_SIG_DOMAIN, OPEN_PER_DAY_PLACEHOLDER, b64, blob_put_chunk,
-    chunk_count, fail, finish_dec, invite_expiry_ok, kv_err, put_var, random_bytes, read_fixed,
-    read_var, storage_err,
+    CHUNK_BYTES, GENESIS_SIG_DOMAIN, OPEN_PER_DAY_PLACEHOLDER, b64, blob_put_chunk, chunk_count,
+    fail, finish_dec, invite_expiry_ok, kv_err, put_var, random_bytes, read_fixed, read_var,
+    storage_err,
 };
 use super::join::{open_sealed, parse_opened, roster_checks};
 use super::session::{ident_call, member_op, reply_bytes, status_code};
 use super::store::{GroupRow, OutboxRow, RetiredJoinSk, Store};
 use super::tokens::take;
 use super::{InviteRecord, Parts};
-use crate::gateway::GatewayClientFrame;
 use crate::SdkError;
+use crate::gateway::GatewayClientFrame;
 
 pub(crate) struct Receipt {
     pub log_seq: u64,
@@ -62,8 +62,18 @@ pub(crate) fn push_warning(group: &mut GroupRow, text: &str) {
     }
 }
 
-pub(crate) fn remember_outbox(store: &Store, group: &GroupRow, bytes: Vec<u8>, kind: &str) -> Result<(), SdkError> {
-    store.put_outbox(&OutboxRow { group_id: group.group_id, epoch: group.epoch, bytes, kind: kind.to_owned() })
+pub(crate) fn remember_outbox(
+    store: &Store,
+    group: &GroupRow,
+    bytes: Vec<u8>,
+    kind: &str,
+) -> Result<(), SdkError> {
+    store.put_outbox(&OutboxRow {
+        group_id: group.group_id,
+        epoch: group.epoch,
+        bytes,
+        kind: kind.to_owned(),
+    })
 }
 
 pub(crate) async fn open_frame(
@@ -115,7 +125,8 @@ pub(crate) async fn create(
     let token_root_pk = read_fixed::<32>(&mut dec)?;
     finish_dec(&dec)?;
     let handle = crate::mls::process_crypto()?;
-    let signer = ramflux_mls::signer::LeafSigner::generate(handle.crypto()).map_err(SdkError::from)?;
+    let signer =
+        ramflux_mls::signer::LeafSigner::generate(handle.crypto()).map_err(SdkError::from)?;
     let owner_p = *signer.public();
     let owner_seed = *signer.secret();
     let (join_pk, join_sk) = super::join::fresh_join_key()?;
@@ -146,7 +157,8 @@ pub(crate) async fn create(
         return Err(fail(status_code(&created.status), created.status));
     }
     let got = reply_bytes(&created)?;
-    let got_id = <[u8; 32]>::try_from(got.as_slice()).map_err(|_| fail("bad_request", "group id"))?;
+    let got_id =
+        <[u8; 32]>::try_from(got.as_slice()).map_err(|_| fail("bad_request", "group id"))?;
     if got_id != group_id {
         return Err(fail("host_unusual", "group id"));
     }
@@ -216,13 +228,23 @@ pub(crate) async fn invite_put(
     let mut spec = LgWriter::default();
     spec.fixed(&invite_id).fixed(&invite_pk).u32(max_uses).u64(expires_at);
     let signed = SignedReq::sign("invite.put", group_id, &group.owner_seed, spec.finish());
-    let reply = ident_call(&group.host_node_id, &parts.root, *group_id, "invite.put", &signed.encode()).await?;
+    let reply =
+        ident_call(&group.host_node_id, &parts.root, *group_id, "invite.put", &signed.encode())
+            .await?;
     if reply.status != "ok" {
         return Err(fail(status_code(&reply.status), reply.status));
     }
-    let link_bytes = super::host::invite_link_bytes(&group.host_node_id, group_id, &invite_id, &invite_sk, expires_at, &group.join_pk);
+    let link_bytes = super::host::invite_link_bytes(
+        &group.host_node_id,
+        group_id,
+        &invite_id,
+        &invite_sk,
+        expires_at,
+        &group.join_pk,
+    );
     let link = super::host::format_invite_link(&link_bytes)?;
-    let record = InviteRecord { invite_id, link: link.clone(), max_uses, expires_at, revoked: false };
+    let record =
+        InviteRecord { invite_id, link: link.clone(), max_uses, expires_at, revoked: false };
     rows.push(super::store::InviteRow {
         group_id: *group_id,
         invite_id,
@@ -237,7 +259,11 @@ pub(crate) async fn invite_put(
     Ok(record)
 }
 
-pub(crate) async fn invite_revoke(parts: &Parts<'_>, group_id: &[u8; 32], invite_id: &[u8; 16]) -> Result<(), SdkError> {
+pub(crate) async fn invite_revoke(
+    parts: &Parts<'_>,
+    group_id: &[u8; 32],
+    invite_id: &[u8; 16],
+) -> Result<(), SdkError> {
     let group = load_group(parts.store, group_id)?;
     require_member(&group)?;
     let mut rows = parts.store.invites(group_id)?;
@@ -248,7 +274,9 @@ pub(crate) async fn invite_revoke(parts: &Parts<'_>, group_id: &[u8; 32], invite
         return Ok(());
     }
     let signed = SignedReq::sign("invite.revoke", group_id, &group.owner_seed, invite_id.to_vec());
-    let reply = ident_call(&group.host_node_id, &parts.root, *group_id, "invite.revoke", &signed.encode()).await?;
+    let reply =
+        ident_call(&group.host_node_id, &parts.root, *group_id, "invite.revoke", &signed.encode())
+            .await?;
     if reply.status != "ok" {
         return Err(fail(status_code(&reply.status), reply.status));
     }
@@ -259,7 +287,10 @@ pub(crate) async fn invite_revoke(parts: &Parts<'_>, group_id: &[u8; 32], invite
     Ok(())
 }
 
-pub(crate) fn invite_list(store: &Store, group_id: &[u8; 32]) -> Result<Vec<InviteRecord>, SdkError> {
+pub(crate) fn invite_list(
+    store: &Store,
+    group_id: &[u8; 32],
+) -> Result<Vec<InviteRecord>, SdkError> {
     let rows = store.invites(group_id)?;
     Ok(rows
         .into_iter()
@@ -373,11 +404,12 @@ pub(crate) fn seal_commit(
     }
     header.welcome_ref = Some(*blake3::hash(&output.welcome).as_bytes());
     let hash = header.bind_hash(&output.commit);
+    let [first, second, third, fourth] = secrets;
     header.auth = EnvAuth::CommitTokens([
-        secrets[0].bind(&hash),
-        secrets[1].bind(&hash),
-        secrets[2].bind(&hash),
-        secrets[3].bind(&hash),
+        first.bind(&hash),
+        second.bind(&hash),
+        third.bind(&hash),
+        fourth.bind(&hash),
     ]);
     if let Err(error) = header.check() {
         discard_quiet(parts, &group.group_id);
@@ -390,7 +422,11 @@ pub(crate) fn seal_commit(
     })
 }
 
-pub(crate) fn merge_own(parts: &Parts<'_>, group: &mut GroupRow, now_ms: u64) -> Result<(), SdkError> {
+pub(crate) fn merge_own(
+    parts: &Parts<'_>,
+    group: &mut GroupRow,
+    now_ms: u64,
+) -> Result<(), SdkError> {
     match parts.mls.merge_own(&group.group_id) {
         Ok(staged) => {
             let merged = staged.commit_plain().map_err(kv_err)?;
@@ -417,14 +453,19 @@ pub(crate) async fn admit(
     now_ms: u64,
 ) -> Result<u64, SdkError> {
     let plain = padded(roster_bytes(&added_p))?;
-    let mut one = take(parts.store, group, &parts.root, TokenBucket::Commit, 1, now_ms, &group.owner_seed).await?;
+    let mut one =
+        take(parts.store, group, &parts.root, TokenBucket::Commit, 1, now_ms, &group.owner_seed)
+            .await?;
     let secret = one.pop().ok_or_else(|| fail("rate_limited", "commit"))?;
     let state_id = random_bytes::<16>()?;
     let state = seal_application(parts, group, EnvKind::State, state_id, &plain, &secret, None)?;
     remember_outbox(parts.store, group, state.clone(), "state")?;
     let _state_receipt = submit(parts, group, &state, "commit", now_ms).await?;
     parts.store.clear_outbox(&group.group_id)?;
-    let secrets = four(take(parts.store, group, &parts.root, TokenBucket::Commit, 4, now_ms, &group.owner_seed).await?)?;
+    let secrets = four(
+        take(parts.store, group, &parts.root, TokenBucket::Commit, 4, now_ms, &group.owner_seed)
+            .await?,
+    )?;
     let sealed = seal_commit(parts, group, added_p, key_package, &secrets)?;
     if let Err(error) = put_welcome(parts, group, &sealed.welcome, now_ms).await {
         discard_quiet(parts, &group.group_id);
@@ -436,7 +477,8 @@ pub(crate) async fn admit(
     parts.store.clear_outbox(&group.group_id)?;
     group.last_commit_ms = now_ms;
     if let Ok(status) = parts.mls.status(&group.group_id) {
-        group.leaf_count = u32::try_from(status.leaves).map_err(|_| fail("internal", "leaf count"))?;
+        group.leaf_count =
+            u32::try_from(status.leaves).map_err(|_| fail("internal", "leaf count"))?;
         group.own_leaf = status.own_leaf;
         group.epoch = status.epoch;
     }
@@ -444,21 +486,36 @@ pub(crate) async fn admit(
     Ok(receipt.log_seq)
 }
 
-pub(crate) async fn elect(parts: &Parts<'_>, group: &mut GroupRow, now_ms: u64) -> Result<(), SdkError> {
+pub(crate) async fn elect(
+    parts: &Parts<'_>,
+    group: &mut GroupRow,
+    now_ms: u64,
+) -> Result<(), SdkError> {
     if !group.admin {
         return Ok(());
     }
-    if group.last_commit_ms != 0 && now_ms.saturating_sub(group.last_commit_ms) < ramflux_crypto::large_group::MEMBER_COMMIT_GAP_MS {
+    if group.last_commit_ms != 0
+        && now_ms.saturating_sub(group.last_commit_ms)
+            < ramflux_crypto::large_group::MEMBER_COMMIT_GAP_MS
+    {
         return Ok(());
     }
     let candidates = [ElectCandidate { leaf: group.own_leaf, admin: true }];
-    let order = election_order(&group.group_id, group.epoch, &candidates).map_err(|error| fail("internal", error.to_string()))?;
+    let order = election_order(&group.group_id, group.epoch, &candidates)
+        .map_err(|error| fail("internal", error.to_string()))?;
     let position = order.iter().position(|item| item.leaf == group.own_leaf).unwrap_or(0);
     if now_ms < group.created_at_ms.saturating_add(election_delay_ms(position)) {
         return Ok(());
     }
     let signed = SignedReq::sign("join.pending", &group.group_id, &group.owner_seed, Vec::new());
-    let reply = ident_call(&group.host_node_id, &parts.root, group.group_id, "join.pending", &signed.encode()).await?;
+    let reply = ident_call(
+        &group.host_node_id,
+        &parts.root,
+        group.group_id,
+        "join.pending",
+        &signed.encode(),
+    )
+    .await?;
     if reply.status != "ok" {
         return Ok(());
     }
@@ -496,25 +553,34 @@ pub(crate) async fn elect(parts: &Parts<'_>, group: &mut GroupRow, now_ms: u64) 
     Ok(())
 }
 
-async fn put_welcome(parts: &Parts<'_>, group: &GroupRow, welcome: &[u8], now_ms: u64) -> Result<[u8; 32], SdkError> {
+async fn put_welcome(
+    parts: &Parts<'_>,
+    group: &GroupRow,
+    welcome: &[u8],
+    now_ms: u64,
+) -> Result<[u8; 32], SdkError> {
     let blob_ref = *blake3::hash(welcome).as_bytes();
     let total_bytes = u64::try_from(welcome.len()).map_err(|_| fail("bad_request", "welcome"))?;
     let total = chunk_count(total_bytes)?;
-    let mut secrets = take(parts.store, group, &parts.root, TokenBucket::Commit, 1, now_ms, &group.owner_seed).await?;
+    let mut secrets =
+        take(parts.store, group, &parts.root, TokenBucket::Commit, 1, now_ms, &group.owner_seed)
+            .await?;
     let token = secrets.pop().ok_or_else(|| fail("rate_limited", "commit"))?;
     let bind = op_bind("blob.put", &group.group_id, &blob_put_body(&blob_ref, total, total_bytes));
     let bound = token.bind(&bind).to_bytes();
     let chunk_len = u64::try_from(CHUNK_BYTES).map_err(|_| fail("internal", "chunk"))?;
     for idx in 0..total {
-        let start = usize::try_from(u64::from(idx).saturating_mul(chunk_len)).map_err(|_| fail("internal", "chunk"))?;
+        let start = usize::try_from(u64::from(idx).saturating_mul(chunk_len))
+            .map_err(|_| fail("internal", "chunk"))?;
         let end = start.saturating_add(CHUNK_BYTES).min(welcome.len());
         let chunk = welcome.get(start..end).ok_or_else(|| fail("internal", "chunk"))?;
         let auth: &[u8] = if idx == 0 { &bound } else { &[] };
         let body = blob_put_chunk(&blob_ref, idx, total, total_bytes, auth, chunk);
-        let reply = member_op(&group.host_node_id, &parts.root, group.group_id, "blob.put", &body, || {
-            open_frame(parts.store, group, &parts.root, now_ms, &group.owner_seed)
-        })
-        .await?;
+        let reply =
+            member_op(&group.host_node_id, &parts.root, group.group_id, "blob.put", &body, || {
+                open_frame(parts.store, group, &parts.root, now_ms, &group.owner_seed)
+            })
+            .await?;
         if reply.status != "ok" {
             return Err(fail(status_code(&reply.status), reply.status));
         }
@@ -535,7 +601,9 @@ fn four(mut secrets: Vec<TokenSecret>) -> Result<[TokenSecret; 4], SdkError> {
 
 fn dummy_token(te: u32, mark: u8) -> Token {
     let mut input = [0u8; 32];
-    input[0] = mark;
+    if let Some(slot) = input.first_mut() {
+        *slot = mark;
+    }
     Token { te, input, tag: [0; 32] }
 }
 
@@ -576,19 +644,26 @@ fn roster_bytes(p: &[u8; 32]) -> Vec<u8> {
 }
 
 pub(crate) fn padded(raw: Vec<u8>) -> Result<Vec<u8>, SdkError> {
-    let len = post_padded_len(raw.len()).ok_or_else(|| fail("bad_request", "post exceeds 64 KiB"))?;
+    let len =
+        post_padded_len(raw.len()).ok_or_else(|| fail("bad_request", "post exceeds 64 KiB"))?;
     let mut out = raw;
     out.resize(len, 0);
     Ok(out)
 }
 
-fn join_key_known(group: &GroupRow, retired: &[RetiredJoinSk], join_pk_id: &[u8; 32], now_ms: u64) -> bool {
+fn join_key_known(
+    group: &GroupRow,
+    retired: &[RetiredJoinSk],
+    join_pk_id: &[u8; 32],
+    now_ms: u64,
+) -> bool {
     if *blake3::hash(&group.join_pk).as_bytes() == *join_pk_id {
         return true;
     }
     let day = 24 * 60 * 60 * 1000;
     retired.iter().any(|row| {
-        now_ms.saturating_sub(row.retired_at_ms) <= day && *blake3::hash(&row.join_pk).as_bytes() == *join_pk_id
+        now_ms.saturating_sub(row.retired_at_ms) <= day
+            && *blake3::hash(&row.join_pk).as_bytes() == *join_pk_id
     })
 }
 

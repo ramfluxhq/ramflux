@@ -63,7 +63,8 @@ pub(crate) fn b64_bytes(text: &str) -> Result<Vec<u8>, SdkError> {
 }
 
 pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N], SdkError> {
-    ramflux_crypto::large_group::random_array::<N>().map_err(|error| fail("internal", error.to_string()))
+    ramflux_crypto::large_group::random_array::<N>()
+        .map_err(|error| fail("internal", error.to_string()))
 }
 
 pub(crate) fn put_var(enc: &mut LgWriter, bytes: &[u8]) {
@@ -125,7 +126,7 @@ pub(crate) fn blob_put_chunk(
 }
 
 pub(crate) fn chunk_count(total_bytes: u64) -> Result<u32, SdkError> {
-    let chunk = u64::try_from(CHUNK_BYTES).unwrap_or(u64::MAX);
+    let chunk = u64::try_from(CHUNK_BYTES).map_err(|_| fail("internal", "chunk"))?;
     let total = total_bytes.div_ceil(chunk).max(1);
     u32::try_from(total).map_err(|_| fail("bad_request", "too many chunks"))
 }
@@ -164,7 +165,8 @@ pub(crate) struct ParsedRoster {
 }
 
 pub(crate) fn parse_roster_p(plain: &[u8]) -> Result<ParsedRoster, SdkError> {
-    let (body, ack) = split_key_ack(plain).ok_or_else(|| fail("bad_request", "roster truncated"))?;
+    let (body, ack) =
+        split_key_ack(plain).ok_or_else(|| fail("bad_request", "roster truncated"))?;
     let mut dec = LgReader::new(body);
     let p = read_fixed::<32>(&mut dec)?;
     Ok(ParsedRoster { p, join_pk_id_ack: *ack })
@@ -211,8 +213,8 @@ pub(crate) fn parse_invite_link(link: &str) -> Result<InviteParts, SdkError> {
     let bytes = b64_bytes(payload)?;
     let mut dec = LgReader::new(&bytes);
     let host = read_var(&mut dec, 256)?;
-    let host_node_id = String::from_utf8(host.to_vec())
-        .map_err(|_| fail("link_invalid", "host node id"))?;
+    let host_node_id =
+        String::from_utf8(host.to_vec()).map_err(|_| fail("link_invalid", "host node id"))?;
     let parts = InviteParts {
         host_node_id,
         group_id: read_fixed(&mut dec)?,
@@ -251,40 +253,48 @@ mod tests {
         let mut enc = LgWriter::new(LG_OPEN_V1.as_bytes());
         enc.fixed(&gid).fixed(&nonce);
         let spec = *blake3::hash(&enc.finish()).as_bytes();
-        assert_eq!(open_bind(&gid, &nonce), spec);
+        assert_eq!(
+            open_bind(&gid, &nonce),
+            spec,
+            "test: open bind is BLAKE3 of the domain, group id and nonce"
+        );
     }
 
     #[test]
     fn invite_link_round_trip_holds_the_seed_and_rejects_over_512() {
         let sk = [0xAB; 32];
         let payload = invite_link_bytes("node-a", &[1; 32], &[2; 16], &sk, 90, &[3; 32]);
-        let link = format_invite_link(&payload).expect("link fits");
-        let parsed = parse_invite_link(&link).expect("parse");
-        assert_eq!(parsed.invite_sk, sk);
-        assert_eq!(parsed.host_node_id, "node-a");
+        let link = format_invite_link(&payload).expect("test: invite link fits in 512 bytes");
+        let parsed = parse_invite_link(&link).expect("test: invite link parses");
+        assert_eq!(parsed.invite_sk, sk, "test: invite link carries the seed");
+        assert_eq!(parsed.host_node_id, "node-a", "test: invite link carries the host node id");
         let huge = format!("{INVITE_PREFIX}{}", "A".repeat(INVITE_LINK_MAX));
-        assert!(parse_invite_link(&huge).is_err());
-        assert!(format_invite_link(&vec![0xFF; 400]).is_err());
+        assert!(parse_invite_link(&huge).is_err(), "test: an over-long link is link_invalid");
+        assert!(
+            format_invite_link(&vec![0xFF; 400]).is_err(),
+            "test: a payload over 512 bytes is refused"
+        );
     }
 
     #[test]
     fn join_attempt_budget_stops_at_three() {
-        assert!(join_attempt_allowed(0));
-        assert!(join_attempt_allowed(1));
-        assert!(join_attempt_allowed(2));
-        assert!(!join_attempt_allowed(3));
-        assert!(!join_attempt_allowed(4));
+        assert!(join_attempt_allowed(0), "test: the first join attempt is allowed");
+        assert!(join_attempt_allowed(1), "test: the second join attempt is allowed");
+        assert!(join_attempt_allowed(2), "test: the third join attempt is allowed");
+        assert!(!join_attempt_allowed(3), "test: a fourth join attempt is refused");
+        assert!(!join_attempt_allowed(4), "test: attempts past the budget stay refused");
     }
 
     #[test]
     fn roster_plain_ends_with_key_ack() {
         let ack = [0x5A; 64];
         let plain = roster_plain(&[1; 32], b"cred", b"chain", 0, ROLE_MEMBER, &[2; 32], &[], &ack);
-        assert!(plain.len() >= 64);
-        assert_eq!(&plain[plain.len() - 64..], &ack);
-        let parsed = parse_roster_p(&plain).expect("roster");
-        assert_eq!(parsed.p, [1; 32]);
-        assert_eq!(parsed.join_pk_id_ack, ack);
+        let tail = plain.get(plain.len().saturating_sub(64)..).expect("test: roster has a suffix");
+        assert_eq!(tail.len(), 64, "test: key_ack is 64 raw bytes, not a length-prefixed field");
+        assert_eq!(tail, ack.as_slice(), "test: key_ack is the roster suffix");
+        let parsed = parse_roster_p(&plain).expect("test: roster plaintext parses");
+        assert_eq!(parsed.p, [1; 32], "test: roster plaintext starts with the member key");
+        assert_eq!(parsed.join_pk_id_ack, ack, "test: parsed key_ack matches the suffix");
     }
 
     #[test]
@@ -297,20 +307,20 @@ mod tests {
         let later = attach_put_chunk(&blob_ref, 1, 2, 8, &[], &[], &chunk);
         let (del0, auth0) = attach_fields(&first);
         let (del1, auth1) = attach_fields(&later);
-        assert_eq!(del0, del_hash);
-        assert_eq!(auth0, token);
-        assert_eq!(del1, [] as [u8; 0]);
-        assert_eq!(auth1, [] as [u8; 0]);
+        assert_eq!(del0, del_hash, "test: chunk 0 carries the delete hash");
+        assert_eq!(auth0, token, "test: chunk 0 carries one attach token");
+        assert_eq!(del1, [] as [u8; 0], "test: a later chunk has an empty delete hash");
+        assert_eq!(auth1, [] as [u8; 0], "test: a later chunk has empty auth");
     }
 
     fn attach_fields(body: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let mut dec = LgReader::new(body);
-        let _blob: [u8; 32] = dec.fixed().expect("blob");
-        let _idx = dec.u32().expect("idx");
-        let _total = dec.u32().expect("total");
-        let _bytes = dec.u64().expect("bytes");
-        let del = dec.var(32).expect("del").to_vec();
-        let auth = dec.var(68).expect("auth").to_vec();
+        let _blob: [u8; 32] = dec.fixed().expect("test: attach chunk starts with the blob ref");
+        let _idx = dec.u32().expect("test: attach chunk has an index");
+        let _total = dec.u32().expect("test: attach chunk has a total");
+        let _bytes = dec.u64().expect("test: attach chunk has a byte length");
+        let del = dec.var(32).expect("test: attach chunk has a delete-hash field").to_vec();
+        let auth = dec.var(68).expect("test: attach chunk has an auth field").to_vec();
         (del, auth)
     }
 }

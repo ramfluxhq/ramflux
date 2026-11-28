@@ -69,7 +69,11 @@ pub(crate) fn body_event(kind: &str, group_id: &[u8; 32], body: Value) -> GroupE
     }
 }
 
-pub(crate) fn membership_event(group_id: &[u8; 32], changes: &Value, by: Option<&Value>) -> GroupEvent {
+pub(crate) fn membership_event(
+    group_id: &[u8; 32],
+    changes: &Value,
+    by: Option<&Value>,
+) -> GroupEvent {
     body_event("membership", group_id, json!({ "changes": changes, "by": by }))
 }
 
@@ -82,11 +86,25 @@ pub(crate) fn settings_event(
     body_event("settings", group_id, json!({ "name": name, "approval": approval, "by": by }))
 }
 
-pub(crate) fn void_event(group_id: &[u8; 32], voided_log_seq: u64, epoch: u64, by: Option<&Value>) -> GroupEvent {
-    body_event("void", group_id, json!({ "voided_log_seq": voided_log_seq, "epoch": epoch, "by": by }))
+pub(crate) fn void_event(
+    group_id: &[u8; 32],
+    voided_log_seq: u64,
+    epoch: u64,
+    by: Option<&Value>,
+) -> GroupEvent {
+    body_event(
+        "void",
+        group_id,
+        json!({ "voided_log_seq": voided_log_seq, "epoch": epoch, "by": by }),
+    )
 }
 
-pub(crate) fn read_event(group_id: &[u8; 32], read_log_seq: u64, unread: u64, unread_mentions: u64) -> GroupEvent {
+pub(crate) fn read_event(
+    group_id: &[u8; 32],
+    read_log_seq: u64,
+    unread: u64,
+    unread_mentions: u64,
+) -> GroupEvent {
     GroupEvent {
         kind: "read".to_owned(),
         group_id: b64(group_id),
@@ -103,7 +121,13 @@ pub(crate) fn read_event(group_id: &[u8; 32], read_log_seq: u64, unread: u64, un
     }
 }
 
-pub(crate) fn post_state_event(group_id: &[u8; 32], post_id: &str, state: &str, params: Value, log_seq: Option<u64>) -> GroupEvent {
+pub(crate) fn post_state_event(
+    group_id: &[u8; 32],
+    post_id: &str,
+    state: &str,
+    params: Value,
+    log_seq: Option<u64>,
+) -> GroupEvent {
     GroupEvent {
         kind: "post_state".to_owned(),
         group_id: b64(group_id),
@@ -120,7 +144,12 @@ pub(crate) fn post_state_event(group_id: &[u8; 32], post_id: &str, state: &str, 
     }
 }
 
-pub(crate) fn post_deleted_event(group_id: &[u8; 32], post_id: &str, post_log_seq: u64, log_seq: u64) -> GroupEvent {
+pub(crate) fn post_deleted_event(
+    group_id: &[u8; 32],
+    post_id: &str,
+    post_log_seq: u64,
+    log_seq: u64,
+) -> GroupEvent {
     GroupEvent {
         kind: "post_deleted".to_owned(),
         group_id: b64(group_id),
@@ -152,12 +181,20 @@ mod tests {
                 "log_seq": 3
             }),
         );
-        let value = serde_json::to_value(&event).expect("json");
-        let post = value.get("post").expect("nested post");
-        assert_eq!(post.get("kind").and_then(Value::as_str), Some("text"));
-        assert!(value.get("body").is_none());
-        assert!(value.get("text").is_none());
-        assert!(value.get("post_id").is_none());
-        assert_eq!(value.get("kind").and_then(Value::as_str), Some("post"));
+        let value = serde_json::to_value(&event).expect("test: a post event serializes");
+        let post = value.get("post").expect("test: the post row is nested");
+        assert_eq!(
+            post.get("kind").and_then(Value::as_str),
+            Some("text"),
+            "test: nested post.kind is the row kind"
+        );
+        assert!(value.get("body").is_none(), "test: body is not a flat envelope field");
+        assert!(value.get("text").is_none(), "test: text is not a flat envelope field");
+        assert!(value.get("post_id").is_none(), "test: post_id is not a flat envelope field");
+        assert_eq!(
+            value.get("kind").and_then(Value::as_str),
+            Some("post"),
+            "test: the envelope kind stays post"
+        );
     }
 }

@@ -12,7 +12,9 @@ use ramflux_crypto::large_group::{
     finish_token_batch,
 };
 
-use super::host::{OPEN_PER_DAY_PLACEHOLDER, fail, finish_dec, first_day, random_bytes, read_fixed};
+use super::host::{
+    OPEN_PER_DAY_PLACEHOLDER, fail, finish_dec, first_day, random_bytes, read_fixed,
+};
 use super::session::{ident_call, reply_bytes, status_code};
 use super::store::{GroupRow, Store, TokenPart, Wallet};
 use crate::SdkError;
@@ -34,6 +36,10 @@ pub(crate) fn limited(bucket: TokenBucket, retry_after_s: Option<u64>) -> SdkErr
         Some(seconds) => fail("rate_limited", format!("{}:{seconds}", bucket_name(bucket))),
         None => fail("rate_limited", bucket_name(bucket)),
     }
+}
+
+fn count_u32(count: usize) -> Result<u32, SdkError> {
+    u32::try_from(count).map_err(|_| fail("bad_request", "token count"))
 }
 
 fn list(wallet: &mut Wallet, bucket: TokenBucket) -> &mut Vec<TokenPart> {
@@ -107,9 +113,10 @@ pub(crate) async fn take(
         wallet.attach.clear();
     }
     let cap = limit_of(bucket, group, now_ms);
+    let width = count_u32(count)?;
     if bucket != TokenBucket::Open {
         let used = spent(&wallet, bucket);
-        if used.saturating_add(u32::try_from(count).unwrap_or(u32::MAX)) > cap {
+        if used.saturating_add(width) > cap {
             return Err(limited(bucket, None));
         }
     }
@@ -127,7 +134,7 @@ pub(crate) async fn take(
         let part = pool.remove(index);
         out.push(TokenSecret::from_parts(part.te, bucket, part.input, part.output));
     }
-    add_spent(&mut wallet, bucket, u32::try_from(count).unwrap_or(u32::MAX));
+    add_spent(&mut wallet, bucket, width);
     store.put_wallet(&group.group_id, &wallet)?;
     Ok(out)
 }
@@ -177,15 +184,18 @@ async fn issue(
     if count == 0 {
         return Ok(());
     }
-    let request = begin_token_batch_sized(bucket, count).map_err(|error| fail("internal", error.to_string()))?;
+    let request = begin_token_batch_sized(bucket, count)
+        .map_err(|error| fail("internal", error.to_string()))?;
     let request_id: [u8; 16] = random_bytes()?;
     let mut body = LgWriter::default();
-    body.u32(group.te).u8(bucket.code()).fixed(&request_id).u32(u32::try_from(count).unwrap_or(0));
+    body.u32(group.te).u8(bucket.code()).fixed(&request_id).u32(count_u32(count)?);
     for element in &request.blinded {
         body.fixed(element);
     }
     let signed = SignedReq::sign("tokens", &group.group_id, seed, body.finish());
-    let reply = ident_call(&group.host_node_id, data_root, group.group_id, "tokens", &signed.encode()).await?;
+    let reply =
+        ident_call(&group.host_node_id, data_root, group.group_id, "tokens", &signed.encode())
+            .await?;
     if reply.status != "ok" {
         let code = status_code(&reply.status);
         if code == "rate_limited" {
@@ -219,7 +229,13 @@ async fn issue(
     }
     for secret in secrets {
         let (te, bucket, input, output) = secret.to_parts();
-        list(wallet, bucket).push(TokenPart { te, bucket: bucket.code(), input, output, issued_ms: now_ms });
+        list(wallet, bucket).push(TokenPart {
+            te,
+            bucket: bucket.code(),
+            input,
+            output,
+            issued_ms: now_ms,
+        });
     }
     Ok(())
 }

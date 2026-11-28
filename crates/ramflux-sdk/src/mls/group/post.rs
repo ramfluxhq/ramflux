@@ -6,8 +6,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use ramflux_crypto::large_group::{
-    CARD_JSON_MAX, EnvKind, LgWriter, ROLL_U_MAX_MS, TokenBucket, privacy_delay_applies, random_array,
-    settle_at_ms,
+    CARD_JSON_MAX, EnvKind, LgWriter, ROLL_U_MAX_MS, TokenBucket, privacy_delay_applies,
+    random_array, settle_at_ms,
 };
 use serde_json::{Value, json};
 
@@ -28,10 +28,28 @@ pub(crate) fn privacy_skips(leaf_count: u32) -> bool {
     !privacy_delay_applies(leaf_count)
 }
 
-pub(crate) async fn post_text(parts: &Parts<'_>, group_id: &[u8; 32], text: &str, now_ms: u64) -> Result<SendState, SdkError> {
+pub(crate) async fn post_text(
+    parts: &Parts<'_>,
+    group_id: &[u8; 32],
+    text: &str,
+    now_ms: u64,
+) -> Result<SendState, SdkError> {
     let group = commit::load_group(parts.store, group_id)?;
     require_member(&group)?;
-    deliver(parts, &group, KIND_TEXT, "text", random_bytes()?, text.as_bytes(), &[], Vec::new(), None, now_ms, false).await
+    deliver(
+        parts,
+        &group,
+        KIND_TEXT,
+        "text",
+        random_bytes()?,
+        text.as_bytes(),
+        &[],
+        Vec::new(),
+        None,
+        now_ms,
+        false,
+    )
+    .await
 }
 
 pub(crate) async fn post_card(
@@ -45,7 +63,20 @@ pub(crate) async fn post_card(
     if card_json.len() > CARD_JSON_MAX {
         return Err(fail("bad_request", "card_json exceeds 64 KiB"));
     }
-    deliver(parts, &group, KIND_CARD, "card", random_bytes()?, card_json.as_bytes(), &[], Vec::new(), None, now_ms, false).await
+    deliver(
+        parts,
+        &group,
+        KIND_CARD,
+        "card",
+        random_bytes()?,
+        card_json.as_bytes(),
+        &[],
+        Vec::new(),
+        None,
+        now_ms,
+        false,
+    )
+    .await
 }
 
 pub(crate) async fn post_attachments(
@@ -69,11 +100,28 @@ pub(crate) async fn post_attachments(
         if del_hash.is_none() {
             del_hash = Some(sealed.secret.del_hash);
         }
-        attach::upload(parts.store, &group, &parts.root, &sealed, now_ms, &group.owner_seed).await?;
+        attach::upload(parts.store, &group, &parts.root, &sealed, now_ms, &group.owner_seed)
+            .await?;
         refs.push(sealed.secret.blob_ref);
-        stored.push(AttachRef { blob_ref: b64(&sealed.secret.blob_ref), state: "available".to_owned() });
+        stored.push(AttachRef {
+            blob_ref: b64(&sealed.secret.blob_ref),
+            state: "available".to_owned(),
+        });
     }
-    deliver(parts, &group, KIND_ATTACH, "attachment", post_id, b"", &refs, stored, del_hash, now_ms, false).await
+    deliver(
+        parts,
+        &group,
+        KIND_ATTACH,
+        "attachment",
+        post_id,
+        b"",
+        &refs,
+        stored,
+        del_hash,
+        now_ms,
+        false,
+    )
+    .await
 }
 
 pub(crate) async fn submit_application(
@@ -84,7 +132,20 @@ pub(crate) async fn submit_application(
 ) -> Result<SendState, SdkError> {
     let group = commit::load_group(parts.store, group_id)?;
     require_member(&group)?;
-    deliver(parts, &group, KIND_APP, "application", random_bytes()?, bytes, &[], Vec::new(), None, now_ms, false).await
+    deliver(
+        parts,
+        &group,
+        KIND_APP,
+        "application",
+        random_bytes()?,
+        bytes,
+        &[],
+        Vec::new(),
+        None,
+        now_ms,
+        false,
+    )
+    .await
 }
 
 pub(crate) async fn delete_own(
@@ -102,7 +163,8 @@ pub(crate) async fn delete_own(
     for attach in &row.attachments {
         let blob = b64_fixed::<32>(&attach.blob_ref)?;
         if let Some(secret) = parts.store.attach(group_id, &blob)? {
-            attach::delete(parts.store, &group, &parts.root, &secret, now_ms, &group.owner_seed).await?;
+            attach::delete(parts.store, &group, &parts.root, &secret, now_ms, &group.owner_seed)
+                .await?;
         }
     }
     if row.log_seq.is_none() {
@@ -111,11 +173,14 @@ pub(crate) async fn delete_own(
     }
     let id = b64_fixed::<16>(post_id)?;
     let plain = commit::padded(Vec::new())?;
-    let mut secrets = take(parts.store, &group, &parts.root, TokenBucket::Post, 1, now_ms, &group.owner_seed).await?;
+    let mut secrets =
+        take(parts.store, &group, &parts.root, TokenBucket::Post, 1, now_ms, &group.owner_seed)
+            .await?;
     let Some(secret) = secrets.pop() else {
         return Ok(super::rate_limited_state("post"));
     };
-    let envelope = commit::seal_application(parts, &group, EnvKind::Tombstone, id, &plain, &secret, None)?;
+    let envelope =
+        commit::seal_application(parts, &group, EnvKind::Tombstone, id, &plain, &secret, None)?;
     commit::remember_outbox(parts.store, &group, envelope.clone(), "tombstone")?;
     match commit::submit(parts, &group, &envelope, "post", now_ms).await {
         Ok(receipt) => {
@@ -135,11 +200,16 @@ pub(crate) async fn load_attachment(
 ) -> Result<Vec<u8>, SdkError> {
     let group = commit::load_group(parts.store, group_id)?;
     require_member(&group)?;
-    let secret = parts.store.attach(group_id, blob_ref)?.ok_or_else(|| fail("not_found", "attachment"))?;
+    let secret =
+        parts.store.attach(group_id, blob_ref)?.ok_or_else(|| fail("not_found", "attachment"))?;
     attach::download(parts.store, &group, &parts.root, &secret, now_ms, &group.owner_seed).await
 }
 
-pub(crate) async fn flush_delayed(parts: &Parts<'_>, group: &GroupRow, now_ms: u64) -> Result<(), SdkError> {
+pub(crate) async fn flush_delayed(
+    parts: &Parts<'_>,
+    group: &GroupRow,
+    now_ms: u64,
+) -> Result<(), SdkError> {
     let rows = parts.store.history(&group.group_id)?;
     let due: Vec<HistoryRow> = rows.into_iter().filter(|row| delayed_due(row, now_ms)).collect();
     for row in due {
@@ -184,7 +254,17 @@ async fn deliver(
         store_pending(parts, group, &post_id, kind_name, content, attachments, &held)?;
         return Ok(held);
     }
-    let mut secrets = match take(parts.store, group, &parts.root, TokenBucket::Post, 1, now_ms, &group.owner_seed).await {
+    let mut secrets = match take(
+        parts.store,
+        group,
+        &parts.root,
+        TokenBucket::Post,
+        1,
+        now_ms,
+        &group.owner_seed,
+    )
+    .await
+    {
         Ok(secrets) => secrets,
         Err(error) => return as_send(error),
     };
@@ -192,12 +272,22 @@ async fn deliver(
         return Ok(super::rate_limited_state("post"));
     };
     let plain = commit::padded(framed(kind_code, content, refs)?)?;
-    let envelope = commit::seal_application(parts, group, EnvKind::Post, post_id, &plain, &secret, del_hash)?;
+    let envelope =
+        commit::seal_application(parts, group, EnvKind::Post, post_id, &plain, &secret, del_hash)?;
     commit::remember_outbox(parts.store, group, envelope.clone(), "post")?;
     match commit::submit(parts, group, &envelope, "post", now_ms).await {
         Ok(receipt) => {
             parts.store.clear_outbox(&group.group_id)?;
-            store_sent(parts, group, &post_id, kind_name, content, attachments, receipt.log_seq, receipt.appended_at_ms)?;
+            store_sent(
+                parts,
+                group,
+                &post_id,
+                kind_name,
+                content,
+                attachments,
+                receipt.log_seq,
+                receipt.appended_at_ms,
+            )?;
             Ok(SendState::Sent { log_seq: receipt.log_seq })
         }
         Err(error) => {
@@ -211,7 +301,11 @@ async fn deliver(
     }
 }
 
-fn privacy_hold(parts: &Parts<'_>, group: &GroupRow, now_ms: u64) -> Result<Option<SendState>, SdkError> {
+fn privacy_hold(
+    parts: &Parts<'_>,
+    group: &GroupRow,
+    now_ms: u64,
+) -> Result<Option<SendState>, SdkError> {
     if privacy_skips(group.leaf_count) {
         return Ok(None);
     }
@@ -393,9 +487,9 @@ mod tests {
 
     #[test]
     fn privacy_delay_skips_under_50() {
-        assert!(privacy_skips(0));
-        assert!(privacy_skips(49));
-        assert!(!privacy_skips(50));
-        assert!(!privacy_skips(3_000));
+        assert!(privacy_skips(0), "test: an empty roster skips the privacy delay");
+        assert!(privacy_skips(49), "test: 49 leaves skip the privacy delay");
+        assert!(!privacy_skips(50), "test: 50 leaves apply the privacy delay");
+        assert!(!privacy_skips(3_000), "test: a full roster applies the privacy delay");
     }
 }

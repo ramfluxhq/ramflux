@@ -8,12 +8,12 @@
 use ed25519_dalek::{Signer, SigningKey};
 use openmls_traits::crypto::OpenMlsCrypto;
 use openmls_traits::types::{HpkeAeadType, HpkeCiphertext, HpkeConfig, HpkeKdfType, HpkeKemType};
+use ramflux_crypto::X25519KeyPair;
 use ramflux_crypto::custody::{DeviceChainCapability, verify_device_chain};
 use ramflux_crypto::large_group::{
     JoinKind, JoinRequest, LgReader, LgWriter, TokenBucket, invite_proof_message, join_bind,
     join_proof_sign, key_ack_sign, key_ack_verify,
 };
-use ramflux_crypto::X25519KeyPair;
 use ramflux_mls::{GroupKind, Mls};
 use ramflux_protocol::domain::LG_JOIN_V1;
 use serde_json::{Value, json};
@@ -25,9 +25,9 @@ use super::host::{
 use super::session::{ident_call, reply_bytes, status_code};
 use super::store::{GroupRow, PendingRow, Store};
 use super::tokens::take;
+use crate::SdkError;
 use crate::mls::kv_adapter::SqlMlsKv;
 use crate::mls::process_crypto;
-use crate::SdkError;
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 const PENDING_CAP: usize = 100;
@@ -137,7 +137,8 @@ pub(crate) struct OpenedRoster {
 }
 
 pub(crate) fn parse_opened(plain: &[u8]) -> Result<OpenedRoster, SdkError> {
-    let (body, ack) = split_key_ack(plain).ok_or_else(|| fail("bad_request", "roster truncated"))?;
+    let (body, ack) =
+        split_key_ack(plain).ok_or_else(|| fail("bad_request", "roster truncated"))?;
     let mut dec = LgReader::new(body);
     let p = read_fixed::<32>(&mut dec)?;
     let credential = read_var(&mut dec, 16 * 1024)?.to_vec();
@@ -182,7 +183,10 @@ struct Minted {
     key_package: Vec<u8>,
 }
 
-fn leaf_secret(store_kv: &ramflux_storage::MlsKvStore, public: &[u8]) -> Result<[u8; 32], SdkError> {
+fn leaf_secret(
+    store_kv: &ramflux_storage::MlsKvStore,
+    public: &[u8],
+) -> Result<[u8; 32], SdkError> {
     let raw = store_kv
         .get(ramflux_mls::RF_LABEL_LEAF_SIG, public)
         .map_err(super::host::storage_err)?
@@ -196,8 +200,16 @@ pub(crate) fn fresh_join_key() -> Result<([u8; 32], [u8; 32]), SdkError> {
     Ok((pair.public, seed))
 }
 
-fn invite_auth(invite_sk: &[u8; 32], gid: &[u8; 32], p: &[u8; 32], join_pk_id: &[u8; 32], invite_id: &[u8; 16]) -> Vec<u8> {
-    let sig = SigningKey::from_bytes(invite_sk).sign(&invite_proof_message(gid, p, join_pk_id)).to_bytes();
+fn invite_auth(
+    invite_sk: &[u8; 32],
+    gid: &[u8; 32],
+    p: &[u8; 32],
+    join_pk_id: &[u8; 32],
+    invite_id: &[u8; 16],
+) -> Vec<u8> {
+    let sig = SigningKey::from_bytes(invite_sk)
+        .sign(&invite_proof_message(gid, p, join_pk_id))
+        .to_bytes();
     let mut auth = invite_id.to_vec();
     auth.extend_from_slice(&sig);
     auth
@@ -262,7 +274,8 @@ async fn send_attempts(
             let bind = join_bind(&request);
             let group = group.ok_or_else(|| fail("not_member", "group"))?;
             let owner = seed.ok_or_else(|| fail("internal", "seed"))?;
-            let mut secrets = take(store, group, root, TokenBucket::Commit, 1, now_ms, owner).await?;
+            let mut secrets =
+                take(store, group, root, TokenBucket::Commit, 1, now_ms, owner).await?;
             let secret = secrets.pop().ok_or_else(|| fail("rate_limited", "commit"))?;
             request.auth = secret.bind(&bind).to_bytes().to_vec();
         } else {
@@ -326,7 +339,8 @@ pub(crate) async fn join_invite(
     {
         return Ok(refused("already_member", json!({ "group_id": b64(&parts.group_id) })));
     }
-    let existing = store.pending()?.into_iter().find(|row| row.link == link && row.group_id == parts.group_id);
+    let existing =
+        store.pending()?.into_iter().find(|row| row.link == link && row.group_id == parts.group_id);
     if let Some(row) = existing {
         if row.expires_at <= now_ms {
             return Ok(refused("request_expired", json!({ "expired_at": row.expires_at })));
@@ -415,17 +429,19 @@ fn kv_of(store: &Store) -> &ramflux_storage::MlsKvStore {
 }
 
 pub(crate) fn data_root(client: &crate::RamfluxClient) -> Result<std::path::PathBuf, SdkError> {
-    let account = client
-        .born_v3_account
-        .as_ref()
-        .ok_or_else(|| fail("internal", "no open account"))?;
+    let account =
+        client.born_v3_account.as_ref().ok_or_else(|| fail("internal", "no open account"))?;
     Ok(account.data_root()?.to_path_buf())
 }
 
 fn outcome_err(error: SdkError, fallback: &str) -> super::JoinOutcome {
     match error {
         SdkError::Mls { code: "rate_limited", detail } => {
-            let retry = detail.split(':').nth(1).and_then(|text| text.parse().ok()).unwrap_or(RETRY_AFTER_S);
+            let retry = detail
+                .split(':')
+                .nth(1)
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(RETRY_AFTER_S);
             refused("rate_limited", json!({ "retry_after_s": retry }))
         }
         SdkError::Mls { code, .. } if code == "link_invalid" || code == "invite_expired" => {
@@ -539,7 +555,8 @@ pub(crate) async fn welcome_poll(
         &row.seed,
         Vec::new(),
     );
-    let reply = ident_call(&row.host_node_id, &root, *group_id, "welcome.get", &signed.encode()).await?;
+    let reply =
+        ident_call(&row.host_node_id, &root, *group_id, "welcome.get", &signed.encode()).await?;
     if reply.status == "not_found" || reply.status != "ok" {
         if reply.status == "not_found" {
             return Ok(pending_outcome(&row));
@@ -573,10 +590,11 @@ pub(crate) async fn welcome_poll(
         welcome.extend_from_slice(&reply_bytes(&chunk)?);
     }
     let read_body = ramflux_crypto::large_group::ReadRequest { from_seq: 0, limit: 1 }.encode();
-    let read = super::session::member_op(&row.host_node_id, &root, *group_id, "read", &read_body, || {
-        super::commit::open_frame(store, &group, &root, now_ms, &row.seed)
-    })
-    .await?;
+    let read =
+        super::session::member_op(&row.host_node_id, &root, *group_id, "read", &read_body, || {
+            super::commit::open_frame(store, &group, &root, now_ms, &row.seed)
+        })
+        .await?;
     if read.status != "ok" {
         return Ok(map_host(&read.status, ramflux_crypto::large_group::LEAF_CAP));
     }
@@ -592,7 +610,7 @@ pub(crate) async fn welcome_poll(
     group.genesis = page.genesis;
     group.epoch = joined.epoch;
     group.te = page.te;
-    group.leaf_count = u32::try_from(joined.leaves).unwrap_or(u32::MAX);
+    group.leaf_count = u32::try_from(joined.leaves).map_err(|_| fail("internal", "leaf count"))?;
     group.own_leaf = mls.status(group_id).map_or(0, |status| status.own_leaf);
     if let Ok(genesis) = ramflux_crypto::large_group::Genesis::decode(&group.genesis) {
         group.token_root_pk = genesis.token_root_pk;

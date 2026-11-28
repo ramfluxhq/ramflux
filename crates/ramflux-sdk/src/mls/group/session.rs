@@ -7,8 +7,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::gateway::{GatewayClientFrame, GatewayServerFrame, GatewaySessionConfig, GroupHostReply};
 use crate::SdkError;
+use crate::gateway::{
+    GatewayClientFrame, GatewayServerFrame, GatewaySessionConfig, GroupHostReply,
+};
 
 use super::host::{b64, b64_bytes, fail};
 
@@ -103,14 +105,8 @@ async fn open_inner(
     if opened != "ok" {
         return Err(fail(status_code(&opened), opened));
     }
-    let mut socket = GroupSocket {
-        _transport: transport,
-        stream,
-        group_id,
-        member,
-        seq: 0,
-        last_log_seq: None,
-    };
+    let mut socket =
+        GroupSocket { _transport: transport, stream, group_id, member, seq: 0, last_log_seq: None };
     if member {
         let reply = socket.call("subscribe", &[]).await?;
         if reply.status != "ok" {
@@ -187,11 +183,7 @@ pub(crate) fn status_code(status: &str) -> &'static str {
 }
 
 pub(crate) fn reply_bytes(reply: &GroupHostReply) -> Result<Vec<u8>, SdkError> {
-    if reply.body.is_empty() {
-        Ok(Vec::new())
-    } else {
-        b64_bytes(&reply.body)
-    }
+    if reply.body.is_empty() { Ok(Vec::new()) } else { b64_bytes(&reply.body) }
 }
 
 static HELD: tokio::sync::Mutex<std::collections::BTreeMap<[u8; 32], GroupSocket>> =
@@ -199,6 +191,10 @@ static HELD: tokio::sync::Mutex<std::collections::BTreeMap<[u8; 32], GroupSocket
 
 /// One member-session operation. Reuses the live socket, so a second read does not spend an open
 /// token. `open_frame` runs only when no socket is held.
+///
+/// `HELD` is a `tokio::sync::Mutex` and stays locked across the socket `.await`. That lock is the
+/// critical section: two member operations must not use the socket at once. It is not a
+/// `std::sync::Mutex`.
 pub(crate) async fn member_op<F, Fut>(
     endpoint: &str,
     data_root: &Path,
