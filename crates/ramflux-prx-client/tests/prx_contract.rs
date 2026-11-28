@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "6bfe946a4ee62d0bd6f5948b9a4a1315c2acb1c9";
+const PIN: &str = "e19c65535db94991c44233a5ddf8b8c38417dc93";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -874,12 +874,13 @@ async fn k_ac2_no_credential_store_then_reload() {
 /// K-AC2-12 (repin row): the shared API limit answers the coded 429. The client returns
 /// `RateLimited` with the body's `retry_after_ms`; the raw answer carries the documented
 /// `Retry-After` header as well. The limit is 60 requests a minute, so the probe makes at most
-/// `PROBE_LIMIT` calls.
+/// `PROBE_LIMIT` calls. Authenticated requests are limited only when
+/// `gateway.api_rate_limit_authenticated` is set (PRX e19c65535).
 #[tokio::test]
 #[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
 async fn k_ac2_12_rate_limit_is_coded() {
     bounded(async {
-        let mut daemon = Daemon::prepare("");
+        let mut daemon = Daemon::prepare("api_rate_limit_authenticated = true\n");
         daemon.start();
         daemon.wait_ready().await;
         daemon.pair().await;
