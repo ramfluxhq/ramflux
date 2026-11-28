@@ -111,6 +111,9 @@ pub(super) fn read(
             json!({"contact_requests":client.contact_request_policy()?,"authority_floors":client.contact_request_floor_status()?})
         }
         "contact.verification.status" => verification(client, view, request)?,
+        "conversation.security" => {
+            crate::bus::dispatch::conversation_security::view(client, request)?
+        }
         "contact.rejected" => {
             let body: LocalBusConversationRequest = serde_json::from_value(request.body.clone())?;
             json!({"rejected":client.rejected_inbox(&body.conversation_id)?})
@@ -384,6 +387,14 @@ fn verification(
     if let Some(expected) = compared.get("expected") {
         value["expected"] = expected.clone();
     }
+    let verified =
+        stored.as_ref().is_some_and(|record| record.verification_state.as_str() == "verified");
+    crate::client::trust_pins::apply_identity(
+        &mut value,
+        client,
+        Some(&body.contact_identity_commitment),
+        verified,
+    )?;
     Ok(value)
 }
 

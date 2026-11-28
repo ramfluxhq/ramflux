@@ -105,6 +105,7 @@ pub(crate) async fn execute(
         .as_deref()
         .filter(|v| !v.is_empty() && v.len() <= 256)
         .ok_or_else(|| refused(Code::InvalidArgument, "operation_id required"))?;
+    super::conversation_security::gate_mutation(account, request, operation)?;
     let journal_key = super::conversation_journal::key(operation);
     let canonical =
         Zeroizing::new(ramflux_protocol::canonical_json_bytes(&(&request.method, &request.body))?);

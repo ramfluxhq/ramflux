@@ -8,7 +8,6 @@ use super::{
     Route, SdkError, SealPair,
 };
 
-#[allow(dead_code, reason = "MLS: allowance removed in D5")]
 pub(crate) struct SealForward<'a> {
     pub message: &'a GatewayDirectMessage,
     pub plaintext: &'a [u8],
@@ -20,17 +19,24 @@ impl RamfluxClient {
     /// Seal for a recipient on another node. The one `PrivateMessage` of the conversation group
     /// does not depend on the recipient's node; the group's first `KeyPackage` fetch from a foreign
     /// node belongs to the lifecycle (D5).
-    #[allow(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "the signature stays; the foreign fetch lands in D5"
-    )]
     pub(crate) async fn seal_federated_message_async(
         &self,
         engine: &impl GatewaySessionAccess,
         request: SealForward<'_>,
     ) -> Result<super::SealedRouted, SdkError> {
-        let SealForward { message, plaintext, route, .. } = request;
+        let SealForward { message, plaintext, federation, route, timeout } = request;
+        if !federation.target_node_id.is_empty()
+            && let Some(anchor) = message.recipient_principal_commitment.as_deref()
+        {
+            if let Err(error) =
+                crate::bus::dispatch::conversation_security::cache_foreign_key_packages(
+                    self, anchor, timeout,
+                )
+                .await
+            {
+                tracing::debug!(%error, "foreign key package fetch");
+            }
+        }
         let local = self.local_device_identity(&engine.config().device_id)?;
         self.require_pair_device_active(&local)?;
         let recipient = Self::qualified_recipient(message)?;

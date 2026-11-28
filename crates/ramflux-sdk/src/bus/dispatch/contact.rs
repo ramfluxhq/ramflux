@@ -70,6 +70,9 @@ pub(crate) async fn dispatch_contact_bus_request(
         "contact.list" => contact_list(state, account_id),
         "contact.safety_number" => dispatch_contact_safety_number(request, state, account_id).await,
         "contact.verify" => dispatch_contact_verify(request, state, account_id),
+        "contact.trust.accept_change" => {
+            Box::pin(super::conversation_security::accept_trust(request, state, account_id)).await
+        }
         "contact.verification.status" => {
             dispatch_contact_verification_status(request, state, account_id).await
         }
@@ -192,6 +195,9 @@ fn verification_body(
     if let Some(expected) = safety.get("expected") {
         value["expected"] = expected.clone();
     }
+    let verified =
+        status.as_ref().is_some_and(|record| record.verification_state.as_str() == "verified");
+    crate::client::trust_pins::apply_identity(&mut value, client, Some(commitment), verified)?;
     Ok(value)
 }
 

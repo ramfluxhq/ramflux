@@ -135,6 +135,27 @@ pub(in crate::bus) async fn send_account(
     let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let principal = local.principal_id.clone();
     let sender = local.device_id.clone();
+    match super::conversation_security::prepare_dm(
+        account,
+        &intent.conversation_id,
+        &thread,
+        &principal,
+        operation,
+    )
+    .await?
+    {
+        super::conversation_security::PreparedSend::Ready => {}
+        super::conversation_security::PreparedSend::Held { reason } => {
+            return Ok(local_bus_ok(json!({
+                "message_id": Value::Null,
+                "client_message_id": message_id,
+                "conversation_id": intent.conversation_id,
+                "delivery_state": "pending",
+                "reason": reason,
+                "deliveries": []
+            })));
+        }
+    }
     reserve_intent(&account.client, operation, &request.body)?;
     let sending = Sending {
         operation,

@@ -553,6 +553,12 @@ async fn process_with_prepared_source(
         return Ok(Processed::control());
     }
     let prepared_source = prepared_source.map(|prepared| *prepared).transpose()?;
+    if let Some(welcome) = crate::bus::dispatch::conversation_security::stranger_welcome_bytes(
+        &entry.envelope.encrypted_payload,
+    ) {
+        crate::bus::dispatch::conversation_security::note_stranger_welcome(account, &welcome)?;
+        return Ok(Processed::control());
+    }
     crate::client::routed::decode(&entry.envelope)?;
     let delivery = if let Some(prepared) = prepared_source {
         account.client.apply_routed_prepared_entry(engine, pool, entry, Ok(prepared)).await?

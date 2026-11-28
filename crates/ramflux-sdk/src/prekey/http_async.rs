@@ -14,6 +14,15 @@ pub(crate) async fn get<R: DeserializeOwned>(
 ) -> Result<R, SdkError> {
     request(base, path, None, budget).await
 }
+
+pub(crate) async fn post_json<R: DeserializeOwned>(
+    base: &str,
+    path: &str,
+    body: Vec<u8>,
+    budget: Duration,
+) -> Result<R, SdkError> {
+    request(base, path, Some(body), budget).await
+}
 async fn request<R: DeserializeOwned>(
     base: &str,
     path: &str,

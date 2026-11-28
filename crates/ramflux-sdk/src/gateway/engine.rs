@@ -1125,7 +1125,6 @@ impl GatewaySessionEngine {
 
     /// # Errors
     /// Returns an error when the gateway rejects the publish or answers with another frame.
-    #[allow(dead_code, reason = "MLS: allowance removed in D5")]
     pub(crate) async fn publish_key_packages(
         &mut self,
         request: crate::mls::key_packages::KeyPackagePublishRequest,
@@ -1142,7 +1141,6 @@ impl GatewaySessionEngine {
 
     /// # Errors
     /// Returns an error when the gateway rejects the request or answers with another frame.
-    #[allow(dead_code, reason = "MLS: allowance removed in D5")]
     pub(crate) async fn key_package_status(
         &mut self,
     ) -> Result<crate::mls::key_packages::KeyPackageStatusResponse, SdkError> {
@@ -1158,7 +1156,6 @@ impl GatewaySessionEngine {
 
     /// # Errors
     /// Returns an error when the gateway rejects the request or answers with another frame.
-    #[allow(dead_code, reason = "MLS: allowance removed in D5")]
     pub(crate) async fn fetch_key_packages(
         &mut self,
         anchor: &str,
@@ -1176,7 +1173,6 @@ impl GatewaySessionEngine {
 
     /// # Errors
     /// Returns an error when the gateway rejects the request or answers with another frame.
-    #[allow(dead_code, reason = "MLS: allowance removed in D5")]
     pub(crate) async fn dm_order(
         &mut self,
         request: crate::mls::order::DmOrderOp,

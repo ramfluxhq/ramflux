@@ -150,6 +150,7 @@ policies! {
     "contact.safety_number" => ("contact", true, true, false, false),
     "contact.unblock" => ("contact", true, true, false, false),
     "contact.verification.status" => ("contact", false, true, false, false),
+    "conversation.security" => ("contact", false, true, false, false),
     "contact.verify" => ("contact.verify.cas", true, true, false, false),
     "conversation.directory" => ("conversation", false, true, false, false),
     "conversation.disappearing.expire" => ("conversation", true, true, false, false),
@@ -213,6 +214,7 @@ policies! {
     "message.receive" => ("message", true, true, false, false),
     "message.submit" => ("raw_message", true, true, false, false),
     "conversation.send" => ("conversation", true, true, false, false),
+    "contact.trust.accept_change" => ("conversation", true, true, false, false),
     // Body requires `expected_revision` (the observed base). The bus refuses a missing base.
     "conversation.edit" => ("conversation", true, true, false, false),
     "conversation.react" => ("conversation", true, true, false, false),

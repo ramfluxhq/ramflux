@@ -337,6 +337,7 @@ impl RamfluxClient {
         let mut entry = json!({"principal_id":principal,"kind_verified":profile.is_some(),"display_name_confusable_with":warnings["display_name_confusable_with"],"mixed_script":warnings["mixed_script"],"display_name":display_name,"reachable":reachable,"verified":verified,"kind_asserted":asserted,"root_commitment":commitment,"root_source":self.contact_root_source(&identity)?,"node":identity["node"],"request_state":request_state,"request_id":request_id});
         entry[crate::VerifiedClassification::FIELD] =
             json!(self.verified_classification(principal)?);
+        super::trust_pins::apply_identity(&mut entry, self, commitment, verified)?;
         Ok(entry)
     }
 }

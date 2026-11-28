@@ -358,6 +358,49 @@ impl GatewaySessionAccess for SessionClient {
     }
 }
 
+impl crate::gateway::access::MlsFrameAccess for SessionClient {
+    fn publish_key_packages(
+        &mut self,
+        request: crate::mls::key_packages::KeyPackagePublishRequest,
+    ) -> GatewayCallFuture<'_, crate::mls::key_packages::KeyPackagePublishOutcome> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.publish_key_packages(request).await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
+    fn key_package_status(
+        &mut self,
+    ) -> GatewayCallFuture<'_, crate::mls::key_packages::KeyPackageStatusResponse> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.key_package_status().await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
+    fn fetch_key_packages<'a>(
+        &'a mut self,
+        anchor: &'a str,
+    ) -> GatewayCallFuture<'a, crate::mls::key_packages::KeyPackageFetchResponse> {
+        let anchor = anchor.to_owned();
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.fetch_key_packages(&anchor).await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
+    fn dm_order(
+        &mut self,
+        request: crate::mls::order::DmOrderOp,
+    ) -> GatewayCallFuture<'_, crate::mls::order::DmOrderReply> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.dm_order(request).await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
+}
+
 impl GatewayPushAccess for SessionClient {
     fn resume_page(
         &mut self,

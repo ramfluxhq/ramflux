@@ -184,7 +184,7 @@ async fn dispatch_routed_request(
             crate::bus::dispatch::itest_agent::approve_once(request, state)
         }
         method if method.starts_with("debug.mls.") => {
-            crate::bus::dispatch::debug_mls::dispatch(request, state)
+            crate::bus::dispatch::debug_mls::dispatch(request, state).await
         }
         "username.mutate"
         | "username.status"
@@ -195,7 +195,19 @@ async fn dispatch_routed_request(
             crate::bus::dispatch::node::dispatch_node_bus_request(request, state).await
         }
         method if method.starts_with("account.") => {
-            dispatch_account_bus_request(request, state).await
+            let result = dispatch_account_bus_request(request, state).await;
+            if request.method == "account.unlock" && result.is_ok() {
+                if let Ok(account_id) = request_account_id(request) {
+                    if let Ok(account) = local_bus_account_mut(state, account_id) {
+                        if let Err(error) =
+                            crate::bus::dispatch::conversation_security::on_unlock(account).await
+                        {
+                            tracing::warn!(%error, "mls unlock tick");
+                        }
+                    }
+                }
+            }
+            result
         }
         method if method.starts_with("task.") => {
             crate::bus::dispatch::task::dispatch_task(request, state).await

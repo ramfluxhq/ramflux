@@ -319,6 +319,9 @@ fn apply(
         Ok(true) => {
             account.head_refresh.failures.remove(root);
             account.head_refresh.foreign_errors.remove(root);
+            let _ = crate::bus::dispatch::conversation_security::mark_custody_head_changed(
+                &account.client,
+            );
             Ok(true)
         }
         Ok(false) => {

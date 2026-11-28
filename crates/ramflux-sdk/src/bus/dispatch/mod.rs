@@ -16,6 +16,7 @@ pub(in crate::bus) mod contact_resolution;
 pub(crate) mod conversation_delivery;
 pub(crate) mod conversation_journal;
 pub(crate) mod conversation_mutation;
+pub(crate) mod conversation_security;
 pub(in crate::bus) mod conversation_send;
 pub mod daemon;
 pub(crate) mod debug_mls;

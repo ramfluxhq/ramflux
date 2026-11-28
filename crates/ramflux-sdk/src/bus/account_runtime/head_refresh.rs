@@ -39,7 +39,11 @@ fn send_roots(
             .map(str::to_owned)
             .into_iter()
             .collect()),
-        "conversation.send" => {
+        "conversation.send"
+        | "conversation.edit"
+        | "conversation.react"
+        | "conversation.reply"
+        | "conversation.delete" => {
             let Some(id) = body.get("conversation_id").and_then(serde_json::Value::as_str) else {
                 return Ok(BTreeSet::new());
             };
@@ -57,6 +61,12 @@ fn send_roots(
                 crate::bus::dispatch::conversation_send::peer_root(account, &thread, &principal)?;
             Ok(BTreeSet::from([root]))
         }
+        "contact.trust.accept_change" => Ok(body
+            .get("contact")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .into_iter()
+            .collect()),
         _ => Ok(BTreeSet::new()),
     }
 }
@@ -197,7 +207,14 @@ impl AccountRuntime {
         command: &AccountCommand,
     ) -> Result<(), SdkError> {
         let method = command.request.method.as_str();
-        if method != "message.submit" && method != "conversation.send" {
+        if method != "message.submit"
+            && method != "conversation.send"
+            && method != "conversation.edit"
+            && method != "conversation.react"
+            && method != "conversation.reply"
+            && method != "conversation.delete"
+            && method != "contact.trust.accept_change"
+        {
             return Ok(());
         }
         let Some(account) = self.state.accounts.get(&self.id) else {

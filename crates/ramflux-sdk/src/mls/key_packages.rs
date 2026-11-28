@@ -7,7 +7,6 @@
 //! The wire types mirror `ramflux-node-core::router_store::key_packages` field by field; the
 //! gateway answers `Nack mls_dm_frames_unsupported` until the node wires the frames, which every
 //! driver here reports as [`TopUpOutcome::NotYetAvailable`] / [`FetchOutcome::NotYetAvailable`].
-#![allow(dead_code, reason = "MLS: allowance removed in D5")]
 
 use ramflux_mls::{GroupKind, Mls, MlsKv};
 use serde::{Deserialize, Serialize};

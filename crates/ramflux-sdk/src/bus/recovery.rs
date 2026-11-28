@@ -199,6 +199,11 @@ async fn confirm(
     if result.is_ok() {
         // With app lock on, the code just verified is the authentication: reopen the fence.
         supervisor.app_unlocked(&id)?;
+        // Recovery emits devices_changed from the next unlock tick, never identity_changed.
+        let _ = crate::bus::dispatch::conversation_security::mark_recovery_marker(
+            &supervisor.config.data_root,
+            &id,
+        );
     }
     result
 }

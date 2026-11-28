@@ -75,7 +75,6 @@ impl SealCache {
     }
 
     /// Forget every message of `group_id` (switch-over, removal).
-    #[allow(dead_code, reason = "MLS: allowance removed in D5")]
     pub(crate) fn evict_group(&mut self, group_id: &[u8]) {
         self.entries.retain(|key, _| key.group_id != group_id);
         self.order.retain(|key| key.group_id != group_id);

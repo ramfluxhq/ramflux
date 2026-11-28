@@ -243,7 +243,16 @@ fn journal_entry(
     {
         client.project_deferred_surface(conversation, message)?;
     }
-    let projected = super::journal::project(client, entry)?;
+    let mut projected = super::journal::project(client, entry)?;
+    let mut live_mls: Option<(String, serde_json::Value)> = None;
+    if entry.table_name == "runtime_actor_state"
+        && let Some(kind) = entry.keys.get("state_kind").and_then(serde_json::Value::as_str)
+        && let Some((topic, _)) = super::dispatch::conversation_security::event_kind(kind)
+        && let Some(body) = super::dispatch::conversation_security::load_event(client, kind)?
+    {
+        projected.push((topic.to_owned(), body.clone(), None));
+        live_mls = Some((topic.to_owned(), body));
+    }
     db.journal_outbox(entry.sequence, &projected, now_unix_timestamp())?;
     // Expiry retries keep runtime correlation without changing command acknowledgements.
     let attribution = if let Some((_, expiry)) =
@@ -261,6 +270,10 @@ fn journal_entry(
         serde_json::to_value(entry)?,
     );
     frame.frame_id = format!("outbox_{}", entry.sequence);
+    if let Some((topic, body)) = live_mls {
+        frame.method = topic;
+        frame.body = body;
+    }
     Ok(frame)
 }
 

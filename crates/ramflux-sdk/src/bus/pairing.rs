@@ -506,20 +506,26 @@ pub(super) fn adopt_installed(
         server_name: String::new(),
         ca_cert: std::path::PathBuf::new(),
         principal_id: native.record().body.principal_id.clone(),
-        device_id,
+        device_id: device_id.clone(),
         target_delivery_id: client.owned_device_identity()?.storage_key().into(),
         prekey_http_url: None,
     };
     let gateway = GatewaySessionConfig::auto(endpoint)
         .with_host_network(&state.config)
         .with_born_v3_account(native);
-    let mut account = super::state::LocalBusAccountState::disconnected(client, gateway, anchor);
+    let mut account =
+        super::state::LocalBusAccountState::disconnected(client, gateway, anchor.clone());
     account.activation_pending = true;
     account.native_setup = Some(state.config.clone());
     let index = account.client.account_index()?;
     index.set_account_unlocked(account_id, true)?;
     index.set_active_account(account_id)?;
     account.client.bind_process_media_ownership(state.config.media_ownership())?;
+    let _ = crate::bus::dispatch::conversation_security::schedule_new_device(
+        &account.client,
+        &device_id,
+        &anchor,
+    );
     state.accounts.insert(account_id.into(), account);
     state.active_account_id = Some(account_id.into());
     Ok(true)

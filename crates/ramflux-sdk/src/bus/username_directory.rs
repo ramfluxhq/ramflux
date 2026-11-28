@@ -190,7 +190,27 @@ pub(super) async fn apply(
         Purpose::Resolve { name, nonce, add, start } => {
             let resolved =
                 directory::observe_resolution(db, result, &prepared.pin, &name, &nonce, now)?;
+            let looked_up = crate::client::trust_pins::note_lookup(
+                &account.client,
+                &name,
+                &resolved.root_commitment,
+                false,
+                u64::try_from(crate::time::now_unix_timestamp()).unwrap_or(0),
+            )?;
+            if let Some(body) = looked_up {
+                crate::bus::dispatch::conversation_security::store_event(
+                    &account.client,
+                    "identity-changed",
+                    &resolved.root_commitment,
+                    body,
+                )?;
+            }
             if let Some(input) = start {
+                crate::bus::dispatch::conversation_security::gate_resolved(
+                    &account.client,
+                    &resolved.root_commitment,
+                    &input.operation_id,
+                )?;
                 open_messages::start(account, &resolved, input)
             } else if add {
                 super::dispatch::contact_resolution::add_username(state, id, &resolved).await

@@ -22,6 +22,7 @@ pub(crate) mod device_unlock;
 pub(crate) mod foreign_manifest;
 pub(crate) mod manifest_demand;
 pub(crate) mod recipient_home;
+pub(crate) mod trust_pins;
 pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};
 pub(crate) mod agent_activity;
 pub(crate) mod agent_custody;

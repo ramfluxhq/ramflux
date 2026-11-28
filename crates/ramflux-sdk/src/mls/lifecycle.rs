@@ -8,7 +8,6 @@
 //! Rule V: freshness is local knowledge. A leaf the directory rejects is removed by a NEW commit
 //! (sender side) or its application messages are refused (receiver side); it never makes a
 //! received commit or Welcome invalid. The clock appears only as a scheduling input (`now`).
-#![allow(dead_code, reason = "MLS: allowance removed in D5")]
 
 use ramflux_mls::{GroupKind, Mls, MlsError, MlsKv};
 
@@ -37,8 +36,10 @@ pub(crate) enum DeviceAdder {
     /// The own device that approved the new device.
     Approver,
     /// Another own device of the same account.
+    #[allow(dead_code)]
     OwnSibling,
     /// A device of the peer.
+    #[allow(dead_code)]
     PeerDevice,
 }
 
@@ -139,6 +140,7 @@ pub(crate) fn note_sealed<K: MlsKv>(
 
 /// What the local directory says about one leaf.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum LeafFreshness {
     /// Passes the directory check now.
     Fresh,
@@ -153,6 +155,7 @@ pub(crate) enum LeafFreshness {
 ///
 /// # Errors
 /// An unknown group or leaf, storage or provider failures.
+#[allow(dead_code)]
 pub(crate) fn check_leaf<K: MlsKv>(
     mls: &Mls<K>,
     group_id: &[u8],
@@ -168,6 +171,7 @@ pub(crate) fn check_leaf<K: MlsKv>(
 
 /// The sender's pre-seal check of every other leaf.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) struct SenderCheck {
     /// Leaves to remove before sealing.
     pub(crate) stale: Vec<u32>,
@@ -175,6 +179,7 @@ pub(crate) struct SenderCheck {
     pub(crate) needs_refresh: Vec<u32>,
 }
 
+#[allow(dead_code)]
 impl SenderCheck {
     /// Sealing may go ahead: nothing to remove and nothing unverified.
     pub(crate) fn is_clear(&self) -> bool {
@@ -187,6 +192,7 @@ impl SenderCheck {
 ///
 /// # Errors
 /// An unknown group, storage or provider failures.
+#[allow(dead_code)]
 pub(crate) fn check_before_seal<K: MlsKv>(
     mls: &Mls<K>,
     group_id: &[u8],
@@ -205,6 +211,7 @@ pub(crate) fn check_before_seal<K: MlsKv>(
 
 /// The receiver's verdict on an application message's sender leaf.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum ReceiveVerdict {
     /// Deliver the message.
     Accept,
@@ -219,6 +226,7 @@ pub(crate) enum ReceiveVerdict {
 ///
 /// # Errors
 /// An unknown group or leaf, storage or provider failures.
+#[allow(dead_code)]
 pub(crate) fn check_received<K: MlsKv>(
     mls: &Mls<K>,
     group_id: &[u8],
@@ -236,6 +244,7 @@ pub(crate) fn check_received<K: MlsKv>(
 ///
 /// # Errors
 /// An unknown group, storage or provider failures.
+#[allow(dead_code)]
 pub(crate) fn revoked_leaves<K: MlsKv>(
     mls: &Mls<K>,
     group_id: &[u8],
@@ -251,6 +260,7 @@ pub(crate) fn revoked_leaves<K: MlsKv>(
 
 /// What a run of Remove commits did.
 #[derive(Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) struct RemoveReport {
     /// Leaves whose Remove the orderer accepted (or that were already gone).
     pub(crate) removed: Vec<u32>,
@@ -258,6 +268,7 @@ pub(crate) struct RemoveReport {
     pub(crate) stopped: Option<CommitOutcome<()>>,
 }
 
+#[allow(dead_code)]
 fn not_found(error: &SdkError) -> bool {
     matches!(error, SdkError::Mls { code, .. } if *code == "not_found")
 }
@@ -269,6 +280,7 @@ fn not_found(error: &SdkError) -> bool {
 /// # Errors
 /// Storage and MLS failures, an orderer refusal, gateway failures other than the
 /// not-yet-available answer.
+#[allow(dead_code)]
 pub(crate) async fn remove_leaves<K: MlsKv>(
     access: &mut impl MlsFrameAccess,
     mls: &Mls<K>,

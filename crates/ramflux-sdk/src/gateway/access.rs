@@ -198,7 +198,6 @@ pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
 
 /// Crate-private MLS DM frames (`KeyPackage` publication and fetch, `dm_order`). Kept off the
 /// public session trait: the daemon-managed session client gets them when a caller needs them.
-#[allow(dead_code, reason = "MLS: allowance removed in D5")]
 pub(crate) trait MlsFrameAccess {
     /// # Errors
     /// The exchange fails; an unwired node answers with the typed not-yet-available error.
@@ -225,7 +224,7 @@ pub(crate) trait MlsFrameAccess {
     ) -> GatewayCallFuture<'_, crate::mls::order::DmOrderReply>;
 }
 
-#[allow(private_interfaces, dead_code, reason = "MLS: allowance removed in D5")]
+#[allow(private_interfaces)]
 impl MlsFrameAccess for GatewaySessionEngine {
     fn publish_key_packages(
         &mut self,

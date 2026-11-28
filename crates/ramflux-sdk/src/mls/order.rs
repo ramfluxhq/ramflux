@@ -21,7 +21,6 @@
 //!
 //! The gateway answers `Nack mls_dm_frames_unsupported` until the node wires the frames; every
 //! driver reports that as `NotYetAvailable`.
-#![allow(dead_code, reason = "MLS: allowance removed in D5")]
 
 use ramflux_mls::{
     ConversationRole, GroupKind, Mls, MlsError, MlsKv, MlsKvError, ReceivedMessage, RfConversation,
@@ -36,12 +35,16 @@ use crate::SdkError;
 use crate::gateway::access::MlsFrameAccess;
 
 /// `submit` per anchor per minute at the orderer.
+#[allow(dead_code)]
 pub(crate) const SUBMIT_PER_MINUTE: usize = 30;
 /// `since` per anchor per minute.
+#[allow(dead_code)]
 pub(crate) const SINCE_PER_MINUTE: usize = 120;
 /// `status` per anchor per minute.
+#[allow(dead_code)]
 pub(crate) const STATUS_PER_MINUTE: usize = 60;
 /// Most commits in one `since` answer.
+#[allow(dead_code)]
 pub(crate) const SINCE_MAX_ENTRIES: usize = 64;
 /// Largest commit the orderer accepts.
 pub(crate) const COMMIT_MAX_BYTES: usize = 1 << 20;
@@ -49,13 +52,17 @@ pub(crate) const COMMIT_MAX_BYTES: usize = 1 << 20;
 pub(crate) const GROUP_NONCE_BYTES: usize = 16;
 /// How long the old group stays readable after a switch-over (7 days).
 pub(crate) const OLD_GROUP_READ_ONLY_SECS: u64 = 7 * 86_400;
+/// Most replaced groups kept (self 6 Updates/hour × 7 days). One extra slot is not stored.
+pub(crate) const OLD_GROUP_CAP: usize = 1008;
 /// An own commit unanswered this long is looked up with `since` (30 s).
 pub(crate) const PENDING_LOOKUP_SECS: u64 = 30;
 /// Most `since` pages one catch-up reads (bounds the loop at the orderer's 4 096 hard cap).
 const CATCH_UP_MAX_PAGES: usize = 64;
 /// First delay of the orderer-down backoff.
+#[allow(dead_code)]
 const BACKOFF_BASE_SECS: u64 = 5;
 /// Largest delay of the orderer-down backoff.
+#[allow(dead_code)]
 const BACKOFF_MAX_SECS: u64 = 900;
 /// Row label of the conversation state, keyed by scope id.
 const CONV_LABEL: &str = "mls/conv";
@@ -352,8 +359,9 @@ pub(crate) struct ConvState {
     pub(crate) group_id: Vec<u8>,
     /// Highest log position applied (0: none).
     pub(crate) log_seq: u64,
-    /// The previous group, readable for 7 days after the switch-over.
-    pub(crate) old: Option<OldGroup>,
+    /// Replaced groups, oldest first, each readable for 7 days. Empty when none are kept.
+    #[serde(default)]
+    pub(crate) old: Vec<OldGroup>,
     /// The own commit awaiting the orderer.
     pub(crate) pending: Option<PendingCommit>,
     /// Unix second the own leaf was created or last updated.
@@ -372,7 +380,7 @@ impl ConvState {
         Self {
             group_id,
             log_seq,
-            old: None,
+            old: Vec::new(),
             pending: None,
             leaf_updated_at: now,
             generations_epoch: 0,
@@ -385,18 +393,21 @@ impl ConvState {
     /// read-only window. Sending is only ever allowed in the current group.
     pub(crate) fn readable(&self, group_id: &[u8], now: u64) -> bool {
         self.group_id == group_id
-            || self
-                .old
-                .as_ref()
-                .is_some_and(|old| old.group_id == group_id && now < old.read_only_until)
+            || self.old.iter().any(|old| old.group_id == group_id && now < old.read_only_until)
     }
 
-    /// Drop the old group once its window has ended. The returned id is deleted by the caller.
-    pub(crate) fn expire_old(&mut self, now: u64) -> Option<Vec<u8>> {
-        if self.old.as_ref().is_some_and(|old| now >= old.read_only_until) {
-            return self.old.take().map(|old| old.group_id);
-        }
-        None
+    /// Drop every old group whose window has ended. The caller deletes each returned id.
+    pub(crate) fn expire_old(&mut self, now: u64) -> Vec<Vec<u8>> {
+        let mut expired = Vec::new();
+        self.old.retain(|old| {
+            if now < old.read_only_until {
+                true
+            } else {
+                expired.push(old.group_id.clone());
+                false
+            }
+        });
+        expired
     }
 
     /// An own commit is waiting and its last attempt is old enough for a `since` lookup.
@@ -406,22 +417,55 @@ impl ConvState {
             .is_some_and(|pending| now.saturating_sub(pending.submitted_at) >= PENDING_LOOKUP_SECS)
     }
 
-    /// Point the conversation at `group_id`, keeping the previous group readable for 7 days.
-    fn switch_to(&mut self, group_id: Vec<u8>, log_seq: u64, now: u64) {
+    /// Point the conversation at `group_id`, appending the previous group.
+    ///
+    /// Above [`OLD_GROUP_CAP`] the oldest ids are returned for an immediate `delete_group`.
+    fn switch_to(&mut self, group_id: Vec<u8>, log_seq: u64, now: u64) -> Vec<Vec<u8>> {
         if self.group_id == group_id {
-            return;
+            return Vec::new();
         }
         let previous = std::mem::replace(&mut self.group_id, group_id);
-        self.old = Some(OldGroup {
+        self.old.push(OldGroup {
             group_id: previous,
             read_only_until: now.saturating_add(OLD_GROUP_READ_ONLY_SECS),
         });
+        let mut evicted = Vec::new();
+        if self.old.len() > OLD_GROUP_CAP {
+            let overflow = self.old.len() - OLD_GROUP_CAP;
+            evicted.extend(self.old.drain(..overflow).map(|old| old.group_id));
+        }
         self.log_seq = log_seq;
         self.pending = None;
         self.leaf_updated_at = now;
         self.generations_epoch = 0;
         self.generations = 0;
         self.removed = false;
+        evicted
+    }
+}
+
+/// What to do with a staged first commit after `status`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StageKeep {
+    /// The frames are unwired. Keep the row and surface `NotYetAvailable`.
+    NotYetAvailable,
+    /// The orderer has no group yet. Keep the row and surface `RateLimited`.
+    RateLimited,
+    /// `status` names our staged group. Merge it.
+    Adopt,
+    /// `status` names another group. Delete only our staged group.
+    Delete,
+}
+
+/// Keep the staged first commit unless `status` names a different group.
+pub(crate) fn keep_stage(status: &StatusOutcome, our_group: &[u8]) -> StageKeep {
+    match status {
+        StatusOutcome::NotYetAvailable => StageKeep::NotYetAvailable,
+        StatusOutcome::UnknownScope => StageKeep::RateLimited,
+        StatusOutcome::Group { group_id, .. } if group_id.as_slice() == our_group => {
+            StageKeep::Adopt
+        }
+        StatusOutcome::Group { .. } => StageKeep::Delete,
     }
 }
 
@@ -461,6 +505,7 @@ impl<'a, K: MlsKv> ConvStore<'a, K> {
     ///
     /// # Errors
     /// Storage failure.
+    #[allow(dead_code)]
     pub(crate) fn scope_of(&self, group_id: &[u8]) -> Result<Option<Vec<u8>>, SdkError> {
         Ok(self
             .kv
@@ -586,12 +631,14 @@ fn decode_establish_row(row: &[u8]) -> Result<EstablishRow, SdkError> {
 
 /// Orderer-down backoff (spec §3.1): exponential from 5 s to 15 min, never shorter than a
 /// `rate_limited` answer asked for. Pure; the caller supplies the time.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Backoff {
     failures: u32,
     not_before: u64,
 }
 
+#[allow(dead_code)]
 impl Backoff {
     /// Delay after `failures` consecutive failures (1 is the first).
     pub(crate) fn delay_secs(failures: u32) -> u64 {
@@ -837,7 +884,7 @@ fn persist_expiring<K: MlsKv>(
     state: &mut ConvState,
     now: u64,
 ) -> Result<(), SdkError> {
-    if let Some(group_id) = state.expire_old(now) {
+    for group_id in state.expire_old(now) {
         forget_group(mls, store, &group_id)?;
     }
     store.put(scope_id, state)
@@ -1040,12 +1087,15 @@ pub(crate) async fn reconcile<K: MlsKv>(
     let log_seq = if joined.epoch == head_epoch { head_log_seq } else { 0 };
     let mut state = match current {
         Some(mut state) => {
-            state.switch_to(group_id.clone(), log_seq, now);
+            let evicted = state.switch_to(group_id.clone(), log_seq, now);
+            for id in evicted {
+                forget_group(mls, store, &id)?;
+            }
             state
         }
         None => ConvState::new(group_id.clone(), log_seq, now),
     };
-    if let Some(expired) = state.expire_old(now) {
+    for expired in state.expire_old(now) {
         forget_group(mls, store, &expired)?;
     }
     store.put(&scope.conversation_id, &state)?;
@@ -1066,11 +1116,7 @@ pub(crate) fn expire_old_group<K: MlsKv>(
     let Some(mut state) = store.get(&scope.conversation_id)? else {
         return Ok(());
     };
-    let Some(group_id) = state.expire_old(now) else {
-        return Ok(());
-    };
-    forget_group(mls, store, &group_id)?;
-    store.put(&scope.conversation_id, &state)
+    persist_expiring(mls, store, &scope.conversation_id, &mut state, now)
 }
 
 /// Which first commit [`establish`] submits.
@@ -1079,6 +1125,7 @@ pub(crate) enum EstablishKind {
     /// First contact: the scope has no group yet.
     Create,
     /// Lost state or a fork: a new group replaces the scope's current one.
+    #[allow(dead_code)]
     ReEstablish,
 }
 
@@ -1097,7 +1144,14 @@ pub(crate) struct Establish<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EstablishOutcome {
     /// The orderer accepted the new group; fan the Welcome out as envelopes.
-    Established { group_id: Vec<u8>, epoch: u64, log_seq: u64, welcome: Vec<u8> },
+    /// `forgotten` groups were deleted by the switch and must leave the seal cache.
+    Established {
+        group_id: Vec<u8>,
+        epoch: u64,
+        log_seq: u64,
+        welcome: Vec<u8>,
+        forgotten: Vec<Vec<u8>>,
+    },
     /// Another device won the scope; follow the group the orderer names.
     LostRace(ReconcileOutcome),
     /// Over the limit with no group to follow; retry after the wait.
@@ -1211,19 +1265,27 @@ fn record_established<K: MlsKv>(
     group_id: &[u8],
     log_seq: u64,
     now: u64,
-) -> Result<(), SdkError> {
+) -> Result<Vec<Vec<u8>>, SdkError> {
+    let mut forgotten = Vec::new();
     let mut state = match store.get(&scope.conversation_id)? {
         Some(mut state) => {
-            state.switch_to(group_id.to_vec(), log_seq, now);
+            let evicted = state.switch_to(group_id.to_vec(), log_seq, now);
+            for id in &evicted {
+                forget_group(mls, store, id)?;
+            }
+            forgotten.extend(evicted);
             state
         }
         None => ConvState::new(group_id.to_vec(), log_seq, now),
     };
-    if let Some(expired) = state.expire_old(now) {
-        forget_group(mls, store, &expired)?;
+    let expired = state.expire_old(now);
+    for id in &expired {
+        forget_group(mls, store, id)?;
     }
+    forgotten.extend(expired);
     store.put(&scope.conversation_id, &state)?;
-    store.establish_delete(&scope.conversation_id)
+    store.establish_delete(&scope.conversation_id)?;
+    Ok(forgotten)
 }
 
 async fn finish_establish<K: MlsKv>(
@@ -1247,12 +1309,13 @@ async fn finish_establish<K: MlsKv>(
     match submit(access, request).await? {
         SubmitOutcome::Accepted { log_seq, .. } => {
             let epoch = merge_staged(mls, &row.group_id, row.epoch)?;
-            record_established(mls, store, scope, &row.group_id, log_seq, now)?;
+            let forgotten = record_established(mls, store, scope, &row.group_id, log_seq, now)?;
             Ok(EstablishOutcome::Established {
                 group_id: row.group_id.clone(),
                 epoch,
                 log_seq,
                 welcome: row.welcome.clone(),
+                forgotten,
             })
         }
         SubmitOutcome::NotYetAvailable => Ok(EstablishOutcome::NotYetAvailable),
@@ -1288,22 +1351,28 @@ async fn lost_or_adopted<K: MlsKv>(
     row: &EstablishRow,
     now: u64,
 ) -> Result<EstablishOutcome, SdkError> {
-    let named_ours = matches!(
-        status(access, scope).await?,
-        StatusOutcome::Group { group_id, .. } if group_id == row.group_id
-    );
-    if named_ours {
-        let epoch = merge_staged(mls, &row.group_id, row.epoch)?;
-        record_established(mls, store, scope, &row.group_id, 0, now)?;
-        return Ok(EstablishOutcome::Established {
-            group_id: row.group_id.clone(),
-            epoch,
-            log_seq: 0,
-            welcome: row.welcome.clone(),
-        });
+    let named = status(access, scope).await?;
+    match keep_stage(&named, &row.group_id) {
+        StageKeep::NotYetAvailable => Ok(EstablishOutcome::NotYetAvailable),
+        StageKeep::RateLimited => {
+            Ok(EstablishOutcome::RateLimited { retry_after: PENDING_LOOKUP_SECS })
+        }
+        StageKeep::Adopt => {
+            let epoch = merge_staged(mls, &row.group_id, row.epoch)?;
+            let forgotten = record_established(mls, store, scope, &row.group_id, 0, now)?;
+            Ok(EstablishOutcome::Established {
+                group_id: row.group_id.clone(),
+                epoch,
+                log_seq: 0,
+                welcome: row.welcome.clone(),
+                forgotten,
+            })
+        }
+        StageKeep::Delete => {
+            abandon_establish(mls, store, &scope.conversation_id, &row.group_id)?;
+            Ok(EstablishOutcome::LostRace(reconcile(access, mls, store, scope, now).await?))
+        }
     }
-    abandon_establish(mls, store, &scope.conversation_id, &row.group_id)?;
-    Ok(EstablishOutcome::LostRace(reconcile(access, mls, store, scope, now).await?))
 }
 
 /// An own commit staged locally, not yet merged.
@@ -1531,12 +1600,65 @@ mod tests {
             "inside the window"
         );
         assert!(!state.readable(&[1; 32], 5_000 + OLD_GROUP_READ_ONLY_SECS), "window over");
+        assert!(
+            state.expire_old(5_000 + OLD_GROUP_READ_ONLY_SECS - 1).is_empty(),
+            "one second inside 30 d keeps the group"
+        );
         assert_eq!(
             state.expire_old(5_000 + OLD_GROUP_READ_ONLY_SECS),
-            Some(vec![1; 32]),
+            vec![vec![1; 32]],
             "the dropped group id"
         );
-        assert!(state.old.is_none(), "nothing left to read");
+        assert!(state.old.is_empty(), "nothing left to read");
+    }
+
+    #[test]
+    fn old_group_cap_evicts_only_past_one_thousand_eight() {
+        let mut state = state();
+        let mut evicted = Vec::new();
+        for n in 0..OLD_GROUP_CAP {
+            let mut id = vec![0_u8; 32];
+            let step = u32::try_from(n).expect("test: cap fits u32");
+            id[0] = u8::try_from((step / 256) + 2).expect("test: id byte");
+            id[1] = u8::try_from(step % 256).expect("test: id byte");
+            evicted.extend(state.switch_to(id, 0, 5_000));
+        }
+        assert!(evicted.is_empty(), "1008 old groups stay");
+        assert_eq!(state.old.len(), OLD_GROUP_CAP, "the cap is full and not over");
+        let dropped = state.switch_to(vec![9; 32], 0, 5_000);
+        assert_eq!(dropped, vec![vec![1; 32]], "the 1009th switch deletes the oldest id");
+        assert_eq!(state.old.len(), OLD_GROUP_CAP, "the list stays at the cap");
+    }
+
+    #[test]
+    fn keep_stage_holds_the_row_unless_status_names_another_group() {
+        let ours = vec![1; 32];
+        assert_eq!(
+            keep_stage(&StatusOutcome::NotYetAvailable, &ours),
+            StageKeep::NotYetAvailable,
+            "an unwired node is not a lost race"
+        );
+        assert_eq!(
+            keep_stage(&StatusOutcome::UnknownScope, &ours),
+            StageKeep::RateLimited,
+            "no named group keeps the staged row"
+        );
+        assert_eq!(
+            keep_stage(
+                &StatusOutcome::Group { group_id: ours.clone(), epoch: 1, log_seq: 0 },
+                &ours
+            ),
+            StageKeep::Adopt,
+            "our group is adopted"
+        );
+        assert_eq!(
+            keep_stage(
+                &StatusOutcome::Group { group_id: vec![2; 32], epoch: 1, log_seq: 4 },
+                &ours
+            ),
+            StageKeep::Delete,
+            "another group deletes only the loser"
+        );
     }
 
     #[test]
