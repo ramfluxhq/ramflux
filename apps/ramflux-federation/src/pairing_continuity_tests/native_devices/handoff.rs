@@ -125,6 +125,9 @@ impl Fixture {
             data_selection: DataSelectionV3::FullAccountDataV1(FullAccountData {}),
             transfer_profile: TransferProfile::FullAccountDataV1,
             display_name: "Phone source".into(),
+
+            device_label: None,
+            platform: None,
         };
         let reply = driver::drive(
             Box::pin(self.wire.primary.begin_full(request)),
@@ -144,6 +147,9 @@ impl Fixture {
                 version: 2,
                 token: value.invite_token,
                 display_name: "Existing phone".into(),
+
+                device_label: None,
+                platform: None,
             })),
             &mut self.source,
             &self.a.client,

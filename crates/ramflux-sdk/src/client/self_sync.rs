@@ -197,6 +197,7 @@ impl RamfluxClient {
         exact_body: &[u8],
     ) -> Result<bool, SdkError> {
         self.authorize_self_sync(source, conversation)?;
+        self.note_device_seen(source.device_id())?;
         // A register is applied only under a roster at or beyond the refresh barrier.
         self.enter_self_sync_refresh()?;
         let operation =

@@ -11,7 +11,7 @@ pub struct Control {
     pub operation: i32,
     #[prost(
         oneof = "control::Payload",
-        tags = "16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 34"
+        tags = "16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 34, 35"
     )]
     pub payload: ::core::option::Option<control::Payload>,
 }
@@ -56,6 +56,9 @@ pub mod control {
         /// Tag 33 is reserved by a parked branch; own layer renewal takes the next free tag.
         #[prost(message, tag = "34")]
         OwnLayerRenewal(super::OwnLayerRenewal),
+        /// Private own-device label. Never a field of the public device set.
+        #[prost(message, tag = "35")]
+        OwnDeviceLabel(super::OwnDeviceLabel),
     }
 }
 impl serde::Serialize for Control {
@@ -133,6 +136,9 @@ impl serde::Serialize for Control {
                 control::Payload::OwnLayerRenewal(v) => {
                     struct_ser.serialize_field("ownLayerRenewal", v)?;
                 }
+                control::Payload::OwnDeviceLabel(v) => {
+                    struct_ser.serialize_field("ownDeviceLabel", v)?;
+                }
             }
         }
         struct_ser.end()
@@ -179,6 +185,8 @@ impl<'de> serde::Deserialize<'de> for Control {
             "agentSync",
             "own_layer_renewal",
             "ownLayerRenewal",
+            "own_device_label",
+            "ownDeviceLabel",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
@@ -201,6 +209,7 @@ impl<'de> serde::Deserialize<'de> for Control {
             Friend,
             AgentSync,
             OwnLayerRenewal,
+            OwnDeviceLabel,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -256,6 +265,9 @@ impl<'de> serde::Deserialize<'de> for Control {
                             "agentSync" | "agent_sync" => Ok(GeneratedField::AgentSync),
                             "ownLayerRenewal" | "own_layer_renewal" => {
                                 Ok(GeneratedField::OwnLayerRenewal)
+                            }
+                            "ownDeviceLabel" | "own_device_label" => {
+                                Ok(GeneratedField::OwnDeviceLabel)
                             }
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
@@ -439,6 +451,14 @@ impl<'de> serde::Deserialize<'de> for Control {
                             payload__ = map_
                                 .next_value::<::std::option::Option<_>>()?
                                 .map(control::Payload::OwnLayerRenewal);
+                        }
+                        GeneratedField::OwnDeviceLabel => {
+                            if payload__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("ownDeviceLabel"));
+                            }
+                            payload__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(control::Payload::OwnDeviceLabel);
                         }
                     }
                 }

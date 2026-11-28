@@ -20,6 +20,9 @@ pub(super) async fn enroll(rig: &mut Rig) -> TestResult {
             lease_not_before: rig.now,
             lease_expires_at: rig.now + 604_800,
             display_name: "Source phone".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     let Outcome::Begin { value } = begun.outcome else {
@@ -31,6 +34,9 @@ pub(super) async fn enroll(rig: &mut Rig) -> TestResult {
             version: 2,
             token: value.invite_token,
             display_name: "Linked phone".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     for _ in 0..24 {
@@ -103,6 +109,9 @@ mod tests {
                 lease_not_before: rig.now,
                 lease_expires_at: rig.now + 86_400,
                 display_name: "Ordinary enrollment".into(),
+
+                device_label: None,
+                platform: None,
             })
             .await?;
         let Outcome::Begin { value } = result.outcome else {

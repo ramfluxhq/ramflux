@@ -32,6 +32,7 @@ fn payload_operation_and_tag(payload: &g::control::Payload) -> (u32, u32) {
         g::control::Payload::OwnGroupConsent(_) => (14, 29),
         g::control::Payload::OwnMessageCopy(_) => (15, 30),
         g::control::Payload::OwnLayerRenewal(_) => (18, 34),
+        g::control::Payload::OwnDeviceLabel(_) => (19, 35),
         g::control::Payload::Friend(_) => (16, 31),
         g::control::Payload::AgentSync(_) => (17, 32),
     }
@@ -73,6 +74,15 @@ pub fn validate_control_operation(control: &g::Control) -> Result<(), SdkError> 
 /// Bounded shape of an own-layer renewal request; the primary authenticates its content on receipt.
 /// # Errors
 /// Refuses a missing primary or an empty or oversized declaration.
+fn validate_own_device_label(body: &g::OwnDeviceLabel) -> Result<(), SdkError> {
+    if body.signed_record_json.is_empty()
+        || body.signed_record_json.len() > ramflux_protocol::device_label::MAX_SIGNED_RECORD_BYTES
+    {
+        return Err(refused("device label requires one bounded signed record"));
+    }
+    Ok(())
+}
+
 fn validate_own_layer_renewal(body: &g::OwnLayerRenewal) -> Result<(), SdkError> {
     if body.primary.is_none()
         || body.signed_declaration_json.is_empty()
@@ -88,6 +98,7 @@ pub fn validate_control_native(control: &g::Control) -> Result<(), SdkError> {
     match control.payload.as_ref() {
         Some(g::control::Payload::Reset(_) | g::control::Payload::ResetAck(_)) => Ok(()),
         Some(g::control::Payload::OwnLayerRenewal(body)) => validate_own_layer_renewal(body),
+        Some(g::control::Payload::OwnDeviceLabel(body)) => validate_own_device_label(body),
         Some(g::control::Payload::ContactControl(body)) => require_canonical(
             body.consent.as_ref().map(|leaf| leaf.canonical.as_slice()),
             "contact control requires native consent",

@@ -226,6 +226,7 @@ fn finish(
     })
 }
 fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
+    account.client.ensure_fanout()?;
     let now = now_unix_timestamp();
     for (key, mut work) in pending_ordered(&account.client, now)? {
         if work.intent.expiry() <= now

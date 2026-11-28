@@ -195,6 +195,9 @@ mod tests {
                 version: 2,
                 token: value.invite_token,
                 display_name: "Existing phone".into(),
+
+                device_label: None,
+                platform: None,
             })),
             source_service,
             &rig.source.client,

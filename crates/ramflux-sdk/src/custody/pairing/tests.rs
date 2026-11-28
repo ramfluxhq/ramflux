@@ -91,6 +91,9 @@ async fn pairing_coordinator_requires_two_local_confirmations() -> TestResult {
             version: 2,
             token: begun.invite_token,
             display_name: "Recipient".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     drive_sas(&mut fx, &op, generation).await?;
@@ -231,6 +234,9 @@ async fn pairing_forged_invitation_is_refused() -> TestResult {
             version: 2,
             token: begun.invite_token,
             display_name: "Recipient".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await
     {
@@ -254,6 +260,9 @@ async fn pairing_bad_mac_is_terminal() -> TestResult {
             version: 2,
             token: begun.invite_token,
             display_name: "Recipient".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     drive_sas(&mut fx, &op, generation).await?;
@@ -304,6 +313,9 @@ async fn joined(fx: &mut Fixture) -> TestResult<(String, u64)> {
         version: 2,
         token: begun.invite_token,
         display_name: "Recipient".into(),
+
+        device_label: None,
+        platform: None,
     }))
     .await?;
     Box::pin(drive_sas(fx, &op, generation)).await?;
@@ -390,6 +402,8 @@ fn begin_body() -> Begin {
         lease_not_before: WALL,
         lease_expires_at: WALL + 86_400,
         display_name: "Primary".into(),
+        device_label: None,
+        platform: None,
     }
 }
 
@@ -503,6 +517,9 @@ async fn pairing_join_commitment_uses_staged_identity() -> TestResult {
             version: 2,
             token: begun.invite_token,
             display_name: "Recipient".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     drive_sas(&mut fx, &op, generation).await?;
@@ -541,6 +558,9 @@ async fn pairing_staging_failure_queues_no_commit() -> TestResult {
             version: 2,
             token: begun.invite_token,
             display_name: "Recipient".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     match drive_sas(&mut fx, &op, generation).await {

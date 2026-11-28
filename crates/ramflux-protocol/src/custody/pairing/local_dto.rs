@@ -23,6 +23,19 @@ pub use full_status::{FullStatus, FullStatusStage, FullTailStatus};
 fn name(v: &str) -> Result<()> {
     require(v.len() <= 128 && crate::text_safety::free_text_is_safe(v), "display_name")
 }
+fn device_face(label: Option<&String>, platform: Option<&String>) -> Result<()> {
+    match (label, platform) {
+        (None, None) => Ok(()),
+        (Some(label), Some(platform)) => {
+            crate::device_label::normalize_label(label)
+                .map_err(|_| WireError::Field("device_label"))?;
+            crate::device_label::DevicePlatform::parse(platform)
+                .map_err(|_| WireError::Field("platform"))?;
+            Ok(())
+        }
+        _ => Err(WireError::Field("device_label")),
+    }
+}
 fn rights(caps: &[String], start: u64, end: u64) -> Result<()> {
     require(
         !caps.is_empty()
@@ -55,6 +68,12 @@ pub struct Begin {
     pub lease_not_before: u64,
     pub lease_expires_at: u64,
     pub display_name: String,
+    /// OS model name of the calling device. Absent until the client sets one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_label: Option<String>,
+    /// Closed platform of the calling device. Present only together with `device_label`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 impl PairingWire for Begin {
     fn normalize(&mut self) {
@@ -65,6 +84,7 @@ impl PairingWire for Begin {
         header(&self.schema, self.version, "Begin")?;
         rights(&self.capabilities, self.lease_not_before, self.lease_expires_at)?;
         name(&self.display_name)?;
+        device_face(self.device_label.as_ref(), self.platform.as_ref())?;
         budget(self, Self::LIMIT)
     }
 }
@@ -111,6 +131,12 @@ pub struct Join {
     pub version: u32,
     pub token: InviteToken,
     pub display_name: String,
+    /// OS model name of the joining device. Absent until the client sets one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_label: Option<String>,
+    /// Closed platform of the joining device. Present only together with `device_label`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 impl PairingWire for Join {
     const LIMIT: usize = 32_768;
@@ -118,6 +144,7 @@ impl PairingWire for Join {
         header(&self.schema, self.version, "Join")?;
         self.token.validate()?;
         name(&self.display_name)?;
+        device_face(self.device_label.as_ref(), self.platform.as_ref())?;
         budget(self, Self::LIMIT)
     }
 }

@@ -293,6 +293,30 @@ impl Rig {
 async fn pairing_recipient_activates_only_exact_durable_publication() -> TestResult {
     crate::bus::credentials::contract_tests::deadline(Box::pin(enrollment_admission())).await
 }
+fn admission_begin(now: u64) -> Begin {
+    Begin {
+        schema: "ramflux.pairing.Begin.v2".into(),
+        version: 2,
+        capabilities: vec!["group".into(), "message".into(), "register".into(), "sync".into()],
+        lease_not_before: now,
+        lease_expires_at: now + 86_400,
+        display_name: "Primary".into(),
+        device_label: None,
+        platform: None,
+    }
+}
+
+fn admission_join(token: ramflux_protocol::custody::pairing::native::InviteToken) -> Join {
+    Join {
+        schema: "ramflux.pairing.Join.v2".into(),
+        version: 2,
+        token,
+        display_name: "Second".into(),
+        device_label: None,
+        platform: None,
+    }
+}
+
 async fn enrollment_admission() -> TestResult {
     let Rig {
         mut primary,
@@ -308,28 +332,12 @@ async fn enrollment_admission() -> TestResult {
         _clock,
         ..
     } = Rig::open().await?;
-    let begun = primary
-        .begin(Begin {
-            schema: "ramflux.pairing.Begin.v2".into(),
-            version: 2,
-            capabilities: vec!["group".into(), "message".into(), "register".into(), "sync".into()],
-            lease_not_before: now,
-            lease_expires_at: now + 86_400,
-            display_name: "Primary".into(),
-        })
-        .await?;
+    let begun = primary.begin(admission_begin(now)).await?;
     let Outcome::Begin { value: begun } = begun.outcome else {
         return Err("begin".into());
     };
     let operation_id = begun.operation_id.clone();
-    secondary
-        .join(Join {
-            schema: "ramflux.pairing.Join.v2".into(),
-            version: 2,
-            token: begun.invite_token,
-            display_name: "Second".into(),
-        })
-        .await?;
+    secondary.join(admission_join(begun.invite_token)).await?;
     for _ in 0..8 {
         clock.advance_ms(1001);
         primary.sync_relay().await?;
@@ -623,6 +631,9 @@ async fn bootstrap_full_rig() -> Result<(Rig, String, String), Box<dyn std::erro
             version: 2,
             token: begun.invite_token,
             display_name: "Target".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     let request = ramflux_protocol::custody::pairing::local_dto::StatusRequest {
@@ -848,6 +859,8 @@ fn full_begin(now: u64) -> ramflux_protocol::custody::pairing::local_dto::FullTr
         data_selection: DataSelectionV3::FullAccountDataV1(FullAccountData {}),
         transfer_profile: TransferProfile::FullAccountDataV1,
         display_name: "Source".into(),
+        device_label: None,
+        platform: None,
     }
 }
 

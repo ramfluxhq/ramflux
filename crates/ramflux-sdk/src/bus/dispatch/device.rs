@@ -12,6 +12,10 @@ pub(crate) async fn dispatch_device_bus_request(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match request.method.as_str() {
         "device.list" => dispatch_device_list(request, state),
+        "device.rename" => {
+            let body: LocalBusDeviceRenameRequest = serde_json::from_value(request.body.clone())?;
+            dispatch_device_rename(request, state, &body)
+        }
         "push.keyset.get" => dispatch_push_keyset_get(request, state),
         "device.refresh" => {
             super::identity_authority::dispatch_identity_authority(request, state).await
@@ -313,6 +317,8 @@ async fn dispatch_device_pair(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
     Box::pin(crate::bus::pairing::ensure_actor(state, account_id, request)).await?;
+    let declaration =
+        crate::client::device_label::pairing_declaration(&request.method, &request.body)?;
     let result = {
         let work = crate::custody::pairing::handle_bus(
             &state.config.data_root,
@@ -344,6 +350,11 @@ async fn dispatch_device_pair(
         && let Some(account) = state.accounts.get_mut(account_id)
     {
         crate::bus::pairing::refresh_source_role(account)?;
+        account.client.accept_pairing_declaration(
+            &state.config.data_root,
+            account_id,
+            declaration.as_ref(),
+        )?;
     }
     match result {
         Ok(result) => Ok(local_bus_ok(serde_json::to_value(result)?)),
@@ -352,6 +363,16 @@ async fn dispatch_device_pair(
         }
         Err(error) => Err(error),
     }
+}
+
+fn dispatch_device_rename(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+    body: &LocalBusDeviceRenameRequest,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account = local_bus_account_mut(state, request_account_id(request)?)?;
+    let renamed = account.client.rename_device(&body.device_id, &body.label)?;
+    Ok(local_bus_ok(renamed))
 }
 
 fn dispatch_device_list(
@@ -409,6 +430,12 @@ pub(crate) fn account_known_devices(
         .iter()
         .filter(|device| device.status == ramflux_protocol::DeviceSetStatus::Active)
         .map(|device| {
+            let is_local = device.device_id == local;
+            let face = account.client.list_face(
+                &device.device_id,
+                is_local,
+                device.branch_certificate.as_ref().map(|certificate| certificate.body.not_before),
+            )?;
             Ok(LocalBusDeviceRecord {
                 device_id: device.device_id.clone(),
                 device_epoch: device.device_epoch,
@@ -420,7 +447,11 @@ pub(crate) fn account_known_devices(
                     .branch_certificate
                     .as_ref()
                     .map_or_else(Vec::new, |certificate| certificate.body.capabilities.clone()),
-                is_local: device.device_id == local,
+                is_local,
+                label: face.label,
+                platform: face.platform,
+                linked_at: face.linked_at,
+                last_active_at: face.last_active_at,
             })
         })
         .collect()

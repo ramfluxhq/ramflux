@@ -115,6 +115,9 @@ async fn pairing_two_local_confirmations_precede_approval() -> TestResult {
             version: 2,
             token: begun.invite_token,
             display_name: "Recipient".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     drive_sas(&mut fx, &op, generation).await?;
@@ -161,6 +164,9 @@ async fn pairing_two_local_confirmations_precede_approval() -> TestResult {
             version: 2,
             token: begun.invite_token,
             display_name: "Recipient".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     drive_sas(&mut fx, &op, generation).await?;
@@ -216,6 +222,9 @@ async fn pairing_forged_invitation_is_refused() -> TestResult {
             version: 2,
             token: begun.invite_token,
             display_name: "Recipient".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await
     {
@@ -621,6 +630,9 @@ async fn joined(fx: &mut Continuity) -> TestResult<(String, u64)> {
             version: 2,
             token: begun.invite_token,
             display_name: "Recipient".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     drive_sas(fx, &op, generation).await?;
@@ -708,6 +720,9 @@ fn begin_body() -> TestResult<Begin> {
         lease_not_before: now,
         lease_expires_at: now + 86_400,
         display_name: "Primary".into(),
+
+        device_label: None,
+        platform: None,
     })
 }
 

@@ -61,6 +61,7 @@ methods! {
     LocalRead(Always) => Actor: ["a2i.list_pending", "agent.approval.list", "agent.catalog", "agent.job.list", "agent.job.sessions", "device.pair.status", "device.transfer.status", "push.keyset.get"];
     LocalMutation(Always) => Actor: [
         "account.config.set",
+        "device.rename",
         "a2i.acknowledge",
         "agent.approval.decide",
         "agent.approval.publish",

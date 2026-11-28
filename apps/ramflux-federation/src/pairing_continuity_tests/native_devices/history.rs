@@ -241,6 +241,9 @@ async fn enroll(
         version: 2,
         token: value.invite_token,
         display_name: "History recipient".into(),
+
+        device_label: None,
+        platform: None,
     })
     .await?;
     for _ in 0..32 {

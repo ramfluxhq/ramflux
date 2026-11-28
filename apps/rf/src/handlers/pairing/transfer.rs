@@ -39,13 +39,14 @@ async fn dispatch(socket: PathBuf, command: TransferCommand) -> Result<(), RfErr
             )
             .await
         }
-        TransferAction::Join { display_name, invitation_file } => {
+        TransferAction::Join { display_name, invitation_file, device_label, platform } => {
             super::join_request(
                 &mut client,
                 &command.account,
                 ("transfer.join", display_name),
                 &invitation_file,
                 &display,
+                super::DeviceFace { label: device_label, platform },
             )
             .await
         }
@@ -130,6 +131,8 @@ fn begin_request(
         destination_device,
         destination_epoch,
         account_anchor,
+        device_label,
+        platform,
     } = action
     else {
         return Err(invalid());
@@ -152,6 +155,8 @@ fn begin_request(
         data_selection: DataSelectionV3::FullAccountDataV1(FullAccountData {}),
         transfer_profile: TransferProfile::FullAccountDataV1,
         display_name,
+        device_label,
+        platform,
     };
     request.normalize();
     request.validate().map_err(|_| invalid())?;

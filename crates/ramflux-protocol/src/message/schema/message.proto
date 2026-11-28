@@ -261,6 +261,7 @@ enum ControlOperation {
   CONTROL_FRIEND = 16;
   CONTROL_AGENT_SYNC = 17;
   CONTROL_OWN_LAYER_RENEWAL = 18;
+  CONTROL_OWN_DEVICE_LABEL = 19;
 }
 message Control {
   ControlOperation operation = 1;
@@ -287,7 +288,14 @@ message Control {
     AgentHostPacket agent_sync = 32;
     // Tag 33 is reserved by a parked branch; own layer renewal takes the next free tag.
     OwnLayerRenewal own_layer_renewal = 34;
+    // Private own-device label. Never a field of the public device set.
+    OwnDeviceLabel own_device_label = 35;
   }
+}
+// Signed own-device label carried only between the account's own devices.
+// signed_record_json is the canonical signed record, at most 1024 bytes.
+message OwnDeviceLabel {
+  bytes signed_record_json = 1;
 }
 // Secondary-device request for a fresh primary-endorsed message-layer declaration (SECONDARY-LAYER-01).
 // signed_declaration_json is the canonical native SignedLayerDeclaration, at most 4096 bytes.

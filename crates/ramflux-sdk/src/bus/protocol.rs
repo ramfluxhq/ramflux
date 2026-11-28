@@ -244,6 +244,25 @@ pub struct LocalBusDeviceRecord {
     pub target_delivery_id: String,
     pub capability_scope: Vec<String>,
     pub is_local: bool,
+    /// Private name. Null until this account sets one.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// `ios|android|macos|linux|windows|cli`. Null until set at enrolment.
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// Milliseconds from the branch certificate `not_before` (unix seconds on the chain).
+    #[serde(default)]
+    pub linked_at: Option<u64>,
+    /// Local UTC-day observation. Not synced.
+    #[serde(default)]
+    pub last_active_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalBusDeviceRenameRequest {
+    pub device_id: String,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

@@ -144,7 +144,7 @@ impl RamfluxClient {
             .map_err(|_| SdkError::InboundRejected("native Control identity malformed".into()))?;
         let control = g::Control::decode(scanned.body)
             .map_err(|_| SdkError::InboundRejected("own metadata Control missing".into()))?;
-        if !matches!(control.operation, 6 | 13 | 14 | 18) {
+        if !matches!(control.operation, 6 | 13 | 14 | 18 | 19) {
             return Err(SdkError::InboundRejected("control is not metadata-only".into()));
         }
         let source_epoch = self

@@ -263,6 +263,8 @@ async fn pairing_registry_fresh_process_helper() -> TestResult {
                 "join" => PairingAction::Join {
                     display_name: "B".into(),
                     invitation_file: std::env::var("RF_PAIRING_REGISTRY_TEST_FILE")?.into(),
+                    device_label: None,
+                    platform: None,
                 },
                 "cancel" => PairingAction::Cancel(operation),
                 _ => PairingAction::Status(operation),

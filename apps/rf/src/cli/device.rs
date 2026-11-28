@@ -15,6 +15,8 @@ pub(crate) struct DeviceCommand {
 #[derive(Subcommand)]
 pub(crate) enum DeviceAction {
     Revoke(DeviceRevoke),
+    /// Set the private label of one own device. Platform is unchanged.
+    Rename(DeviceRename),
     /// Observe a root-signed device set and apply revocation/key-rotation safety changes.
     Refresh(DeviceRefresh),
     List(AccountSelector),
@@ -35,6 +37,16 @@ pub(crate) struct DevicePushPolicy {
     pub(crate) class: String,
     #[arg(long, action = clap::ArgAction::Set, value_parser = clap::value_parser!(bool))]
     pub(crate) muted: bool,
+}
+
+#[derive(Args)]
+pub(crate) struct DeviceRename {
+    #[arg(allow_hyphen_values = true, long)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) device: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) label: String,
 }
 
 #[derive(Args)]

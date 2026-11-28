@@ -461,6 +461,11 @@ impl RamfluxClient {
             self.apply_generated_metadata_control_once(entry, identity, bytes, || {
                 self.receive_own_layer_renewal(&source, renewal)
             })?;
+        } else if let Some(g::control::Payload::OwnDeviceLabel(label)) = control.payload.as_ref() {
+            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+            self.apply_generated_metadata_control_once(entry, identity, bytes, || {
+                self.receive_device_label(&source, label)
+            })?;
         } else if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
             self.apply_generated_friend_control(entry, identity, friend, bytes)?;
         } else if let Some(g::control::Payload::GroupKeyControl(key)) = control.payload.as_ref() {
@@ -909,7 +914,8 @@ impl RamfluxClient {
         let control = g::Control::decode(scanned.body)
             .map_err(|_| invalid("control authority fields missing"))?;
         if (1..=17).contains(&control.operation)
-            && crate::client::generated_control::validate_control_operation(&control).is_err()
+            || control.operation == 19
+                && crate::client::generated_control::validate_control_operation(&control).is_err()
         {
             return Err(SdkError::GeneratedRefused {
                 code: crate::error::GeneratedRefusalCode::Content,
@@ -917,7 +923,7 @@ impl RamfluxClient {
             });
         }
 
-        if matches!(control.operation, 6 | 7 | 13 | 14 | 15 | 17) {
+        if matches!(control.operation, 6 | 7 | 13 | 14 | 15 | 17 | 19) {
             if source.root_commitment() != self.own_account_anchor()? {
                 return Err(SdkError::InboundRejected("own control requires same root".into()));
             }

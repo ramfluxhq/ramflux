@@ -75,6 +75,9 @@ async fn begin_native(wire: &mut Continuity) -> TestResult<(String, u64)> {
             version: 2,
             token: begun.invite_token,
             display_name: "Paired phone".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     drive_sas(wire, &operation, generation).await?;

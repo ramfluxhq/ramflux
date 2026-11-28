@@ -36,6 +36,9 @@ pub async fn enroll(source: &mut Device, target: &mut Device, node: &Node) -> Re
             lease_not_before: now()?,
             lease_expires_at: now()? + 604_800,
             display_name: "Phone".into(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     let Outcome::Begin { value } = begun.outcome else {
@@ -50,6 +53,9 @@ pub async fn enroll(source: &mut Device, target: &mut Device, node: &Node) -> Re
             version: 2,
             token: value.invite_token,
             display_name: target.id.clone(),
+
+            device_label: None,
+            platform: None,
         })
         .await?;
     for _ in 0..24 {

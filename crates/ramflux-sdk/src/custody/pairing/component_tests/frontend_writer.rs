@@ -102,6 +102,9 @@ mod tests {
                 version: 2,
                 token: value.invite_token,
                 display_name: "phone".into(),
+
+                device_label: None,
+                platform: None,
             })
             .await
             .map_err(|error| format!("test: target join: {error}"))?;
@@ -302,6 +305,9 @@ mod tests {
                     lease_not_before: rig.now,
                     lease_expires_at: rig.now + 86_400,
                     display_name: "source".into(),
+
+                    device_label: None,
+                    platform: None,
                 })),
                 &mut service,
                 &rig.source.client,

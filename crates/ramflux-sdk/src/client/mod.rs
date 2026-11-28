@@ -18,6 +18,7 @@ pub(crate) mod contact_verification_cas;
 pub mod conversation;
 pub(crate) mod conversation_projection;
 mod deferred_attachment;
+pub(crate) mod device_label;
 pub(crate) mod device_unlock;
 pub(crate) mod foreign_manifest;
 pub(crate) mod manifest_demand;

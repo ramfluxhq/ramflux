@@ -110,7 +110,7 @@ impl RamfluxClient {
                     .map_err(|_| invalid("invalid own Control"))?;
                 let control =
                     g::Control::decode(body).map_err(|_| invalid("invalid own Control"))?;
-                if !matches!(control.operation, 6 | 13 | 14 | 17 | 18) {
+                if !matches!(control.operation, 6 | 13 | 14 | 17 | 18 | 19) {
                     return Err(invalid("own control operation mismatch"));
                 }
                 return Self::encode_generated_inner(
@@ -224,6 +224,7 @@ impl RamfluxClient {
             self.device_identity_for_root(source.account_anchor.as_str(), &source.device_id)?;
         self.require_native_operation(&local, NativeOperation::Sync)?;
         self.require_native_operation(&source_identity, NativeOperation::Sync)?;
+        self.note_device_seen(&source.device_id)?;
         let principal =
             self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id.clone();
         let context = super::PrivateContext {

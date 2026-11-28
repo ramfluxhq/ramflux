@@ -17,6 +17,15 @@ pub(crate) async fn handle_device(socket: PathBuf, command: DeviceCommand) -> Re
             )
             .await?,
         ),
+        DeviceAction::Rename(rename) => print_json(
+            &bus.request(
+                Some(rename.account),
+                "device",
+                "device.rename",
+                serde_json::json!({"device_id": rename.device, "label": rename.label}),
+            )
+            .await?,
+        ),
         DeviceAction::Revoke(revoke) => {
             let request = LocalBusDeviceRevokeRequest { device_id: revoke.device };
             print_json(

@@ -156,6 +156,7 @@ pub use wake_v2::{
     remaining_whole_seconds, wake_request_digest, wake_signing_bytes,
 };
 
+pub mod device_label;
 mod identity_name;
 mod identity_profile;
 pub use identity_name::{

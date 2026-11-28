@@ -20,6 +20,12 @@ pub struct FullTransferBegin {
     pub data_selection: DataSelectionV3,
     pub transfer_profile: TransferProfile,
     pub display_name: String,
+    /// OS model name of the calling device. Absent until the client sets one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_label: Option<String>,
+    /// Closed platform of the calling device. Present only together with `device_label`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 impl PairingWire for FullTransferBegin {
     const LIMIT: usize = 16_384;
@@ -43,6 +49,7 @@ impl PairingWire for FullTransferBegin {
             "UpdateRequired",
         )?;
         require(self.transfer_profile == TransferProfile::FullAccountDataV1, "UpdateRequired")?;
+        super::device_face(self.device_label.as_ref(), self.platform.as_ref())?;
         budget(self, Self::LIMIT)
     }
 }
@@ -99,6 +106,9 @@ mod tests {
             data_selection: DataSelectionV3::FullAccountDataV1(FullAccountData {}),
             transfer_profile: TransferProfile::FullAccountDataV1,
             display_name: "New primary".into(),
+
+            device_label: None,
+            platform: None,
         };
         let wire = request.to_wire_bytes()?;
         assert_eq!(FullTransferBegin::from_wire_bytes(&wire)?, request);

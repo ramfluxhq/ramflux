@@ -291,6 +291,9 @@ mod tests {
                 data_selection: DataSelectionV3::FullAccountDataV1(FullAccountData {}),
                 transfer_profile: TransferProfile::FullAccountDataV1,
                 display_name: "Source".into(),
+
+                device_label: None,
+                platform: None,
             })
             .await;
         assert!(

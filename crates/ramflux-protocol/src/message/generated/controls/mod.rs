@@ -185,6 +185,9 @@ pub use own_contact_tombstone_types::*;
 #[path = "own_context.rs"]
 mod own_context_types;
 pub use own_context_types::*;
+#[path = "own_device_label.rs"]
+mod own_device_label_types;
+pub use own_device_label_types::*;
 #[path = "own_group_consent.rs"]
 mod own_group_consent_types;
 pub use own_group_consent_types::*;

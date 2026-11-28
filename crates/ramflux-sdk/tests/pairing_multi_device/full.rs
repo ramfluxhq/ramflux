@@ -83,6 +83,9 @@ impl Fixture {
             data_selection: DataSelectionV3::FullAccountDataV1(FullAccountData {}),
             transfer_profile: TransferProfile::FullAccountDataV1,
             display_name: "Source phone".into(),
+
+            device_label: None,
+            platform: None,
         };
         let begun = drive(
             Box::pin(self.a.actor.begin_full(request)),
@@ -102,6 +105,9 @@ impl Fixture {
                 version: 2,
                 token: value.invite_token,
                 display_name: "Existing phone".into(),
+
+                device_label: None,
+                platform: None,
             })),
             &mut self.source,
             &self.a.client,

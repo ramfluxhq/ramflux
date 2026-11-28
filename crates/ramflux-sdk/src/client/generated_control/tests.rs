@@ -152,7 +152,14 @@ fn samples() -> Result<Vec<Control>, SdkError> {
         friend()?,
         agent_sync()?,
         own_layer_renewal()?,
+        own_device_label()?,
     ])
+}
+
+fn own_device_label() -> Result<Control, SdkError> {
+    control_from_payload(control::Payload::OwnDeviceLabel(
+        ramflux_protocol::message::OwnDeviceLabel { signed_record_json: b"{}".to_vec() },
+    ))
 }
 
 /// `CONTROL_OWN_LAYER_RENEWAL` (18, tag 34): the registry grew by one operation in RFCORE-139.
@@ -286,11 +293,11 @@ fn friend() -> Result<Control, SdkError> {
 }
 
 fn round_trip_all_operations() -> TestResult {
-    assert_eq!(CONTROLS.len(), 18);
+    assert_eq!(CONTROLS.len(), 19);
     let operations: BTreeSet<u32> = CONTROLS.iter().map(|binding| binding.operation).collect();
     let tags: BTreeSet<u32> = CONTROLS.iter().map(|binding| binding.tag).collect();
-    assert_eq!(operations, (1..=18).collect());
-    assert_eq!(tags, (16..=32).chain(34..=34).collect());
+    assert_eq!(operations, (1..=19).collect());
+    assert_eq!(tags, (16..=32).chain([34, 35]).collect());
     let mut events = stream();
     let mut seen = BTreeSet::new();
     for (index, control) in samples()?.into_iter().enumerate() {
@@ -328,7 +335,7 @@ fn round_trip_all_operations() -> TestResult {
         );
         RamfluxClient::validate_generated_control(&decoded_control)?;
     }
-    assert_eq!(seen.len(), 18);
+    assert_eq!(seen.len(), 19);
     Ok(())
 }
 

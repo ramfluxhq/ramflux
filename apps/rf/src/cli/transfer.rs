@@ -34,12 +34,22 @@ pub(crate) enum TransferAction {
         destination_epoch: Option<u64>,
         #[arg(long, requires = "destination_device", allow_hyphen_values = true)]
         account_anchor: Option<String>,
+        /// OS model name of this device. Set together with `--platform`.
+        #[arg(long, requires = "platform", allow_hyphen_values = true)]
+        device_label: Option<String>,
+        #[arg(long, requires = "device_label", value_parser = ["ios", "android", "macos", "linux", "windows", "cli"])]
+        platform: Option<String>,
     },
     Join {
         #[arg(long)]
         display_name: String,
         #[arg(long)]
         invitation_file: PathBuf,
+        /// OS model name of this device. Set together with `--platform`.
+        #[arg(long, requires = "platform", allow_hyphen_values = true)]
+        device_label: Option<String>,
+        #[arg(long, requires = "device_label", value_parser = ["ios", "android", "macos", "linux", "windows", "cli"])]
+        platform: Option<String>,
     },
     Confirm {
         #[command(flatten)]

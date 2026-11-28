@@ -27,6 +27,7 @@ pub enum ControlOperation {
     ControlFriend = 16,
     ControlAgentSync = 17,
     ControlOwnLayerRenewal = 18,
+    ControlOwnDeviceLabel = 19,
 }
 impl ControlOperation {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -54,6 +55,7 @@ impl ControlOperation {
             Self::ControlFriend => "CONTROL_FRIEND",
             Self::ControlAgentSync => "CONTROL_AGENT_SYNC",
             Self::ControlOwnLayerRenewal => "CONTROL_OWN_LAYER_RENEWAL",
+            Self::ControlOwnDeviceLabel => "CONTROL_OWN_DEVICE_LABEL",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -78,6 +80,7 @@ impl ControlOperation {
             "CONTROL_FRIEND" => Some(Self::ControlFriend),
             "CONTROL_AGENT_SYNC" => Some(Self::ControlAgentSync),
             "CONTROL_OWN_LAYER_RENEWAL" => Some(Self::ControlOwnLayerRenewal),
+            "CONTROL_OWN_DEVICE_LABEL" => Some(Self::ControlOwnDeviceLabel),
             _ => None,
         }
     }
@@ -108,6 +111,7 @@ impl serde::Serialize for ControlOperation {
             Self::ControlFriend => "CONTROL_FRIEND",
             Self::ControlAgentSync => "CONTROL_AGENT_SYNC",
             Self::ControlOwnLayerRenewal => "CONTROL_OWN_LAYER_RENEWAL",
+            Self::ControlOwnDeviceLabel => "CONTROL_OWN_DEVICE_LABEL",
         };
         serializer.serialize_str(variant)
     }
@@ -138,6 +142,7 @@ impl<'de> serde::Deserialize<'de> for ControlOperation {
             "CONTROL_FRIEND",
             "CONTROL_AGENT_SYNC",
             "CONTROL_OWN_LAYER_RENEWAL",
+            "CONTROL_OWN_DEVICE_LABEL",
         ];
         struct GeneratedVisitor;
         impl serde::de::Visitor<'_> for GeneratedVisitor {
@@ -187,6 +192,7 @@ impl<'de> serde::Deserialize<'de> for ControlOperation {
                     "CONTROL_FRIEND" => Ok(ControlOperation::ControlFriend),
                     "CONTROL_AGENT_SYNC" => Ok(ControlOperation::ControlAgentSync),
                     "CONTROL_OWN_LAYER_RENEWAL" => Ok(ControlOperation::ControlOwnLayerRenewal),
+                    "CONTROL_OWN_DEVICE_LABEL" => Ok(ControlOperation::ControlOwnDeviceLabel),
                     _ => Err(serde::de::Error::unknown_variant(value, FIELDS)),
                 }
             }

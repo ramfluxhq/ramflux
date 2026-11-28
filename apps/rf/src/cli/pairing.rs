@@ -36,6 +36,11 @@ pub(crate) enum PairingAction {
         lease_expires_at: u64,
         #[arg(long)]
         invitation_out: PathBuf,
+        /// OS model name of this device. Set together with `--platform`.
+        #[arg(long, requires = "platform", allow_hyphen_values = true)]
+        device_label: Option<String>,
+        #[arg(long, requires = "device_label", value_parser = ["ios", "android", "macos", "linux", "windows", "cli"])]
+        platform: Option<String>,
     },
     /// Join using a private invitation file; bearer tokens are never accepted in argv.
     Join {
@@ -43,6 +48,11 @@ pub(crate) enum PairingAction {
         display_name: String,
         #[arg(long)]
         invitation_file: PathBuf,
+        /// OS model name of this device. Set together with `--platform`.
+        #[arg(long, requires = "platform", allow_hyphen_values = true)]
+        device_label: Option<String>,
+        #[arg(long, requires = "device_label", value_parser = ["ios", "android", "macos", "linux", "windows", "cli"])]
+        platform: Option<String>,
     },
     Confirm {
         #[command(flatten)]

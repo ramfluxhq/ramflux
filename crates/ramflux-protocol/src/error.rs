@@ -15,6 +15,8 @@ pub enum ProtocolError {
     InvalidIdentityRecord(&'static str),
     #[error("device name contains a control or format character")]
     DeviceNameControlCharacter,
+    #[error("invalid device label")]
+    InvalidDeviceLabel,
     #[error("device name yields a delivery id of {actual} bytes; the limit is {limit}")]
     DeviceDeliveryIdTooLong { actual: usize, limit: usize },
     #[error("group state capacity: {0}")]

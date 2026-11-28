@@ -50,6 +50,8 @@ async fn handle_attended(socket: PathBuf, command: PairingCommand) -> Result<(),
             lease_not_before,
             lease_expires_at,
             invitation_out,
+            device_label,
+            platform,
         } => {
             begin(
                 &mut bus,
@@ -61,6 +63,8 @@ async fn handle_attended(socket: PathBuf, command: PairingCommand) -> Result<(),
                     capabilities,
                     lease_not_before,
                     lease_expires_at,
+                    device_label,
+                    platform,
                 },
                 invitation_out,
                 &display,
@@ -68,8 +72,16 @@ async fn handle_attended(socket: PathBuf, command: PairingCommand) -> Result<(),
             .await
         }
 
-        PairingAction::Join { display_name, invitation_file } => {
-            join(&mut bus, &command.account, display_name, &invitation_file, &display).await
+        PairingAction::Join { display_name, invitation_file, device_label, platform } => {
+            join(
+                &mut bus,
+                &command.account,
+                display_name,
+                &invitation_file,
+                &display,
+                DeviceFace { label: device_label, platform },
+            )
+            .await
         }
         PairingAction::Confirm {
             operation,
@@ -164,14 +176,20 @@ async fn cancel(
     finish(display, result)
 }
 
+pub(super) struct DeviceFace {
+    pub(super) label: Option<String>,
+    pub(super) platform: Option<String>,
+}
+
 async fn join(
     bus: &mut PairingBusClient,
     account: &str,
     display_name: String,
     path: &Path,
     display: &sas::Display<'_>,
+    face: DeviceFace,
 ) -> Result<(), RfError> {
-    join_request(bus, account, ("join", display_name), path, display).await
+    join_request(bus, account, ("join", display_name), path, display, face).await
 }
 async fn join_request(
     bus: &mut PairingBusClient,
@@ -179,6 +197,7 @@ async fn join_request(
     (action, display_name): (&str, String),
     path: &Path,
     display: &sas::Display<'_>,
+    face: DeviceFace,
 ) -> Result<(), RfError> {
     let owned = registry::JoinedFile::open(path)?;
     let token = read_invitation(path)?;
@@ -192,7 +211,14 @@ async fn join_request(
         bus,
         account,
         action,
-        &Join { schema: "ramflux.pairing.Join.v2".into(), version: 2, token, display_name },
+        &Join {
+            schema: "ramflux.pairing.Join.v2".into(),
+            version: 2,
+            token,
+            display_name,
+            device_label: face.label,
+            platform: face.platform,
+        },
     )
     .await?;
     if matches!(&result.outcome, Outcome::Update { value } if value.operation_id!=expected_operation)

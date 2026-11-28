@@ -60,6 +60,9 @@ mod tests {
                 lease_not_before: rig.now,
                 lease_expires_at: rig.now + 86_400,
                 display_name: "Phone".into(),
+
+                device_label: None,
+                platform: None,
             })
             .await?;
         let Outcome::Begin { value } = begun.outcome else {
@@ -82,6 +85,9 @@ mod tests {
                 version: 2,
                 token: value.invite_token,
                 display_name: "Web secondary".into(),
+
+                device_label: None,
+                platform: None,
             })?,
         );
         tokio::pin!(join);

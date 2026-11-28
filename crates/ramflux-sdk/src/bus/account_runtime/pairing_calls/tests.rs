@@ -116,6 +116,9 @@ async fn run() -> TestResult {
                 ),
             transfer_profile:
                 ramflux_protocol::custody::pairing::context_v3::TransferProfile::FullAccountDataV1,
+
+            device_label: None,
+            platform: None,
         })?,
     );
     assert!(!runtime.apply(begin).await?, "test: long source begin stopped its account owner");
