@@ -65,7 +65,6 @@ fn typed_bytes(
         "context": {
             "conversation_id": conversation,
             "participants": [principal, "peer"],
-            "group": null,
             "friend": null
         },
         "authored_at": authored_at,
@@ -300,22 +299,16 @@ fn retired_prefix_bytes(body: &serde_json::Value) -> Result<Vec<u8>, SdkError> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn retired_own_sent_prefix_cannot_claim_original_dm_or_group_rows() -> TestResult {
+async fn retired_own_sent_prefix_cannot_claim_original_dm_rows() -> TestResult {
     use crate::client::own_device_copy::{OwnMessageInput, OwnPayloadKind};
     let own = Box::pin(Own::new("original-recipient")).await?;
     let client = &own.target.client;
-    for (conversation, group, context) in [
-        (
+    {
+        let (conversation, group, context) = (
             "direct-original",
             None,
-            json!({"conversation_id":"direct-original","participants":[own.principal,own.principal],"group":null,"friend":null}),
-        ),
-        (
-            "group-original",
-            Some("own-group"),
-            json!({"conversation_id":"group-original","participants":[],"group":{"group_id":"own-group"},"friend":null}),
-        ),
-    ] {
+            json!({"conversation_id":"direct-original","participants":[own.principal,own.principal],"friend":null}),
+        );
         let bytes = retired_prefix_bytes(&json!({
             "envelope_id":"original-envelope","message_id":"original-message","sender_id":"source_device_sync",
             "original_recipients":["target_device_sync"],"context":context,
@@ -355,7 +348,7 @@ async fn retired_own_sent_prefix_cannot_alias_equal_sender_labels_ids_and_text()
     let bytes = retired_prefix_bytes(&json!({
         "envelope_id":"different-envelope","message_id":"shared-id","sender_id":"same-label",
         "ciphertext_hash":own_sent_ciphertext_hash(&[1,2,3]),
-        "context":{"conversation_id":"direct","participants":[own.principal,"peer"],"group":null,"friend":null},
+        "context":{"conversation_id":"direct","participants":[own.principal,"peer"],"friend":null},
         "body_base64":ramflux_protocol::encode_base64url(b"same text")
     }))?;
     client.receive_own_sent_message(
