@@ -312,6 +312,20 @@ pub enum GatewayClientFrame {
     PrincipalManifestFetch {
         principal_id: String,
     },
+    /// Publish this device's MLS key packages (one-time and last-resort).
+    KeyPackagePublish {
+        request: crate::KeyPackagePublishRequest,
+    },
+    /// What this device has stored; the answer says whether to top up.
+    KeyPackageStatus {},
+    /// One key package per device of `anchor` (the own home; peers use the public endpoint).
+    KeyPackageFetch {
+        anchor: String,
+    },
+    /// One `dm_order` operation (`submit`, `since`, `status`) for a DM or self group.
+    DmOrder {
+        request: crate::DmOrderOp,
+    },
     RelayTokenV3Issue {
         request: Box<GatewayRelayTokenV3IssueRequest>,
     },
@@ -401,6 +415,18 @@ pub enum GatewayServerFrame {
     },
     IdentityRegistrationRejected {
         reason_code: ramflux_protocol::IdentityDirectoryReason,
+    },
+    KeyPackagePublished {
+        response: crate::KeyPackagePublishOutcome,
+    },
+    KeyPackageStatus {
+        response: crate::KeyPackageStatusResponse,
+    },
+    KeyPackages {
+        response: crate::KeyPackageFetchResponse,
+    },
+    DmOrder {
+        reply: crate::DmOrderReply,
     },
     PrekeyPublished {
         response: PrekeyResponse,

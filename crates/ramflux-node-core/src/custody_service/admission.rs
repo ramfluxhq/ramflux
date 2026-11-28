@@ -343,15 +343,21 @@ impl CustodyService {
             }
             CustodyProofAction::Register { prekey_bundle } => {
                 super::agent_session::guard_headless(&fence, publication)?;
-                validate_bundle(
-                    authority,
-                    &proof.body.device_ref,
-                    &prekey_bundle,
-                    "register",
-                    now,
-                )?;
+                authority.authorize(&proof.body.device_ref, "register", now).map_err(invalid)?;
                 let delivery = target(&proof.body.device_ref)?;
-                store.record_custody_prekey(&delivery, &prekey_bundle).map_err(persistence)?;
+                // The evidence is `custody_registered_v1`. A bundle is still recorded when one is
+                // sent: the peer lookup answers with it until the prekey frames are deleted (D15).
+                if !prekey_bundle.is_null() {
+                    validate_bundle(
+                        authority,
+                        &proof.body.device_ref,
+                        &prekey_bundle,
+                        "register",
+                        now,
+                    )?;
+                    store.record_custody_prekey(&delivery, &prekey_bundle).map_err(persistence)?;
+                }
+                store.record_custody_registered(&delivery, now).map_err(persistence)?;
                 Ok(CustodyServerFrame::Registered {
                     device_ref: proof.body.device_ref,
                     target_delivery_id: delivery,
@@ -390,11 +396,10 @@ impl CustodyService {
         (now, tick): (u64, std::time::Instant),
     ) -> Result<CustodyServerFrame, super::ProofFailure> {
         let delivery = target(&proof.body.device_ref)?;
-        let bundle = store
-            .custody_prekey(&delivery)
-            .map_err(persistence)?
-            .ok_or(CustodyRefusal::AuthorityUnavailable)?;
-        validate_bundle(authority, &proof.body.device_ref, &bundle, "message", now)?;
+        if !store.custody_registered(&delivery).map_err(persistence)? {
+            return Err(CustodyRefusal::AuthorityUnavailable.into());
+        }
+        authority.authorize(&proof.body.device_ref, "message", now).map_err(invalid)?;
         let session = CustodySession {
             session_id: String::new(),
             target_delivery_id: delivery,

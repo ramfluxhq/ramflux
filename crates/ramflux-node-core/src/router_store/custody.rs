@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Permanent node-key history and native prekeys, indexed individually in redb.
+//! Permanent node-key history, native prekeys and registration evidence, indexed individually in
+//! redb.
 use super::{
     BTreeMap, NodeCoreError, Read, ReadableDatabase, ReadableTable, RouterRedbStore,
     TableDefinition,
@@ -12,6 +13,8 @@ const HISTORY: TableDefinition<&str, &[u8]> = TableDefinition::new("custody_node
 const HEADS: TableDefinition<&str, &str> = TableDefinition::new("custody_node_heads_v1");
 const BINDINGS: TableDefinition<&str, &[u8]> = TableDefinition::new("custody_node_key_bindings_v1");
 const PREKEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("custody_prekeys_v3");
+/// Registration evidence of a device (`custody_registered_v1`): the delivery id and the time.
+const REGISTERED: TableDefinition<&str, &[u8]> = TableDefinition::new("custody_registered_v1");
 fn error(e: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(e.to_string())
 }
@@ -126,5 +129,24 @@ impl RouterRedbStore {
             table.insert(target, bytes.as_slice()).map_err(error)?;
         }
         tx.commit().map_err(error)
+    }
+    /// Record that `delivery_id` registered: the evidence that replaces the prekey row.
+    pub(crate) fn record_custody_registered(
+        &self,
+        delivery_id: &str,
+        now: u64,
+    ) -> Result<(), NodeCoreError> {
+        let tx = self.begin_write().map_err(error)?;
+        {
+            let mut table = tx.open_table(REGISTERED).map_err(error)?;
+            table.insert(delivery_id, now.to_be_bytes().as_slice()).map_err(error)?;
+        }
+        tx.commit().map_err(error)
+    }
+    /// Whether `delivery_id` registered.
+    pub(crate) fn custody_registered(&self, delivery_id: &str) -> Result<bool, NodeCoreError> {
+        let tx = self.db.begin_read().map_err(error)?;
+        let Ok(table) = tx.open_table(REGISTERED) else { return Ok(false) };
+        Ok(table.get(delivery_id).map_err(error)?.is_some())
     }
 }
