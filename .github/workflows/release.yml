@@ -55,7 +55,7 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
-          RAMFLUX_PRODUCTION_BUILD=1 cargo build --locked --release --target "${{ matrix.target }}" --workspace
+          RAMFLUX_PRODUCTION_BUILD=1 cargo build --locked --profile ffi-release --target "${{ matrix.target }}" --workspace
 
       - name: Package
         shell: bash
@@ -71,7 +71,7 @@ jobs:
             ramflux-gateway ramflux-router ramflux-notify ramflux-federation \
             ramflux-relay ramflux-signaling ramflux-retention rf
           do
-            cp "target/${{ matrix.target }}/release/${bin}" "$dist/"
+            cp "target/${{ matrix.target }}/ffi-release/${bin}" "$dist/"
           done
           tar -C dist -czf "${dist}.tar.gz" "$(basename "$dist")"
           shasum -a 256 "${dist}.tar.gz" > "${dist}.tar.gz.sha256"

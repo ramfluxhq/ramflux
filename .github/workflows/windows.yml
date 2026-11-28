@@ -130,7 +130,7 @@ jobs:
 
       - name: Build rf.exe
         shell: pwsh
-        run: cargo build --locked --release -p ramflux-rf --bin rf
+        run: cargo build --locked --profile ffi-release -p ramflux-rf --bin rf
 
       # No proxy variable is set anywhere in this job: the client has no HTTP proxy support.
       - name: Windows carrier, vault and store tests
@@ -156,7 +156,7 @@ jobs:
 
       - name: Daemon and second process over the named pipe
         shell: pwsh
-        run: ./scripts/ci/windows-daemon-smoke.ps1 -Rf target\release\rf.exe
+        run: ./scripts/ci/windows-daemon-smoke.ps1 -Rf target\ffi-release\rf.exe
 
       # Design M2 acceptance: two accounts, one DM, delivery, then the receiver reopens.
       # The release rf.exe above stays free of itest features. This step builds its own
@@ -221,7 +221,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target\release\rf.exe dist\
+          Copy-Item target\ffi-release\rf.exe dist\
           Copy-Item $env:RF_LIBCRYPTO_DLL dist\
           Copy-Item LICENSE* dist\ -ErrorAction SilentlyContinue
           Compress-Archive -Path dist\* -DestinationPath rf-windows-x86_64.zip -Force
