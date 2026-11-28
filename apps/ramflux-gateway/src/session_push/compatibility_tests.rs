@@ -35,7 +35,7 @@ async fn legacy_established_raw_bytes() -> anyhow::Result<()> {
     let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut sink = RawSink(frames.clone());
     established(&mut sink, session(), None, false).await?;
-    assert_eq!(frames.lock().map_err(|_|Retired)?[0],br#"{"frame_type":"session_established","session":{"session_id":"session","gateway_id":"gateway","accepted_cursor":null,"resume_token":"resume","resume_window_seconds":300}}"#);
+    assert_eq!(frames.lock().map_err(|_|Retired)?[0],br#"{"frame_type":"session_established","session":{"accepted_cursor":null,"gateway_id":"gateway","push_mode":"direct","resume_token":"resume","resume_window_seconds":300,"session_id":"session"}}"#);
     Ok(())
 }
 struct Broken;
