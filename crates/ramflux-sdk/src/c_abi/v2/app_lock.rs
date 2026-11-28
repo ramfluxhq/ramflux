@@ -21,7 +21,9 @@ impl Observer for Shared {
             && let Ok(mut events) = self.events.lock()
             && events.account_id.as_deref().is_none_or(|id| id == account)
         {
-            *subscription = None;
+            if subscription.take().is_some() {
+                self.close_bus_subscription();
+            }
             events.active = false;
             events.queue.clear();
             events.bytes = 0;

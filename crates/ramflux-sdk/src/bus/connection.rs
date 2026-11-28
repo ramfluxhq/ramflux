@@ -474,7 +474,25 @@ fn subscription_method(method: &str) -> bool {
         || (cfg!(feature = "c-abi") && method == "subscription.close")
 }
 
+/// A refused open must not leave the attended mark behind: the mark is set before the
+/// account is validated, and a stale mark makes other accounts' app-lock calls unauthorized.
 pub(super) async fn configure_subscription(
+    supervisor: &Supervisor,
+    connection: &mut LocalBusConnectionState,
+    request: &LocalBusFrame,
+) -> Result<(), SdkError> {
+    let previous = connection.attended_account_id.clone();
+    let result = open_subscription(supervisor, connection, request).await;
+    if result.is_err() && request.method != "subscription.close" {
+        if previous.is_none() {
+            supervisor.forget_attended(connection.connection_id);
+        }
+        connection.attended_account_id = previous;
+    }
+    result
+}
+
+async fn open_subscription(
     supervisor: &Supervisor,
     connection: &mut LocalBusConnectionState,
     request: &LocalBusFrame,
