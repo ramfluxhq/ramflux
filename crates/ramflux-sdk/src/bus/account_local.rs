@@ -6,7 +6,7 @@
 use crate::prelude::*;
 use std::path::Path;
 
-type Listed = (serde_json::Value, bool);
+type Listed = serde_json::Value;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -14,21 +14,15 @@ struct RemoveLocal {
     confirmation: String,
 }
 
-/// Index rows that are not custody accounts, then every custody account.
+/// Every custody account. Index rows of other (pre-native) accounts are not listed.
 ///
 /// # Errors
-/// Returns index, custody, or filesystem errors. A removed index row is omitted.
+/// Returns index, custody, or filesystem errors.
 pub(super) fn known_rows(
     index: &AccountIndex,
     root: &Path,
 ) -> Result<(Option<String>, Vec<Listed>), SdkError> {
     let mut known = Vec::new();
-    for id in index.known_account_ids()? {
-        if removed(index, &id) || crate::custody::account_exists(root, &id)? {
-            continue;
-        }
-        known.push(manifest_row(root, &id));
-    }
     append_custody(root, &mut known)?;
     Ok((index.active_account()?, known))
 }
@@ -36,8 +30,8 @@ pub(super) fn known_rows(
 /// Adds open sessions that have no on-disk row yet.
 pub(super) fn include_open(known: &mut Vec<Listed>, open: &[String]) {
     for id in open {
-        if !known.iter().any(|(row, _)| row_id(row) == id) {
-            known.push((serde_json::json!({"id": id}), false));
+        if !known.iter().any(|row| row_id(row) == id) {
+            known.push(serde_json::json!({"id": id}));
         }
     }
 }
@@ -86,7 +80,7 @@ pub(super) fn daemon_list(
     };
     include_open(&mut known, &open);
     let mut rows = Vec::with_capacity(known.len());
-    for (mut row, _) in known {
+    for mut row in known {
         let id = row_id(&row).to_owned();
         attach_picker_fields(&mut row, !open.iter().any(|open_id| open_id == &id));
         rows.push(row);
@@ -164,10 +158,6 @@ pub(super) fn missing() -> SdkError {
     refused("AccountNotFound", "account_not_found")
 }
 
-fn removed(index: &AccountIndex, id: &str) -> bool {
-    index.account(id).is_ok_and(|record| record.account_state == "removed")
-}
-
 fn custody_rows(root: &Path) -> Result<Vec<Listed>, SdkError> {
     let mut known = Vec::new();
     append_custody(root, &mut known)?;
@@ -186,34 +176,9 @@ fn append_custody(root: &Path, known: &mut Vec<Listed>) -> Result<(), SdkError> 
         if let Some(map) = account.as_object_mut() {
             map.insert("id".to_owned(), serde_json::Value::String(id));
         }
-        known.push((account, false));
+        known.push(account);
     }
     Ok(())
-}
-
-fn manifest_row(root: &Path, id: &str) -> (serde_json::Value, bool) {
-    let path = super::daemon::local_bus_account_manifest_path(root, id);
-    let (manifest, unreadable) = if super::daemon::account_manifest_available(&path) {
-        if let Ok(manifest) = super::daemon::read_local_bus_account_manifest(&path) {
-            (Some(manifest), false)
-        } else {
-            tracing::warn!(
-                account_id = %id,
-                reason_code = "manifest_unreadable",
-                "account list omitted unreadable manifest metadata"
-            );
-            (None, true)
-        }
-    } else {
-        (None, false)
-    };
-    let row = serde_json::json!({
-        "id": id,
-        "label": manifest.as_ref().and_then(|item| item.label.clone()),
-        "kind": manifest.as_ref().and_then(|item| item.kind.clone()),
-        "principal_id": manifest.as_ref().map(|item| item.principal_id.clone()),
-    });
-    (row, unreadable)
 }
 
 fn attach_picker_fields(row: &mut serde_json::Value, locked: bool) {

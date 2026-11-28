@@ -69,7 +69,6 @@ pub(crate) async fn dispatch_node_bus_request(
             }
             match request.method.as_str() {
                 "node.remove" => {
-                    refuse_bound_node_removal(&state.config.data_root, &body.node_id)?;
                     nodes.profiles.remove(&body.node_id);
                     if nodes.default_node_id.as_deref() == Some(&body.node_id) {
                         nodes.default_node_id = None;
@@ -95,23 +94,6 @@ pub(crate) async fn dispatch_node_bus_request(
         }
         _ => Err(node_error("unsupported node method")),
     }
-}
-
-pub(crate) fn refuse_bound_node_removal(root: &Path, id: &str) -> Result<(), SdkError> {
-    let dir = crate::bus::daemon::local_bus_accounts_dir(root);
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.extension().and_then(std::ffi::OsStr::to_str) == Some("json") {
-            let manifest = read_local_bus_account_manifest(&path)?;
-            if manifest.node_id.as_deref() == Some(id) {
-                return Err(node_error("cannot remove node while an account is bound"));
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn add_node(

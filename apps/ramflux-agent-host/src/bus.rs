@@ -120,7 +120,6 @@ impl AgentBus for RfdBus {
                 | "account_command_backpressure" => Error::Bus,
                 "AccountNotOpen" | "AccountLocked" | "AccountNotFound" => Error::IdentityLost,
                 "AccountRestorePending" => Error::AccountRestorePending,
-                "AccountRestoreFailed" => Error::AccountRestoreFailed,
                 "Unauthorized" if matches!(method, "account.status" | "device.list") => {
                     Error::IdentityLost
                 }

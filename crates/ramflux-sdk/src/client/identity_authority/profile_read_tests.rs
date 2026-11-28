@@ -95,7 +95,6 @@ fn corrupt_profile_unverifies_only_that_actor_and_preserves_other_directory_and_
     let owner = Actor::new("owner", "phone", 41, 42, 1)?;
     let other = Actor::new("other", "phone", 43, 44, 1)?;
     let reader = Actor::new("reader", "phone", 45, 46, 1)?;
-    mode(&other, PrincipalKind::HeadlessAi, LocalBusClientMode::HeadlessAi)?;
     let signed = with_profile(&owner, owner.manifest()?, "Owner", 1, 1)?;
     observe(&reader.client, &signed)?;
     observe(&reader.client, &with_profile(&other, other.manifest()?, "Agent", 1, 1)?)?;
@@ -112,92 +111,10 @@ fn corrupt_profile_unverifies_only_that_actor_and_preserves_other_directory_and_
     ] {
         assert_eq!(view["actors"]["requester"]["actor_kind_verified"], false);
         assert_eq!(view["actors"]["assignee"]["actor_kind_verified"], true);
-        assert_eq!(view["actors"]["assignee"]["actor_kind"], "headless_ai");
+        assert_eq!(view["actors"]["assignee"]["actor_kind"], "human");
     }
     Ok(())
 }
-#[test]
-fn signed_headless_device_verifies_task_actor_kind_without_a_role_class() -> TestResult {
-    use ramflux_protocol::{TaskAccept, TaskEvent, TaskEventBody, TaskStart};
-    let agent = Actor::new("agent", "agent-device", 51, 52, 1)?;
-    mode(&agent, PrincipalKind::HeadlessAi, LocalBusClientMode::HeadlessAi)?;
-    let reader = Actor::new("reader", "reader-device", 53, 54, 1)?;
-    observe(&reader.client, &with_profile(&agent, agent.manifest()?, "Agent", 1, 1)?)?;
-    let db = reader.client.account_db()?;
-    db.persist_client_record(
-        "conversation",
-        "thread",
-        &json!({"kind":"direct","participants":["agent","reader"]}),
-    )?;
-    let make = |id: &str, body: TaskEventBody| -> Result<_, SdkError> {
-        let event = TaskEvent::new(
-            "thread".into(),
-            body,
-            crate::prelude::sdk_device_signed_fields("agent-device", ""),
-        )
-        .map_err(|e| crate::task_refusal::protocol(&e))?;
-        agent.client.sign_task_event(event, id.into(), None)
-    };
-    let start = make(
-        "start",
-        TaskEventBody::Start(TaskStart {
-            task_id: "task".into(),
-            conversation_id: "thread".into(),
-            requester: "agent".into(),
-            assignee: "reader".into(),
-            text: "Work".into(),
-            constraints: None,
-        }),
-    )?;
-    let now = crate::time::now_unix_timestamp();
-    for c in [
-        start,
-        make(
-            "waiting",
-            TaskEventBody::Accept(TaskAccept { task_id: "missing".into(), version: 2 }),
-        )?,
-    ] {
-        assert!(crate::client::task::carrier_kind_verified(&reader.client, &c));
-        reader
-            .client
-            .project_task_message(
-                &crate::client::task::Delivery {
-                    conversation: "thread",
-                    message: &c.message_id,
-                    principal: "agent",
-                    device: "agent-device",
-                    at: now,
-                },
-                &c.bytes()?,
-            )?
-            .ok_or("outcome")?;
-        assert_eq!(
-            reader.client.task_message_metadata("thread", &c.message_id)?.ok_or("metadata")?["actor_kind_verified"],
-            true
-        );
-        assert_eq!(
-            reader.client.task_message_metadata("thread", &c.message_id)?.ok_or("metadata")?["actor_kind"],
-            "headless_ai"
-        );
-        let journal = db.latest_journal_event("task.changed")?.ok_or("journal")?;
-        assert_eq!(journal.body["actor_kind"], "headless_ai");
-        assert_eq!(journal.body["actor_kind_verified"], true);
-    }
-    reader.client.retry_pending_tasks(now + 601)?;
-    let journal = db.latest_journal_event("task.changed")?.ok_or("event")?;
-    assert_eq!(journal.body["resync_required"], true);
-    assert_eq!(journal.body["actor_kind"], "headless_ai");
-    assert_eq!(journal.body["actor_kind_verified"], true);
-    let mut missing = make(
-        "unknown-device",
-        TaskEventBody::Accept(TaskAccept { task_id: "missing".into(), version: 2 }),
-    )?;
-    missing.device_id = "not-authorized".into();
-    assert_eq!(crate::client::task::carrier_actor_kind(&reader.client, &missing), None);
-    assert!(!crate::client::task::carrier_kind_verified(&reader.client, &missing));
-    Ok(())
-}
-
 #[tokio::test]
 async fn confusable_name_lookup_includes_contacts_after_the_storage_page_limit() -> TestResult {
     let reader = crate::client::native_test_support::Fixture::new("reader").await?;

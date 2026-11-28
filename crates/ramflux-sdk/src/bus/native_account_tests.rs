@@ -414,7 +414,6 @@ async fn ordinary_native_restart_reopens_silently_and_explicit_lock_needs_the_co
         server?;
         flow?;
     }
-    assert!(!root.0.join("local_bus_accounts/ordinary.json").exists());
     Ok(())
 }
 

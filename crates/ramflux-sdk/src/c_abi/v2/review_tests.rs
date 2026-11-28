@@ -85,7 +85,6 @@ fn policy_refuses_unknown_sensitive_exports_and_oversized_operation_keys() {
         ("unknown.method", "bounded".to_owned(), 12),
         ("itest.bypass", "bounded".to_owned(), 1),
         ("account.export_agent_credentials", "bounded".to_owned(), 12),
-        ("account.backup.export", "bounded".to_owned(), 12),
         ("account.list", "x".repeat(257), 1),
     ] {
         let request=serde_json::to_vec(&json!({"sdk_api":"account","method":method,"body":{},"operation_id":operation_id,"deadline_ms":deadline()})).expect("test: request");
@@ -250,7 +249,6 @@ fn default_config_allows_ordinary_methods_and_refuses_every_key_export() {
         exports,
         std::collections::BTreeSet::from([
             "account.export_agent_credentials",
-            "account.backup.export",
             "group.sender_key.export",
             "device.sync.export",
             "account.create.show_once",

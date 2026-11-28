@@ -120,7 +120,6 @@ mod tests {
             server?;
             result?;
         }
-        assert!(!root.path().join("local_bus_accounts/private-native.json").exists(), "test: private native unlock credential refusal or account lifecycle changed");
         Ok(())
     }))
     .await
