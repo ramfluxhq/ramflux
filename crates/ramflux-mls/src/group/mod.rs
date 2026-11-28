@@ -9,6 +9,7 @@
 //! one transaction. The [`Staged`] also holds the account's operation lock, so no group stays in
 //! memory between calls and operations never interleave.
 
+pub mod call_keying;
 pub mod config;
 pub mod context;
 pub mod conversation;
