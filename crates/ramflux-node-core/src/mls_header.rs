@@ -7,11 +7,16 @@
 //! content_type}` of an `MLSMessage` (the `dm_order` table and the group host). It reads at most
 //! [`MAX_OUTER_HEADER_BYTES`] bytes, allocates only the group id, never indexes with an untrusted
 //! bound, and refuses every wire format except the pure-ciphertext `PrivateMessage` (ramflux
-//! refuses public messages).
+//! refuses public messages). [`parse_private_message`] also returns the cleartext
+//! `authenticated_data` that follows the content type (bounded to [`MAX_AUTHENTICATED_DATA_BYTES`]);
+//! variable-length integers must be minimally encoded (RFC 9420 section 2.1.2).
 
 /// Most bytes the parser reads: version, wire format, group id (length prefix and bytes), epoch,
 /// content type.
 pub(crate) const MAX_OUTER_HEADER_BYTES: usize = 64;
+
+/// Largest `authenticated_data` the parser returns.
+pub(crate) const MAX_AUTHENTICATED_DATA_BYTES: usize = 16 * 1024;
 
 const MLS10: u16 = 1;
 const WIRE_FORMAT_PRIVATE_MESSAGE: u16 = 2;
@@ -55,6 +60,12 @@ pub(crate) enum MlsHeaderError {
     /// Unknown content type.
     #[error("unknown mls content type")]
     ContentType,
+    /// A variable-length integer is not in its shortest form.
+    #[error("non-minimal mls varint")]
+    NonMinimal,
+    /// The `authenticated_data` is longer than the bound.
+    #[error("authenticated data too large")]
+    AuthenticatedDataTooLarge,
 }
 
 struct Cursor<'a> {
@@ -85,28 +96,25 @@ impl<'a> Cursor<'a> {
         Ok(u64::from_be_bytes(bytes))
     }
 
-    /// An RFC 9420 variable-length integer; the four-byte form cannot fit the header bound.
+    /// An RFC 9420 variable-length integer in its shortest form (one, two or four bytes).
     fn varint(&mut self) -> Result<usize, MlsHeaderError> {
         let first = self.u8()?;
-        match first >> 6 {
-            0 => Ok(usize::from(first)),
-            1 => {
-                let second = self.u8()?;
-                Ok((usize::from(first & 0x3f) << 8) | usize::from(second))
-            }
-            _ => Err(MlsHeaderError::Truncated),
+        let width = match first >> 6 {
+            0 => return Ok(usize::from(first)),
+            1 => 2_usize,
+            2 => 4,
+            _ => return Err(MlsHeaderError::Truncated),
+        };
+        let mut value = usize::from(first & 0x3f);
+        for _ in 1..width {
+            value = (value << 8) | usize::from(self.u8()?);
         }
+        let minimal = if width == 2 { value >= 64 } else { value >= 16_384 };
+        if minimal { Ok(value) } else { Err(MlsHeaderError::NonMinimal) }
     }
 }
 
-/// Parse the outer header of an `MLSMessage` carrying a `PrivateMessage`.
-///
-/// Only the first [`MAX_OUTER_HEADER_BYTES`] bytes of `message` are looked at.
-///
-/// # Errors
-/// [`MlsHeaderError`] when the header is truncated, does not fit the bound, or is not an MLS 1.0
-/// `PrivateMessage` with a known content type.
-pub(crate) fn parse_outer_header(message: &[u8]) -> Result<MlsOuterHeader, MlsHeaderError> {
+fn parse_header(message: &[u8]) -> Result<(MlsOuterHeader, usize), MlsHeaderError> {
     let bounded = message.get(..MAX_OUTER_HEADER_BYTES).unwrap_or(message);
     let mut cursor = Cursor { rest: bounded };
     if cursor.u16()? != MLS10 {
@@ -125,5 +133,89 @@ pub(crate) fn parse_outer_header(message: &[u8]) -> Result<MlsOuterHeader, MlsHe
         3 => MlsContentType::Commit,
         _ => return Err(MlsHeaderError::ContentType),
     };
-    Ok(MlsOuterHeader { wire_format, group_id, epoch, content_type })
+    let consumed = bounded.len().saturating_sub(cursor.rest.len());
+    Ok((MlsOuterHeader { wire_format, group_id, epoch, content_type }, consumed))
+}
+
+/// Parse the outer header of an `MLSMessage` carrying a `PrivateMessage`.
+///
+/// Only the first [`MAX_OUTER_HEADER_BYTES`] bytes of `message` are looked at.
+///
+/// # Errors
+/// [`MlsHeaderError`] when the header is truncated, does not fit the bound, or is not an MLS 1.0
+/// `PrivateMessage` with a known content type.
+pub(crate) fn parse_outer_header(message: &[u8]) -> Result<MlsOuterHeader, MlsHeaderError> {
+    parse_header(message).map(|(header, _)| header)
+}
+
+/// Parse the outer header and the cleartext `authenticated_data` that follows the content type.
+///
+/// # Errors
+/// [`MlsHeaderError`] as [`parse_outer_header`]; also when the field is missing, runs past the
+/// message, is longer than [`MAX_AUTHENTICATED_DATA_BYTES`], or its length is not minimally encoded.
+pub(crate) fn parse_private_message(
+    message: &[u8],
+) -> Result<(MlsOuterHeader, &[u8]), MlsHeaderError> {
+    let (header, consumed) = parse_header(message)?;
+    let mut cursor = Cursor { rest: message.get(consumed..).ok_or(MlsHeaderError::Truncated)? };
+    let len = cursor.varint()?;
+    if len > MAX_AUTHENTICATED_DATA_BYTES {
+        return Err(MlsHeaderError::AuthenticatedDataTooLarge);
+    }
+    Ok((header, cursor.take(len)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(aad_prefix: &[u8], aad: &[u8]) -> Vec<u8> {
+        let mut out = vec![0, 1, 0, 2, 4, 9, 9, 9, 9];
+        out.extend_from_slice(&7_u64.to_be_bytes());
+        out.push(3);
+        out.extend_from_slice(aad_prefix);
+        out.extend_from_slice(aad);
+        out.extend_from_slice(&[0, 0]);
+        out
+    }
+
+    #[test]
+    fn returns_the_authenticated_data_after_the_header() {
+        let short = message(&[3], b"abc");
+        let (header, aad) = parse_private_message(&short).expect("test: message parses");
+        assert_eq!(header.epoch, 7, "epoch");
+        assert_eq!(header.content_type, MlsContentType::Commit, "content type");
+        assert_eq!(aad, b"abc", "authenticated data");
+        let long = vec![5_u8; 300];
+        let wide = message(&[0x41, 0x2c], &long);
+        let (_, aad) = parse_private_message(&wide).expect("test: two-byte length parses");
+        assert_eq!(aad, long.as_slice(), "two-byte length form");
+    }
+
+    #[test]
+    fn refuses_non_minimal_missing_and_oversized_data() {
+        assert_eq!(
+            parse_private_message(&message(&[0x40, 0x03], b"abc")),
+            Err(MlsHeaderError::NonMinimal),
+            "a two-byte form of 3 is not minimal"
+        );
+        assert_eq!(
+            parse_private_message(&message(&[0x80, 0, 0x40, 0], b"")),
+            Err(MlsHeaderError::Truncated),
+            "a length past the message"
+        );
+        let mut huge = vec![0x80, 0, 0x40, 0x01];
+        huge.extend_from_slice(&vec![0_u8; 16_385]);
+        assert_eq!(
+            parse_private_message(&message(&huge[..4], &huge[4..])),
+            Err(MlsHeaderError::AuthenticatedDataTooLarge),
+            "over 16 KiB"
+        );
+        assert!(parse_private_message(&message(&[], b"")[..18]).is_err(), "no field at all");
+        assert_eq!(
+            parse_outer_header(&[0, 1, 0, 2, 0x40, 0x04, 1, 2, 3, 4]),
+            Err(MlsHeaderError::NonMinimal),
+            "the group id length is checked too"
+        );
+    }
 }

@@ -10,7 +10,9 @@
 use ramflux_crypto::large_group::{EnvHeader, EnvKind, MlsContent};
 
 use super::refusal::{LgRefusal, LgResult};
-use crate::mls_header::{MlsContentType, MlsOuterHeader, parse_outer_header};
+use crate::mls_header::{
+    MlsContentType, MlsOuterHeader, parse_outer_header, parse_private_message,
+};
 
 /// One day in milliseconds.
 pub const DAY_MS: u64 = 86_400_000;
@@ -84,55 +86,15 @@ pub fn epoch_rule(kind: EnvKind, epoch: u64, head_epoch: u64) -> LgResult<()> {
     if ok { Ok(()) } else { Err(LgRefusal::Stale { epoch: head_epoch }) }
 }
 
-/// Reads one RFC 9420 variable-length integer at `*pos`; the 1, 2 and 4 byte forms.
-fn read_varint(data: &[u8], pos: &mut usize) -> Option<usize> {
-    let first = *data.get(*pos)?;
-    let width = match first >> 6 {
-        0 => 1,
-        1 => 2,
-        2 => 4,
-        _ => return None,
-    };
-    let bytes = data.get(*pos..pos.checked_add(width)?)?;
-    let mut value = usize::from(first & 0x3f);
-    for byte in bytes.iter().skip(1) {
-        value = (value << 8) | usize::from(*byte);
-    }
-    *pos += width;
-    Some(value)
-}
-
-/// The cleartext `authenticated_data` of a `PrivateMessage` that [`check_outer_header`] parsed
-/// (it follows the content type).
-///
-/// # Errors
-/// [`LgRefusal::HeaderMismatch`] when the field is missing or runs past the message.
-pub fn authenticated_data<'a>(mls: &'a [u8], outer: &MlsOuterHeader) -> LgResult<&'a [u8]> {
-    let mismatch = || LgRefusal::HeaderMismatch;
-    // version (2) + wire format (2), then the group id length prefix as the parser read it.
-    let mut pos = 4_usize;
-    let prefix = read_varint(mls, &mut pos).ok_or_else(mismatch)?;
-    if prefix != outer.group_id.len() {
-        return Err(mismatch());
-    }
-    // group id bytes, epoch (8), content type (1)
-    pos = pos.checked_add(prefix).and_then(|at| at.checked_add(9)).ok_or_else(mismatch)?;
-    let len = read_varint(mls, &mut pos).ok_or_else(mismatch)?;
-    let end = pos.checked_add(len).ok_or_else(mismatch)?;
-    mls.get(pos..end).ok_or_else(mismatch)
-}
-
-/// Spec 2.3 check 5a: the commit's `authenticated_data` is `rf-lg-aad-v1 ‖ canonical header
-/// without token and blob_ref`, which must equal the envelope header's own AAD bytes.
+/// Spec 2.3 check 5a: the commit's `authenticated_data` is `rf-lg-aad-v1` followed by the
+/// canonical header without the authorisation, `blob_ref` and `welcome_ref`; it must equal the
+/// envelope header's own AAD bytes. The field comes from the one shared MLS header parser.
 ///
 /// # Errors
 /// [`LgRefusal::HeaderMismatch`].
-pub fn check_commit_aad(header: &EnvHeader, mls: &[u8], outer: &MlsOuterHeader) -> LgResult<()> {
-    if authenticated_data(mls, outer)? == header.aad_bytes().as_slice() {
-        Ok(())
-    } else {
-        Err(LgRefusal::HeaderMismatch)
-    }
+pub fn check_commit_aad(header: &EnvHeader, mls: &[u8]) -> LgResult<()> {
+    let (_, aad) = parse_private_message(mls).map_err(|_| LgRefusal::HeaderMismatch)?;
+    if aad == header.aad_bytes().as_slice() { Ok(()) } else { Err(LgRefusal::HeaderMismatch) }
 }
 
 /// Drop commit times older than 24 h.
@@ -218,25 +180,16 @@ pub fn join_tie(found: &[Option<u8>], approval_on: bool, by_admin: bool) -> LgRe
     Ok((member, outsider))
 }
 
-/// The leaf signature key of a serialized `KeyPackage`: `protocol_version (2) ‖ cipher_suite (2) ‖
-/// init_key<V> ‖ LeafNode{encryption_key<V> ‖ signature_key<V> …}`. The host needs the pseudonym
-/// `P` to tie a join request to an `added_P` without reading the roster.
+/// The leaf signature key of the `MLSMessage`-wrapped `KeyPackage` that `ramflux-mls` emits: the
+/// pseudonym `P` (by definition the leaf signature key, so reading it adds no field and no link).
+/// The host needs it to tie a join request to an `added_P` without reading the roster. The bytes
+/// are parsed with the openmls types in `ramflux-mls`; only the structure is checked here.
 ///
 /// # Errors
-/// [`LgRefusal::BadRequest`] when the bytes are not an Ed25519 `KeyPackage` prefix.
+/// [`LgRefusal::BadRequest`] when the bytes are not an MLS 1.0 `KeyPackage` message of the ramflux
+/// suite.
 pub fn key_package_signature_key(key_package: &[u8]) -> LgResult<[u8; 32]> {
-    let bad = || LgRefusal::BadRequest;
-    let mut pos = 4_usize;
-    for _ in 0..2 {
-        let len = read_varint(key_package, &mut pos).ok_or_else(bad)?;
-        pos = pos.checked_add(len).ok_or_else(bad)?;
-    }
-    let len = read_varint(key_package, &mut pos).ok_or_else(bad)?;
-    if len != 32 {
-        return Err(bad());
-    }
-    let end = pos.checked_add(32).ok_or_else(bad)?;
-    key_package.get(pos..end).and_then(|bytes| bytes.try_into().ok()).ok_or_else(bad)
+    ramflux_mls::key_package_signature_key(key_package).map_err(|_| LgRefusal::BadRequest)
 }
 
 /// A log entry is past retention.
@@ -249,6 +202,13 @@ pub const fn entry_expired(appended_ms: u64, now: u64) -> bool {
 #[must_use]
 pub const fn join_expired(created_ms: u64, now: u64) -> bool {
     created_ms.saturating_add(JOIN_TTL_MS) <= now
+}
+
+/// A pending join row satisfies the join tie only while it is younger than 24 h (expiry otherwise
+/// runs only when a queue is full, so a stale row must not count).
+#[must_use]
+pub const fn join_row_live(created_ms: u64, now: u64) -> bool {
+    !join_expired(created_ms, now)
 }
 
 /// An unreferenced upload is an orphan.
@@ -290,6 +250,7 @@ mod tests {
             tags: [[0; 16]; TAG_SLOTS],
             del_hash: None,
             blob_ref: None,
+            welcome_ref: None,
             added_p: Vec::new(),
             removed: Vec::new(),
             join_pk_new: None,
@@ -375,16 +336,22 @@ mod tests {
         let commit = header(EnvKind::Commit, 3);
         let aad = commit.aad_bytes();
         let message = mls_message(&GID, 3, 3, &aad);
-        let outer = check_outer_header(&commit, &message)
-            .expect("test: header parses")
-            .expect("test: commit has MLS content");
-        assert_eq!(check_commit_aad(&commit, &message, &outer), Ok(()), "equal AAD passes");
+        assert!(check_outer_header(&commit, &message).is_ok(), "test: header parses");
+        assert_eq!(check_commit_aad(&commit, &message), Ok(()), "equal AAD passes");
         let mut other = commit.clone();
         other.epoch = 9;
         assert_eq!(
-            check_commit_aad(&other, &message, &outer),
+            check_commit_aad(&other, &message),
             Err(LgRefusal::HeaderMismatch),
             "an AAD of another header must be refused"
+        );
+        let mut with_refs = commit.clone();
+        with_refs.blob_ref = Some([1; 32]);
+        with_refs.welcome_ref = Some([2; 32]);
+        assert_eq!(
+            check_commit_aad(&with_refs, &message),
+            Ok(()),
+            "blob_ref and welcome_ref are outside the AAD"
         );
     }
 
@@ -433,19 +400,74 @@ mod tests {
         assert!(bucket.take(1_999), "one second refills one request");
     }
 
+    /// A key-value backend that keeps nothing: enough to mint a `KeyPackage`.
+    struct NullKv;
+
+    impl ramflux_mls::MlsKv for NullKv {
+        type Tx<'a> = ();
+
+        fn get(
+            &self,
+            _label: &str,
+            _key: &[u8],
+        ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, ramflux_mls::MlsKvError> {
+            Ok(None)
+        }
+
+        fn row_stats(&self) -> Result<ramflux_mls::RowStats, ramflux_mls::MlsKvError> {
+            Ok(ramflux_mls::RowStats::default())
+        }
+
+        fn commit_batch<F>(
+            &self,
+            _batch: ramflux_mls::WriteBatch,
+            _caller: F,
+        ) -> Result<(), ramflux_mls::MlsKvError>
+        where
+            F: for<'a> FnOnce(&mut Self::Tx<'a>) -> Result<(), ramflux_mls::MlsKvError>
+                + Send
+                + 'static,
+        {
+            Ok(())
+        }
+    }
+
     #[test]
-    fn key_package_pseudonym_is_read_from_the_leaf() {
-        let mut kp = vec![0, 1, 0, 1, 3, 9, 9, 9, 2, 5, 5, 32];
-        kp.extend_from_slice(&[0xAB; 32]);
-        kp.extend_from_slice(&[1, 2, 3]);
-        assert_eq!(key_package_signature_key(&kp), Ok([0xAB; 32]), "signature key at the leaf");
+    fn key_package_pseudonym_is_read_from_the_wrapped_leaf() {
+        let crypto = ramflux_mls::CryptoHandle::init().expect("test: crypto probe");
+        let mls = ramflux_mls::Mls::new(NullKv, crypto);
+        let minted = mls
+            .key_package(ramflux_mls::GroupKind::Group)
+            .expect("test: key package")
+            .commit_plain()
+            .expect("test: staged key package");
         assert_eq!(
-            key_package_signature_key(&kp[..20]),
-            Err(LgRefusal::BadRequest),
-            "a truncated KeyPackage is refused"
+            minted.bytes.get(..4),
+            Some(&[0_u8, 1, 0, 5][..]),
+            "ramflux-mls emits the MLSMessage form (version, wire format 5)"
         );
-        kp[11] = 31;
-        assert_eq!(key_package_signature_key(&kp), Err(LgRefusal::BadRequest), "not 32 bytes");
+        assert_eq!(
+            key_package_signature_key(&minted.bytes),
+            Ok(minted.leaf_sig_pk),
+            "P is the leaf signature key of the wrapped KeyPackage"
+        );
+        assert_eq!(
+            key_package_signature_key(&minted.bytes[4..]),
+            Err(LgRefusal::BadRequest),
+            "the unwrapped form is not accepted"
+        );
+        assert_eq!(
+            key_package_signature_key(&minted.bytes[..minted.bytes.len() - 1]),
+            Err(LgRefusal::BadRequest),
+            "a truncated message is refused"
+        );
+        let mut other_suite = minted.bytes.clone();
+        other_suite[7] = 2;
+        assert_eq!(
+            key_package_signature_key(&other_suite),
+            Err(LgRefusal::BadRequest),
+            "another suite is refused"
+        );
     }
 
     #[test]
@@ -453,6 +475,8 @@ mod tests {
         assert!(!entry_expired(0, RETAIN_MS), "exactly 30 d is kept");
         assert!(entry_expired(0, RETAIN_MS + 1), "past 30 d goes");
         assert!(!join_expired(0, JOIN_TTL_MS - 1) && join_expired(0, JOIN_TTL_MS), "24 h joins");
+        assert!(join_row_live(0, JOIN_TTL_MS - 1), "a row younger than 24 h satisfies the tie");
+        assert!(!join_row_live(0, JOIN_TTL_MS), "a row 24 h old does not");
         assert!(!blob_orphaned(0, true, BLOB_ORPHAN_MS) && blob_orphaned(0, false, BLOB_ORPHAN_MS));
         assert!(!welcome_expired(0, 0, WELCOME_TTL_MS - 1), "an unfetched Welcome lives 7 d");
         assert!(welcome_expired(0, 0, WELCOME_TTL_MS), "and goes after 7 d");

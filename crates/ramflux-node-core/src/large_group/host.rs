@@ -249,6 +249,7 @@ impl LargeGroupHost {
                 voidable_epoch: 0,
                 undo_removed: Vec::new(),
                 route_count: 0,
+                evals: 0,
             };
             let owner = PsetRow { role: ROLE_OWNER, joined_ms: now, leaving: false };
             cx.pset_insert(&gid, &mut head, &genesis.owner_p_pub, &owner)?;

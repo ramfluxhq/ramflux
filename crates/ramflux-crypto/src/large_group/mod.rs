@@ -26,15 +26,15 @@ pub use poprf_host::{IssuedBatch, LgTokenRootKey};
 pub use rng::random_array;
 pub use rules::{
     ADMIN_COMMIT_GAP_MS, ELECT_WINDOW_MS, ELECT_WINDOW_SIZE, ElectCandidate, MAX_ADDS_PER_COMMIT,
-    MEMBER_COMMIT_GAP_MS, PRIVACY_DELAY_MIN_LEAVES, ROLL_U_MAX_MS, RollKind, RollRecord,
-    RollRefusal, RollWindow, SETTLE_REPLY_DELAY_MS, SETTLE_ROLL_DELAY_MS, SKEW_MS, appended_at_ok,
-    election_delay_ms, election_order, election_rank, late_reply, late_roll, privacy_delay_applies,
-    settle_at_ms,
+    MEMBER_COMMIT_GAP_MS, PRIVACY_DELAY_MIN_LEAVES, REVOKE_ROLL_GAP_MS, ROLL_U_MAX_MS, RollKind,
+    RollRecord, RollRefusal, RollWindow, SETTLE_REPLY_DELAY_MS, SETTLE_ROLL_DELAY_MS, SKEW_MS,
+    appended_at_ok, election_delay_ms, election_order, election_rank, late_reply, late_roll,
+    privacy_delay_applies, settle_at_ms,
 };
 pub use token::{
     BucketQuota, COMMIT_TOKEN_COST, SPENT_KEY_LEN, TOKEN_LEN, Token, TokenBatchRequest,
-    TokenBucket, TokenSecret, begin_token_batch, finish_token_batch, spent_key,
-    verify_token_binding,
+    TokenBucket, TokenSecret, begin_token_batch, begin_token_batch_sized, finish_token_batch,
+    spent_key, verify_token_binding,
 };
 pub use wire::{
     ENV_DOMAIN, EnvAuth, EnvHeader, EnvKind, Envelope, JoinKind, JoinRequest, JoinSession, LogView,

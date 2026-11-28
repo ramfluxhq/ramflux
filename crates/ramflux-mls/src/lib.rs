@@ -45,7 +45,7 @@ pub use group::conversation::{ConversationRole, ExpectedPrincipals, RfConversati
 pub use group::policy::{CommitPolicy, DenyAllRoster, PermissiveCommitPolicy, RosterPolicy};
 pub use group::{
     AddOutput, CommitOutput, CreateOutput, JoinOutput, KeyPackageOutput, MemberSummary, Mls,
-    ReceivedMessage, SendOutput, StatusOutput, Tier,
+    ReceivedMessage, SendOutput, StatusOutput, Tier, key_package_signature_key,
 };
 pub use provider::{CryptoHandle, RfMlsProvider};
 pub use storage::kv::{MlsKv, MlsKvError, RowStats, Staged, WriteBatch, WriteOp};

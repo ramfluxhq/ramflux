@@ -4,8 +4,9 @@
 //! `submit`: the check order of MLS-SPEC r1.1 2.3 and the append (from 6ed `entries.rs`).
 //!
 //! 1 session scope, 2 authorisation, 3 outer MLS header and kind, 4 epoch rule, 5 commit checks
-//! (authenticated data, pacing and cap, join tie, removals, blobs), 6 append. One write
-//! transaction; every refusal aborts it, so a refused entry spends no token and writes no row.
+//! (authenticated data, pacing and cap, join tie, removals, blobs, the Welcome), 6 append. One
+//! write transaction; every refusal aborts it, so a refused entry spends no token (a commit spends
+//! four) and writes no row; the Welcome row is written in the commit's own transaction.
 
 use ramflux_crypto::large_group::{
     ADMIN_COMMIT_GAP_MS, EnvAuth, EnvKind, Envelope, Genesis, LEAF_CAP, MEMBER_COMMIT_GAP_MS,
@@ -13,7 +14,8 @@ use ramflux_crypto::large_group::{
 };
 
 use super::check::{
-    check_commit_aad, check_outer_header, check_pacing, epoch_rule, join_tie, prune_ring,
+    check_commit_aad, check_outer_header, check_pacing, epoch_rule, join_row_live, join_tie,
+    prune_ring,
 };
 use super::host::{Cx, LargeGroupHost};
 use super::refusal::{LgRefusal, LgResult};
@@ -22,7 +24,6 @@ use super::rows::{
     ROLE_OWNER, key,
 };
 use crate::RouterRedbStore;
-use crate::mls_header::MlsOuterHeader;
 use crate::router_store::lg_store::LgTable;
 
 /// What `submit` answers: the entry's place in the head chain.
@@ -52,7 +53,6 @@ enum Signer {
 struct CommitIn<'a> {
     env: &'a Envelope,
     mls: &'a [u8],
-    outer: &'a MlsOuterHeader,
     signer: Signer,
 }
 
@@ -111,8 +111,8 @@ impl Cx<'_> {
         // 5 and 6.
         let row = match env.header.kind {
             EnvKind::Commit => {
-                let outer = outer.ok_or(LgRefusal::Internal)?;
-                let input = CommitIn { env, mls: mls.bytes(), outer: &outer, signer };
+                outer.ok_or(LgRefusal::Internal)?;
+                let input = CommitIn { env, mls: mls.bytes(), signer };
                 self.append_commit(&gid, &mut head, &input)?
             }
             EnvKind::Post | EnvKind::Tombstone | EnvKind::Proposal | EnvKind::State => {
@@ -148,6 +148,16 @@ impl Cx<'_> {
             EnvAuth::Token(token) => {
                 let bucket: TokenBucket = env.header.bucket.ok_or(LgRefusal::BadRequest)?;
                 self.spend_token(gid, head, bucket, token, &env.bind_hash())?;
+                Ok(Signer::Token)
+            }
+            // A commit pays four tokens, all verified and spent here or none (the caller's
+            // transaction aborts on the first refusal).
+            EnvAuth::CommitTokens(tokens) => {
+                let bucket: TokenBucket = env.header.bucket.ok_or(LgRefusal::BadRequest)?;
+                let bind = env.bind_hash();
+                for token in tokens {
+                    self.spend_token(gid, head, bucket, token, &bind)?;
+                }
                 Ok(Signer::Token)
             }
             EnvAuth::AdminSig(sig) => {
@@ -198,9 +208,13 @@ impl Cx<'_> {
         }
     }
 
+    /// The queue where `p` has a live pending join (younger than 24 h; a stale row that nobody
+    /// has swept yet does not count).
     pub(super) fn pending_queue(&self, gid: &[u8; 32], p: &[u8; 32]) -> LgResult<Option<u8>> {
         for queue in [QUEUE_MEMBER, QUEUE_OUTSIDER] {
-            if self.tx.get(LgTable::Join, &key(gid, &[&[queue], p]))?.is_some() {
+            if let Some(bytes) = self.tx.get(LgTable::Join, &key(gid, &[&[queue], p]))?
+                && join_row_live(JoinRow::decode(&bytes)?.created_ms, self.now)
+            {
                 return Ok(Some(queue));
             }
         }
@@ -213,11 +227,11 @@ impl Cx<'_> {
         head: &mut HeadRow,
         input: &CommitIn<'_>,
     ) -> LgResult<LogRow> {
-        let CommitIn { env, mls, outer, signer } = input;
+        let CommitIn { env, mls, signer } = input;
         let header = &env.header;
         let by_admin = matches!(signer, Signer::Admin);
         // 5a: authenticated data equals the envelope header.
-        check_commit_aad(header, mls, outer)?;
+        check_commit_aad(header, mls)?;
         // 5b: pacing and the commit cap C (admin included).
         let gap = if by_admin { ADMIN_COMMIT_GAP_MS } else { MEMBER_COMMIT_GAP_MS };
         let cap = self.host.config.commit_cap_24h.min(u32::try_from(RING_MAX).unwrap_or(u32::MAX));
@@ -261,12 +275,20 @@ impl Cx<'_> {
         if head.pset_count.saturating_add(adds).saturating_sub(removes) > LEAF_CAP {
             return Err(LgRefusal::LeafCap);
         }
-        // 5e: the commit's own blob.
+        // 5e: the commit's own blob, and the Welcome of its adds (a complete pending blob).
         self.reference_blob(gid, env)?;
+        match (header.added_p.is_empty(), header.welcome_ref) {
+            (false, Some(welcome_ref)) => self.blob_reference(gid, &welcome_ref)?,
+            (false, None) => return Err(LgRefusal::BlobMissing),
+            (true, _) => {}
+        }
         // 6: append; epoch + 1; leaf set and queues follow the cleartext header.
         let seq_before = head.log_seq;
         let row = self.append_entry(gid, head, header.clone(), env.payload.clone())?;
         let seq = seq_before.saturating_add(1);
+        if let Some(welcome_ref) = header.welcome_ref {
+            self.welcome_store(gid, seq, &welcome_ref, &header.added_p)?;
+        }
         for (p, queue) in header.added_p.iter().zip(&found) {
             if let Some(queue) = queue {
                 self.tx.del(LgTable::Join, &key(gid, &[&[*queue], p]))?;

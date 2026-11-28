@@ -197,15 +197,31 @@ pub struct TokenBatchRequest {
     pub blinded: Vec<[u8; 32]>,
 }
 
-/// Blinds a fixed batch of 20 fresh random inputs for `bucket`.
+/// Blinds a full batch of 20 fresh random inputs for `bucket`.
 ///
 /// # Errors
 /// Returns a typed error when randomness or blinding fails.
 pub fn begin_token_batch(bucket: TokenBucket) -> Result<TokenBatchRequest, LgError> {
-    let mut clients = Vec::with_capacity(BATCH_SIZE);
-    let mut inputs = Vec::with_capacity(BATCH_SIZE);
-    let mut blinded = Vec::with_capacity(BATCH_SIZE);
-    for _ in 0..BATCH_SIZE {
+    begin_token_batch_sized(bucket, BATCH_SIZE)
+}
+
+/// Blinds a batch of `count` (1 to 20) fresh random inputs for `bucket`. A batch never exceeds the
+/// remaining daily quota of its bucket (first-day commit quota 16: one batch of 16), so the client
+/// asks for fewer than 20 when the quota left is smaller.
+///
+/// # Errors
+/// Refuses a `count` outside 1 to 20; returns a typed error when randomness or blinding fails.
+pub fn begin_token_batch_sized(
+    bucket: TokenBucket,
+    count: usize,
+) -> Result<TokenBatchRequest, LgError> {
+    if count == 0 || count > BATCH_SIZE {
+        return Err(LgError::Format("batch size"));
+    }
+    let mut clients = Vec::with_capacity(count);
+    let mut inputs = Vec::with_capacity(count);
+    let mut blinded = Vec::with_capacity(count);
+    for _ in 0..count {
         let input = super::random_array::<32>()?;
         let mut rng = FallibleOsRng;
         let result = PoprfClient::<Ristretto255>::blind(&input, &mut rng)
@@ -276,6 +292,27 @@ pub fn finish_token_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_short_batch_issues_and_finishes() {
+        let root = LgTokenRootKey::from_seed(&[8; 32]).expect("test: root key");
+        let group_id = [4_u8; 32];
+        let request = begin_token_batch_sized(TokenBucket::Commit, 16).expect("test: blind 16");
+        let info = token_info(&group_id, 0, TokenBucket::Commit);
+        let issued = root.issue_batch(&request.blinded, &info).expect("test: issue 16");
+        let secrets = finish_token_batch(
+            &request,
+            &issued.evaluated,
+            &issued.proof,
+            &root.public_key(),
+            &group_id,
+            0,
+        )
+        .expect("test: finish 16");
+        assert_eq!(secrets.len(), 16, "a batch of 16 yields 16 tokens");
+        assert!(begin_token_batch_sized(TokenBucket::Post, 0).is_err(), "empty batch refused");
+        assert!(begin_token_batch_sized(TokenBucket::Post, 21).is_err(), "over 20 refused");
+    }
 
     #[test]
     fn issued_token_redeems_in_its_bucket_only() {

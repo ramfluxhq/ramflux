@@ -35,7 +35,8 @@ const MAX_ADMIN_CHAIN: usize = 64;
 const MAX_KEY_PACKAGE: usize = 16 * 1024;
 const MAX_JOIN_SEALED: usize = 16 * 1024;
 const MAX_JOIN_AUTH: usize = 256;
-const MAX_ROLL_REFS: usize = 64;
+/// One revoke roll lists every held admin removal (64) and leave (64).
+const MAX_ROLL_REFS: usize = 128;
 
 /// What an envelope is. The MLS content type is checked against it by the host (spec 2.3 check 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,11 +152,17 @@ pub struct Removal {
     pub ground: RemoveGround,
 }
 
-/// Who authorises the entry: a posting token, an admin or member pseudonym signature, or the host.
+/// Who authorises the entry: a posting token, the four tokens of a commit, an admin signature, a
+/// pseudonym signature (`leave` only), or the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant, reason = "wire shape fixed by MLS-SPEC r1.2 2.6: [Token; 4]")]
 pub enum EnvAuth {
     Token(Token),
+    /// A token-authorised commit: four tokens of the same epoch and distinct inputs, each tag over
+    /// the same bind hash (spec 2.6, commit cost 4).
+    CommitTokens([Token; 4]),
     AdminSig([u8; 64]),
+    /// A pseudonym signature names its signer, so only `leave` (payload = `P`) may carry it.
     PSig([u8; 64]),
     /// Written by the host itself (token epoch roll); covered by the head chain.
     Host,
@@ -174,6 +181,9 @@ pub struct EnvHeader {
     pub tags: [[u8; 16]; TAG_SLOTS],
     pub del_hash: Option<[u8; 32]>,
     pub blob_ref: Option<[u8; 32]>,
+    /// Commit only: the complete pending blob holding the Welcome of `added_p`. Bound by the bind
+    /// hash, not part of the AAD (the Welcome exists only after the commit is framed).
+    pub welcome_ref: Option<[u8; 32]>,
     pub added_p: Vec<[u8; 32]>,
     pub removed: Vec<Removal>,
     pub join_pk_new: Option<[u8; 32]>,
@@ -199,6 +209,20 @@ fn put_count(enc: &mut Enc, len: usize) {
     enc.u32(u32::try_from(len).unwrap_or(u32::MAX));
 }
 
+/// The four tokens of a commit: one epoch, four distinct inputs.
+fn check_commit_tokens(tokens: &[Token; 4]) -> Result<(), LgError> {
+    let [first, rest @ ..] = tokens;
+    if rest.iter().any(|token| token.te != first.te) {
+        return Err(LgError::Format("commit tokens epoch"));
+    }
+    for (index, token) in tokens.iter().enumerate() {
+        if tokens.get(..index).is_some_and(|before| before.iter().any(|t| t.input == token.input)) {
+            return Err(LgError::Format("commit tokens repeat"));
+        }
+    }
+    Ok(())
+}
+
 fn get_count(dec: &mut Dec<'_>, max: usize, what: &'static str) -> Result<usize, LgError> {
     let count = usize::try_from(dec.u32()?).map_err(|_| LgError::Format(what))?;
     if count > max { Err(LgError::Format(what)) } else { Ok(count) }
@@ -211,16 +235,28 @@ impl EnvHeader {
     /// # Errors
     /// Returns the first violated rule.
     pub fn check(&self) -> Result<(), LgError> {
+        let commit = self.kind == EnvKind::Commit;
         match (&self.auth, self.bucket, self.kind.token_bucket()) {
-            (EnvAuth::Token(_), Some(got), Some(want)) if got == want => {}
-            (EnvAuth::Token(_), ..) => return Err(LgError::Format("token bucket mismatch")),
+            (EnvAuth::Token(_), Some(got), Some(want)) if got == want && !commit => {}
+            (EnvAuth::CommitTokens(tokens), Some(got), Some(want)) if got == want && commit => {
+                check_commit_tokens(tokens)?;
+            }
+            (EnvAuth::Token(_) | EnvAuth::CommitTokens(_), Some(_), Some(_)) => {
+                return Err(LgError::Format("token count for kind"));
+            }
+            (EnvAuth::Token(_) | EnvAuth::CommitTokens(_), ..) => {
+                return Err(LgError::Format("token bucket mismatch"));
+            }
             (_, None, _) => {}
             _ => return Err(LgError::Format("bucket without token")),
         }
         let auth_ok = match self.kind {
             EnvKind::Post | EnvKind::Tombstone => matches!(self.auth, EnvAuth::Token(_)),
-            EnvKind::Commit | EnvKind::Proposal | EnvKind::State => {
-                !matches!(self.auth, EnvAuth::Host)
+            EnvKind::Commit => {
+                matches!(self.auth, EnvAuth::CommitTokens(_) | EnvAuth::AdminSig(_))
+            }
+            EnvKind::Proposal | EnvKind::State => {
+                matches!(self.auth, EnvAuth::Token(_) | EnvAuth::AdminSig(_))
             }
             EnvKind::Leave => matches!(self.auth, EnvAuth::PSig(_)),
             EnvKind::Void => matches!(self.auth, EnvAuth::AdminSig(_)),
@@ -229,11 +265,16 @@ impl EnvHeader {
         if !auth_ok {
             return Err(LgError::Format("authorisation for kind"));
         }
-        let commit = self.kind == EnvKind::Commit;
         if !commit
-            && (!self.added_p.is_empty() || !self.removed.is_empty() || self.join_pk_new.is_some())
+            && (!self.added_p.is_empty()
+                || !self.removed.is_empty()
+                || self.join_pk_new.is_some()
+                || self.welcome_ref.is_some())
         {
             return Err(LgError::Format("commit-only field"));
+        }
+        if self.welcome_ref.is_some() && self.added_p.is_empty() {
+            return Err(LgError::Format("welcome without adds"));
         }
         if self.added_p.len() > MAX_ADDS_PER_COMMIT || self.removed.len() > MAX_REMOVED {
             return Err(LgError::Format("commit list too long"));
@@ -247,7 +288,7 @@ impl EnvHeader {
         Ok(())
     }
 
-    fn write_fields(&self, enc: &mut Enc, with_blob_ref: bool) {
+    fn write_fields(&self, enc: &mut Enc, with_late_refs: bool) {
         enc.fixed(&self.group_id)
             .u8(self.kind.code())
             .u64(self.epoch)
@@ -257,8 +298,9 @@ impl EnvHeader {
             enc.fixed(tag);
         }
         put_opt32(enc, self.del_hash.as_ref());
-        if with_blob_ref {
+        if with_late_refs {
             put_opt32(enc, self.blob_ref.as_ref());
+            put_opt32(enc, self.welcome_ref.as_ref());
         }
         put_count(enc, self.added_p.len());
         for p in &self.added_p {
@@ -273,14 +315,29 @@ impl EnvHeader {
 
     fn write_auth(&self, enc: &mut Enc) {
         match &self.auth {
-            EnvAuth::Token(token) => enc.u8(1).fixed(&token.to_bytes()),
-            EnvAuth::AdminSig(sig) => enc.u8(2).fixed(sig),
-            EnvAuth::PSig(sig) => enc.u8(3).fixed(sig),
-            EnvAuth::Host => enc.u8(4),
-        };
+            EnvAuth::Token(token) => {
+                enc.u8(1).fixed(&token.to_bytes());
+            }
+            EnvAuth::AdminSig(sig) => {
+                enc.u8(2).fixed(sig);
+            }
+            EnvAuth::PSig(sig) => {
+                enc.u8(3).fixed(sig);
+            }
+            EnvAuth::Host => {
+                enc.u8(4);
+            }
+            EnvAuth::CommitTokens(tokens) => {
+                enc.u8(5);
+                for token in tokens {
+                    enc.fixed(&token.to_bytes());
+                }
+            }
+        }
     }
 
-    /// Commit authenticated data: `rf-lg-aad-v1 ‖ canonical header without token and blob_ref`.
+    /// Commit authenticated data: `rf-lg-aad-v1` followed by the canonical header without the
+    /// authorisation, `blob_ref` and `welcome_ref`.
     #[must_use]
     pub fn aad_bytes(&self) -> Vec<u8> {
         let mut enc = Enc::new(LG_AAD_V1.as_bytes());
@@ -335,6 +392,7 @@ impl EnvHeader {
         }
         let del_hash = get_opt32(dec)?;
         let blob_ref = get_opt32(dec)?;
+        let welcome_ref = get_opt32(dec)?;
         let adds = get_count(dec, MAX_ADDS_PER_COMMIT, "added count")?;
         let mut added_p = Vec::with_capacity(adds);
         for _ in 0..adds {
@@ -351,6 +409,11 @@ impl EnvHeader {
             2 => EnvAuth::AdminSig(dec.fixed()?),
             3 => EnvAuth::PSig(dec.fixed()?),
             4 => EnvAuth::Host,
+            5 => {
+                let mut read =
+                    || -> Result<Token, LgError> { Token::from_bytes(&dec.fixed::<TOKEN_LEN>()?) };
+                EnvAuth::CommitTokens([read()?, read()?, read()?, read()?])
+            }
             _ => return Err(LgError::Format("authorisation tag")),
         };
         Ok(Self {
@@ -362,6 +425,7 @@ impl EnvHeader {
             tags,
             del_hash,
             blob_ref,
+            welcome_ref,
             added_p,
             removed,
             join_pk_new,
@@ -811,10 +875,37 @@ mod tests {
             tags: [[0; 16]; TAG_SLOTS],
             del_hash: Some([4; 32]),
             blob_ref: None,
+            welcome_ref: None,
             added_p: Vec::new(),
             removed: Vec::new(),
             join_pk_new: None,
             auth: EnvAuth::Token(token),
+        }
+    }
+
+    fn four_tokens(te: u32) -> [Token; 4] {
+        std::array::from_fn(|i| Token {
+            te,
+            input: [u8::try_from(i).unwrap_or(0).saturating_add(10); 32],
+            tag: [6; 32],
+        })
+    }
+
+    fn commit_header(auth: EnvAuth, bucket: Option<TokenBucket>) -> EnvHeader {
+        EnvHeader {
+            group_id: [1; 32],
+            kind: EnvKind::Commit,
+            epoch: 3,
+            post_id: [2; 16],
+            bucket,
+            tags: [[0; 16]; TAG_SLOTS],
+            del_hash: None,
+            blob_ref: None,
+            welcome_ref: Some([9; 32]),
+            added_p: vec![[7; 32]],
+            removed: Vec::new(),
+            join_pk_new: None,
+            auth,
         }
     }
 
@@ -846,8 +937,84 @@ mod tests {
         let mut a = post_header(token);
         let before = a.aad_bytes();
         a.blob_ref = Some([8; 32]);
+        a.welcome_ref = Some([9; 32]);
         a.auth = EnvAuth::PSig([0; 64]);
-        assert_eq!(before, a.aad_bytes(), "aad excludes token and blob_ref");
+        assert_eq!(before, a.aad_bytes(), "aad excludes the authorisation and both refs");
+        let hash = a.bind_hash(&[1]);
+        a.welcome_ref = Some([10; 32]);
+        assert_ne!(hash, a.bind_hash(&[1]), "the bind hash covers welcome_ref");
+    }
+
+    #[test]
+    fn commit_tokens_round_trip_and_bind_all_four() {
+        let header =
+            commit_header(EnvAuth::CommitTokens(four_tokens(2)), Some(TokenBucket::Commit));
+        let envelope = Envelope { header, payload: vec![3; 12] };
+        let bytes = envelope.encode();
+        assert_eq!(Envelope::decode(&bytes).expect("test: decodes"), envelope, "round trip");
+        let mut other = envelope.clone();
+        if let EnvAuth::CommitTokens(tokens) = &mut other.header.auth {
+            tokens[3].tag = [7; 32];
+        }
+        assert_ne!(
+            envelope.chain_hash(1, 1),
+            other.chain_hash(1, 1),
+            "the chain hash covers every token"
+        );
+        assert_eq!(envelope.bind_hash(), other.bind_hash(), "tokens are outside the bind hash");
+    }
+
+    #[test]
+    fn commit_tokens_must_share_an_epoch_and_differ() {
+        let mut mixed = four_tokens(2);
+        mixed[1].te = 3;
+        let header = commit_header(EnvAuth::CommitTokens(mixed), Some(TokenBucket::Commit));
+        assert!(header.check().is_err(), "tokens of two epochs must be refused");
+        let mut repeated = four_tokens(2);
+        repeated[2].input = repeated[0].input;
+        let header = commit_header(EnvAuth::CommitTokens(repeated), Some(TokenBucket::Commit));
+        assert!(header.check().is_err(), "a repeated input must be refused");
+    }
+
+    #[test]
+    fn auth_kinds_follow_the_spec_check_two() {
+        let one = Token { te: 1, input: [5; 32], tag: [6; 32] };
+        let commit_one = commit_header(EnvAuth::Token(one), Some(TokenBucket::Commit));
+        assert!(commit_one.check().is_err(), "a commit with one token must be refused");
+        let commit_four =
+            commit_header(EnvAuth::CommitTokens(four_tokens(1)), Some(TokenBucket::Commit));
+        assert!(commit_four.check().is_ok(), "a commit with four tokens passes");
+        let commit_admin = commit_header(EnvAuth::AdminSig([0; 64]), None);
+        assert!(commit_admin.check().is_ok(), "an admin commit passes");
+        let commit_psig = commit_header(EnvAuth::PSig([0; 64]), None);
+        assert!(commit_psig.check().is_err(), "a P-signed commit names its author");
+        let mut post = post_header(Token { te: 1, input: [5; 32], tag: [6; 32] });
+        post.auth = EnvAuth::CommitTokens(four_tokens(1));
+        assert!(post.check().is_err(), "four tokens belong to commits only");
+        let mut proposal = post_header(Token { te: 1, input: [5; 32], tag: [6; 32] });
+        proposal.kind = EnvKind::Proposal;
+        proposal.del_hash = None;
+        proposal.bucket = Some(TokenBucket::Commit);
+        assert!(proposal.check().is_ok(), "a proposal spends one token");
+        proposal.auth = EnvAuth::PSig([0; 64]);
+        proposal.bucket = None;
+        assert!(proposal.check().is_err(), "a P-signed proposal is refused");
+        let mut leave = commit_header(EnvAuth::PSig([0; 64]), None);
+        leave.kind = EnvKind::Leave;
+        leave.added_p.clear();
+        leave.welcome_ref = None;
+        assert!(leave.check().is_ok(), "leave keeps the P signature");
+    }
+
+    #[test]
+    fn welcome_ref_is_commit_only_and_needs_adds() {
+        let mut commit =
+            commit_header(EnvAuth::CommitTokens(four_tokens(1)), Some(TokenBucket::Commit));
+        commit.added_p.clear();
+        assert!(commit.check().is_err(), "a welcome without adds must be refused");
+        let mut post = post_header(Token { te: 1, input: [5; 32], tag: [6; 32] });
+        post.welcome_ref = Some([1; 32]);
+        assert!(post.check().is_err(), "welcome_ref is commit-only");
     }
 
     #[test]
