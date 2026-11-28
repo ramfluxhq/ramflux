@@ -155,5 +155,12 @@ mod tests {
             token_info(&gid, 1, TokenBucket::Commit),
             "buckets must not share an info string"
         );
+        for other in [TokenBucket::Post, TokenBucket::Commit, TokenBucket::Open] {
+            assert_ne!(
+                token_info(&gid, 1, TokenBucket::Attach),
+                token_info(&gid, 1, other),
+                "an attach token must not redeem in another bucket"
+            );
+        }
     }
 }

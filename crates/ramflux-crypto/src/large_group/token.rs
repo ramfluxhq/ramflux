@@ -3,8 +3,8 @@
 
 //! Client side of posting tokens (spec 2.6) and host-side redemption checks.
 //! `token = te ‖ input ‖ tag` (68 B); `tag = BLAKE3-keyed(k_bind, H(header without token ‖ mls bytes))`,
-//! `k_bind = BLAKE3-derive_key("rf-lg-token-bind-v1", output)`. A token is issued for one of three
-//! buckets (`post`, `commit`, `open`); the bucket is part of the POPRF `info`.
+//! `k_bind = BLAKE3-derive_key("rf-lg-token-bind-v1", output)`. A token is issued for one of four
+//! buckets (`post`, `commit`, `open`, `attach`); the bucket is part of the POPRF `info`.
 
 use subtle::ConstantTimeEq;
 use voprf::{EvaluationElement, PoprfClient, Proof, Ristretto255};
@@ -32,6 +32,8 @@ pub enum TokenBucket {
     Commit,
     /// One member session open.
     Open,
+    /// One attachment upload (`attach.put` chunk 0; 30 a day, 5 on the first day, no free refill).
+    Attach,
 }
 
 /// Daily token quota of one bucket per device.
@@ -49,6 +51,7 @@ impl TokenBucket {
             Self::Post => 1,
             Self::Commit => 2,
             Self::Open => 3,
+            Self::Attach => 4,
         }
     }
 
@@ -59,6 +62,7 @@ impl TokenBucket {
             1 => Ok(Self::Post),
             2 => Ok(Self::Commit),
             3 => Ok(Self::Open),
+            4 => Ok(Self::Attach),
             _ => Err(LgError::Format("token bucket")),
         }
     }
@@ -74,7 +78,24 @@ impl TokenBucket {
             Self::Open => {
                 BucketQuota { per_day: open_per_day, first_day: open_per_day.div_ceil(3) }
             }
+            Self::Attach => BucketQuota { per_day: 30, first_day: 5 },
         }
+    }
+
+    /// Most tokens one issuance batch of this bucket holds: 10 for `attach`, 20 otherwise.
+    #[must_use]
+    pub const fn batch_max(self) -> usize {
+        match self {
+            Self::Attach => 10,
+            Self::Post | Self::Commit | Self::Open => BATCH_SIZE,
+        }
+    }
+
+    /// Whether a token epoch roll gives a free refill batch. Only `attach` gets none: every attach
+    /// issuance counts against its 30 a day (tokens left at a roll are lost).
+    #[must_use]
+    pub const fn free_refill(self) -> bool {
+        !matches!(self, Self::Attach)
     }
 }
 
@@ -205,17 +226,17 @@ pub fn begin_token_batch(bucket: TokenBucket) -> Result<TokenBatchRequest, LgErr
     begin_token_batch_sized(bucket, BATCH_SIZE)
 }
 
-/// Blinds a batch of `count` (1 to 20) fresh random inputs for `bucket`. A batch never exceeds the
-/// remaining daily quota of its bucket (first-day commit quota 16: one batch of 16), so the client
-/// asks for fewer than 20 when the quota left is smaller.
+/// Blinds a batch of `count` (1 to [`TokenBucket::batch_max`]) fresh random inputs for `bucket`. A
+/// batch never exceeds the remaining daily quota of its bucket (first-day commit quota 16: one
+/// batch of 16), so the client asks for fewer than 20 when the quota left is smaller.
 ///
 /// # Errors
-/// Refuses a `count` outside 1 to 20; returns a typed error when randomness or blinding fails.
+/// Refuses a `count` outside 1 to the bucket's batch maximum (20, `attach` 10); returns a typed error when randomness or blinding fails.
 pub fn begin_token_batch_sized(
     bucket: TokenBucket,
     count: usize,
 ) -> Result<TokenBatchRequest, LgError> {
-    if count == 0 || count > BATCH_SIZE {
+    if count == 0 || count > bucket.batch_max() {
         return Err(LgError::Format("batch size"));
     }
     let mut clients = Vec::with_capacity(count);
@@ -292,6 +313,28 @@ pub fn finish_token_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_bucket_is_code_four_with_its_own_quota() {
+        assert_eq!(TokenBucket::Attach.code(), 4, "attach is bucket code 4");
+        assert_eq!(TokenBucket::from_code(4), Ok(TokenBucket::Attach), "code 4 round trips");
+        assert!(TokenBucket::from_code(5).is_err(), "code 5 is unknown");
+        assert!(TokenBucket::from_code(0).is_err(), "code 0 is unknown");
+        let quota = TokenBucket::Attach.quota(0);
+        assert_eq!((quota.per_day, quota.first_day), (30, 5), "30 a day, 5 on the first day");
+    }
+
+    #[test]
+    fn attach_batches_are_ten_and_get_no_free_refill() {
+        assert_eq!(TokenBucket::Attach.batch_max(), 10, "attach batches hold at most 10");
+        for bucket in [TokenBucket::Post, TokenBucket::Commit, TokenBucket::Open] {
+            assert_eq!(bucket.batch_max(), BATCH_SIZE, "other buckets keep 20");
+            assert!(bucket.free_refill(), "other buckets keep the free refill");
+        }
+        assert!(!TokenBucket::Attach.free_refill(), "attach has no free refill after a roll");
+        assert!(begin_token_batch_sized(TokenBucket::Attach, 10).is_ok(), "10 attach tokens");
+        assert!(begin_token_batch_sized(TokenBucket::Attach, 11).is_err(), "11 is over the max");
+    }
 
     #[test]
     fn a_short_batch_issues_and_finishes() {

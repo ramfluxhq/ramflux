@@ -13,10 +13,9 @@
 //! found by `P`.
 
 use ramflux_crypto::large_group::{
-    JoinKind, JoinRequest, JoinSession, LgReader as Dec, LgWriter as Enc, SignedReq, Token,
-    TokenBucket,
+    JoinKind, JoinRequest, JoinSession, LgReader as Dec, SignedReq, Token, TokenBucket,
+    invite_proof_message, join_bind,
 };
-use ramflux_protocol::domain::LG_JOIN_V1;
 
 use super::check::{JOIN_QUEUE_MAX, key_package_signature_key};
 use super::host::{Cx, LargeGroupHost, verify_plain};
@@ -58,25 +57,15 @@ pub struct WelcomeInfo {
     pub bytes: u64,
 }
 
-/// The hash a member-session join token binds to: `BLAKE3(rf-lg-join-v1 ‖ kind ‖ H(KeyPackage) ‖
-/// join_pk_id ‖ H(sealed))`.
-#[must_use]
-pub fn join_bind(req: &JoinRequest) -> [u8; 32] {
-    let mut enc = Enc::new(LG_JOIN_V1.as_bytes());
-    enc.u8(req.kind.code())
-        .fixed(blake3::hash(&req.key_package).as_bytes())
-        .fixed(&req.join_pk_id)
-        .fixed(blake3::hash(&req.sealed).as_bytes());
-    *blake3::hash(&enc.finish()).as_bytes()
-}
-
-/// The message an invite's key signs: `rf-lg-join-v1 ‖ group_id ‖ P ‖ join_pk_id`; the proof in
-/// `JoinRequest::auth` is `invite_id (16) ‖ signature (64)`.
-#[must_use]
-pub fn invite_proof_message(gid: &[u8; 32], p: &[u8; 32], join_pk_id: &[u8; 32]) -> Vec<u8> {
-    let mut enc = Enc::new(LG_JOIN_V1.as_bytes());
-    enc.fixed(gid).fixed(p).fixed(join_pk_id);
-    enc.finish()
+/// The request names the group's current join key, else `join_key_stale` carrying the current key.
+/// Callers run it only after the invite row and proof were verified (an `invite` request), so a
+/// link holder learns the key only with a live link; `own_device` and `rejoin` get it at once.
+pub(super) fn join_key_check(head_join_pk: &[u8; 32], join_pk_id: &[u8; 32]) -> LgResult<()> {
+    if blake3::hash(head_join_pk).as_bytes() == join_pk_id {
+        Ok(())
+    } else {
+        Err(LgRefusal::JoinKeyStale { join_pk: *head_join_pk })
+    }
 }
 
 fn queue_of(kind: JoinKind) -> u8 {
@@ -108,9 +97,14 @@ impl LargeGroupHost {
         self.settle(store, now, gid)?;
         self.run(store, now, |cx| {
             let mut head = cx.head(gid)?;
-            if *blake3::hash(&head.join_pk).as_bytes() != req.join_pk_id {
-                return Err(LgRefusal::JoinKeyStale);
-            }
+            // An invite's row and proof come first (nothing is stored here, no use is counted
+            // until the request is queued); only then may a stale key be answered with the
+            // current one. A group id alone, a revoked, expired or used-up link learns no key.
+            let invite = match req.kind {
+                JoinKind::Invite => Some(cx.check_invite(gid, req, &p)?),
+                JoinKind::OwnDevice | JoinKind::Rejoin => None,
+            };
+            join_key_check(&head.join_pk, &req.join_pk_id)?;
             cx.drop_stale_join(gid, &mut head, &p)?;
             if cx.pset(gid, &p)?.is_some() || cx.pending_queue(gid, &p)?.is_some() {
                 return Err(LgRefusal::AlreadyJoined);
@@ -118,14 +112,10 @@ impl LargeGroupHost {
             if head.pset_count >= ramflux_crypto::large_group::LEAF_CAP {
                 return Err(LgRefusal::LeafCap);
             }
-            let invite = match req.kind {
-                JoinKind::Invite => Some(cx.check_invite(gid, req, &p)?),
-                JoinKind::OwnDevice | JoinKind::Rejoin => {
-                    let token = Token::from_bytes(&req.auth).map_err(|_| LgRefusal::BadRequest)?;
-                    cx.spend_token(gid, &mut head, TokenBucket::Commit, &token, &join_bind(req))?;
-                    None
-                }
-            };
+            if !matches!(req.kind, JoinKind::Invite) {
+                let token = Token::from_bytes(&req.auth).map_err(|_| LgRefusal::BadRequest)?;
+                cx.spend_token(gid, &mut head, TokenBucket::Commit, &token, &join_bind(req))?;
+            }
             let queue = queue_of(req.kind);
             let pending =
                 if queue == QUEUE_MEMBER { head.pending_member } else { head.pending_outsider };
@@ -278,8 +268,9 @@ fn welcome_index_key(gid: &[u8; 32], p: &[u8; 32]) -> Vec<u8> {
 }
 
 impl Cx<'_> {
-    /// Verify the invite proof of a join request; returns the updated invite row (uses + 1) to
-    /// store once every other check has passed.
+    /// Verify the invite row (live: not revoked, not used up, not expired) and the proof of a join
+    /// request; returns the updated invite row (uses + 1) to store once every other check has
+    /// passed. Nothing is stored here.
     fn check_invite(
         &self,
         gid: &[u8; 32],
@@ -368,5 +359,28 @@ impl Cx<'_> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stale_join_key_answers_with_the_current_key() {
+        let current = [7_u8; 32];
+        let current_id = *blake3::hash(&current).as_bytes();
+        assert_eq!(join_key_check(&current, &current_id), Ok(()), "the current key passes");
+        let old_id = *blake3::hash(&[6_u8; 32]).as_bytes();
+        assert_eq!(
+            join_key_check(&current, &old_id),
+            Err(LgRefusal::JoinKeyStale { join_pk: current }),
+            "a retired key id gets the current join key"
+        );
+        assert_eq!(
+            join_key_check(&current, &current).map_err(|refusal| refusal.code()),
+            Err("join_key_stale"),
+            "the id is the hash of the key, never the key"
+        );
     }
 }

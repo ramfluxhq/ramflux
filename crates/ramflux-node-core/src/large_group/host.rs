@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use ramflux_crypto::large_group::{
     EnvHeader, Genesis, LgReader as Dec, LgTokenRootKey, LgWriter as Enc, LogView, ReadReply,
-    SignedReq, Token, TokenBucket, admin_chain_head, host_head_sign, next_head, random_array,
+    SignedReq, Token, TokenBucket, admin_chain_head, host_head_sign, next_head, op_bind,
+    random_array,
 };
 
 use super::check::{COMMIT_CAP_24H_DEFAULT, JoinBucket};
@@ -48,6 +49,10 @@ pub struct HostConfig {
     pub open_per_day: u32,
     /// Commit cap `C` per rolling 24 h (admin included); `min(1 440, ...)` once MEAS-1 exists.
     pub commit_cap_24h: u32,
+    /// Complete-attachment bytes one group keeps before the oldest go (default 8 GiB; values
+    /// below 16 MiB act as 16 MiB). Deployers size it so groups × (this + 128 MiB pending) stays
+    /// under the free disk.
+    pub attach_store_bytes: u64,
 }
 
 impl HostConfig {
@@ -61,6 +66,7 @@ impl HostConfig {
             host_node_id: host_node_id.into(),
             open_per_day: Self::OPEN_PER_DAY_PLACEHOLDER,
             commit_cap_24h: COMMIT_CAP_24H_DEFAULT,
+            attach_store_bytes: super::attach::ATTACH_STORE_DEFAULT,
         }
     }
 }
@@ -103,7 +109,7 @@ pub enum Authority<'a> {
     /// A P-signed request (ident session); the signer must be an admin.
     Signed(&'a SignedReq),
     /// A commit-bucket token (member session) bound to the operation by
-    /// [`super::issue::op_bind`].
+    /// [`ramflux_crypto::large_group::op_bind`].
     Token(&'a Token),
 }
 
@@ -638,7 +644,7 @@ impl Cx<'_> {
                 self.admin_role(gid, &req.p)?.map(|_| ()).ok_or(LgRefusal::Unauthorized)
             }
             Authority::Token(token) => {
-                let bind = super::issue::op_bind(op, gid, body);
+                let bind = op_bind(op, gid, body);
                 self.spend_token(gid, head, TokenBucket::Commit, token, &bind)
             }
         }
