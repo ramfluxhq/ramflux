@@ -108,7 +108,7 @@ Refusals are typed: the bus error has `error.code` and `error.reason_code` equal
 | `card_session_refused` | Bad body, unsupported slot kind or outcome, or missing authority. |
 | `card_session_stale` | The token or request id does not match a slot of the mounted tree. |
 | `card_session_busy` | The session store was re-entered. Retry. |
-| `card_limit_exceeded` | Two card VMs are already resident in the process (a third open). Closing a session, dropping it, or a connection close frees the slot; reopening the same card reuses its own slot. |
+| `card_limit_exceeded` | Two card VMs are already resident in the process (a third open, or a `resume` that cannot re-acquire a slot). Closing a session, dropping it, or a connection close frees the slot; reopening the same card reuses its own slot. |
 
 C ABI hosts get `InvalidArgument` for all of them. Other failures keep their usual codes
 (`AccountNotOpen` while locked, `card runtime unavailable` without the feature).
