@@ -367,9 +367,7 @@ impl RamfluxClient {
             edit.replacement.as_ref().ok_or_else(|| refused("Edit replacement missing"))?;
             let digest = if historical { [0; 32] } else {
                 let stored = stored.as_deref().ok_or_else(|| refused("Edit target content missing"))?;
-                if let Some(nested) = db.load_actor_state::<Vec<u8>>(&format!("routed/group-content/{target_id}"))? {
-                    digest_exact_content(target, &nested)?
-                } else { previous_content_digest(target, stored)? }
+                previous_content_digest(target, stored)?
             };
             let old_revision = applied.as_ref().map_or(0, |state| state.revision);
             let fork = (old_revision == edit.revision && old_pair != Some(incoming))
@@ -398,8 +396,6 @@ impl RamfluxClient {
                 db.retire_message_attachment_references(&target_id)?;
             }
             self.retire_generated_edit_payloads(conversation, &target_id)?;
-            db.remove_actor_state(&format!("routed/group-content/{target_id}"))?;
-            db.remove_actor_state(&format!("routed/group-projection/{target_id}"))?;
             let mut replacement_metadata = row.metadata;
             replacement_metadata.franking_report = metadata.and_then(|metadata| metadata.franking_report.clone());
             db.replace_generated_message_content(conversation, &target_id, exact_inner, &replacement_metadata)?;

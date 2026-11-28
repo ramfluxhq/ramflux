@@ -219,15 +219,6 @@ impl FederationMesh {
         }
     }
 
-    #[must_use]
-    pub fn heal_group_partition(
-        &self,
-        left_members: &BTreeSet<String>,
-        right_members: &BTreeSet<String>,
-    ) -> BTreeSet<String> {
-        left_members.intersection(right_members).cloned().collect()
-    }
-
     fn ensure_trusted(&self, left: &str, right: &str) -> Result<(), SyncError> {
         self.ensure_active(left)?;
         self.ensure_active(right)?;

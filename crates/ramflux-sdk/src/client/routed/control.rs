@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Typed control projections, with source/target ownership checked before transactional mutation.
-use super::{GatewayInboxEntry, Kind, Opened, RamfluxClient, SdkError, invalid};
+use super::{GatewayInboxEntry, Opened, RamfluxClient, SdkError, invalid};
 use crate::client::identity_authority::HeadUse;
 #[cfg(test)]
 use serde_json::Value;
@@ -23,10 +23,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-        if source != opened.remote_device
-            || opened.routing.group_id.is_some()
-            || matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
-        {
+        if source != opened.remote_device || opened.routing.group_id.is_some() {
             return Err(invalid(
                 "pair reset requires the authenticated pair peer on a direct control route",
             ));

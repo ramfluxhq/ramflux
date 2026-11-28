@@ -325,7 +325,6 @@ fn register_shared_object(db: &AccountDb, message: &str) -> Result<(), StorageEr
 fn history_container_any_owner_invalidates_without_erasing_shared_object()
 -> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("p11-history-any-owner")?;
-    db.create_group("group", "peer")?;
     for message in ["m1", "m2"] {
         db.send_direct_message("thread", message, "peer", b"private-content")?;
         register_shared_object(&db, message)?;
@@ -365,12 +364,6 @@ fn history_container_any_owner_invalidates_without_erasing_shared_object()
         |row| row.get(0),
     )?;
     assert_eq!(owners, 1);
-    let groups: i64 = db.connection.query_row(
-        "SELECT count(*) FROM group_projection WHERE group_id='group'",
-        [],
-        |row| row.get(0),
-    )?;
-    assert_eq!(groups, 1);
     db.delete_direct_message("thread", "m2", "local", "delete-m2")?;
     let leftover: i64 = db.connection.query_row(
         "SELECT count(*) FROM object_index WHERE object_id='shared-wire' AND length(ciphertext)>0",

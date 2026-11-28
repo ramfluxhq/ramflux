@@ -341,13 +341,9 @@ fn unix_now() -> Result<u64, SdkError> {
 #[must_use]
 pub(crate) fn kind_id_for_route(kind: &crate::client::routed::Kind) -> KindId {
     match kind {
-        crate::client::routed::Kind::Control | crate::client::routed::Kind::GroupControl => {
-            KindId::KindControl
-        }
+        crate::client::routed::Kind::Control => KindId::KindControl,
         crate::client::routed::Kind::Receipt => KindId::KindReceipt,
-        crate::client::routed::Kind::Direct | crate::client::routed::Kind::GroupMessage => {
-            KindId::KindMessage
-        }
+        crate::client::routed::Kind::Direct => KindId::KindMessage,
     }
 }
 

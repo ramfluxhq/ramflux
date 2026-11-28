@@ -90,11 +90,6 @@ fn preview(client: &RamfluxClient, conversation: &str) -> Result<Value, SdkError
 
 fn classify_body(client: &RamfluxClient, message_id: &str) -> Result<PreviewClass, SdkError> {
     let db = client.account_db()?;
-    if let Some(projected) =
-        db.load_actor_state::<g::Message>(&format!("routed/group-projection/{message_id}"))?
-    {
-        return Ok(classify_message(&projected));
-    }
     let Some(bytes) = db.message_content_within(
         message_id,
         ramflux_protocol::message::validation::MAX_INNER_BYTES,

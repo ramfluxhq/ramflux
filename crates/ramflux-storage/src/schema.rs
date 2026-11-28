@@ -191,78 +191,6 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
             );
             CREATE INDEX IF NOT EXISTS idx_direct_message_conversation
                 ON direct_message_projection(conversation_id, created_at);
-            CREATE TABLE IF NOT EXISTS root_group_sender_key_counter_seen (
-                group_id TEXT NOT NULL, group_key_epoch INTEGER NOT NULL,
-                sender_reference TEXT NOT NULL, session_id TEXT NOT NULL, counter INTEGER NOT NULL,
-                message_id TEXT NOT NULL, seen_at INTEGER NOT NULL,
-                PRIMARY KEY(group_id,group_key_epoch,sender_reference,session_id,counter)
-            );
-            CREATE TABLE IF NOT EXISTS group_sender_key_counter_seen (
-                group_id TEXT NOT NULL,
-                group_key_epoch INTEGER NOT NULL,
-                sender_id TEXT NOT NULL,
-                counter INTEGER NOT NULL,
-                message_id TEXT NOT NULL,
-                seen_at INTEGER NOT NULL,
-                PRIMARY KEY(group_id, group_key_epoch, sender_id, counter)
-            );
-            CREATE INDEX IF NOT EXISTS idx_group_sender_key_counter_seen_sender
-                ON group_sender_key_counter_seen(group_id, group_key_epoch, sender_id, counter);
-            CREATE TABLE IF NOT EXISTS group_member_device_key (
-                group_id TEXT NOT NULL,
-                member_id TEXT NOT NULL,
-                device_signing_public_key TEXT NOT NULL,
-                verified_at INTEGER NOT NULL,
-                PRIMARY KEY(group_id, member_id)
-            );
-            CREATE TABLE IF NOT EXISTS group_control_event_seen (
-                group_id TEXT NOT NULL,
-                event_id TEXT NOT NULL,
-                event_kind TEXT NOT NULL,
-                actor_device_id TEXT NOT NULL,
-                target_member_id TEXT NOT NULL,
-                previous_epoch INTEGER NOT NULL,
-                new_group_epoch INTEGER NOT NULL,
-                applied_at INTEGER NOT NULL,
-                PRIMARY KEY(group_id, event_id)
-            );
-            CREATE TABLE IF NOT EXISTS group_message_tombstone_projection (
-                group_id TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                tombstone_id TEXT NOT NULL,
-                actor_device_id TEXT NOT NULL,
-                delete_scope TEXT NOT NULL,
-                deleted_epoch INTEGER NOT NULL,
-                reason TEXT NOT NULL,
-                deleted_at INTEGER NOT NULL,
-                PRIMARY KEY(group_id, message_id)
-            );
-            CREATE TABLE IF NOT EXISTS group_ban_projection (
-                group_id TEXT NOT NULL,
-                member_id TEXT NOT NULL,
-                ban_id TEXT NOT NULL,
-                actor_device_id TEXT NOT NULL,
-                banned_epoch INTEGER NOT NULL,
-                reason TEXT NOT NULL,
-                active INTEGER NOT NULL,
-                created_at INTEGER NOT NULL,
-                PRIMARY KEY(group_id, member_id)
-            );
-            CREATE TABLE IF NOT EXISTS group_invite_projection (
-                group_id TEXT NOT NULL,
-                invite_id TEXT NOT NULL,
-                invitee_identity TEXT NOT NULL,
-                invitee_signing_public_key TEXT NOT NULL,
-                invited_role TEXT NOT NULL,
-                inviter_device_id TEXT NOT NULL,
-                invite_epoch INTEGER NOT NULL,
-                expires_at INTEGER NOT NULL,
-                state TEXT NOT NULL,
-                reason TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY(group_id, invite_id)
-            );
             CREATE TABLE IF NOT EXISTS conversation_disappearing_policy (
                 conversation_id TEXT PRIMARY KEY,
                 timer_seconds INTEGER NOT NULL,
@@ -314,29 +242,6 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
                 blocked_at INTEGER,
                 removed_at INTEGER,
                 updated_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS group_projection (
-                group_id TEXT PRIMARY KEY,
-                group_epoch INTEGER NOT NULL,
-                role TEXT,
-                notification_state TEXT,
-                max_members INTEGER NOT NULL DEFAULT 1000,
-                new_member_history TEXT NOT NULL DEFAULT 'no_history',
-                deleted_at INTEGER,
-                created_at INTEGER NOT NULL DEFAULT 1760000000,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS group_member_projection (
-                group_id TEXT NOT NULL,
-                member_principal_id TEXT NOT NULL,
-                member_id TEXT,
-                role TEXT NOT NULL,
-                joined_epoch INTEGER NOT NULL,
-                removed_epoch INTEGER,
-                active INTEGER NOT NULL DEFAULT 1,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY(group_id, member_principal_id),
-                FOREIGN KEY(group_id) REFERENCES group_projection(group_id)
             );
             CREATE TABLE IF NOT EXISTS receipt_projection (
                 receipt_id TEXT PRIMARY KEY,
@@ -781,30 +686,6 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
         sql: "ALTER TABLE device_directory ADD COLUMN raw_device_id TEXT; UPDATE device_directory SET raw_device_id=device_id; CREATE INDEX idx_device_directory_raw ON device_directory(raw_device_id);",
     },
     AccountMigration {
-        schema_version: 9,
-        app_version: "v1-root-device-pins",
-        checksum: "2026-10-24-root-qualified-group-pins-v1",
-        notes: "literal member names indexed beside root-qualified key pins",
-        sql: "ALTER TABLE group_member_device_key ADD COLUMN raw_device_id TEXT; UPDATE group_member_device_key SET raw_device_id=member_id; CREATE INDEX idx_group_device_raw ON group_member_device_key(group_id,raw_device_id);",
-    },
-    AccountMigration {
-        schema_version: 10,
-        app_version: "v1-root-membership",
-        checksum: "2026-10-25-root-qualified-membership-v1",
-        notes: "membership and key pins must agree on the principal root",
-        sql: "ALTER TABLE group_member_projection ADD COLUMN principal_commitment TEXT;
-            UPDATE group_member_projection SET principal_commitment=(SELECT MIN(k.principal_commitment) FROM group_member_device_key k WHERE k.group_id=group_member_projection.group_id AND COALESCE(k.raw_device_id,k.member_id)=group_member_projection.member_id HAVING COUNT(*)=1 AND COUNT(k.principal_commitment)=1);",
-    },
-    AccountMigration {
-        schema_version: 11,
-        app_version: "v1-retired-group-pins",
-        checksum: "2026-10-25-archive-inactive-or-mismatched-group-pins-v1",
-        notes: "retired or mismatched pins cannot bind a reused membership slot",
-        sql: "CREATE TABLE IF NOT EXISTS legacy_group_member_device_key AS SELECT * FROM group_member_device_key WHERE 0;
-            INSERT INTO legacy_group_member_device_key SELECT k.* FROM group_member_device_key k WHERE EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=k.group_id AND m.member_id=COALESCE(k.raw_device_id,k.member_id) AND (m.active=0 OR m.principal_commitment IS NOT k.principal_commitment));
-            DELETE FROM group_member_device_key WHERE EXISTS(SELECT 1 FROM group_member_projection m WHERE m.group_id=group_member_device_key.group_id AND m.member_id=COALESCE(group_member_device_key.raw_device_id,group_member_device_key.member_id) AND (m.active=0 OR m.principal_commitment IS NOT group_member_device_key.principal_commitment));",
-    },
-    AccountMigration {
         schema_version: 12,
         app_version: "v1-object-erasure",
         checksum: crate::schema_object_erasure::V12_CHECKSUM,
@@ -833,22 +714,6 @@ pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageE
     )?;
     connection.call(|db| Ok(crate::schema_object_erasure::validate(db)))??;
     for migration in ACCOUNT_MIGRATIONS {
-        if migration.schema_version == 11 {
-            ensure_column(
-                connection,
-                "group_member_device_key",
-                "member_principal_id",
-                "member_principal_id TEXT",
-            )?;
-        }
-        if migration.schema_version == 10 {
-            ensure_column(
-                connection,
-                "group_member_device_key",
-                "principal_commitment",
-                "principal_commitment TEXT",
-            )?;
-        }
         apply_account_migration(connection, migration)?;
     }
     connection.call(|db| crate::account_db::raw_inner::schema::install(db))?;
@@ -923,8 +788,6 @@ fn apply_account_migration(
 fn ensure_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
     ensure_message_legacy_columns(connection)?;
     ensure_contact_legacy_columns(connection)?;
-    ensure_group_legacy_columns(connection)?;
-    ensure_group_control_tables(connection)?;
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS bot_trust_pin (
             bot_identity_commitment TEXT PRIMARY KEY,
@@ -1021,39 +884,6 @@ fn ensure_contact_legacy_columns(connection: &Connection) -> Result<(), StorageE
         "capability_revoked_at",
         "capability_revoked_at INTEGER",
     )
-}
-
-fn ensure_group_legacy_columns(connection: &Connection) -> Result<(), StorageError> {
-    ensure_column(connection, "group_projection", "role", "role TEXT")?;
-    ensure_column(connection, "group_projection", "notification_state", "notification_state TEXT")?;
-    ensure_column(connection, "group_projection", "deleted_at", "deleted_at INTEGER")?;
-    ensure_column(
-        connection,
-        "group_projection",
-        "created_at",
-        "created_at INTEGER NOT NULL DEFAULT 1760000000",
-    )?;
-    ensure_column(
-        connection,
-        "group_projection",
-        "updated_at",
-        "updated_at INTEGER NOT NULL DEFAULT 1760000000",
-    )?;
-    ensure_column(connection, "group_member_projection", "member_id", "member_id TEXT")?;
-    ensure_column(connection, "group_member_projection", "removed_epoch", "removed_epoch INTEGER")?;
-    ensure_column(
-        connection,
-        "group_member_projection",
-        "active",
-        "active INTEGER NOT NULL DEFAULT 1",
-    )?;
-    ensure_column(
-        connection,
-        "group_member_projection",
-        "updated_at",
-        "updated_at INTEGER NOT NULL DEFAULT 1760000000",
-    )?;
-    Ok(())
 }
 
 fn ensure_pending_recovery_tables(connection: &Connection) -> Result<(), StorageError> {
@@ -1158,79 +988,6 @@ fn ensure_device_directory_table(connection: &Connection) -> Result<(), StorageE
         );
         CREATE INDEX IF NOT EXISTS idx_device_directory_principal
             ON device_directory(principal_commitment);",
-    )?;
-    Ok(())
-}
-
-fn ensure_group_control_tables(connection: &Connection) -> Result<(), StorageError> {
-    connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS group_member_device_key (
-            group_id TEXT NOT NULL,
-            member_id TEXT NOT NULL,
-            device_signing_public_key TEXT NOT NULL,
-            verified_at INTEGER NOT NULL,
-            PRIMARY KEY(group_id, member_id)
-        );
-        CREATE TABLE IF NOT EXISTS group_control_event_seen (
-            group_id TEXT NOT NULL,
-            event_id TEXT NOT NULL,
-            event_kind TEXT NOT NULL,
-            actor_device_id TEXT NOT NULL,
-            target_member_id TEXT NOT NULL,
-            previous_epoch INTEGER NOT NULL,
-            new_group_epoch INTEGER NOT NULL,
-            applied_at INTEGER NOT NULL,
-            PRIMARY KEY(group_id, event_id)
-        );
-        CREATE TABLE IF NOT EXISTS group_message_tombstone_projection (
-            group_id TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            tombstone_id TEXT NOT NULL,
-            actor_device_id TEXT NOT NULL,
-            delete_scope TEXT NOT NULL,
-            deleted_epoch INTEGER NOT NULL,
-            reason TEXT NOT NULL,
-            deleted_at INTEGER NOT NULL,
-            PRIMARY KEY(group_id, message_id)
-        );
-        CREATE TABLE IF NOT EXISTS group_ban_projection (
-            group_id TEXT NOT NULL,
-            member_id TEXT NOT NULL,
-            ban_id TEXT NOT NULL,
-            actor_device_id TEXT NOT NULL,
-            banned_epoch INTEGER NOT NULL,
-            reason TEXT NOT NULL,
-            active INTEGER NOT NULL,
-            created_at INTEGER NOT NULL,
-            PRIMARY KEY(group_id, member_id)
-        );
-        CREATE TABLE IF NOT EXISTS group_invite_projection (
-            group_id TEXT NOT NULL,
-            invite_id TEXT NOT NULL,
-            invitee_identity TEXT NOT NULL,
-            invitee_signing_public_key TEXT NOT NULL,
-            invited_role TEXT NOT NULL,
-            inviter_device_id TEXT NOT NULL,
-            invite_epoch INTEGER NOT NULL,
-            expires_at INTEGER NOT NULL,
-            state TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY(group_id, invite_id)
-        );",
-    )?;
-    ensure_column(
-        connection,
-        "group_member_device_key",
-        "member_principal_id",
-        "member_principal_id TEXT",
-    )?;
-    ensure_column(
-        connection,
-        "group_member_device_key",
-        "principal_commitment",
-        "principal_commitment TEXT",
     )?;
     Ok(())
 }

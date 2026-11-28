@@ -76,47 +76,6 @@ fn erased_input_recorded_before_bindings_drop() -> Result<(), StorageError> {
 }
 
 #[test]
-fn erased_input_remote_group_delete_converts_only_its_message() -> Result<(), StorageError> {
-    // (d) A remote group delete converts only M's envelopes; an unrelated message has no row.
-    let now = crate::unix_now();
-    let (_root, db) = crate::tests::test_db("erased-producers-d")?;
-    let identity = ramflux_crypto::create_identity_root("owner", [0x72; 32]);
-    let actor = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
-        &identity,
-        "owner-device",
-    )?;
-    db.create_group("group", actor.device_id())?;
-    db.persist_group_member_device_key("group", &actor, "owner-key")?;
-    for (id, payload) in [("group-message", "pd1"), ("other-message", "pd2")] {
-        db.send_direct_message("group", id, actor.device_id(), b"secret")?;
-        db.persist_actor_state(
-            &format!("routed/committed/{id}"),
-            &json!({"routing":{"message_id":id},"entry":{"envelope":full("pd-p","pd-d",payload,now,3600)}}),
-        )?;
-    }
-    db.apply_group_message_delete(
-        &crate::GroupMessageDeleteWrite {
-            group_id: "group".into(),
-            event_id: "delete-event".into(),
-            actor_device_id: actor.device_id().into(),
-            target_message_id: "group-message".into(),
-            group_epoch: 1,
-            delete_scope: "all_devices".into(),
-            tombstone_id: "group-tombstone".into(),
-            reason: "user".into(),
-        },
-        &actor,
-    )?;
-    let (_, deleted) = current(&db, "pd-p", "pd-d", "pd1")?;
-    let (_, unrelated) = current(&db, "pd-p", "pd-d", "pd2")?;
-    assert_eq!(tombstone(&db, &deleted)?, Some(lifetime(now, 3600, now)));
-    assert_eq!(tombstone(&db, &unrelated)?, None);
-    assert_eq!(tombstones(&db)?, 1);
-    drop(db);
-    Ok(())
-}
-
-#[test]
 fn erased_input_conversation_delete_converts_the_sum_of_envelopes() -> Result<(), StorageError> {
     // (e) A conversation-wide expiry over k messages records exactly the sum; none is evicted.
     let now = crate::unix_now();

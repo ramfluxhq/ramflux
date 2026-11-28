@@ -7,12 +7,11 @@ use ramflux_crypto::{blake3_256_base64url, object_erasure_commitment, object_era
 use rusqlite::{Connection, params};
 use serde_json::Value;
 
-const TABLES: [&str; 6] = [
+const TABLES: [&str; 5] = [
     "backup_reference_admission",
     "backup_selector_admission",
     "backup_lookup_origin",
     "backup_target_delete",
-    "backup_group_delete",
     "backup_message_delete",
 ];
 

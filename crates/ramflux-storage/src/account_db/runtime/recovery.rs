@@ -7,50 +7,6 @@ use crate::StorageError;
 impl AccountDb {
     pub(super) fn install_inbox_recovery_schema(&self) -> Result<(), StorageError> {
         self.connection.execute_batch("CREATE TABLE IF NOT EXISTS runtime_inbox_recovery(singleton INTEGER PRIMARY KEY,revision INTEGER NOT NULL); INSERT OR IGNORE INTO runtime_inbox_recovery VALUES(1,0); DROP TRIGGER IF EXISTS inbox_recovery_actor_insert; DROP TRIGGER IF EXISTS inbox_recovery_actor_update;")?;
-        for (table, fields, keys) in [
-            (
-                "group_projection",
-                vec!["group_epoch", "role", "new_member_history", "deleted_at"],
-                vec!["group_id"],
-            ),
-            (
-                "group_member_projection",
-                vec!["role", "joined_epoch", "removed_epoch", "active"],
-                vec!["group_id", "member_principal_id"],
-            ),
-            (
-                "group_member_device_key",
-                vec!["device_signing_public_key"],
-                vec!["group_id", "member_id"],
-            ),
-        ] {
-            let same = fields
-                .iter()
-                .chain(keys.iter())
-                .map(|f| format!("t.{f} IS NEW.{f}"))
-                .collect::<Vec<_>>()
-                .join(" AND ");
-            let changed = fields
-                .iter()
-                .map(|f| format!("OLD.{f} IS NOT NEW.{f}"))
-                .collect::<Vec<_>>()
-                .join(" OR ");
-            for action in ["INSERT", "UPDATE", "DELETE"] {
-                self.connection.execute_batch(&format!(
-                    "DROP TRIGGER IF EXISTS inbox_recovery_{table}_{action};"
-                ))?;
-                let (timing, guard, subject) = match action {
-                    "INSERT" => (
-                        "BEFORE",
-                        format!("WHEN NOT EXISTS(SELECT 1 FROM {table} t WHERE {same})"),
-                        "NEW.group_id",
-                    ),
-                    "UPDATE" => ("AFTER", format!("WHEN {changed}"), "NEW.group_id"),
-                    _ => ("AFTER", String::new(), "OLD.group_id"),
-                };
-                self.connection.execute_batch(&format!("CREATE TRIGGER inbox_recovery_{table}_{action} {timing} {action} ON {table} {guard} BEGIN UPDATE runtime_inbox_recovery SET revision=revision+1; INSERT INTO runtime_inbox_changes VALUES('group',{subject},(SELECT revision FROM runtime_inbox_recovery)) ON CONFLICT(kind,subject) DO UPDATE SET revision=excluded.revision; END;"))?;
-            }
-        }
         for action in ["INSERT", "UPDATE"] {
             self.connection.execute_batch(&format!("DROP TRIGGER IF EXISTS inbox_recovery_message_{action}; CREATE TRIGGER inbox_recovery_message_{action} AFTER {action} ON runtime_message_content BEGIN UPDATE runtime_inbox_recovery SET revision=revision+1; INSERT INTO runtime_inbox_changes VALUES('message_target',NEW.conversation_id||'/'||NEW.message_id,(SELECT revision FROM runtime_inbox_recovery)) ON CONFLICT(kind,subject) DO UPDATE SET revision=excluded.revision; END;"))?;
         }

@@ -246,7 +246,7 @@ fn reverse_partial() -> TestResult {
     target.merge_backup_pipeline(
         &input,
         &source.key,
-        (BackupMergeMode::FullAccount(None), true),
+        (BackupMergeMode::FullAccount, true),
         &mut || Ok(()),
         |db| {
             assert_eq!(
@@ -316,7 +316,7 @@ fn replacement(mode: &str, replay_old: bool) -> TestResult {
     let result = target.merge_backup_pipeline(
         &input,
         &source.key,
-        (BackupMergeMode::FullAccount(None), true),
+        (BackupMergeMode::FullAccount, true),
         &mut || Ok(()),
         |db| {
             if mode == "valid" {

@@ -20,8 +20,6 @@ pub(crate) fn upgrade(connection: &Connection) -> Result<(), StorageError> {
     let transaction = connection.immediate_transaction()?;
     metadata(connection)?;
     directory(connection)?;
-    pins(connection)?;
-    connection.execute("UPDATE group_member_projection SET principal_commitment=(SELECT MIN(k.principal_commitment) FROM group_member_device_key k WHERE k.group_id=group_member_projection.group_id AND COALESCE(k.raw_device_id,k.member_id)=group_member_projection.member_id HAVING COUNT(*)=1 AND COUNT(k.principal_commitment)=1) WHERE principal_commitment IS NULL",[])?;
     // An unscoped secret cannot be attributed to a root by guessing from a raw name.
     // Archive unscoped secrets without granting them live authority. Drop old pointers and
     // recovery work; authenticated bootstrap establishes a new scoped pair. An upgraded
@@ -91,33 +89,6 @@ fn directory(connection: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn pins(connection: &Connection) -> Result<(), StorageError> {
-    let rows = {
-        let mut query = connection.prepare("SELECT group_id,COALESCE(raw_device_id,member_id),device_signing_public_key,verified_at,member_principal_id,principal_commitment FROM group_member_device_key")?;
-        query
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    connection.execute("DELETE FROM group_member_device_key", [])?;
-    for (group, raw, key, time, principal, root) in rows {
-        let address = match &root {
-            Some(root) => ramflux_protocol::qualified_device_id(root, &raw)?,
-            None => legacy_address(&raw),
-        };
-        connection.execute("INSERT OR REPLACE INTO group_member_device_key(group_id,member_id,device_signing_public_key,verified_at,member_principal_id,principal_commitment,raw_device_id) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![group,address,key,time,principal,root,raw])?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use crate::*;
@@ -135,8 +106,6 @@ mod tests {
             "INSERT INTO device_directory VALUES(?1,'mallory-root','legacy',1,?1)",
             rusqlite::params![address],
         )?;
-        db.create_group("legacy-group", &address)?;
-        db.connection.execute("INSERT INTO group_member_device_key(group_id,member_id,device_signing_public_key,verified_at,member_principal_id,principal_commitment,raw_device_id) VALUES('legacy-group',?1,'mallory',1,'mallory','mallory-root',?1)",rusqlite::params![address])?;
         db.persist_actor_state(
             "dm-pair/session/old",
             &json!({"local":"phone","remote":address,"snapshot":{"secret":"old"}}),
@@ -170,18 +139,6 @@ mod tests {
                 .device_id,
             address
         );
-        assert_eq!(
-            db.group_member_identity_metadata("legacy-group", &address)?
-                .ok_or(StorageError::AuthorizationRejected)?
-                .principal_commitment
-                .as_deref(),
-            Some("mallory-root")
-        );
-        let live = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
-            &ramflux_crypto::create_identity_root("bob", [41; 32]),
-            "phone",
-        )?;
-        assert!(db.group_member_key_binding("legacy-group", &live)?.is_none());
         assert!(
             ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
                 &ramflux_crypto::create_identity_root("mallory", [51; 32]),

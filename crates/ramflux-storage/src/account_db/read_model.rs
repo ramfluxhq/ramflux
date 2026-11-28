@@ -35,7 +35,6 @@ impl AccountDb {
             "object" => {
                 "SELECT object_id AS id FROM object_index WHERE tombstoned=0 UNION SELECT substr(m.state_kind,18) AS id FROM runtime_actor_state m WHERE m.state_kind GLOB 'directory/object/*' AND EXISTS(SELECT 1 FROM runtime_actor_state r WHERE r.state_kind='attachment/reference/'||substr(m.state_kind,18)) AND NOT EXISTS(SELECT 1 FROM object_index o WHERE o.object_id=substr(m.state_kind,18) AND o.tombstoned=1)"
             }
-            "group" => "SELECT group_id AS id FROM group_projection WHERE deleted_at IS NULL",
             "server" => "SELECT server_id AS id FROM mcp_server_registry",
             "approval" => {
                 "SELECT substr(state_kind,20) AS id FROM runtime_actor_state WHERE state_kind GLOB 'directory/approval/*' AND json_extract(CAST(state_json AS TEXT),'$.status')='pending'"

@@ -14,7 +14,6 @@ pub struct SearchMessageInput {
     pub expires_at: Option<i64>,
     pub body: zeroize::Zeroizing<Vec<u8>>,
     pub identity: zeroize::Zeroizing<Vec<u8>>,
-    pub group_projection: Option<zeroize::Zeroizing<Vec<u8>>>,
     pub revision: u64,
 }
 
@@ -111,15 +110,14 @@ impl AccountDb {
             let body:Option<Option<Vec<u8>>>=db.query_row("SELECT CASE WHEN length(body)<=131072 THEN body END FROM runtime_message_content WHERE message_id=?1",[&message],|r|r.get(0)).optional()?;
             let body=match body {None=>return Ok(None),Some(Some(body))=>zeroize::Zeroizing::new(body),Some(None)=>return Err(SearchError::Capacity)};
             let revision=actor(format!("routed/edit-revision/{message}"))?.map(|bytes|serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_|SearchError::IndexUnavailable)).transpose()?.and_then(|value|value.get("revision").and_then(serde_json::Value::as_u64)).unwrap_or(0);
-            let group_projection=actor(format!("routed/group-projection/{message}"))?.map(zeroize::Zeroizing::new);
-            Ok(Some(SearchMessageInput {message_id:message,conversation_id,sender_id,created_at,expires_at,body,identity,group_projection,revision}))
+            Ok(Some(SearchMessageInput {message_id:message,conversation_id,sender_id,created_at,expires_at,body,identity,revision}))
         })
     }
 }
 
 impl AccountDb {
     /// # Errors
-    /// Requires visible local metadata and current, non-deleted group authority.
+    /// Requires visible local metadata.
     pub fn search_conversation_visible(
         &self,
         _activation: &SearchActivation,
@@ -131,23 +129,6 @@ impl AccountDb {
         }
         let conversation = conversation.to_owned();
         self.search_call(control,move |db| Ok(db.query_row("SELECT NOT EXISTS(SELECT 1 FROM conversation_list_state WHERE conversation_id=?1 AND hidden_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM conversation_projection WHERE conversation_id=?1 AND hidden_at IS NOT NULL)",[conversation],|r|r.get(0))?))
-    }
-    /// # Errors
-    /// Membership probes use the complete indexed viewer key, never a group-wide scan.
-    pub fn search_group_member(
-        &self,
-        _activation: &SearchActivation,
-        group: &str,
-        viewer: &ramflux_crypto::RootQualifiedDeviceRef,
-        control: &SearchControl,
-    ) -> SearchResult<bool> {
-        if group.len() > 256 {
-            return Err(SearchError::InvalidQuery);
-        }
-        let group = group.to_owned();
-        let root = viewer.root_commitment().to_owned();
-        let device = viewer.device_id().to_owned();
-        self.search_call(control,move |db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM shared_group_member_projection m WHERE group_id=?1 AND root_commitment=?2 AND device_id=?3 AND active=1) AND NOT EXISTS(SELECT 1 FROM group_projection WHERE group_id=?1 AND deleted_at IS NOT NULL)",params![group,root,device],|r|r.get(0))?))
     }
     /// # Errors
     /// Resolves only bounded, admitted local references for the exact wire/manifest identity.

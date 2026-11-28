@@ -120,13 +120,10 @@ impl RamfluxClient {
         let id = ramflux_protocol::encode_base64url(&identity.id);
         let scanned = g::validation::scan_inner(&item.exact_inner)
             .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
-        let supported = scanned.outcome == g::validation::ScanOutcome::Supported
-            && (identity.group_id.is_none()
-                || g::validation::scan_message(
-                    "Message",
-                    &origin.evidence.group_plaintext,
-                    scanned.layer,
-                ) == Ok(g::validation::ScanOutcome::Supported));
+        if identity.group_id.is_some() {
+            return Err(EvidenceError::OriginCommitmentMismatch.into());
+        }
+        let supported = scanned.outcome == g::validation::ScanOutcome::Supported;
         self.bind_history_message_conversation(identity, verified)?;
         db.import_direct_message_projection(ramflux_storage::DirectMessageWrite {
             conversation_id: &identity.conversation_id,
@@ -164,20 +161,6 @@ impl RamfluxClient {
                 &ramflux_storage::MessageMetadata::default(),
             )?;
             self.persist_known_origin(&id, origin)?;
-            if identity.group_id.is_some() {
-                let message = g::Message::decode(origin.evidence.group_plaintext.as_slice())
-                    .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
-                db.persist_message_actor_state(
-                    &id,
-                    &format!("routed/group-projection/{id}"),
-                    &message,
-                )?;
-                db.persist_message_actor_state(
-                    &id,
-                    &format!("routed/group-content/{id}"),
-                    &origin.evidence.group_plaintext,
-                )?;
-            }
             self.resolve_generated_pending_edit(&identity.conversation_id, &id)?;
             self.resolve_generated_pending_history_edit(&id)?;
         } else {

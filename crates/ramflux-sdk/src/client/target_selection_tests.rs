@@ -712,7 +712,6 @@ fn storage_errors_in_cached_roster_are_not_classified_stale() -> TestResult {
 #[test]
 fn control_route_selects_control_kind() {
     assert_eq!(kind_id_for_route(&crate::client::routed::Kind::Control), KindId::KindControl);
-    assert_eq!(kind_id_for_route(&crate::client::routed::Kind::GroupControl), KindId::KindControl);
     assert_eq!(kind_id_for_route(&crate::client::routed::Kind::Direct), KindId::KindMessage);
 }
 

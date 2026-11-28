@@ -68,18 +68,6 @@ pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFail
         | E::Serde(_)
         | E::AuthorizationRejected
         | E::FootprintMigrationIncomplete
-        | E::GroupMemberLimitExceeded
-        | E::InvalidGroupRole(_)
-        | E::GroupPermissionDenied
-        | E::GroupControlReplay(_)
-        | E::GroupControlEpochMismatch { .. }
-        | E::GroupControlSigningKeyMissing(_)
-        | E::GroupInviteMissing(_)
-        | E::GroupInviteInvalidState { .. }
-        | E::GroupInviteExpired(_)
-        | E::GroupInviteAcceptorMismatch(_)
-        | E::SenderKeyNotDistributed
-        | E::GroupEpochAccessDenied
         | E::MessageNotFound(_)
         | E::MessageIdConflict(_)
         | E::OperationReconciliationRequired { .. }

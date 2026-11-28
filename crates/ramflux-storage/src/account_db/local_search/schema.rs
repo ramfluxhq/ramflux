@@ -142,8 +142,6 @@ fn install_sources(db: &Connection) -> rusqlite::Result<()> {
         ("conversation_projection", "conversation_id", Some(0)),
         ("conversation_disappearing_policy", "conversation_id", Some(0)),
         ("object_retention_reference", "reference_hash", None),
-        ("group_projection", "group_id", None),
-        ("shared_group_member_projection", "group_id", None),
         ("object_index", "object_id", None),
         ("object_message_reference", "message_id", Some(1)),
         ("object_retention_payload", "commitment", None),
@@ -179,9 +177,6 @@ fn install_sources(db: &Connection) -> rusqlite::Result<()> {
                     write!(body, "INSERT INTO local_search_dirty SELECT {kind},OLD.{key} WHERE length(CAST(OLD.{key} AS BLOB))<=256 AND (SELECT count(*) FROM local_search_dirty)<4096 ON CONFLICT DO NOTHING;").map_err(|_|rusqlite::Error::InvalidQuery)?;
                 }
             }
-            if matches!(table, "group_projection" | "shared_group_member_projection") {
-                body.push_str("UPDATE local_search_state SET rebuild_required=1,checkpoint_kind=0,checkpoint='',coverage='building';");
-            }
             if table == "runtime_actor_state" {
                 write!(body, "INSERT INTO local_search_dirty SELECT 0,substr({current}.state_kind,24) WHERE {current}.state_kind GLOB 'directory/conversation/*' AND length(CAST(substr({current}.state_kind,24) AS BLOB))<=256 AND (SELECT count(*) FROM local_search_dirty)<4096 ON CONFLICT DO NOTHING;").map_err(|_|rusqlite::Error::InvalidQuery)?;
                 body.push_str(
@@ -212,11 +207,8 @@ fn actor_source_guard(alias: &str) -> String {
     [
         "directory/*",
         "routed/generated-identity/*",
-        "routed/group-projection/*",
         "routed/edit-revision/*",
         "routed/unsupported/*",
-        "shared-group/*",
-        "group/*",
         "attachment/*",
         "identity/*",
         "profile/*",

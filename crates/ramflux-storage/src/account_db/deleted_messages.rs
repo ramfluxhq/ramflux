@@ -836,39 +836,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn group_delete_uses_the_same_narrow_projection() -> Result<(), StorageError> {
-        let (root, db) = crate::tests::test_db("deleted-group")?;
-        let identity = ramflux_crypto::create_identity_root("owner", [0x72; 32]);
-        let actor = ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
-            &identity,
-            "owner-device",
-        )?;
-        db.create_group("group", actor.device_id())?;
-        db.persist_group_member_device_key("group", &actor, "owner-key")?;
-        db.send_direct_message("group", "group-message", actor.device_id(), b"secret")?;
-        db.store_message_content("group", "group-message", b"plaintext")?;
-        db.apply_group_message_delete(
-            &crate::GroupMessageDeleteWrite {
-                group_id: "group".into(),
-                event_id: "delete-event".into(),
-                actor_device_id: actor.device_id().into(),
-                target_message_id: "group-message".into(),
-                group_epoch: 1,
-                delete_scope: "all_devices".into(),
-                tombstone_id: "group-tombstone".into(),
-                reason: "user".into(),
-            },
-            &actor,
-        )?;
-        let row =
-            db.direct_message_by_id("group-message")?.ok_or(StorageError::AuthorizationRejected)?;
-        assert!(row.deleted);
-        assert_eq!(row.sender_id, "");
-        assert_eq!(db.message_content("group-message")?, None);
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
     fn seed_carrier(db: &AccountDb) -> Result<(), StorageError> {
         db.import_direct_message_projection(crate::DirectMessageWrite {
             conversation_id: "thread",

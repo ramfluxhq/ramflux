@@ -379,7 +379,7 @@ fn preservation_progress_cancellation_rolls_back() -> TestResult {
         let before = std::fs::read(path)?;
         let mut calls = 0;
         let result = target.merge_backup_pipeline(path, key,
-            (super::super::backup_merge::BackupMergeMode::FullAccount(None), true),
+            (super::super::backup_merge::BackupMergeMode::FullAccount, true),
             &mut || Ok(()), |db| {
                 graph::classify(db)?;
                 db.execute_batch("CREATE TEMP TABLE backup_erased_copy(database_name TEXT,table_name TEXT,row_id INTEGER);")?;

@@ -170,7 +170,7 @@ impl RamfluxClient {
             Some(g::content::Value::Reaction(reaction)) => {
                 self.apply_generated_reaction_authorized(&local, identity, conversation, reaction)?;
             }
-            Some(g::content::Value::Message(body)) => {
+            Some(g::content::Value::Message(_)) => {
                 let id = ramflux_protocol::encode_base64url(&identity.id);
                 self.account_db()?.write_transaction(|| {
                     if self.direct_message_by_id(&id)?.is_none() {
@@ -187,19 +187,6 @@ impl RamfluxClient {
                             &format!("routed/generated-identity/{id}"),
                             identity,
                         )?;
-                        if identity.group_id.is_some() {
-                            use prost::Message as _;
-                            self.account_db()?.persist_message_actor_state(
-                                &id,
-                                &format!("routed/group-projection/{id}"),
-                                body,
-                            )?;
-                            self.account_db()?.persist_message_actor_state(
-                                &id,
-                                &format!("routed/group-content/{id}"),
-                                &body.encode_to_vec(),
-                            )?;
-                        }
                         self.account_db()?.mark_generated_message_owned(&id, &local)?;
                     }
                     Ok::<_, SdkError>(())

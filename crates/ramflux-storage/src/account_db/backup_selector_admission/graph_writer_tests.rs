@@ -69,7 +69,7 @@ fn admitted_graph_writer_excludes_unadmitted_reference_edges()
             params![format!("message/deleted/{marker}"), b"true".as_slice()],
         )?;
         let result = target.merge_backup_pipeline(&path,&snapshot.key,
-            (BackupMergeMode::FullAccount(None),true), &mut ||Ok(()), |db| {
+            (BackupMergeMode::FullAccount,true), &mut ||Ok(()), |db| {
                 graph::classify(db)?;
                 // Remove the fixture's target owners, so target presence cannot mask an import.
                 db.execute_batch("DELETE FROM object_message_reference; DELETE FROM object_retention_reference; DELETE FROM object_reference_actor; DELETE FROM message_copy_binding; DELETE FROM message_footprint;

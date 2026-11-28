@@ -38,7 +38,6 @@ mod backup_selector_admission;
 mod backup_self_sync;
 #[cfg(test)]
 mod backup_self_sync_tests;
-mod backup_shared_groups;
 pub mod bot;
 pub(crate) mod checkpoint_writer;
 mod contact_consent;
@@ -54,12 +53,6 @@ mod event_counter;
 mod files;
 pub mod friend;
 pub(crate) mod full_transfer;
-mod group_device_address;
-mod group_key_safety;
-pub mod group_pending;
-mod group_retention;
-mod group_snapshot;
-pub mod groups;
 pub mod history;
 pub mod mls_kv;
 #[cfg(any(test, feature = "test-instrumentation"))]
@@ -100,13 +93,6 @@ pub mod restore_floor;
 pub mod runtime;
 pub(crate) mod safety_verification;
 mod self_sync_retirement;
-mod shared_group_delivery;
-pub(crate) mod shared_group_denials;
-mod shared_group_floor_index;
-mod shared_group_heads;
-mod shared_group_members;
-mod shared_group_removals;
-mod shared_group_state;
 pub mod surface;
 mod task;
 #[cfg(test)]
@@ -201,7 +187,6 @@ impl AccountDb {
             volatile_presence: RefCell::new(BTreeMap::new()),
         };
         crate::schema_contact_requests::upgrade(&db.connection)?;
-        crate::schema_shared_group::upgrade(&db.connection)?;
         db.enable_runtime()?;
         db.complete_footprint_migration()?;
         mac_subkeys::initialize_managed(&db.connection, key, fresh)?;
@@ -209,8 +194,6 @@ impl AccountDb {
         crate::schema_device_namespace::upgrade(&db.connection)?;
         crate::schema_identity_keys::upgrade(&db.connection)?;
         crate::schema_receipt_identity::upgrade(&db.connection)?;
-        crate::schema_group_sender_identity::upgrade(&db.connection)?;
-        crate::schema_group_control_identity::upgrade(&db.connection)?;
         db.maintain_object_retention()?;
         Ok(db)
     }

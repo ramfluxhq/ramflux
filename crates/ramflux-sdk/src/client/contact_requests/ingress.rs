@@ -50,11 +50,7 @@ impl RamfluxClient {
             Err(error @ SdkError::Storage(_)) => return Err(error),
             Err(_) => {}
         }
-        Ok(!self.inbound_relationship_names_root(
-            &entry.envelope.source_principal_id,
-            &root,
-            &entry.envelope.source_device_id,
-        )?)
+        Ok(!self.inbound_relationship_names_root(&entry.envelope.source_principal_id, &root)?)
     }
 
     pub(crate) async fn contact_request_candidate(
@@ -200,10 +196,6 @@ impl RamfluxClient {
         body: &[u8],
     ) -> Result<(), SdkError> {
         use crate::client::routed::Kind;
-        if matches!(route.kind, Kind::GroupControl | Kind::GroupMessage) {
-            // The old shared-group route is gone; MLS groups never travel on it.
-            return Err(invalid("group routes are not accepted"));
-        }
         if !matches!(route.kind, Kind::Direct | Kind::Control) {
             return Ok(());
         }

@@ -956,28 +956,6 @@ fn deterministic_event_replay_is_idempotent_but_rejects_changed_body() -> Result
 }
 
 #[test]
-fn group_sender_key_counter_seen_rejects_replay() -> Result<(), StorageError> {
-    let (_root, db) = test_db("sender-counter")?;
-    let actor = receipt_actor("alice")?;
-    let record = GroupSenderKeyCounterRecord {
-        group_id: "group_a".to_owned(),
-        group_key_epoch: 7,
-        sender_id: "alice".to_owned(),
-        session_id: "session".to_owned(),
-        counter: 42,
-        message_id: "msg_first".to_owned(),
-        seen_at: 1_760_000_000,
-    };
-
-    assert!(!db.group_sender_key_counter_seen("group_a", 7, &actor, "session", 42)?);
-    assert!(db.record_group_sender_key_counter(&record, &actor)?);
-    assert!(db.group_sender_key_counter_seen("group_a", 7, &actor, "session", 42)?);
-    let replay = GroupSenderKeyCounterRecord { message_id: "msg_replay".to_owned(), ..record };
-    assert!(!db.record_group_sender_key_counter(&replay, &actor)?);
-    Ok(())
-}
-
-#[test]
 fn conversation_summaries_lists_real_conversations_with_activity() -> Result<(), StorageError> {
     let (_root, mut db) = test_db("conversation-summaries")?;
     db.set_clock(AccountClock::sequence(1_900_000_000));
@@ -1223,5 +1201,3 @@ fn optional_friend_lookup_distinguishes_absent_links_from_real_sql_failures()
     drop(db);
     Ok(())
 }
-#[path = "shared_group_state_tests.rs"]
-mod shared_group_state_tests;

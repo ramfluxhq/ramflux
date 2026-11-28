@@ -44,8 +44,7 @@ impl AccountDb {
                 fingerprint TEXT NOT NULL,
                 response_json TEXT,
                 operation_kind TEXT
-             );
-             CREATE TABLE IF NOT EXISTS group_service_body_fence (message_id TEXT PRIMARY KEY, body_hash BLOB NOT NULL);",
+             );",
         )?;
         let operation_kind: i64 = self.connection.query_row(
             "SELECT count(*) FROM pragma_table_info('runtime_operation') WHERE name='operation_kind'",
@@ -62,7 +61,6 @@ impl AccountDb {
             params![self.principal_commitment],
         )?;
         self.install_event_counter_schema()?;
-        self.install_group_message_retention_schema()?;
         let columns: i64 = self.connection.query_row(
             "SELECT count(*) FROM pragma_table_info('runtime_outbox') WHERE name='keys_json'",
             [],

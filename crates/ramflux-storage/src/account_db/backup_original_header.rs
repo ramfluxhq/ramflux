@@ -21,7 +21,7 @@ fn mismatch<T>() -> Result<T, h::EvidenceError> {
     Err(h::EvidenceError::OriginCommitmentMismatch)
 }
 
-/// Signatures, historical native authority, group membership and the original-header
+/// Signatures, historical native authority and the original-header
 /// commitment all precede comparison. Recipient-specific envelope bytes are excluded.
 fn verified_preimage(target: &str, bytes: &[u8]) -> Result<Vec<u8>, h::EvidenceError> {
     let bad = h::EvidenceError::OriginCommitmentMismatch;
@@ -92,7 +92,7 @@ fn verified_preimage(target: &str, bytes: &[u8]) -> Result<Vec<u8>, h::EvidenceE
         &certificate.branch_signing_public_key,
     )
     .map_err(|_| bad)?;
-    verify_group(&identity, &evidence, &authority, issued)?;
+    refuse_group_evidence(&identity, &evidence)?;
     let header = h::Header {
         layer: evidence.layer,
         kind: 1,
@@ -108,51 +108,19 @@ fn verified_preimage(target: &str, bytes: &[u8]) -> Result<Vec<u8>, h::EvidenceE
     h::transcript(&header)
 }
 
-fn verify_group(
+/// Old shared-group evidence is refused: MLS group history is never carried by this header.
+fn refuse_group_evidence(
     identity: &g::EventIdentity,
     evidence: &g::HistoryOriginalMetadataEvidence,
-    authority: &ramflux_crypto::custody::VerifiedRecord,
-    issued: u64,
 ) -> Result<(), h::EvidenceError> {
-    let bad = h::EvidenceError::OriginCommitmentMismatch;
-    let Some(binding) = evidence.group_binding.as_ref() else {
-        return if identity.group_id.is_none() && evidence.group_membership.is_none() {
-            Ok(())
-        } else {
-            mismatch()
-        };
-    };
-    let author = identity.author.as_ref().ok_or(bad)?;
-    authority
-        .authorize(
-            &ramflux_protocol::custody::DeviceRef {
-                account_anchor: author.account_anchor.clone(),
-                device_id: author.device_id.clone(),
-                device_epoch: author.device_epoch,
-            },
-            "group",
-            issued,
-        )
-        .map_err(|_| bad)?;
-    let snapshot = evidence.group_membership.as_ref().ok_or(bad)?;
-    let parsed =
-        ramflux_protocol::group_state::GroupStateSnapshot::from_wire_bytes(&snapshot.canonical)
-            .map_err(|_| bad)?;
-    if ramflux_protocol::canonical_json_bytes(&parsed).map_err(|_| bad)? != snapshot.canonical {
-        return mismatch();
-    }
-    let verified = ramflux_crypto::verify_group_state_snapshot(parsed).map_err(|_| bad)?;
-    let state = verified.snapshot();
-    if state.group_id != binding.group_id
-        || state.epoch != binding.key_epoch
-        || state.genesis.conversation_id != identity.conversation_id
-        || ramflux_protocol::decode_base64url(&state.state_hash).map_err(|_| bad)?
-            != binding.group_state_hash
-        || verified.view().effective_role(&author.account_anchor, &author.device_id).is_none()
+    if identity.group_id.is_none()
+        && evidence.group_binding.is_none()
+        && evidence.group_membership.is_none()
     {
-        return mismatch();
+        Ok(())
+    } else {
+        mismatch()
     }
-    Ok(())
 }
 
 fn headers(

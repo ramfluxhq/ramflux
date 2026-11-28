@@ -2,14 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 //! Exact local migration markers. Unknown descendants are never excluded by prefix.
-use super::{
-    CellType, CodecRule, Disposition, FamilyRule, FamilySelector, FieldRule, MergeRule, U64,
-};
+use super::{CodecRule, Disposition, FamilyRule, FamilySelector, FieldRule, MergeRule, U64};
 use crate::{StorageError, database::Connection};
 use rusqlite::OptionalExtension as _;
 
 const SAFETY: &str = crate::account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;
-const GROUP: &str = "group-message/upgrade-start";
 const fn local_rule(
     id: &'static str,
     kind: &'static str,
@@ -39,14 +36,6 @@ const fn field(name: &'static str, codec: CodecRule) -> FieldRule {
         codec,
     }
 }
-pub(super) const GROUP_RULE: FamilyRule = local_rule(
-    "actor/group-message/upgrade-start",
-    GROUP,
-    &[
-        field("state_kind", CodecRule::Enum { values: &[GROUP] }),
-        field("state_json", CodecRule::Scalar { cell_type: CellType::I64 }),
-    ],
-);
 pub(super) const SAFETY_RULE: FamilyRule = local_rule(
     "actor/identity/safety-verification-migration/v1",
     SAFETY,
@@ -66,9 +55,7 @@ pub(in crate::account_db::full_transfer) fn rows(
     rule: &FamilyRule,
     table_exists: bool,
 ) -> Result<u64, StorageError> {
-    let (kind, limit, boolean) = if exact(rule, &GROUP_RULE)? {
-        (GROUP, 20, false)
-    } else if exact(rule, &SAFETY_RULE)? {
+    let (kind, limit, boolean) = if exact(rule, &SAFETY_RULE)? {
         (SAFETY, 5, true)
     } else {
         return Err(unsupported());
@@ -118,17 +105,15 @@ pub(in crate::account_db::full_transfer) fn unprojected_rows(
     input: &Connection,
     rules: &[FamilyRule],
 ) -> Result<u64, StorageError> {
-    let group = rules
-        .iter()
-        .find(|rule| rule.id == GROUP_RULE.id)
-        .map(|rule| exact(rule, &GROUP_RULE))
-        .transpose()?
-        .unwrap_or(false);
     let safety = rules
         .iter()
         .find(|rule| rule.id == SAFETY_RULE.id)
         .map(|rule| exact(rule, &SAFETY_RULE))
         .transpose()?
         .unwrap_or(false);
-    Ok(input.query_row("SELECT count(*) FROM runtime_actor_state WHERE NOT ((?1 AND state_kind=?2) OR (?3 AND state_kind=?4))",rusqlite::params![group,GROUP,safety,SAFETY],|row|row.get(0))?)
+    Ok(input.query_row(
+        "SELECT count(*) FROM runtime_actor_state WHERE NOT (?1 AND state_kind=?2)",
+        rusqlite::params![safety, SAFETY],
+        |row| row.get(0),
+    )?)
 }

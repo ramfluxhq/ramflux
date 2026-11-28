@@ -137,10 +137,9 @@ fn deleted_with_bindings(
     message: &str,
     bindings: &str,
 ) -> Result<bool, StorageError> {
-    let queries = super::restrictions::queries(schema, bindings);
-    let projected: bool = db.query_row(&queries[0], [message], |r| r.get(0))?;
-    let group_deleted: bool = db.query_row(&queries[1], [message], |r| r.get(0))?;
-    if projected || group_deleted || marker(db, schema, message)? {
+    let projected: bool =
+        db.query_row(&super::restrictions::query(schema), [message], |r| r.get(0))?;
+    if projected || marker(db, schema, message)? {
         return Ok(true);
     }
     // Resolve envelope aliases only through the caller's binding authority;

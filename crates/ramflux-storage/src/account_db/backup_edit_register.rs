@@ -33,13 +33,8 @@ pub(super) const KEEP: [&str; 11] = [
     "message-delete-tombstone/",
 ];
 /// Per-revision private evidence addressed by the target id rather than by an index row.
-const REVISION_ACTORS: [&str; 5] = [
-    "routed/current-edit-proof/",
-    "routed/origin-evidence/",
-    "routed/group-content/",
-    "routed/group-projection/",
-    "routed/report-opening-retired/",
-];
+const REVISION_ACTORS: [&str; 3] =
+    ["routed/current-edit-proof/", "routed/origin-evidence/", "routed/report-opening-retired/"];
 const REVISION_RAW: &str = "history/current-edit/";
 const ORIGINAL_RAW: &str = "history/original-header/";
 const ERASED_COPY: &str = "CREATE TEMP TABLE IF NOT EXISTS backup_erased_copy(database_name TEXT NOT NULL,table_name TEXT NOT NULL,row_id INTEGER NOT NULL,PRIMARY KEY(database_name,table_name,row_id));";

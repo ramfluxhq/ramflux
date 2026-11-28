@@ -57,13 +57,12 @@ impl crate::AccountDb {
     /// # Errors
     /// Returns storage errors.
     pub fn durable_rows_for_test(&self) -> Result<Vec<String>, StorageError> {
-        const TABLES: [&str; 8] = [
+        const TABLES: [&str; 7] = [
             "runtime_actor_state",
             "message_copy_binding",
             "message_footprint",
             "direct_message_projection",
             "object_key_slot",
-            "group_sender_key_counter_seen",
             "gateway_receive_receipt",
             "gateway_receive_work",
         ];

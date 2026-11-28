@@ -15,12 +15,8 @@ const AUDIT_IDENTITY_TABLES: &[&str] = &[
     "contact_request_decision",
     "contact_link_decision",
     "contact_root_binding",
-    "shared_group_member_projection",
-    "group_member_projection",
-    "group_member_device_key",
     "runtime_account_identity",
     "runtime_inbox_changes",
-    "root_group_control_event_seen",
 ];
 const AUDIT_IDENTITY_ACTOR_FILTER: &str = "state_kind GLOB 'directory/identity/*' OR state_kind GLOB 'directory/device/*' OR state_kind GLOB 'directory/contact/*' OR state_kind GLOB 'directory/commitment/*' OR state_kind GLOB 'directory/conversation/*' OR state_kind GLOB 'directory/group/*' OR state_kind GLOB 'directory/group-local/*' OR state_kind GLOB 'directory/group-name/*' OR state_kind GLOB 'identity/*' OR state_kind GLOB 'authority/*'";
 const AUDIT_IDENTITY_EVENT_FILTER: &str = "event_type GLOB 'identity.*' OR event_type GLOB 'device.*' OR event_type GLOB 'prekey.*' OR event_type GLOB 'x3dh.prekey.*' OR event_type IN ('dm.ratchet_session','group.sender_key.state','group.member.route')";
@@ -55,53 +51,48 @@ fn message_copy_upserts_keep_registration_idempotent() -> Result<(), StorageErro
 }
 
 #[test]
-fn message_copy_stores_erase_all_columns_for_own_peer_dm_and_group_across_restart()
+fn message_copy_stores_erase_all_columns_for_own_and_peer_dm_across_restart()
 -> Result<(), StorageError> {
     for own in [false, true] {
-        for group in [false, true] {
-            let (root, db) = crate::tests::test_db(&format!("footprint-generic-{own}-{group}"))?;
-            let sender = if own { "sibling-private-device" } else { "peer-private-device" };
-            let principal = if own { "principal" } else { "peer-private-root" };
-            db.upsert_device_directory_entry(sender, principal, "verified", 1)?;
-            db.persist_client_record(
-                "identity",
-                principal,
-                &json!({"principal":principal,"device":sender}),
-            )?;
-            if group {
-                db.create_group("group", sender)?;
-            }
-            let conversation = if group { "group" } else { "thread" };
-            db.send_direct_message(conversation, "projection-id", sender, b"private-content")?;
-            let hash = ramflux_crypto::blake3_256_base64url(
-                "ramflux.sdk.receipt.v3",
-                &ramflux_protocol::canonical_json_bytes(&(principal, sender, "wire-private-id"))?,
-            );
-            seed_copies(&db, &hash, principal, sender, conversation)?;
-            let forbidden = vec![
-                sender.to_owned(),
-                principal.to_owned(),
-                "wire-private-id".into(),
-                hash,
-                "logical-private-id".into(),
-                "private-content".into(),
-            ];
-            let before = identity_rows(&db)?;
-            db.delete_direct_message(conversation, "projection-id", "local", "delete-id")?;
-            assert_eq!(before, identity_rows(&db)?);
-            assert_erased(&db, &forbidden)?;
-            assert_eq!(db.direct_message_by_id("projection-id")?.map(|p| p.is_own), Some(own));
-            drop(db);
-            let db = AccountDb::open(
-                &AccountIndex::open(&root)?,
-                "acct",
-                &AccountDbKey::derive("acct", b"storage-test-secret"),
-            )?;
-            assert_eq!(before, identity_rows(&db)?);
-            assert_erased(&db, &forbidden)?;
-            drop(db);
-            std::fs::remove_dir_all(root)?;
-        }
+        let (root, db) = crate::tests::test_db(&format!("footprint-generic-{own}"))?;
+        let sender = if own { "sibling-private-device" } else { "peer-private-device" };
+        let principal = if own { "principal" } else { "peer-private-root" };
+        db.upsert_device_directory_entry(sender, principal, "verified", 1)?;
+        db.persist_client_record(
+            "identity",
+            principal,
+            &json!({"principal":principal,"device":sender}),
+        )?;
+        let conversation = "thread";
+        db.send_direct_message(conversation, "projection-id", sender, b"private-content")?;
+        let hash = ramflux_crypto::blake3_256_base64url(
+            "ramflux.sdk.receipt.v3",
+            &ramflux_protocol::canonical_json_bytes(&(principal, sender, "wire-private-id"))?,
+        );
+        seed_copies(&db, &hash, principal, sender, conversation)?;
+        let forbidden = vec![
+            sender.to_owned(),
+            principal.to_owned(),
+            "wire-private-id".into(),
+            hash,
+            "logical-private-id".into(),
+            "private-content".into(),
+        ];
+        let before = identity_rows(&db)?;
+        db.delete_direct_message(conversation, "projection-id", "local", "delete-id")?;
+        assert_eq!(before, identity_rows(&db)?);
+        assert_erased(&db, &forbidden)?;
+        assert_eq!(db.direct_message_by_id("projection-id")?.map(|p| p.is_own), Some(own));
+        drop(db);
+        let db = AccountDb::open(
+            &AccountIndex::open(&root)?,
+            "acct",
+            &AccountDbKey::derive("acct", b"storage-test-secret"),
+        )?;
+        assert_eq!(before, identity_rows(&db)?);
+        assert_erased(&db, &forbidden)?;
+        drop(db);
+        std::fs::remove_dir_all(root)?;
     }
     Ok(())
 }
@@ -189,13 +180,7 @@ fn seed_envelope_stores(db: &AccountDb, sender: &str, event: &str) -> Result<(),
 
 fn identity_rows(db: &AccountDb) -> Result<Vec<Vec<u8>>, StorageError> {
     let mut result = Vec::new();
-    for table in [
-        "device_directory",
-        "device_identity",
-        "local_event_counter",
-        "group_member_projection",
-        "group_member_device_key",
-    ] {
+    for table in ["device_directory", "device_identity", "local_event_counter"] {
         result.extend(dump(db, &format!("SELECT * FROM {table} ORDER BY rowid"))?);
     }
     result.extend(dump(db,"SELECT state_kind,state_json FROM runtime_actor_state WHERE state_kind GLOB 'directory/identity/*' ORDER BY state_kind")?);

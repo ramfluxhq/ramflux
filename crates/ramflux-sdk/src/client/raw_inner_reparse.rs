@@ -205,25 +205,6 @@ impl RamfluxClient {
         )?;
         if let Some((copy, origin)) = origin.as_ref() {
             self.persist_known_origin(&provenance.message, origin)?;
-            if identity.group_id.is_some() {
-                let message = <g::Message as prost::Message>::decode(
-                    origin.evidence.group_plaintext.as_slice(),
-                )
-                .map_err(|_| {
-                    SdkError::InboundRejected("retained group plaintext changed".into())
-                })?;
-                db.persist_message_actor_state(
-                    &provenance.message,
-                    &format!("routed/group-projection/{}", provenance.message),
-                    &message,
-                )?;
-                db.persist_message_actor_state(
-                    &provenance.message,
-                    &format!("routed/group-content/{}", provenance.message),
-                    &origin.evidence.group_plaintext,
-                )?;
-                db.finish_raw_inner_reparse(&format!("{}/nested-group", snapshot.copy.copy_id))?;
-            }
             db.finish_raw_inner_reparse(&copy.copy_id)?;
         }
         self.remove_generated_unsupported_view(&provenance.message)?;

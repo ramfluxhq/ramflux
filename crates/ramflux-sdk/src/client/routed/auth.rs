@@ -94,11 +94,9 @@ impl RamfluxClient {
         {
             return Ok(None);
         }
-        if !self.inbound_relationship_names_root(
-            &entry.envelope.source_principal_id,
-            &commitment,
-            remote,
-        )? {
+        if !self
+            .inbound_relationship_names_root(&entry.envelope.source_principal_id, &commitment)?
+        {
             return Err(invalid("unsolicited sender root has no accepted relationship"));
         }
         Ok(Some(commitment))

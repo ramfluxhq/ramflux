@@ -14,7 +14,6 @@ pub struct BackupCounts {
     pub contacts: u64,
     pub conversations: u64,
     pub messages: u64,
-    pub groups: u64,
     pub surfaces: u64,
     pub tasks: u64,
     pub attachments: u64,
@@ -299,7 +298,6 @@ pub(super) fn read_counts(db: &rusqlite::Connection) -> rusqlite::Result<BackupC
         messages: count(
             "SELECT (SELECT count(*) FROM direct_message_projection)+(SELECT count(*) FROM message_projection m WHERE NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=m.message_id))",
         )?,
-        groups: count("SELECT count(*) FROM group_projection")?,
         surfaces: count(
             "SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'surface/state/%'",
         )?,

@@ -431,18 +431,6 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         | E::HistoryBundleHashMismatch
         | E::AuthorizationRejected
         | E::FootprintMigrationIncomplete
-        | E::GroupMemberLimitExceeded
-        | E::InvalidGroupRole(_)
-        | E::GroupPermissionDenied
-        | E::GroupControlReplay(_)
-        | E::GroupControlEpochMismatch { .. }
-        | E::GroupControlSigningKeyMissing(_)
-        | E::GroupInviteMissing(_)
-        | E::GroupInviteInvalidState { .. }
-        | E::GroupInviteExpired(_)
-        | E::GroupInviteAcceptorMismatch(_)
-        | E::SenderKeyNotDistributed
-        | E::GroupEpochAccessDenied
         | E::MessageNotFound(_)
         | E::MessageIdConflict(_)
         | E::EventIdConflict(_)

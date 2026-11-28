@@ -79,7 +79,6 @@ pub use logical_rows::{
     load_account_db_key, load_device_account_db_key, logical_table_rows, read_existing_vault_secret,
 };
 mod event_store;
-mod group_permissions;
 mod history_hash;
 mod records;
 mod row_mappers;
@@ -87,8 +86,6 @@ mod schema;
 mod schema_contact_requests;
 mod schema_device_namespace;
 mod schema_generation;
-mod schema_group_control_identity;
-mod schema_group_sender_identity;
 mod schema_identity_keys;
 mod schema_large_segments;
 mod schema_object_erasure;
@@ -142,7 +139,6 @@ pub use account_db::raw_inner::{
 };
 pub use account_db::runtime::{AccountOutboxEntry, OperationLookup};
 pub use account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;
-pub use account_db::shared_group_denials::{GroupRemovalFloor, PrunedGroupFloor};
 pub use account_db::username_candidates::UsernameRecoveryCandidate;
 pub use account_db::username_directory::{UsernameFloor, UsernameNamePin, UsernameStorageError};
 pub use account_db::{ConversationReadPosition, DirectoryTotals};
@@ -165,7 +161,5 @@ pub use records::*;
 mod contact_request_tests;
 #[cfg(test)]
 mod tests;
-
-mod schema_shared_group;
 
 pub use account_db::{NativeGrantAssociation, PendingAttachmentRetirement};

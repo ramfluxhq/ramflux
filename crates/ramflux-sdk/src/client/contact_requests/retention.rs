@@ -130,15 +130,6 @@ impl RamfluxClient {
             self.current_custody_authority(root, crate::custody::network_now()?)?
         {
             let record = native.envelope();
-            for entry in &record.body.devices {
-                if db
-                    .pinned_group_root_metadata(&record.body.principal_id, &entry.device_id)?
-                    .iter()
-                    .any(|known| known == root)
-                {
-                    return self.promote_contact_request_cache(root);
-                }
-            }
             self.retain_native_request_floor(record)?;
             for entry in &record.body.devices {
                 let device = ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(
@@ -160,15 +151,6 @@ impl RamfluxClient {
             db.remove_actor_state(&key)?;
             return Ok(());
         };
-        for entry in &set.devices {
-            if db
-                .pinned_group_root_metadata(&set.principal_id, &entry.device_id)?
-                .iter()
-                .any(|known| known == root)
-            {
-                return self.promote_contact_request_cache(root);
-            }
-        }
         self.retain_request_floor(&set)?;
         for entry in &set.devices {
             if entry.status == ramflux_protocol::DeviceSetStatus::Active {

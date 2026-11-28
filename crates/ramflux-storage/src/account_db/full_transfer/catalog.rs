@@ -575,7 +575,6 @@ mod completion_local;
 mod contacts;
 mod conversations;
 mod events;
-mod groups;
 mod identity;
 mod integrations;
 mod keys;
@@ -601,7 +600,6 @@ pub const fn full_transfer_catalog() -> &'static [FamilyRule] {
     TABLE_CATALOG
 }
 static TABLE_CATALOG: &[FamilyRule] = &[
-    local_actor::GROUP_RULE,
     local_actor::SAFETY_RULE,
     surfaces::RULE_0,       // sql/a2ui_surface_cache
     objects::RULE_1,        // sql/account_erasure_generation
@@ -643,16 +641,6 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     contacts::RULE_37,      // sql/friend_link_projection
     contacts::RULE_38,      // sql/friend_projection
     keys::RULE_159,         // sql/full_imported_mac_bundle
-    groups::RULE_39,        // sql/group_ban_projection
-    groups::RULE_40,        // sql/group_control_event_seen
-    groups::RULE_41,        // sql/group_invite_projection
-    groups::RULE_42,        // sql/group_member_device_key
-    groups::RULE_43,        // sql/group_member_projection
-    groups::RULE_44,        // sql/group_message_tombstone_projection
-    groups::RULE_46,        // sql/group_projection
-    groups::RULE_47,        // sql/group_sender_identity_upgrade
-    groups::RULE_48,        // sql/group_sender_key_counter_seen
-    groups::RULE_160,       // sql/group_service_body_fence
     recovery::RULE_49,      // sql/guardian_recovery_share_projection/local
     recovery::RULE_50,      // sql/guardian_recovery_share_projection/portable
     routing::RULE_51,       // sql/home_node_binding
@@ -660,8 +648,6 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     conversations::RULE_53, // sql/legacy_conversation_delivery_state
     conversations::RULE_54, // sql/legacy_conversation_read_state
     conversations::RULE_55, // sql/legacy_conversation_unread_marker
-    groups::RULE_56,        // sql/legacy_group_member_device_key
-    groups::RULE_57,        // sql/legacy_group_sender_key_counter_seen
     receipts::RULE_58,      // sql/legacy_receipt_projection
     progress::RULE_59,      // sql/lineage_checkpoint
     events::RULE_60,        // sql/local_event_counter
@@ -733,9 +719,6 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     receipts::RULE_119,     // sql/receipt_projection
     receive::RULE_120,      // sql/receive_erased_input
     receive::RULE_121,      // sql/rejected_inbox_projection
-    groups::RULE_122,       // sql/root_group_control_event_seen
-    groups::RULE_123,       // sql/root_group_invite_identity
-    groups::RULE_124,       // sql/root_group_sender_key_counter_seen
     identity::RULE_125,     // sql/root_identity_key_upgrade
     identity::RULE_126,     // sql/runtime_account_identity
     receipts::RULE_127,     // sql/runtime_ack
@@ -767,8 +750,5 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     progress::RULE_152, // sql/schema_migration
     identity::RULE_153, // sql/self_device_control_log
     routing::RULE_154,  // sql/session_capability_cache
-    groups::RULE_155,   // sql/shared_group_floor_generation
-    groups::RULE_156,   // sql/shared_group_member_projection
-    groups::RULE_157,   // sql/shared_group_removal_floor
     progress::RULE_158, // sql/sync_checkpoint
 ];

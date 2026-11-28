@@ -11,7 +11,7 @@ neither live registration nor receive, own-device import, or export authorizatio
 `backup_jobs/service.rs` calls `BackupJobs::verify_archive`; `routing.rs` calls
 `BackupJobs::install_generation`. Both select the complete admission pipeline.
 Archive preview and existing-identity checks use the same input-open boundary.
-The full restore worker chooses `merge_backup_candidate_with_group_actor`; native
+The full restore worker chooses `merge_backup_candidate`; native
 restore chooses `merge_native_backup_candidate`. Fresh full restore calls
 `normalize_backup_candidate` before strict reopen and index publication.
 

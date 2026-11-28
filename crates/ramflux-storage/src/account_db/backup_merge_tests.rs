@@ -38,14 +38,6 @@ fn backup_merge_preserves_newer_restrictions_plaintext_and_live_outbound_state()
         b"preserved despite actor-counter collision",
     )?;
     local.append_event("local-counter", "test.history", b"live event at the same counter")?;
-    source.create_group("membership", "owner")?;
-    source.add_group_member("membership", "peer", "member")?;
-    local.create_group("membership", "owner")?;
-    local.add_group_member("membership", "peer", "member")?;
-    local.connection.execute_batch("UPDATE group_projection SET group_epoch=3 WHERE group_id='membership'; UPDATE group_member_projection SET active=0,removed_epoch=3 WHERE group_id='membership' AND member_id='peer';")?;
-    source.create_group("new-membership", "owner")?;
-    source.add_group_member("new-membership", "peer", "member")?;
-    local.create_group("new-membership", "owner")?;
     stage_link_consent_order(&source, &local)?;
     let incoming = root.join("incoming.db");
     let snapshot = source.write_backup_snapshot(&incoming)?;
@@ -74,8 +66,6 @@ fn backup_merge_preserves_newer_restrictions_plaintext_and_live_outbound_state()
     assert!(merged.db.query_row("SELECT CAST(state_json AS TEXT) FROM runtime_actor_state WHERE state_kind='backup/inactive-pair/new'",[],|r|r.get::<_,String>(0))?.parse::<u64>()?>0);
     assert_eq!(merged.db.query_row("SELECT json_extract(CAST(state_json AS TEXT),'$.revision') FROM runtime_actor_state WHERE state_kind='surface/state/old'",[],|r|r.get::<_,u64>(0))?,9);
     assert_eq!(merged.db.query_row("SELECT CAST(event_body AS TEXT) FROM backup_archived_local_event WHERE event_id='source-only-counter'",[],|r|r.get::<_,String>(0))?,"preserved despite actor-counter collision");
-    assert!(!merged.db.query_row("SELECT active FROM group_member_projection WHERE group_id='membership' AND member_id='peer'",[],|r|r.get::<_,bool>(0))?);
-    assert!(merged.db.query_row("SELECT active FROM group_member_projection WHERE group_id='new-membership' AND member_id='peer'",[],|r|r.get::<_,bool>(0))?);
     assert_link_consent_order(&merged.db)?;
     merged.check_integrity()?;
     drop(merged);

@@ -170,7 +170,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "non-receive push-route checkpoint",
         hook: "none (not receive-cursor)",
-        count: 2,
+        count: 3,
     },
     WriterSite {
         file: "src/bus/sync_driver.rs",

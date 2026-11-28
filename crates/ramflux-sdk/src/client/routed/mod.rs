@@ -59,8 +59,6 @@ pub(crate) use prepared::{SendMaterial, SendMaterialRequest};
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Kind {
     Direct,
-    GroupMessage,
-    GroupControl,
     Receipt,
     Control,
 }
@@ -710,7 +708,6 @@ impl RamfluxClient {
         route: Route,
     ) -> Result<Routing, SdkError> {
         let mut route = routing(message, route);
-        refuse_removed_group_route(&route.kind)?;
         bind_generated_route_identity(&mut route, body);
         Ok(route)
     }
@@ -780,7 +777,6 @@ impl RamfluxClient {
         {
             return Err(invalid("invalid authenticated routing header"));
         }
-        refuse_removed_group_route(&plaintext.routing.kind)?;
         if plaintext.routing.group_message_id.is_some() {
             return Err(invalid("invalid authenticated group message id"));
         }
@@ -828,14 +824,6 @@ fn bind_generated_route_identity(route: &mut Routing, body: &[u8]) {
     {
         route.message_id = ramflux_protocol::encode_base64url(identity.id);
     }
-}
-
-/// The old group route kinds are refused on send and receive until the MLS group path lands.
-fn refuse_removed_group_route(kind: &Kind) -> Result<(), SdkError> {
-    if matches!(kind, Kind::GroupMessage | Kind::GroupControl) {
-        return Err(invalid("group routes are unavailable"));
-    }
-    Ok(())
 }
 
 fn invalid(message: &str) -> SdkError {

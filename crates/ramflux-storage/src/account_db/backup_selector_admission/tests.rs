@@ -110,7 +110,7 @@ fn e14_fault_after_lookup_origin_capture() -> TestResult {
         let source_before = std::fs::read(path)?;
         let before: u64 =
             target.db.query_row("SELECT count(*) FROM object_erasure_lookup", [], |r| r.get(0))?;
-        let result = target.merge_backup_pipeline(path,key,(BackupMergeMode::FullAccount(None),true),&mut ||Ok(()),|db| {
+        let result = target.merge_backup_pipeline(path,key,(BackupMergeMode::FullAccount,true),&mut ||Ok(()),|db| {
             let origins = db.prepare("SELECT side,lookup FROM backup_lookup_origin ORDER BY side,lookup")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             assert_eq!(origins, vec![("incoming".into(),"dual-opaque".into()),("incoming".into(),"incoming-opaque".into()),("target".into(),"dual-opaque".into()),("target".into(),"target-opaque".into())]);
             assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM main.object_erasure_lookup WHERE lookup='incoming-opaque')",[],|r|r.get::<_,bool>(0))?);
@@ -150,7 +150,7 @@ fn e14_scratch_tables_never_in_temp() -> TestResult {
         target.merge_backup_pipeline(
             path,
             key,
-            (BackupMergeMode::FullAccount(None), true),
+            (BackupMergeMode::FullAccount, true),
             &mut || Ok(()),
             |db| {
                 for table in TABLES {
@@ -528,7 +528,7 @@ fn graph_admission_uses_each_inputs_mac_subkey_bundles() -> TestResult {
                     let result = target.merge_backup_pipeline(
                         input_path,
                         input_key,
-                        (BackupMergeMode::FullAccount(None), true),
+                        (BackupMergeMode::FullAccount, true),
                         &mut || Ok(()),
                         observe,
                     );
@@ -588,7 +588,7 @@ fn classification_preserves_lookup_origin_and_fence_dominance() -> TestResult {
                         )?;
                     }
                     drop(source);
-                    let result = target.merge_backup_pipeline(path,key,(BackupMergeMode::FullAccount(None),true),&mut ||Ok(()),|db| {
+                    let result = target.merge_backup_pipeline(path,key,(BackupMergeMode::FullAccount,true),&mut ||Ok(()),|db| {
                         graph::classify(db)?;
                         let admitted: u64 = db.query_row("SELECT count(*) FROM backup_reference_admission WHERE side='incoming'",[],|r|r.get(0))?;
                         assert_eq!(admitted,u64::from(!fence && (origin == "incoming" || survivor)),"{origin}/{survivor}/{fence}");
@@ -641,7 +641,7 @@ fn dependency_fences_reach_fixed_point_across_both_graphs() -> TestResult {
         let result = target.merge_backup_pipeline(
             path,
             key,
-            (BackupMergeMode::FullAccount(None), true),
+            (BackupMergeMode::FullAccount, true),
             &mut || Ok(()),
             |db| {
                 graph::classify(db)?;
@@ -779,7 +779,7 @@ fn restore_g6_checks_closed_lookup_before_unfenced_payload() -> TestResult {
         let result = target.merge_backup_pipeline(
             path,
             key,
-            (BackupMergeMode::FullAccount(None), true),
+            (BackupMergeMode::FullAccount, true),
             &mut || Ok(()),
             |db| {
                 graph::classify(db)?;
@@ -804,7 +804,7 @@ fn restore_copy_manifest_fence_survives_other_admitted_manifest() -> TestResult 
         let result = target.merge_backup_pipeline(
             path,
             key,
-            (BackupMergeMode::FullAccount(None), true),
+            (BackupMergeMode::FullAccount, true),
             &mut || Ok(()),
             |db| {
                 graph::classify(db)?;
@@ -832,7 +832,7 @@ fn restore_copy_manifest_fence_survives_other_admitted_manifest() -> TestResult 
 fn mixed_selector_decisions_preserve_kept_owner_provenance() -> TestResult {
     fixture("mixed-selector-decisions", |_, _, target, path, key| {
         let result = target.merge_backup_pipeline(path, key,
-            (BackupMergeMode::FullAccount(None), true), &mut || Ok(()), |db| {
+            (BackupMergeMode::FullAccount, true), &mut || Ok(()), |db| {
                 graph::classify(db)?;
                 db.execute("INSERT INTO backup_selector_admission VALUES('target','wire','other-commitment','erase')", [])?;
                 db.execute("INSERT OR IGNORE INTO message_copy_binding VALUES('object:wire','message')", [])?;

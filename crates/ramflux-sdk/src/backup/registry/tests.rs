@@ -24,7 +24,6 @@ fn staged(
         counts: BackupCounts {
             contacts: 1001,
             messages: 10001,
-            groups: 201,
             attachments: 3,
             attachment_bytes: 1_000_000_000,
             ..BackupCounts::default()

@@ -42,7 +42,7 @@ fn review_fence_after_classify_dominates_writer() -> Result<(), Box<dyn std::err
         let path = root.join("src.db");
         let snapshot = live.write_backup_snapshot(&path)?;
         let commitment = object_erasure_commitment("principal", "wire", "manifest");
-        let result = target.merge_backup_pipeline(&path, &snapshot.key, (BackupMergeMode::FullAccount(None), true), &mut || Ok(()), |db| {
+        let result = target.merge_backup_pipeline(&path, &snapshot.key, (BackupMergeMode::FullAccount, true), &mut || Ok(()), |db| {
             graph::classify(db)?;
             db.execute_batch("DELETE FROM object_message_reference; DELETE FROM object_retention_reference; DELETE FROM object_reference_actor; DELETE FROM message_copy_binding; DELETE FROM message_footprint;")?;
             db.execute("INSERT INTO object_erasure_fence VALUES(?1) ON CONFLICT DO NOTHING", [&commitment])?;
@@ -76,7 +76,7 @@ fn crafted_actor(crafted: bool) -> Result<(), Box<dyn std::error::Error>> {
             let path = root.join("src.db");
             let snapshot = live.write_backup_snapshot(&path)?;
             let victim = object_erasure_commitment("principal", "victim-wire", "victim-manifest");
-            let result = target.merge_backup_pipeline(&path, &snapshot.key, (BackupMergeMode::FullAccount(None), true), &mut || Ok(()), |db| {
+            let result = target.merge_backup_pipeline(&path, &snapshot.key, (BackupMergeMode::FullAccount, true), &mut || Ok(()), |db| {
             graph::classify(db)?;
             writer::merge(db)?;
             db.execute("INSERT INTO runtime_actor_state VALUES('attachment/reference/victim',x'7b7d') ON CONFLICT DO NOTHING", [])?;
@@ -113,7 +113,7 @@ fn late_fence_at_production_graph_write_excludes_incoming_graph()
 -> Result<(), Box<dyn std::error::Error>> {
     super::tests::fixture("production-writer-late-fence", |_, _, target, path, key| {
         let result = target.merge_backup_pipeline(path, key,
-            (BackupMergeMode::FullAccount(None), true), &mut || Ok(()), |db| {
+            (BackupMergeMode::FullAccount, true), &mut || Ok(()), |db| {
                 db.execute_batch("DELETE FROM object_message_reference; DELETE FROM object_retention_reference; DELETE FROM object_reference_actor; DELETE FROM message_copy_binding; DELETE FROM message_footprint; DELETE FROM object_retention_payload;")?;
                 writer::FENCE_BEFORE_WRITE.set(true);
                 Ok(())
@@ -207,7 +207,7 @@ fn reference_actor_keys_require_exact_slot_or_bounded_ack_identity()
                 let path = root.join("actor-source.db");
                 let snapshot = live.write_backup_snapshot(&path)?;
                 let result=target.merge_backup_pipeline(&path,&snapshot.key,
-                (BackupMergeMode::FullAccount(None),true),&mut ||Ok(()), |db| {
+                (BackupMergeMode::FullAccount,true),&mut ||Ok(()), |db| {
                     graph::classify(db)?;
                     writer::merge(db)?;
                     for (keys,count) in [(&allowed[..],1_u64),(&denied[..],0)] {

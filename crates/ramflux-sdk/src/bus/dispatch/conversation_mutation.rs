@@ -415,15 +415,7 @@ fn content(
             let revision = revision
                 .checked_add(1)
                 .ok_or_else(|| refused(Code::InvalidArgument, "edit revision exhausted"))?;
-            let nested = client.account_db()?.load_actor_state::<Vec<u8>>(&format!(
-                "routed/group-content/{}",
-                intent.message_id
-            ))?;
-            let digest = if let Some(nested) = nested {
-                crate::client::message_mutations::digest_exact_content(target, &nested)?
-            } else {
-                crate::client::message_mutations::previous_content_digest(target, stored)?
-            };
+            let digest = crate::client::message_mutations::previous_content_digest(target, stored)?;
             g::content::Value::Edit(g::Edit {
                 target: Some(target.clone()),
                 revision,

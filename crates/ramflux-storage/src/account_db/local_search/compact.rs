@@ -78,11 +78,8 @@ fn locator_tables(db: &Connection) -> rusqlite::Result<Vec<LocatorTable>> {
             "runtime_message_content"
             | "rejected_inbox_projection"
             | "conversation_unread_marker"
-            | "group_message_tombstone_projection"
             | "message_projection"
             | "receipt_projection"
-            | "root_group_sender_key_counter_seen"
-            | "group_sender_key_counter_seen"
             | "contact_message_request"
             | "conversation_read_state"
             | "conversation_delivery_state" => kind.as_str(),

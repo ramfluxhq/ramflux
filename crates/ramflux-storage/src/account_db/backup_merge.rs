@@ -11,8 +11,8 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 #[derive(Clone, Copy)]
-pub(super) enum BackupMergeMode<'a> {
-    FullAccount(Option<&'a ramflux_protocol::GroupStateActor>),
+pub(super) enum BackupMergeMode {
+    FullAccount,
     NativeDataOnly,
 }
 
@@ -71,9 +71,6 @@ fn skip_merge_table(table: &str, native_data_only: bool) -> bool {
             | "message_copy_binding"
             | "backup_imported_verification"
             | "runtime_account_identity"
-            | "shared_group_removal_floor"
-            | "shared_group_floor_generation"
-            | "shared_group_member_projection"
             | "contact_request_fence"
             | "contact_request_authority_floor"
             | "contact_message_request_fence"
@@ -183,9 +180,8 @@ impl BackupDatabase {
                 }
             }
             let roots:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_actor_state l JOIN incoming.runtime_actor_state r USING(state_kind) WHERE l.state_kind LIKE 'directory/identity/%' AND json_extract(CAST(l.state_json AS TEXT),'$.contact_identity_commitment') IS NOT NULL AND json_extract(CAST(r.state_json AS TEXT),'$.contact_identity_commitment') IS NOT NULL AND json_extract(CAST(l.state_json AS TEXT),'$.contact_identity_commitment')<>json_extract(CAST(r.state_json AS TEXT),'$.contact_identity_commitment'))",[],|row|row.get(0))?;
-            let pins:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key l JOIN incoming.group_member_device_key r USING(group_id,member_id) WHERE l.device_signing_public_key<>r.device_signing_public_key)",[],|row|row.get(0))?;
             let links:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM friend_link_projection l JOIN incoming.friend_link_projection r USING(link_id) WHERE l.requester_id<>r.requester_id OR l.target_id<>r.target_id)",[],|row|row.get(0))?;
-            if roots || pins || links {
+            if roots || links {
                 return Err(StorageError::AuthorizationRejected);
             }
             Ok(())
@@ -237,25 +233,13 @@ impl BackupDatabase {
         key: &AccountDbKey,
         progress: impl FnMut() -> Result<(), StorageError>,
     ) -> Result<BackupMergeReport, StorageError> {
-        self.merge_backup_mode(path, key, BackupMergeMode::FullAccount(None), progress)
-    }
-    /// Merge while rebuilding shared groups from verified snapshots and durable removal floors.
-    /// # Errors
-    /// Refuses incompatible authorities, unsafe removal rollback, or missing local certification.
-    pub fn merge_backup_with_group_actor(
-        &mut self,
-        path: &Path,
-        key: &AccountDbKey,
-        local: Option<&ramflux_protocol::GroupStateActor>,
-        progress: impl FnMut() -> Result<(), StorageError>,
-    ) -> Result<BackupMergeReport, StorageError> {
-        self.merge_backup_mode(path, key, BackupMergeMode::FullAccount(local), progress)
+        self.merge_backup_mode(path, key, BackupMergeMode::FullAccount, progress)
     }
     pub(super) fn merge_backup_mode(
         &mut self,
         path: &Path,
         key: &AccountDbKey,
-        mode: BackupMergeMode<'_>,
+        mode: BackupMergeMode,
         mut progress: impl FnMut() -> Result<(), StorageError>,
     ) -> Result<BackupMergeReport, StorageError> {
         self.merge_backup_pipeline(path, key, (mode, false), &mut progress, |_| Ok(()))
@@ -273,26 +257,7 @@ impl BackupDatabase {
         self.merge_backup_pipeline(
             path,
             key,
-            (BackupMergeMode::FullAccount(None), true),
-            &mut progress,
-            |_| Ok(()),
-        )
-    }
-    /// Runs candidate admission with the independently certified local group actor.
-    /// # Errors
-    /// Refuses invalid graphs, pins, group history or storage errors.
-    #[doc(hidden)]
-    pub fn merge_backup_candidate_with_group_actor(
-        &mut self,
-        path: &Path,
-        key: &AccountDbKey,
-        local: Option<&ramflux_protocol::GroupStateActor>,
-        mut progress: impl FnMut() -> Result<(), StorageError>,
-    ) -> Result<BackupMergeReport, StorageError> {
-        self.merge_backup_pipeline(
-            path,
-            key,
-            (BackupMergeMode::FullAccount(local), true),
+            (BackupMergeMode::FullAccount, true),
             &mut progress,
             |_| Ok(()),
         )
@@ -301,16 +266,12 @@ impl BackupDatabase {
         &mut self,
         path: &Path,
         key: &AccountDbKey,
-        selection: (BackupMergeMode<'_>, bool),
+        selection: (BackupMergeMode, bool),
         progress: &mut impl FnMut() -> Result<(), StorageError>,
         after_capture: impl FnOnce(&rusqlite::Connection) -> Result<(), StorageError>,
     ) -> Result<BackupMergeReport, StorageError> {
         let (mode, candidate) = selection;
         let native_data_only = matches!(mode, BackupMergeMode::NativeDataOnly);
-        let local = match mode {
-            BackupMergeMode::FullAccount(local) => local,
-            BackupMergeMode::NativeDataOnly => None,
-        };
         self.check_backup_pins(path, key)?;
         self.attach(path, key)?;
         let result = (|| {
@@ -319,7 +280,6 @@ impl BackupDatabase {
             let marker_ids = self.prepare_mac_verifiers(progress)?;
             super::large_segments::retirement::merge_floors(&self.db)?;
             self.merge_object_erasure(progress)?;
-            let shared_groups = self.select_backup_shared_groups(mode)?;
             let preserved_actor = projected_actor(candidate);
             // A restored generation starts fresh handshakes, never archived reservations.
             self.archive_group_transfer(&preserved_actor)?;
@@ -390,7 +350,6 @@ impl BackupDatabase {
             }
             self.finish_pair_import(&preserved_actor)?;
             self.merge_self_sync_values(&self_sync_floors)?;
-            self.project_backup_shared_groups(&shared_groups, local)?;
             self.apply_merged_contact_fences()?;
             self.discard_retired_pair_secrets()?;
             self.finish_conversation_counts(&mut report)?;
@@ -504,7 +463,7 @@ impl BackupDatabase {
         if candidate {
             super::backup_selector_admission::final_deletion::apply(&self.db)?;
         }
-        self.db.execute_batch("UPDATE direct_message_projection SET is_own=1 WHERE deleted=1 AND EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1); UPDATE direct_message_projection SET is_own=CASE WHEN is_own=1 OR EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1) OR EXISTS(SELECT 1 FROM device_directory d WHERE d.principal_commitment=(SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1) AND direct_message_projection.sender_id IN (d.device_id,COALESCE(d.raw_device_id,d.device_id),d.principal_commitment)) THEN 1 ELSE 0 END,sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1 WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id)); DELETE FROM runtime_message_content WHERE message_id IN (SELECT message_id FROM direct_message_projection WHERE deleted=1); UPDATE direct_message_projection SET deleted=1 WHERE deleted=1; ")?;
+        self.db.execute_batch("UPDATE direct_message_projection SET is_own=1 WHERE deleted=1 AND EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1); UPDATE direct_message_projection SET is_own=CASE WHEN is_own=1 OR EXISTS(SELECT 1 FROM backup_local_message_own o WHERE o.conversation_id=direct_message_projection.conversation_id AND o.message_id=direct_message_projection.message_id AND o.is_own=1) OR EXISTS(SELECT 1 FROM device_directory d WHERE d.principal_commitment=(SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1) AND direct_message_projection.sender_id IN (d.device_id,COALESCE(d.raw_device_id,d.device_id),d.principal_commitment)) THEN 1 ELSE 0 END,sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1 WHERE deleted=0 AND (EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=direct_message_projection.message_id AND t.conversation_id=direct_message_projection.conversation_id)); DELETE FROM runtime_message_content WHERE message_id IN (SELECT message_id FROM direct_message_projection WHERE deleted=1); UPDATE direct_message_projection SET deleted=1 WHERE deleted=1; ")?;
         self.remove_deleted_message_origins()?;
         Ok(())
     }
@@ -795,10 +754,6 @@ fn base_merge_filter(table: &str, native_data_only: bool) -> &'static str {
         "NOT EXISTS(SELECT 1 FROM contact_message_request_fence f WHERE f.sender_identity=r.sender_identity AND f.message_id=r.message_id) AND NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=r.message_id AND d.conversation_id=r.conversation_id) AND NOT EXISTS(SELECT 1 FROM message_tombstone_projection t WHERE t.message_id=r.message_id AND t.conversation_id=r.conversation_id)"
     } else if table == "runtime_message_content" {
         "NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=r.message_id AND d.deleted=1)"
-    } else if matches!(table, "group_member_projection" | "group_ban_projection") {
-        "NOT EXISTS(SELECT 1 FROM incoming.group_projection source JOIN main.group_projection live USING(group_id) WHERE source.group_id=r.group_id AND source.group_epoch<live.group_epoch)"
-    } else if table == "projection_checkpoint" {
-        "NOT EXISTS(SELECT 1 FROM incoming.local_event_log e WHERE e.event_id=r.last_event_id AND e.event_type='group.sender_key.state' AND CASE WHEN json_valid(CAST(e.event_body AS TEXT)) THEN json_extract(CAST(e.event_body AS TEXT),'$.session_snapshot.is_initiator_side') END=1)"
     } else if table == "message_projection" {
         "NOT EXISTS(SELECT 1 FROM direct_message_projection d WHERE d.message_id=r.message_id)"
     } else {
@@ -816,16 +771,13 @@ fn columns(
         .collect::<rusqlite::Result<_>>()?)
 }
 const ORDER_FIELDS: &[&str] = &[
-    "group_epoch",
     "device_epoch",
     "lifecycle_epoch",
     "version",
     "edit_counter",
     "deleted_epoch",
     "removed_epoch",
-    "banned_epoch",
     "group_key_epoch",
-    "invite_epoch",
     "marker_epoch",
     "updated_at",
     "deleted_at",
@@ -867,9 +819,6 @@ fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
     if table == "direct_message_projection" {
         return "r.deleted>l.deleted OR (r.deleted=l.deleted AND r.created_at>l.created_at)".into();
     }
-    if table == "group_member_projection" {
-        return "EXISTS(SELECT 1 FROM incoming.group_projection source JOIN main.group_projection live USING(group_id) WHERE source.group_id=r.group_id AND source.group_epoch>live.group_epoch) OR r.updated_at>l.updated_at".into();
-    }
     if table == "contact_request_projection" {
         let rank = |alias: &str| {
             format!(
@@ -890,7 +839,7 @@ fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
     if table == "runtime_actor_state" {
         let timestamp = |alias: &str| {
             format!(
-                "coalesce(json_extract(CAST({alias}.state_json AS TEXT),'$.signed_device_set.device_set_epoch'),json_extract(CAST({alias}.state_json AS TEXT),'$.revision'),json_extract(CAST({alias}.state_json AS TEXT),'$.updated_at'),json_extract(CAST({alias}.state_json AS TEXT),'$.seq'),json_extract(CAST({alias}.state_json AS TEXT),'$.group_epoch'),0)"
+                "coalesce(json_extract(CAST({alias}.state_json AS TEXT),'$.signed_device_set.device_set_epoch'),json_extract(CAST({alias}.state_json AS TEXT),'$.revision'),json_extract(CAST({alias}.state_json AS TEXT),'$.updated_at'),json_extract(CAST({alias}.state_json AS TEXT),'$.seq'),0)"
             )
         };
         return format!(
@@ -904,11 +853,7 @@ fn newer_expression(table: &str, columns: &[(String, u32)]) -> String {
         .copied()
         .filter(|name| columns.iter().any(|(column, _)| column == name))
         .collect::<Vec<_>>();
-    if fields.is_empty()
-        || table == "local_event_log"
-        || table == "group_member_device_key"
-        || table == "projection_checkpoint"
-    {
+    if fields.is_empty() || table == "local_event_log" || table == "projection_checkpoint" {
         return "0".into();
     }
     let expr = |alias| {
@@ -928,7 +873,6 @@ fn add_count(counts: &mut BackupCounts, table: &str, n: u64) {
         "friend_link_projection" => counts.contacts += n,
         "conversation_projection" => counts.conversations += n,
         "message_projection" | "direct_message_projection" => counts.messages += n,
-        "group_projection" => counts.groups += n,
         _ => {}
     }
 }

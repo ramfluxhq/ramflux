@@ -74,11 +74,8 @@ fn install_copy_triggers(db: &Connection) -> rusqlite::Result<()> {
         ("runtime_message_content", "message_id"),
         ("rejected_inbox_projection", "message_id"),
         ("conversation_unread_marker", "message_id"),
-        ("group_message_tombstone_projection", "message_id"),
         ("message_projection", "message_id"),
         ("receipt_projection", "message_id"),
-        ("root_group_sender_key_counter_seen", "message_id"),
-        ("group_sender_key_counter_seen", "message_id"),
         ("contact_message_request", "message_id"),
     ] {
         column_copy(db, table, column)?;
@@ -200,13 +197,11 @@ const ACTOR_LINKS: &str = r"
  INSERT INTO message_footprint SELECT message_id,'{kind}',{locator} FROM message_copy_binding WHERE copy_id='actor:'||NEW.state_kind ON CONFLICT DO NOTHING;
  INSERT INTO message_footprint SELECT message_id,'{kind}',{locator} FROM message_copy_binding WHERE copy_id='prepared:'||NEW.state_kind ON CONFLICT DO NOTHING;
  INSERT INTO message_footprint SELECT message_id,'{kind}',{locator} FROM message_copy_binding WHERE copy_id='history_container:'||NEW.state_kind ON CONFLICT DO NOTHING;
- INSERT INTO message_footprint SELECT substr(NEW.state_kind,21),'{kind}',{locator} WHERE NEW.state_kind GLOB 'group-message/alias/*' ON CONFLICT DO NOTHING;
  INSERT INTO message_copy_binding SELECT 'actor:delivery-receipt/status/'||json_extract(CAST(NEW.state_json AS TEXT),'$.status_id'),json_extract(CAST(NEW.state_json AS TEXT),'$.message') WHERE NEW.state_kind GLOB 'delivery-receipt/pending/*' AND json_type(CAST(NEW.state_json AS TEXT),'$.status_id')='text' AND json_type(CAST(NEW.state_json AS TEXT),'$.message')='text' ON CONFLICT DO NOTHING;
 
  INSERT INTO message_copy_binding SELECT 'object:'||substr(NEW.state_kind,18),json_extract(CAST(NEW.state_json AS TEXT),'$.message_id') WHERE NEW.state_kind GLOB 'directory/object/*' AND json_type(CAST(NEW.state_json AS TEXT),'$.message_id')='text' ON CONFLICT DO NOTHING;
  INSERT INTO message_copy_binding SELECT 'payload:'||json_extract(CAST(NEW.state_json AS TEXT),'$.entry.envelope.payload_hash'),json_extract(CAST(NEW.state_json AS TEXT),'$.routing.message_id') WHERE NEW.state_kind GLOB 'routed/committed/*' AND json_type(CAST(NEW.state_json AS TEXT),'$.routing.message_id')='text' AND json_type(CAST(NEW.state_json AS TEXT),'$.entry.envelope.payload_hash')='text' ON CONFLICT DO NOTHING;
  INSERT INTO message_copy_binding SELECT 'envelope:'||json_extract(CAST(NEW.state_json AS TEXT),'$.entry.envelope.envelope_id'),json_extract(CAST(NEW.state_json AS TEXT),'$.routing.message_id') WHERE NEW.state_kind GLOB 'routed/committed/*' AND json_type(CAST(NEW.state_json AS TEXT),'$.routing.message_id')='text' AND json_type(CAST(NEW.state_json AS TEXT),'$.entry.envelope.envelope_id')='text' ON CONFLICT DO NOTHING;
- INSERT INTO message_copy_binding SELECT 'group:'||json_extract(CAST(NEW.state_json AS TEXT),'$.group_id')||':'||json_extract(CAST(NEW.state_json AS TEXT),'$.group_message_id'),json_extract(CAST(NEW.state_json AS TEXT),'$.message_id') WHERE NEW.state_kind GLOB 'routed/message-metadata/*' AND json_type(CAST(NEW.state_json AS TEXT),'$.group_message_id')='text' ON CONFLICT DO NOTHING;
  INSERT INTO message_footprint SELECT t.value,'{kind}',{locator} FROM json_tree(CAST(NEW.state_json AS TEXT)) t WHERE t.type='text' AND t.key='message' AND NEW.state_kind GLOB 'delivery-receipt/*' ON CONFLICT DO NOTHING;
  INSERT INTO message_footprint SELECT json_extract(CAST(NEW.state_json AS TEXT),'$.intent.id'),'{kind}',{locator} WHERE NEW.state_kind GLOB 'own-device/send/*' AND json_type(CAST(NEW.state_json AS TEXT),'$.intent.id')='text' ON CONFLICT DO NOTHING;
  INSERT INTO message_footprint SELECT CAST(json_extract(CAST(NEW.state_json AS TEXT),'$') AS TEXT),'{kind}',{locator} WHERE (NEW.state_kind GLOB 'routed/projection/*' OR NEW.state_kind GLOB 'directory/message/*') AND json_type(CAST(NEW.state_json AS TEXT),'$')='text' ON CONFLICT DO NOTHING;

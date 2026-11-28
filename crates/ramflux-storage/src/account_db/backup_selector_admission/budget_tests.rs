@@ -9,7 +9,6 @@ use crate::{AccountDb, BackupDatabase, ObjectReferenceAdmission, ObjectReference
 use rusqlite::StatementStatus;
 use serde_json::json;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-const BINDINGS: &str = "SELECT copy_id,message_id FROM main.message_copy_binding UNION ALL SELECT copy_id,message_id FROM incoming.message_copy_binding";
 
 fn standalone(db: &Connection, sql: &str, message: Option<&str>) -> rusqlite::Result<u64> {
     let mut statement = db.prepare(sql)?;
@@ -222,12 +221,8 @@ fn measure_candidates(
 ) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
     let mut measured = Vec::new();
     let mut statements = Vec::new();
-    for (schema, bindings) in [
-        ("main", BINDINGS),
-        ("incoming", BINDINGS),
-        ("main", "SELECT copy_id,message_id FROM main.message_copy_binding"),
-    ] {
-        statements.extend(restrictions::queries(schema, bindings));
+    for schema in ["main", "incoming"] {
+        statements.push(restrictions::query(schema));
     }
     for sql in statements {
         let mut total = 0;

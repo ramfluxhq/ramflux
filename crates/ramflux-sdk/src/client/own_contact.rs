@@ -606,11 +606,7 @@ mod tests {
         assert!(own.account_db()?.client_record("identity", "alice")?.is_none());
         assert!(own.receive_own_contact(&packet(manifest.clone(), link.clone())?)?);
         assert_eq!(own.trusted_recipient_root("shared")?, manifest.principal_commitment);
-        assert!(own.inbound_relationship_names_root(
-            "alice",
-            &manifest.principal_commitment,
-            "shared"
-        )?);
+        assert!(own.inbound_relationship_names_root("alice", &manifest.principal_commitment)?);
         let forged_manifest =
             crate::client::identity_authority::test_support::public_manifest(&impostor)?;
         let mut forged_link = link.clone();

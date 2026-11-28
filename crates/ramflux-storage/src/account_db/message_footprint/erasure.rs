@@ -94,8 +94,6 @@ const BODY: &str = r"
  DELETE FROM runtime_message_content WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='runtime_message_content');
  DELETE FROM message_projection WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='message_projection');
  DELETE FROM receipt_projection WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='receipt_projection');
- DELETE FROM root_group_sender_key_counter_seen WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='root_group_sender_key_counter_seen');
- DELETE FROM group_sender_key_counter_seen WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='group_sender_key_counter_seen');
  DELETE FROM contact_message_request WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='contact_message_request');
  UPDATE conversation_read_state SET read_through_message_id=COALESCE((
   SELECT previous.message_id FROM direct_message_projection previous
@@ -111,7 +109,6 @@ const BODY: &str = r"
  WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='conversation_delivery_state');
  DELETE FROM rejected_inbox_projection WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='rejected_inbox_projection');
  DELETE FROM conversation_unread_marker WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='conversation_unread_marker');
- UPDATE group_message_tombstone_projection SET actor_device_id='',reason='' WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='group_message_tombstone_projection');
  DELETE FROM runtime_outbox WHERE sequence IN (
   SELECT outbox.sequence FROM message_footprint footprint
   CROSS JOIN runtime_outbox outbox INDEXED BY runtime_outbox_actor_kind

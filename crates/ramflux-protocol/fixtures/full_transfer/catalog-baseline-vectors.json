@@ -1,11 +1,7 @@
 {
-  "census_hash": "Al4oj7N2byb1sRCnNELWpXktmnm0j6tKRtGJ294Tjno",
+  "census_hash": "duUf7sL8OYaWdaUk10B1l_qDpvn88g-q2b59wnk2KU8",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
-    {
-      "hash": "cnYJn-acIjp7Vb-NLW7ugybcPDsPcZE2a_B5OF6FgwQ",
-      "id": "actor/group-message/upgrade-start"
-    },
     {
       "hash": "q6HM8YAKXD0r02_CO96C1bkTJjlyApKGgD7kgILy0TY",
       "id": "actor/identity/safety-verification-migration/v1"
@@ -171,46 +167,6 @@
       "id": "sql/full_imported_mac_bundle"
     },
     {
-      "hash": "FicoBUdSzUTlTiYzIbVrGQJd2SDpkDe5ZlkKRm4xybM",
-      "id": "sql/group_ban_projection"
-    },
-    {
-      "hash": "YcU56xfMGyf_WwQexhu09Oy8zQJHEdbgluJjS_mN18w",
-      "id": "sql/group_control_event_seen"
-    },
-    {
-      "hash": "_-EVwALwwUXedqKnenVHvYr8dobHIWl7OsVUzzATxGw",
-      "id": "sql/group_invite_projection"
-    },
-    {
-      "hash": "Mtkm8F9HqtfOq1FLqz4rxyUK5w-HBY2MAAcAwvWwaB0",
-      "id": "sql/group_member_device_key"
-    },
-    {
-      "hash": "3ciFR7M_2XzFsBd9pGnJpgj-kptI2_tm9bgSyjV_2bk",
-      "id": "sql/group_member_projection"
-    },
-    {
-      "hash": "xBIspLkLGQEkk6jNZHc9jYOOI6VbPetk6ylXNp7t0v4",
-      "id": "sql/group_message_tombstone_projection"
-    },
-    {
-      "hash": "i4qdqcXPNAmEfy_8ILUipt6xCjOU25xvg_qbUVGxcXs",
-      "id": "sql/group_projection"
-    },
-    {
-      "hash": "5sUgV47KcDbkLneGTRbbFjQXcxtYMTHhi5QYIiCdOC0",
-      "id": "sql/group_sender_identity_upgrade"
-    },
-    {
-      "hash": "rzF6jSiuZ6iHQGSdt7aDZAku-RGC5M_e04ep8HJFLpc",
-      "id": "sql/group_sender_key_counter_seen"
-    },
-    {
-      "hash": "Jl56tjYyopyN2qNJShlZf5r36V8U4GWJfLA1Yfud3Lo",
-      "id": "sql/group_service_body_fence"
-    },
-    {
       "hash": "sigCWEzbdYYkOn1nzK0gJOjRZrS7hGk8mnrFUFYUKbg",
       "id": "sql/guardian_recovery_share_projection/local"
     },
@@ -237,14 +193,6 @@
     {
       "hash": "w8C2NV1_l8Lt4TWwA34kjedhZvLVn4MFOq-IWtMqva4",
       "id": "sql/legacy_conversation_unread_marker"
-    },
-    {
-      "hash": "BQYqx0tlxlKGj6L6UNIZ97I8QOfPY7TutRiKStOxPK4",
-      "id": "sql/legacy_group_member_device_key"
-    },
-    {
-      "hash": "5JP8IGZL48V1u72exts8ejbP12eVGC122lUlu_uABvo",
-      "id": "sql/legacy_group_sender_key_counter_seen"
     },
     {
       "hash": "GLT1ik6-_4xKATHmwyMv9cjGVLI52MC3QPfz-Z9BbO4",
@@ -527,18 +475,6 @@
       "id": "sql/rejected_inbox_projection"
     },
     {
-      "hash": "CJ4q6zhKFbw-uzurNjGIYDGj8VAwWOeOiSWQf_Dvee0",
-      "id": "sql/root_group_control_event_seen"
-    },
-    {
-      "hash": "sprFChoDpeBQspGKvWaEKK9GMaPrin01w6NpaU87rBA",
-      "id": "sql/root_group_invite_identity"
-    },
-    {
-      "hash": "-EJZKtV4gfxYrxk_jT4q3P2HzvVyBdBdJDmeTY2kmdE",
-      "id": "sql/root_group_sender_key_counter_seen"
-    },
-    {
       "hash": "UXNHmbvcjVF4aVR7s4cvNkTpFvpDTP82uCy-5Okx_Tc",
       "id": "sql/root_identity_key_upgrade"
     },
@@ -661,18 +597,6 @@
     {
       "hash": "j03guetB5IMhriqfufl7pxlEeVCWcQM9pf3f2jjPql4",
       "id": "sql/session_capability_cache"
-    },
-    {
-      "hash": "5DX0CLogofzBpszUBJO2u0HPCxyMuh9Bgv8G5rBUwz0",
-      "id": "sql/shared_group_floor_generation"
-    },
-    {
-      "hash": "8UAP4U1J_JAYTD5wthQHdSK0vuFPnyj3CZ7-OG0k3qQ",
-      "id": "sql/shared_group_member_projection"
-    },
-    {
-      "hash": "cx_hwGTlNvSa_zGdeW2pnpGYqLPK5vbtlsMzmDj9mTI",
-      "id": "sql/shared_group_removal_floor"
     },
     {
       "hash": "AicyUcMdjPFIPvklJNaWT_ycVA-rkyBzw6uS27XL8go",

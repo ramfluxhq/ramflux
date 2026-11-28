@@ -19,7 +19,9 @@ pub(super) fn generated_plaintext(bytes: &[u8]) -> Result<Plaintext, SdkError> {
         identified_inner(bytes).ok_or_else(|| invalid("generated transport identity missing"))?;
     let identity = inner.identity.ok_or_else(|| invalid("generated transport identity missing"))?;
     g::identity::verify(&identity).map_err(|_| invalid("generated transport identity invalid"))?;
-    let group = identity.group_id.clone();
+    if identity.group_id.is_some() {
+        return Err(invalid("group identities are not accepted"));
+    }
     let control = match scanned.kind {
         8 | 11 | 12 => true,
         9 => g::Surface::decode(scanned.body).is_ok_and(|value| match value.payload {
@@ -45,26 +47,18 @@ pub(super) fn generated_plaintext(bytes: &[u8]) -> Result<Plaintext, SdkError> {
         _ => false,
     };
     let kind = match scanned.kind {
-        8 if group.is_some()
-            && g::Control::decode(scanned.body)
-                .is_ok_and(|value| matches!(value.operation, 4 | 5)) =>
-        {
-            Kind::GroupControl
-        }
         _ if control => Kind::Control,
         6 => Kind::Receipt,
-        _ if group.is_some() => Kind::GroupMessage,
         _ => Kind::Direct,
     };
     let message_id = ramflux_protocol::encode_base64url(identity.id);
-    let group_message_id = (kind == Kind::GroupMessage).then(|| message_id.clone());
     Ok(Plaintext {
         routing: Routing {
             kind,
             conversation_id: identity.conversation_id,
-            group_id: group,
+            group_id: None,
             message_id,
-            group_message_id,
+            group_message_id: None,
             attachments: false,
         },
         body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(bytes)),

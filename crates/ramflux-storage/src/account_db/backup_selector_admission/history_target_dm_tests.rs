@@ -45,7 +45,7 @@ fn target_only_dm_restriction(deleted_projection: bool) -> TestResult {
     target.merge_backup_pipeline(
         &input,
         &input_key.key,
-        (BackupMergeMode::FullAccount(None), true),
+        (BackupMergeMode::FullAccount, true),
         &mut || Ok(()),
         |connection| {
             // Numeric-only trace: later deletion triggers must not mask an

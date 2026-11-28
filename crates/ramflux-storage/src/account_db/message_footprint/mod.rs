@@ -330,9 +330,6 @@ fn actor_registration(key: &str, value: &Value) -> ActorRegistration {
     let mut registration = ActorRegistration::default();
     collect_generic_references(value, &mut registration);
 
-    if let Some(message) = key.strip_prefix("group-message/alias/") {
-        registration.message_ids.insert(message.to_owned());
-    }
     if let Some(message) = key.strip_prefix("routed/message-owner/") {
         registration.message_ids.insert(message.to_owned());
     }
@@ -414,17 +411,6 @@ fn actor_registration(key: &str, value: &Value) -> ActorRegistration {
                 }
             }
         }
-    }
-    if key.starts_with("routed/message-metadata/")
-        && let (Some(group), Some(group_message), Some(message)) = (
-            value.get("group_id").and_then(Value::as_str),
-            value.get("group_message_id").and_then(Value::as_str),
-            value.get("message_id").and_then(Value::as_str),
-        )
-    {
-        registration
-            .bindings
-            .insert((format!("group:{group}:{group_message}"), message.to_owned()));
     }
     registration
 }
@@ -543,7 +529,6 @@ fn actor_state_may_reference_message(key: &str) -> bool {
             "surface/history/",
             "directory/surface_error/",
             "task/message/",
-            "group-message/alias/",
             "own-copy/",
             "own-device/",
             "inbox/",

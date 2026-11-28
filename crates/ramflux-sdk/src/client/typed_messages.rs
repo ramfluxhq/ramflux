@@ -202,12 +202,6 @@ impl RamfluxClient {
                 SdkError::InboundRejected("generated message content missing".into())
             })?;
             let (_, mut content) = Self::decode_generated_inner(&bytes)?;
-            if let Some(message) = db.load_actor_state::<g::Message>(&format!(
-                "routed/group-projection/{}",
-                message.message_id
-            ))? {
-                content.value = Some(g::content::Value::Message(message));
-            }
             if let Some(g::content::Value::Edit(edit)) = content.value.as_ref() {
                 content.value = edit.replacement.clone().map(g::content::Value::Message);
             }

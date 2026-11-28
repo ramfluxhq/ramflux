@@ -893,7 +893,7 @@ pub(crate) mod commit_fault {
     pub(crate) enum Kind {
         Bootstrap,
         Pair,
-        GroupControl,
+        Receipt,
         Content,
         Control,
     }
@@ -904,9 +904,9 @@ pub(crate) mod commit_fault {
 
     pub(crate) fn projection(kind: &super::Kind) -> Kind {
         match kind {
-            super::Kind::Direct | super::Kind::GroupMessage => Kind::Content,
+            super::Kind::Direct => Kind::Content,
             super::Kind::Control => Kind::Control,
-            super::Kind::GroupControl | super::Kind::Receipt => Kind::GroupControl,
+            super::Kind::Receipt => Kind::Receipt,
         }
     }
 

@@ -19,14 +19,8 @@ impl RamfluxClient {
         report::refuse_payload_outer_mismatch(&entry.envelope, &packet)?;
         let local_device = self.local_device_identity(local)?;
         let remote = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-        let group_peer = self
-            .account_db()?
-            .pinned_group_root_metadata(&entry.envelope.source_principal_id, remote.device_id())?
-            .iter()
-            .any(|root| root == remote.root_commitment());
         if remote.root_commitment() != self.own_account_anchor()?
             && !self.friend_link_peer_is_accepted(remote.root_commitment())?
-            && !group_peer
         {
             return Ok(());
         }

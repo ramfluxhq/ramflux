@@ -15,12 +15,8 @@ const IDENTITY_TABLES: &[&str] = &[
     "contact_request_decision",
     "contact_link_decision",
     "contact_root_binding",
-    "shared_group_member_projection",
-    "group_member_projection",
-    "group_member_device_key",
     "runtime_account_identity",
     "runtime_inbox_changes",
-    "root_group_control_event_seen",
 ];
 const IDENTITY_ACTOR_FILTER: &str = "state_kind GLOB 'directory/identity/*' OR state_kind GLOB 'directory/device/*' OR state_kind GLOB 'directory/contact/*' OR state_kind GLOB 'directory/commitment/*' OR state_kind GLOB 'directory/conversation/*' OR state_kind GLOB 'directory/group/*' OR state_kind GLOB 'directory/group-local/*' OR state_kind GLOB 'directory/group-name/*' OR state_kind GLOB 'group-state/*' OR state_kind GLOB 'task/verified_roster_v2/*' OR state_kind GLOB 'identity/*' OR state_kind GLOB 'authority/*'";
 const IDENTITY_EVENT_FILTER: &str = "event_type GLOB 'identity.*' OR event_type GLOB 'device.*' OR event_type GLOB 'prekey.*' OR event_type GLOB 'x3dh.prekey.*' OR event_type IN ('dm.ratchet_session','group.sender_key.state','group.member.route')";
@@ -172,7 +168,6 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
                         name,
                         "direct_message_projection"
                             | "message_tombstone_projection"
-                            | "group_message_tombstone_projection"
                             | "runtime_actor_state"
                     )
                 });
