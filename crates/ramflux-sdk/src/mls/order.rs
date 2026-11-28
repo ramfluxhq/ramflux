@@ -1602,7 +1602,7 @@ mod tests {
         assert!(!state.readable(&[1; 32], 5_000 + OLD_GROUP_READ_ONLY_SECS), "window over");
         assert!(
             state.expire_old(5_000 + OLD_GROUP_READ_ONLY_SECS - 1).is_empty(),
-            "one second inside 30 d keeps the group"
+            "one second inside the 7-day window keeps the group"
         );
         assert_eq!(
             state.expire_old(5_000 + OLD_GROUP_READ_ONLY_SECS),

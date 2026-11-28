@@ -521,11 +521,13 @@ pub(super) fn adopt_installed(
     index.set_account_unlocked(account_id, true)?;
     index.set_active_account(account_id)?;
     account.client.bind_process_media_ownership(state.config.media_ownership())?;
-    let _ = crate::bus::dispatch::conversation_security::schedule_new_device(
+    if let Err(error) = crate::bus::dispatch::conversation_security::schedule_new_device(
         &account.client,
         &device_id,
         &anchor,
-    );
+    ) {
+        tracing::warn!(%error, "mls new device");
+    }
     state.accounts.insert(account_id.into(), account);
     state.active_account_id = Some(account_id.into());
     Ok(true)

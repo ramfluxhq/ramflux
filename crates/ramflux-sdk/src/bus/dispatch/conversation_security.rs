@@ -189,6 +189,13 @@ fn rate_limited(message: &str) -> SdkError {
     refused("rate_limited", message, &json!({}))
 }
 
+/// A best-effort step must not roll back a merge. The error is logged and dropped.
+fn note_error(result: Result<(), SdkError>, message: &'static str) {
+    if let Err(error) = result {
+        tracing::warn!(%error, "{message}");
+    }
+}
+
 /// Direct-conversation peer anchor. Groups are left to the caller.
 fn direct_peer_anchor(
     client: &RamfluxClient,
@@ -559,11 +566,7 @@ fn welcome_ciphertext(payload: &str) -> Option<Vec<u8>> {
     let raw = ramflux_protocol::decode_base64url(payload).ok()?;
     let compact = ramflux_protocol::message::outer::decode_compact_cryptobox(&raw).ok()?;
     let bytes = compact.ciphertext;
-    if bytes.len() >= 4 && bytes[0] == 0 && bytes[1] == 1 && bytes[2] == 0 && bytes[3] == 3 {
-        Some(bytes.to_vec())
-    } else {
-        None
-    }
+    if bytes.get(..4) == Some(&[0, 1, 0, 3]) { Some(bytes.to_vec()) } else { None }
 }
 
 /// Peek a compact cryptobox. A Welcome is consumed here and never reaches routed decode.
@@ -740,7 +743,7 @@ pub(crate) async fn cache_foreign_key_packages(
     if ConvStore::new(&kv).get(&scope.conversation_id)?.is_some() {
         return Ok(());
     }
-    let _ = fetch_foreign(client, anchor, timeout).await?;
+    fetch_foreign(client, anchor, timeout).await?;
     Ok(())
 }
 
@@ -895,7 +898,10 @@ pub(crate) async fn prepare_dm(
     };
     evict_forgotten(&account.client, &held.forgotten);
     if let Some(welcome) = held.welcome.as_deref() {
-        let _ = fan_welcome(&account.client, &mut engine, &held.anchor, welcome).await;
+        note_error(
+            fan_welcome(&account.client, &mut engine, &held.anchor, welcome).await,
+            "mls welcome fan-out",
+        );
     }
     account.apply_session_metadata(engine);
     Ok(held.prepared)
@@ -1068,7 +1074,10 @@ async fn ensure_self_group(
     };
     if let EstablishOutcome::Established { welcome, forgotten, .. } = outcome {
         evict_forgotten(&account.client, &forgotten);
-        let _ = fan_welcome(&account.client, engine, &anchor, &welcome).await;
+        note_error(
+            fan_welcome(&account.client, engine, &anchor, &welcome).await,
+            "mls welcome fan-out",
+        );
         remember_scope(&account.client, &scope, now)?;
     }
     Ok(())
@@ -1133,7 +1142,10 @@ async fn tick_scopes(
         if let Some(welcome) = welcome_out {
             let anchor = scope.anchors.first().map_or("", String::as_str);
             if !anchor.is_empty() {
-                let _ = fan_welcome(&account.client, engine, anchor, &welcome).await;
+                note_error(
+                    fan_welcome(&account.client, engine, anchor, &welcome).await,
+                    "mls welcome fan-out",
+                );
             }
         }
         evict_forgotten(&account.client, &doomed);
@@ -1200,22 +1212,31 @@ async fn drain_device_adds(
                         .find(|item| item.as_str() != add.anchor)
                         .map(String::as_str);
                     if let Some(anchor) = target.or(scope.anchors.first().map(String::as_str)) {
-                        let _ = fan_welcome(&account.client, engine, anchor, &welcome).await;
+                        note_error(
+                            fan_welcome(&account.client, engine, anchor, &welcome).await,
+                            "mls welcome fan-out",
+                        );
                     }
-                    let _ = store_event(
-                        &account.client,
-                        "devices-changed",
-                        &hex(&scope.conversation_id),
-                        json!({
-                            "conversation_id": hex(&scope.conversation_id),
-                            "added": [{ "anchor": add.anchor, "device_id": add.device_id, "ai_flag": false }],
-                            "removed": [],
-                        }),
+                    note_error(
+                        store_event(
+                            &account.client,
+                            "devices-changed",
+                            &hex(&scope.conversation_id),
+                            json!({
+                                "conversation_id": hex(&scope.conversation_id),
+                                "added": [{ "anchor": add.anchor, "device_id": add.device_id, "ai_flag": false }],
+                                "removed": [],
+                            }),
+                        ),
+                        "mls devices-changed",
                     );
-                    let _ = account
+                    if let Err(error) = account
                         .client
                         .account_db()?
-                        .remove_actor_state(&format!("{DEVICE_ADD_PREFIX}{}", add.device_id));
+                        .remove_actor_state(&format!("{DEVICE_ADD_PREFIX}{}", add.device_id))
+                    {
+                        tracing::warn!(%error, "mls device-add row");
+                    }
                 }
                 Ok(CommitOutcome::Forked) => store_fork(&account.client, &scope, now)?,
                 _ => {}
@@ -1264,15 +1285,18 @@ fn note_recovery_if_marked(account: &LocalBusAccountState) {
         .as_ref()
         .map(|branch| branch.device_id.clone())
         .unwrap_or_default();
-    let _ = store_event(
-        &account.client,
-        "devices-changed",
-        &id,
-        json!({
-            "conversation_id": anchor,
-            "added": [{ "anchor": anchor, "device_id": device, "ai_flag": false }],
-            "removed": [],
-        }),
+    note_error(
+        store_event(
+            &account.client,
+            "devices-changed",
+            &id,
+            json!({
+                "conversation_id": anchor,
+                "added": [{ "anchor": anchor, "device_id": device, "ai_flag": false }],
+                "removed": [],
+            }),
+        ),
+        "mls devices-changed",
     );
 }
 
@@ -1288,7 +1312,7 @@ fn drain_open_strangers(client: &RamfluxClient) -> Result<(), SdkError> {
         if suffix.is_empty() {
             continue;
         }
-        let _ = accept_stranger_welcome(client, suffix);
+        note_error(accept_stranger_welcome(client, suffix), "mls stranger welcome");
     }
     Ok(())
 }
