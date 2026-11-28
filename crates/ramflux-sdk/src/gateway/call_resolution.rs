@@ -31,7 +31,8 @@ impl CallOperationAction {
             CallAction::Ack { .. }
             | CallAction::Ready { .. }
             | CallAction::Rekey { .. }
-            | CallAction::RekeyAck { .. } => Self::Continue,
+            | CallAction::RekeyAck { .. }
+            | CallAction::VideoTrack { .. } => Self::Continue,
             CallAction::Reject | CallAction::Busy | CallAction::AnsweredElsewhere => Self::Reject,
             CallAction::Hangup | CallAction::Timeout | CallAction::Failed => Self::End,
         }

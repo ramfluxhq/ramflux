@@ -39,6 +39,9 @@ struct Registry {
 }
 static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry::default()));
 
+/// Video frame exports are minor 1. A host that requires a later minor is refused.
+const ABI_V2_MINOR: u32 = 1;
+
 #[derive(zeroize::ZeroizeOnDrop)]
 pub(super) struct Config {
     #[zeroize(skip)]
@@ -217,13 +220,13 @@ pub extern "C" fn ramflux_v2_negotiate(
 ) -> i32 {
     call(|| {
         super::super::clear_out_ptr(out)?;
-        if major != 2 || min_minor > 0 {
+        if major != 2 || min_minor > ABI_V2_MINOR {
             return Err(CAbiError::new(RamfluxErrorCode::UnsupportedVersion, "unsupported ABI"));
         }
         super::buffer::write_json_buffer(
             out,
             &json!({
-                "abi_major":2,"abi_minor":0,"bus_protocol":"ramflux.local_bus.v1",
+                "abi_major":2,"abi_minor":ABI_V2_MINOR,"bus_protocol":"ramflux.local_bus.v1",
                 "message_schema_generation":ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION,
                 "message_descriptor_blake3":blake3::hash(crate::message::FILE_DESCRIPTOR_SET).to_hex().to_string(),
                 "max_frame_bytes":MAX_FRAME_BYTES,"max_operations":MAX_OPERATIONS,

@@ -19,8 +19,14 @@ pub(crate) fn fixture(
         root_public_key: ramflux_crypto::public_key_base64url_from_seed(&[9; 32]),
     };
     let id = ramflux_protocol::encode_base64url([7; 16]);
-    let mut call =
-        LiveCall::outgoing(id.clone(), "thread".into(), local, vec![peer], now_unix_timestamp())?;
+    let mut call = LiveCall::outgoing(
+        id.clone(),
+        "thread".into(),
+        local,
+        vec![peer],
+        false,
+        now_unix_timestamp(),
+    )?;
     // These receipt/key-reuse fixtures begin with an already-authorized active call.
     assert!(call.media_held, "new calls must start held before this fixture's authorization");
     call.allow_media();
@@ -188,6 +194,7 @@ fn committed_call_cache_refresh_is_idempotent_and_cannot_revive_a_restarted_call
         "thread".into(),
         remote,
         vec![local.clone()],
+        false,
         now_unix_timestamp(),
     )?;
     let mut control =

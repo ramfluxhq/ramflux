@@ -108,7 +108,7 @@ fn verify_approved_fields() -> TestResult {
         assert_eq!(actual, expected, "{message}.{name}");
         count += 1;
     }
-    assert_eq!(count, 484, "v3 native mapping inventory covers every descriptor field");
+    assert_eq!(count, 504, "v3 native mapping inventory covers every descriptor field");
     Ok(())
 }
 
@@ -314,7 +314,7 @@ fn verify_every_operation() -> TestResult {
                 // JsonValue.number/string/bool are primitive arms, covered by conformance;
                 // all message-valued operation arms, including unit markers, are exercised.
                 assert_eq!(
-                    scan_message(message.name(), &bytes, 4)?,
+                    scan_message(message.name(), &bytes, COMPILED_LAYER)?,
                     ScanOutcome::Supported,
                     "{}.{}",
                     message.name(),

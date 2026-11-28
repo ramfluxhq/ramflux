@@ -792,12 +792,18 @@ pub struct LocalBusObjectTransferResumeRequest {
 #[serde(deny_unknown_fields)]
 pub struct LocalBusCallInviteRequest {
     pub conversation_id: String,
+    /// Ask for a video offer on the invite (CALLS-VIDEO-V1). Absent means voice-only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub video: bool,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalBusCallAnswerRequest {
     pub call_id: String,
+    /// Accept the video offer of this call (CALLS-VIDEO-V1). Absent or false declines video.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub video: bool,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

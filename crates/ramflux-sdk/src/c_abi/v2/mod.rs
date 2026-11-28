@@ -37,6 +37,7 @@ mod suspend;
 #[cfg(test)]
 mod tests;
 mod username;
+mod video;
 mod wake_fetch;
 
 pub use custody::{RamfluxV2CustodyOperation, RamfluxV2CustodyProvider, RamfluxV2CustodyRequest};
@@ -61,3 +62,8 @@ pub use suspend::{ramflux_v2_client_resume, ramflux_v2_client_suspend};
 pub use wake_fetch::ramflux_v2_wake_fetch;
 
 pub use exports::ramflux_v2_diag_support_key;
+pub use video::{
+    RAMFLUX_V2_VIDEO_FLAG_CONFIG, RAMFLUX_V2_VIDEO_FLAG_IDR, RAMFLUX_V2_VIDEO_FRAME_VERSION,
+    RAMFLUX_V2_VIDEO_MAX_AU_BYTES, RamfluxV2VideoFrame, RamfluxV2VideoStatus,
+    ramflux_v2_video_status, ramflux_v2_video_submit, ramflux_v2_video_take,
+};

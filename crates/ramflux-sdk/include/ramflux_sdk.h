@@ -219,6 +219,35 @@ typedef int32_t (*CredentialProviderCallback)(const uint8_t*,
                                               size_t*,
                                               void*);
 
+/*
+ Metadata of one access unit. `struct_size` is `size_of` of this struct.
+ Flags: bit 0 IDR, bit 1 parameter sets. `rotation` is quarter turns, `0..=3`.
+ */
+struct RamfluxV2VideoFrame {
+  uint32_t struct_size;
+  uint32_t version;
+  uint64_t frame_id;
+  uint64_t pts_us;
+  uint32_t track_revision;
+  uint32_t config_revision;
+  uint16_t rotation;
+  uint16_t flags;
+  /*
+   Must be zero. Keeps the header a multiple of its alignment.
+   */
+  uint32_t reserved;
+};
+
+/*
+ Redacted video status. The itest feeder counters are not here.
+ */
+struct RamfluxV2VideoStatus {
+  uint32_t struct_size;
+  uint32_t video_target_bps;
+  uint32_t keyframe_request_revision;
+  uint32_t keyframe_ack_revision;
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -511,6 +540,44 @@ int32_t ramflux_v2_client_suspend(uint64_t handle);
  Call off the UI thread.
  */
 int32_t ramflux_v2_client_resume(uint64_t handle);
+
+/*
+ Copy one AVCC access unit into the live in-process engine.
+ An IDR acknowledges the peer's current keyframe request.
+ Returns 0, or 1 for a bad buffer, 12 when the account cannot use the engine.
+ */
+int32_t ramflux_v2_video_submit(uint64_t client,
+                                const uint8_t *account,
+                                size_t account_len,
+                                const uint8_t *call_id,
+                                size_t call_len,
+                                const struct RamfluxV2VideoFrame *frame,
+                                const uint8_t *au,
+                                size_t au_len);
+
+/*
+ Copy one complete access unit out. `written` is 0 when none is waiting; the buffer is unchanged.
+ A unit larger than `capacity` stays queued and returns 1.
+ */
+int32_t ramflux_v2_video_take(uint64_t client,
+                              const uint8_t *account,
+                              size_t account_len,
+                              const uint8_t *call_id,
+                              size_t call_len,
+                              struct RamfluxV2VideoFrame *frame,
+                              uint8_t *au,
+                              size_t capacity,
+                              size_t *written);
+
+/*
+ Copy `video_target_bps`, the peer's keyframe request, and this side's ack.
+ */
+int32_t ramflux_v2_video_status(uint64_t client,
+                                const uint8_t *account,
+                                size_t account_len,
+                                const uint8_t *call_id,
+                                size_t call_len,
+                                struct RamfluxV2VideoStatus *out);
 
 /*
  Fetch and durably apply one inbox page, then ACK, without opening a full client.

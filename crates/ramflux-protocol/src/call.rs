@@ -24,23 +24,72 @@ pub enum VoiceCallFailureReason {
     #[default]
     SignalingUnavailable,
 }
+/// Video offer carried by the caller's Invite (CALLS-VIDEO-V1). Carries no key material.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoOffer {
+    pub version: u32,
+    pub codec: String,
+    pub profile: String,
+    pub max_rung: u32,
+    pub packet_format: u32,
+    pub receive_enabled: bool,
+}
+/// Callee's answer to a video offer. `accepted = false` is explicit audio-only consent.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoSelection {
+    pub version: u32,
+    pub accepted: bool,
+    pub codec: String,
+    pub profile: String,
+    pub max_rung: u32,
+    pub packet_format: u32,
+    pub receive_enabled: bool,
+}
 /// Authenticated signaling action carried inside a pair-session control envelope.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CallAction {
-    Invite { base_key: String },
+    Invite {
+        base_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        video_offer: Option<VideoOffer>,
+    },
     Ringing,
-    Answer { base_key: String },
-    Ack { allocation: Box<VoicePeerAllocation> },
-    Ready { consent: Box<VoiceLeaseConsent> },
+    Answer {
+        base_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        video_selection: Option<VideoSelection>,
+    },
+    Ack {
+        allocation: Box<VoicePeerAllocation>,
+    },
+    Ready {
+        consent: Box<VoiceLeaseConsent>,
+    },
     Reject,
     Busy,
     Hangup,
     Timeout,
     Failed,
     AnsweredElsewhere,
-    Rekey { generation: u64, base_key: String },
-    RekeyAck { generation: u64, base_key: String },
+    Rekey {
+        generation: u64,
+        base_key: String,
+    },
+    RekeyAck {
+        generation: u64,
+        base_key: String,
+    },
+    /// Sender's video state; `base_key` is present only on the first start (CALLS-VIDEO-V1).
+    VideoTrack {
+        revision: u64,
+        enabled: bool,
+        max_rung: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_key: Option<String>,
+    },
 }
 /// No `Debug`: actions contain media secrets and allocation bearer credentials.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -197,10 +246,11 @@ impl Drop for CallAction {
     fn drop(&mut self) {
         use zeroize::Zeroize;
         match self {
-            Self::Invite { base_key }
-            | Self::Answer { base_key }
+            Self::Invite { base_key, .. }
+            | Self::Answer { base_key, .. }
             | Self::Rekey { base_key, .. }
             | Self::RekeyAck { base_key, .. } => base_key.zeroize(),
+            Self::VideoTrack { base_key, .. } => base_key.zeroize(),
             _ => {}
         }
     }

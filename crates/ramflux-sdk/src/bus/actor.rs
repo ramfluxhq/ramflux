@@ -46,7 +46,7 @@ pub(super) enum AgentPrivate {
 pub(super) enum PrivateCommand {
     Media {
         command: super::media::MediaCommand,
-        reply: oneshot::Sender<Result<crate::client::call::InProcessMediaStatus, SdkError>>,
+        reply: oneshot::Sender<Result<super::media::MediaResult, SdkError>>,
     },
     SearchRebuild {
         owner: u64,

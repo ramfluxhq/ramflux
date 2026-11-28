@@ -179,7 +179,12 @@ pub(crate) async fn run_udp(
                 };
                 if sent.is_err() { tracing::debug!("voice datagram forwarding failed"); }
             }
-            _=sweep.tick() => { state.lock().map_err(|_|anyhow::anyhow!("voice state poisoned"))?.expire(crate::config::now_unix_seconds()); }
+            _=sweep.tick() => {
+                let mut state=state.lock().map_err(|_|anyhow::anyhow!("voice state poisoned"))?;
+                state.expire(crate::config::now_unix_seconds());
+                let counters=state.video_counters();
+                tracing::info!(admitted_packets=counters.admitted_packets,admitted_bytes=counters.admitted_bytes,refused_packets=counters.refused_packets,refused_bytes=counters.refused_bytes,"relay video quota counters");
+            }
         }
     }
 }

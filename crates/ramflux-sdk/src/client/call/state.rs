@@ -61,6 +61,12 @@ pub(crate) struct LiveCall {
     pub(crate) media_held: bool,
     /// The callee asked to answer while media was still held. Promoted once a resolution releases it.
     pub(crate) held_answer: HeldAnswer,
+    /// Video state of the selected peer device (CALLS-VIDEO-V1). Starts refused.
+    pub(crate) video: super::video_signaling::VideoTrackPeer,
+    /// Caller: the offer it attached. Callee: the offer received on its Invite.
+    pub(crate) video_offer: Option<ramflux_protocol::VideoOffer>,
+    /// This device's video send key for the selected peer (memory only, never persisted).
+    pub(crate) video_send_key: Option<Zeroizing<[u8; 32]>>,
     #[cfg(feature = "test-support")]
     pub(crate) last_control_error: Option<String>,
 }
@@ -128,11 +134,15 @@ impl LiveCall {
     pub(super) fn has_seen(&self, sender: &CallEndpoint, seq: u64) -> bool {
         self.seen.get(sender).is_some_and(|old| seq <= *old)
     }
+    /// `video` attaches the video offer to every Invite; `false` keeps the call voice-only.
+    /// # Errors
+    /// Refuses too many devices, no peer device, or a failed key draw.
     pub fn outgoing(
         id: String,
         conversation: String,
         local: CallEndpoint,
         invited: Vec<CallEndpoint>,
+        video: bool,
         now: i64,
     ) -> Result<Self, SdkError> {
         if invited.len() > 96 {
@@ -142,10 +152,13 @@ impl LiveCall {
         let key = Zeroizing::new(ramflux_crypto::random_32()?);
         let mut call = Self::new(id, conversation, (local.clone(), callee), local, key, now);
         call.invited = invited;
+        call.video_offer = video.then(|| super::video_signaling::offer(true));
         for peer in call.invited.clone() {
             let key = Zeroizing::new(ramflux_crypto::random_32()?);
-            let body =
-                CallAction::Invite { base_key: ramflux_protocol::encode_base64url(key.as_ref()) };
+            let body = CallAction::Invite {
+                base_key: ramflux_protocol::encode_base64url(key.as_ref()),
+                video_offer: call.video_offer.clone(),
+            };
             call.offer_keys.insert(peer.clone(), key);
             let mut control = call.control(body, now)?;
             control.callee = peer;
@@ -158,9 +171,12 @@ impl LiveCall {
         local: CallEndpoint,
         now: i64,
     ) -> Result<Self, SdkError> {
-        let CallAction::Invite { base_key } = &control.body else {
+        let CallAction::Invite { base_key, video_offer } = &control.body else {
             return Err(invalid("unknown call"));
         };
+        if let Some(offer) = video_offer {
+            super::video_signaling::check_offer(offer)?;
+        }
         if control.sender != control.caller
             || control.callee != local
             || control.seq == 0
@@ -179,6 +195,7 @@ impl LiveCall {
             control.created_at,
         );
         call.ring_deadline = now.min(control.created_at).saturating_add(45);
+        call.video_offer.clone_from(video_offer);
         call.receive_key = Some(decode_key(base_key)?);
         call.seen.insert(control.sender.clone(), control.seq);
         call.call_ref.clone_from(&control.call_ref);
@@ -239,6 +256,9 @@ impl LiveCall {
             pending: Vec::new(),
             media_loss: None,
             offer_keys: BTreeMap::new(),
+            video: super::video_signaling::VideoTrackPeer::default(),
+            video_offer: None,
+            video_send_key: None,
             peer_keys: BTreeMap::new(),
             peer_media: BTreeMap::new(),
             next_seq: 1,
@@ -453,19 +473,66 @@ impl LiveCall {
         if self.local != self.callee || self.row.state != "incoming_ringing" || self.expired(now) {
             return Err(invalid("call cannot be answered"));
         }
+        let video_selection = match self.video_offer.as_ref() {
+            Some(offer) => Some(super::video_signaling::selection(
+                offer,
+                self.video.accepts(),
+                self.video.accepts(),
+            )?),
+            None => None,
+        };
+        let accepted = video_selection.as_ref().is_some_and(|selection| selection.accepted);
         let answer = self.control(
             CallAction::Answer {
                 base_key: ramflux_protocol::encode_base64url(self.send_key.as_ref()),
+                video_selection,
             },
             now,
         )?;
         self.pending.push(answer);
+        if accepted {
+            self.queue_video_track(now)?;
+        }
         self.set_state("connecting", now)?;
         self.held_answer = HeldAnswer::None;
         Ok(())
     }
 
+    /// Sends the one key-carrying track control to the selected peer, after the selection is
+    /// settled and accepted. Never called for a declined selection.
+    fn queue_video_track(&mut self, now: i64) -> Result<(), SdkError> {
+        let offer = self.video_offer.clone().ok_or_else(|| invalid("video track without offer"))?;
+        let key = super::video_signaling::fresh_key()?;
+        let body = super::video_signaling::initial_track(offer.max_rung, &key);
+        self.video.negotiate(true);
+        tracing::info!(
+            call_id = %self.row.call_id,
+            key_commit = %super::video_signaling::key_commit(&key),
+            "video send key queued for the selected peer"
+        );
+        self.video_send_key = Some(key);
+        let control = self.control(body, now)?;
+        self.pending.push(control);
+        Ok(())
+    }
+
     /// The first answer selects that callee and tells every other invited device.
+    /// Caller side: the answer's video selection, checked against the caller's own offer.
+    fn negotiate_video(
+        &mut self,
+        selection: Option<&ramflux_protocol::VideoSelection>,
+    ) -> Result<(), SdkError> {
+        let Some(selection) = selection else {
+            self.video.negotiate(false);
+            return Ok(());
+        };
+        let offer =
+            self.video_offer.as_ref().ok_or_else(|| invalid("video selection without offer"))?;
+        let accepted = super::video_signaling::check_selection(offer, selection)?;
+        self.video.negotiate(accepted);
+        Ok(())
+    }
+
     fn apply_answer(
         &mut self,
         control: &CallControl,
@@ -528,8 +595,16 @@ impl LiveCall {
         self.seen.insert(c.sender.clone(), c.seq);
         match &c.body {
             CallAction::Ringing if self.row.state == "outgoing_ringing" => {}
-            CallAction::Answer { base_key } if self.local == self.caller => {
-                return self.apply_answer(c, base_key, now);
+            CallAction::Answer { base_key, video_selection } if self.local == self.caller => {
+                // Only the selecting answer may settle video; a sibling's answer must not.
+                if self.row.state == "outgoing_ringing" {
+                    self.negotiate_video(video_selection.as_ref())?;
+                }
+                let selected = self.apply_answer(c, base_key, now)?;
+                if selected && self.video.is_negotiated() {
+                    self.queue_video_track(now)?;
+                }
+                return Ok(selected);
             }
             CallAction::Ack { allocation }
                 if self.local == self.callee
@@ -579,6 +654,15 @@ impl LiveCall {
                     "declined"
                 };
                 self.finish(reason, c.created_at)?;
+            }
+            CallAction::VideoTrack { revision, max_rung, base_key, .. }
+                if matches!(self.row.state.as_str(), "connecting" | "active") =>
+            {
+                let peer = if self.local == self.caller { &self.callee } else { &self.caller };
+                if &c.sender != peer {
+                    return Err(invalid("video track from a device that is not selected"));
+                }
+                self.video.admit(*revision, *max_rung, base_key.as_deref())?;
             }
             _ => return Err(invalid("control invalid for current state")),
         }
@@ -819,6 +903,7 @@ mod resolution_gate {
             created_at: now,
             body: ramflux_protocol::CallAction::Invite {
                 base_key: ramflux_protocol::encode_base64url([7_u8; 32]),
+                video_offer: None,
             },
             call_ref,
             signature: String::new(),

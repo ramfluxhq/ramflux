@@ -47,6 +47,9 @@ pub use call_action_ringing_types::*;
 #[path = "call_action_timeout.rs"]
 mod call_action_timeout_types;
 pub use call_action_timeout_types::*;
+#[path = "call_action_video_track.rs"]
+mod call_action_video_track_types;
+pub use call_action_video_track_types::*;
 #[path = "call_control.rs"]
 mod call_control_types;
 pub use call_control_types::*;
@@ -65,6 +68,12 @@ pub use call_summary_outcome_types::*;
 #[path = "call_summary_participant.rs"]
 mod call_summary_participant_types;
 pub use call_summary_participant_types::*;
+#[path = "call_video_offer.rs"]
+mod call_video_offer_types;
+pub use call_video_offer_types::*;
+#[path = "call_video_selection.rs"]
+mod call_video_selection_types;
+pub use call_video_selection_types::*;
 #[path = "needs_me.rs"]
 mod needs_me_types;
 pub use needs_me_types::*;
