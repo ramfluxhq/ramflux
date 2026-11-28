@@ -12,11 +12,12 @@
 //!   `now` is passed in and only schedules (read-only window, backoff, pending age).
 //! * The orderer names the current group. A Welcome alone never switches `mls/conv/<scope>`;
 //!   [`reconcile`] switches when `status` names a group this device has already joined.
-//! * An own commit is merged locally by the facade before it is submitted. Its bytes are kept as
-//!   the conversation's `pending` commit until the orderer accepts, so a lost answer, a down
-//!   orderer or a rate limit re-submits the same bytes. A log entry at the pending epoch that is
-//!   not the pending commit is a fork ([`CatchUpOutcome::Forked`]): the recovery is
-//!   [`establish`] with [`EstablishKind::ReEstablish`].
+//! * An own commit is staged, not merged. Its bytes, and an Add's Welcome, stay in the
+//!   conversation's `pending` commit until the orderer accepts, then [`ramflux_mls::Mls::merge_own`]
+//!   runs. A lost answer, a down orderer or a rate limit re-submits the same bytes. Another
+//!   commit at that epoch discards ours ([`CommitOutcome::Lost`]) and is applied. A log entry
+//!   past the local epoch is [`CatchUpOutcome::Forked`]: the recovery is [`establish`] with
+//!   [`EstablishKind::ReEstablish`].
 //!
 //! The gateway answers `Nack mls_dm_frames_unsupported` until the node wires the frames; every
 //! driver reports that as `NotYetAvailable`.
@@ -30,7 +31,7 @@ use ramflux_protocol::message::dm_scope::{self, MLS_KIND_DM, MLS_KIND_SELF};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use super::key_packages::{FetchedKeyPackage, b64};
+use super::key_packages::{self, FetchedKeyPackage, b64};
 use crate::SdkError;
 use crate::gateway::access::MlsFrameAccess;
 
@@ -60,8 +61,10 @@ const BACKOFF_MAX_SECS: u64 = 900;
 const CONV_LABEL: &str = "mls/conv";
 /// Row label of the reverse index, keyed by group id (current and old group) to the scope id.
 const CONV_GROUP_LABEL: &str = "mls/conv_group";
-/// Largest stored conversation row (the pending commit is at most 1 MiB, base64 inflates it).
-const CONV_ROW_MAX_BYTES: usize = 2 << 20;
+/// Largest stored conversation or establish row (commit and Welcome, base64, bounded at 4 MiB).
+const CONV_ROW_MAX_BYTES: usize = 4 << 20;
+/// Row label of a staged first commit, keyed by scope id, written before the first submit.
+const ESTABLISH_LABEL: &str = "mls/establish";
 /// The gateway's answer while the DM frames are not wired.
 pub(crate) const UNSUPPORTED_NACK: &str = "mls_dm_frames_unsupported";
 const UNAVAILABLE_CODE: &str = "dm_frames_unsupported";
@@ -327,13 +330,16 @@ pub(crate) struct OldGroup {
     pub(crate) read_only_until: u64,
 }
 
-/// An own commit merged locally and not yet accepted by the orderer.
+/// An own commit staged locally and not yet merged.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct PendingCommit {
     /// Epoch the commit was made in.
     pub(crate) epoch: u64,
     #[serde(with = "b64")]
     pub(crate) commit: Vec<u8>,
+    /// Welcome of an Add, kept so a retry can still fan it out. Absent for other commits.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "key_packages::opt_b64")]
+    pub(crate) welcome: Option<Vec<u8>>,
     /// Unix second of the first submit attempt.
     pub(crate) submitted_at: u64,
 }
@@ -385,13 +391,12 @@ impl ConvState {
                 .is_some_and(|old| old.group_id == group_id && now < old.read_only_until)
     }
 
-    /// Drop the old group once its window has ended; true when something was dropped.
-    pub(crate) fn expire_old(&mut self, now: u64) -> bool {
+    /// Drop the old group once its window has ended. The returned id is deleted by the caller.
+    pub(crate) fn expire_old(&mut self, now: u64) -> Option<Vec<u8>> {
         if self.old.as_ref().is_some_and(|old| now >= old.read_only_until) {
-            self.old = None;
-            return true;
+            return self.old.take().map(|old| old.group_id);
         }
-        false
+        None
     }
 
     /// An own commit is waiting and its last attempt is old enough for a `since` lookup.
@@ -495,6 +500,88 @@ impl<'a, K: MlsKv> ConvStore<'a, K> {
             detail: "the conversation has no MLS group".to_owned(),
         })
     }
+
+    /// The staged first commit of `scope_id`, if one was written.
+    fn establish_get(&self, scope_id: &[u8]) -> Result<Option<EstablishRow>, SdkError> {
+        let Some(row) = self.kv.get(ESTABLISH_LABEL, scope_id).map_err(kv_error)? else {
+            return Ok(None);
+        };
+        decode_establish_row(&row).map(Some)
+    }
+
+    /// Persist the staged first commit before it is submitted.
+    fn establish_put(&self, scope_id: &[u8], row: &EstablishRow) -> Result<(), SdkError> {
+        let encoded =
+            serde_json::to_vec(row).map_err(|_| conv_error("establish row does not encode"))?;
+        if encoded.len() > CONV_ROW_MAX_BYTES {
+            return Err(SdkError::Mls {
+                code: "too_large",
+                detail: "the establish row exceeds 4 MiB".to_owned(),
+            });
+        }
+        self.write_row(ESTABLISH_LABEL, scope_id, encoded)
+    }
+
+    /// Drop the staged first-commit row.
+    fn establish_delete(&self, scope_id: &[u8]) -> Result<(), SdkError> {
+        self.delete_row(ESTABLISH_LABEL, scope_id)
+    }
+
+    /// Drop the reverse index entry of a group that is no longer current or old.
+    fn delete_group_index(&self, group_id: &[u8]) -> Result<(), SdkError> {
+        self.delete_row(CONV_GROUP_LABEL, group_id)
+    }
+
+    fn write_row(&self, label: &str, key: &[u8], value: Vec<u8>) -> Result<(), SdkError> {
+        self.kv
+            .commit_batch(
+                WriteBatch {
+                    ops: vec![WriteOp::Put {
+                        label: label.to_owned(),
+                        key: key.to_vec(),
+                        value: Zeroizing::new(value),
+                    }],
+                    epoch_changed: false,
+                },
+                |_tx| Ok(()),
+            )
+            .map_err(kv_error)
+    }
+
+    fn delete_row(&self, label: &str, key: &[u8]) -> Result<(), SdkError> {
+        self.kv
+            .commit_batch(
+                WriteBatch {
+                    ops: vec![WriteOp::Delete { label: label.to_owned(), key: key.to_vec() }],
+                    epoch_changed: false,
+                },
+                |_tx| Ok(()),
+            )
+            .map_err(kv_error)
+    }
+}
+
+/// `mls/establish/<scope>`: one staged first commit, written before its first submit.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct EstablishRow {
+    #[serde(with = "b64")]
+    group_id: Vec<u8>,
+    #[serde(with = "b64")]
+    nonce: Vec<u8>,
+    flag: DmSubmitFlag,
+    epoch: u64,
+    #[serde(with = "b64")]
+    commit: Vec<u8>,
+    #[serde(with = "b64")]
+    welcome: Vec<u8>,
+    submitted_at: u64,
+}
+
+fn decode_establish_row(row: &[u8]) -> Result<EstablishRow, SdkError> {
+    if row.len() > CONV_ROW_MAX_BYTES {
+        return Err(conv_error("establish row exceeds the decode bound"));
+    }
+    serde_json::from_slice(row).map_err(|_| conv_error("establish row does not decode"))
 }
 
 /// Orderer-down backoff (spec §3.1): exponential from 5 s to 15 min, never shorter than a
@@ -508,7 +595,7 @@ pub(crate) struct Backoff {
 impl Backoff {
     /// Delay after `failures` consecutive failures (1 is the first).
     pub(crate) fn delay_secs(failures: u32) -> u64 {
-        let shift = failures.saturating_sub(1).min(16);
+        let shift = failures.checked_sub(1).unwrap_or(0).min(16);
         BACKOFF_BASE_SECS.saturating_mul(1_u64 << shift).min(BACKOFF_MAX_SECS)
     }
 
@@ -616,15 +703,25 @@ pub(crate) async fn submit(
     }
 }
 
+/// What a catch-up did with a staged own commit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OwnResolution {
+    /// No staged own commit was resolved.
+    None,
+    /// Our staged commit was the log entry at `log_seq` and was merged.
+    Merged { log_seq: u64 },
+    /// A foreign commit took the epoch; our staged commit was discarded.
+    Discarded,
+}
+
 /// How a catch-up ended.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CatchUpOutcome {
-    /// Every commit up to the head is applied; the log position is `log_seq`.
-    Current { log_seq: u64 },
+    /// Every commit up to the head is applied. `own` reports a staged own commit resolved here.
+    Current { log_seq: u64, own: OwnResolution },
     /// A commit removed this device from the group.
     Removed,
-    /// A commit could not be applied, or a competing commit took the pending commit's epoch:
-    /// re-establish.
+    /// A commit could not be applied, or the log jumped past the local epoch: re-establish.
     Forked,
     /// The orderer replaced the group; reconcile.
     Replaced { group_id: Vec<u8> },
@@ -632,6 +729,47 @@ pub(crate) enum CatchUpOutcome {
     Pruned,
     /// The node does not serve the frames yet.
     NotYetAvailable,
+}
+
+/// What one log entry asks the device to do. Pure: no storage and no clock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EntryAction {
+    /// The entry is our staged commit.
+    MergeOwn,
+    /// The entry took our staged commit's epoch. Discard ours, then apply or skip it.
+    DiscardThenApply,
+    /// The entry is older than the local epoch.
+    Skip,
+    /// The entry is the next commit and is not ours.
+    Apply,
+    /// The entry is ahead of the local epoch, or ahead of a still-staged own commit.
+    Fork,
+}
+
+fn classify_entry(
+    pending: Option<&PendingCommit>,
+    local_epoch: u64,
+    entry_epoch: u64,
+    entry_commit: &[u8],
+) -> EntryAction {
+    if let Some(pending) = pending {
+        if entry_epoch == pending.epoch {
+            if entry_commit == pending.commit.as_slice() {
+                return EntryAction::MergeOwn;
+            }
+            return EntryAction::DiscardThenApply;
+        }
+        if entry_epoch > pending.epoch {
+            return EntryAction::Fork;
+        }
+    }
+    if entry_epoch < local_epoch {
+        EntryAction::Skip
+    } else if entry_epoch > local_epoch {
+        EntryAction::Fork
+    } else {
+        EntryAction::Apply
+    }
 }
 
 /// Applying one log entry.
@@ -642,28 +780,72 @@ enum Applied {
     Failed,
 }
 
-fn apply_entry<K: MlsKv>(
+enum OwnMark {
+    Merged,
+    Discarded,
+}
+
+struct ApplyResult {
+    applied: Applied,
+    own: Option<OwnMark>,
+}
+
+fn merge_staged<K: MlsKv>(
     mls: &Mls<K>,
-    state: &mut ConvState,
-    local_epoch: u64,
-    entry: &DmCommitEntry,
-) -> Result<Applied, SdkError> {
-    if let Some(pending) = &state.pending
-        && entry.epoch >= pending.epoch
-    {
-        // The log reached the pending commit's epoch: it is ours or a fork.
-        if entry.epoch == pending.epoch && entry.commit == pending.commit {
-            state.pending = None;
-            return Ok(Applied::Skipped);
+    group_id: &[u8],
+    pending_epoch: u64,
+) -> Result<u64, SdkError> {
+    match mls.merge_own(group_id) {
+        Ok(staged) => Ok(staged.commit_plain().map_err(kv_error)?.epoch),
+        // A crash between the merge and the conversation-row write: the group is already ahead.
+        Err(MlsError::NotFound(detail)) if detail == "pending commit" => {
+            let status = mls.status(group_id)?;
+            if status.epoch == pending_epoch.saturating_add(1) {
+                Ok(status.epoch)
+            } else {
+                Err(MlsError::NotFound(detail).into())
+            }
         }
-        return Ok(Applied::Failed);
+        Err(error) => Err(error.into()),
     }
-    if entry.epoch < local_epoch {
-        return Ok(Applied::Skipped);
+}
+
+fn discard_staged<K: MlsKv>(mls: &Mls<K>, group_id: &[u8]) -> Result<bool, SdkError> {
+    mls.discard_own(group_id)?.commit_plain().map_err(kv_error)
+}
+
+fn delete_local_group<K: MlsKv>(mls: &Mls<K>, group_id: &[u8]) -> Result<(), SdkError> {
+    match mls.delete_group(group_id) {
+        Ok(staged) => staged.commit_plain().map_err(kv_error).map(|_| ()),
+        Err(MlsError::NotFound(_)) => Ok(()),
+        Err(error) => Err(error.into()),
     }
-    if entry.epoch > local_epoch {
-        return Ok(Applied::Failed);
+}
+
+fn forget_group<K: MlsKv>(
+    mls: &Mls<K>,
+    store: &ConvStore<'_, K>,
+    group_id: &[u8],
+) -> Result<(), SdkError> {
+    delete_local_group(mls, group_id)?;
+    store.delete_group_index(group_id)
+}
+
+/// Delete an expired old group, then persist `state` (which no longer names it).
+fn persist_expiring<K: MlsKv>(
+    mls: &Mls<K>,
+    store: &ConvStore<'_, K>,
+    scope_id: &[u8],
+    state: &mut ConvState,
+    now: u64,
+) -> Result<(), SdkError> {
+    if let Some(group_id) = state.expire_old(now) {
+        forget_group(mls, store, &group_id)?;
     }
+    store.put(scope_id, state)
+}
+
+fn receive_commit<K: MlsKv>(mls: &Mls<K>, entry: &DmCommitEntry) -> Result<Applied, SdkError> {
     match mls.receive(&entry.commit) {
         Ok(staged) => match staged.commit_plain().map_err(MlsError::from)? {
             ReceivedMessage::Commit { epoch, removed: false } => Ok(Applied::Epoch(epoch)),
@@ -676,6 +858,42 @@ fn apply_entry<K: MlsKv>(
         Err(MlsError::Storage(error)) => Err(kv_error(error)),
         Err(MlsError::Internal(detail)) => Err(SdkError::Mls { code: "internal", detail }),
         Err(_) => Ok(Applied::Failed),
+    }
+}
+
+fn apply_entry<K: MlsKv>(
+    mls: &Mls<K>,
+    state: &mut ConvState,
+    local_epoch: u64,
+    entry: &DmCommitEntry,
+) -> Result<ApplyResult, SdkError> {
+    let action = classify_entry(state.pending.as_ref(), local_epoch, entry.epoch, &entry.commit);
+    match action {
+        EntryAction::MergeOwn => {
+            let pending_epoch = state
+                .pending
+                .as_ref()
+                .map(|pending| pending.epoch)
+                .ok_or_else(|| conv_error("the pending commit disappeared"))?;
+            let epoch = merge_staged(mls, &state.group_id, pending_epoch)?;
+            state.pending = None;
+            Ok(ApplyResult { applied: Applied::Epoch(epoch), own: Some(OwnMark::Merged) })
+        }
+        EntryAction::DiscardThenApply => {
+            discard_staged(mls, &state.group_id)?;
+            state.pending = None;
+            let applied = if entry.epoch < local_epoch {
+                Applied::Skipped
+            } else if entry.epoch > local_epoch {
+                Applied::Failed
+            } else {
+                receive_commit(mls, entry)?
+            };
+            Ok(ApplyResult { applied, own: Some(OwnMark::Discarded) })
+        }
+        EntryAction::Skip => Ok(ApplyResult { applied: Applied::Skipped, own: None }),
+        EntryAction::Fork => Ok(ApplyResult { applied: Applied::Failed, own: None }),
+        EntryAction::Apply => Ok(ApplyResult { applied: receive_commit(mls, entry)?, own: None }),
     }
 }
 
@@ -692,6 +910,7 @@ pub(crate) async fn catch_up<K: MlsKv>(
 ) -> Result<CatchUpOutcome, SdkError> {
     let mut state = store.require(scope)?;
     let mut local_epoch = mls.status(&state.group_id)?.epoch;
+    let mut own = OwnResolution::None;
     for _ in 0..CATCH_UP_MAX_PAGES {
         let request =
             DmOrderOp::Since(DmSince { group_id: state.group_id.clone(), log_seq: state.log_seq });
@@ -707,13 +926,21 @@ pub(crate) async fn catch_up<K: MlsKv>(
             _ => return Err(unexpected("since")),
         };
         if entries.is_empty() {
-            return Ok(CatchUpOutcome::Current { log_seq: state.log_seq });
+            return Ok(CatchUpOutcome::Current { log_seq: state.log_seq, own });
         }
         for entry in &entries {
             if entry.log_seq <= state.log_seq {
                 return Err(unexpected("since (log position went backwards)"));
             }
-            match apply_entry(mls, &mut state, local_epoch, entry)? {
+            let result = apply_entry(mls, &mut state, local_epoch, entry)?;
+            match result.own {
+                Some(OwnMark::Merged) => {
+                    own = OwnResolution::Merged { log_seq: entry.log_seq };
+                }
+                Some(OwnMark::Discarded) => own = OwnResolution::Discarded,
+                None => {}
+            }
+            match result.applied {
                 Applied::Epoch(epoch) => local_epoch = epoch,
                 Applied::Skipped => {}
                 Applied::Removed => {
@@ -722,16 +949,19 @@ pub(crate) async fn catch_up<K: MlsKv>(
                     store.put(&scope.conversation_id, &state)?;
                     return Ok(CatchUpOutcome::Removed);
                 }
-                Applied::Failed => return Ok(CatchUpOutcome::Forked),
+                Applied::Failed => {
+                    store.put(&scope.conversation_id, &state)?;
+                    return Ok(CatchUpOutcome::Forked);
+                }
             }
             state.log_seq = entry.log_seq;
         }
         store.put(&scope.conversation_id, &state)?;
         if !more {
-            return Ok(CatchUpOutcome::Current { log_seq: state.log_seq });
+            return Ok(CatchUpOutcome::Current { log_seq: state.log_seq, own });
         }
     }
-    Ok(CatchUpOutcome::Current { log_seq: state.log_seq })
+    Ok(CatchUpOutcome::Current { log_seq: state.log_seq, own })
 }
 
 /// What `status` said.
@@ -819,9 +1049,32 @@ pub(crate) async fn reconcile<K: MlsKv>(
         }
         None => ConvState::new(group_id.clone(), log_seq, now),
     };
-    state.expire_old(now);
+    if let Some(expired) = state.expire_old(now) {
+        forget_group(mls, store, &expired)?;
+    }
     store.put(&scope.conversation_id, &state)?;
     Ok(ReconcileOutcome::Switched { group_id })
+}
+
+/// Drop a conversation's old group once its 7-day window has ended (the D5 daily hook).
+/// A missing group is already gone.
+///
+/// # Errors
+/// Storage failure.
+pub(crate) fn expire_old_group<K: MlsKv>(
+    mls: &Mls<K>,
+    store: &ConvStore<'_, K>,
+    scope: &Scope,
+    now: u64,
+) -> Result<(), SdkError> {
+    let Some(mut state) = store.get(&scope.conversation_id)? else {
+        return Ok(());
+    };
+    let Some(group_id) = state.expire_old(now) else {
+        return Ok(());
+    };
+    forget_group(mls, store, &group_id)?;
+    store.put(&scope.conversation_id, &state)
 }
 
 /// Which first commit [`establish`] submits.
@@ -858,14 +1111,16 @@ pub(crate) enum EstablishOutcome {
 }
 
 /// First contact and re-establish: create the group with the derived id, add every verified device
-/// (`key_packages`), submit the commit with `create` or `re_establish`.
+/// (`key_packages`), and submit the commit with `create` or `re_establish`.
 ///
-/// The caller verified each `KeyPackage` against the directory (spec §3.4) and holds the Welcome
-/// until the orderer accepted. A lost race leaves the freshly created local group unreferenced.
+/// The staged first commit is written to `mls/establish/<scope>` before the first submit. A later
+/// call whose group still loads re-submits those bytes, so a scope keeps one staged group. The
+/// caller verified each `KeyPackage` against the directory (spec §3.4). The Welcome stays in the
+/// row until the orderer has the group and [`ramflux_mls::Mls::merge_own`] has run.
 ///
 /// # Errors
-/// No `KeyPackages`, MLS failures, storage failures, an orderer refusal, gateway failures other
-/// than the not-yet-available answer.
+/// No `KeyPackages` on a fresh start, MLS failures, storage failures, an orderer refusal, gateway
+/// failures other than the not-yet-available answer.
 pub(crate) async fn establish<K: MlsKv>(
     access: &mut impl MlsFrameAccess,
     mls: &Mls<K>,
@@ -874,6 +1129,24 @@ pub(crate) async fn establish<K: MlsKv>(
     now: u64,
 ) -> Result<EstablishOutcome, SdkError> {
     let Establish { scope, key_packages, kind } = request;
+    let flag = match kind {
+        EstablishKind::Create => DmSubmitFlag::Create,
+        EstablishKind::ReEstablish => DmSubmitFlag::ReEstablish,
+    };
+    if let Some(existing) = store.establish_get(&scope.conversation_id)? {
+        if existing.flag == flag {
+            match mls.status(&existing.group_id) {
+                Ok(_) => return finish_establish(access, mls, store, scope, &existing, now).await,
+                Err(MlsError::NotFound(_)) => {
+                    store.establish_delete(&scope.conversation_id)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            delete_local_group(mls, &existing.group_id)?;
+            store.establish_delete(&scope.conversation_id)?;
+        }
+    }
     if key_packages.is_empty() {
         return Err(SdkError::Mls {
             code: "policy_rejected",
@@ -887,73 +1160,164 @@ pub(crate) async fn establish<K: MlsKv>(
     })?;
     let group_id = dm_scope::mls_group_id(scope.kind.byte(), &scope.conversation_id, &nonce);
     let binding = scope.binding();
-    mls.create_with(scope.kind.mls_kind(), None, Some(&binding), Some(group_id))?
-        .commit_plain()
-        .map_err(MlsError::from)?;
     let packages: Vec<Vec<u8>> =
         key_packages.iter().map(|entry| entry.key_package.clone()).collect();
-    let added = mls.add(&group_id, &packages)?.commit_plain().map_err(MlsError::from)?;
-    let flag = match kind {
-        EstablishKind::Create => DmSubmitFlag::Create,
-        EstablishKind::ReEstablish => DmSubmitFlag::ReEstablish,
+    let added = match stage_first_commit(mls, scope, group_id, &binding, &packages) {
+        Ok(added) => added,
+        Err(error) => {
+            delete_local_group(mls, &group_id)?;
+            return Err(error);
+        }
     };
-    let request = DmSubmit {
+    let row = EstablishRow {
         group_id: group_id.to_vec(),
+        nonce: nonce.to_vec(),
+        flag,
+        epoch: added.epoch,
+        commit: added.commit,
+        welcome: added.welcome,
+        submitted_at: now,
+    };
+    if let Err(error) = store.establish_put(&scope.conversation_id, &row) {
+        delete_local_group(mls, &group_id)?;
+        return Err(error);
+    }
+    finish_establish(access, mls, store, scope, &row, now).await
+}
+
+fn stage_first_commit<K: MlsKv>(
+    mls: &Mls<K>,
+    scope: &Scope,
+    group_id: [u8; 32],
+    binding: &RfConversation,
+    packages: &[Vec<u8>],
+) -> Result<ramflux_mls::AddOutput, SdkError> {
+    mls.create_with(scope.kind.mls_kind(), None, Some(binding), Some(group_id))?
+        .commit_plain()
+        .map_err(kv_error)?;
+    mls.add(&group_id, packages)?.commit_plain().map_err(kv_error)
+}
+
+fn abandon_establish<K: MlsKv>(
+    mls: &Mls<K>,
+    store: &ConvStore<'_, K>,
+    scope_id: &[u8],
+    group_id: &[u8],
+) -> Result<(), SdkError> {
+    delete_local_group(mls, group_id)?;
+    store.establish_delete(scope_id)
+}
+
+fn record_established<K: MlsKv>(
+    mls: &Mls<K>,
+    store: &ConvStore<'_, K>,
+    scope: &Scope,
+    group_id: &[u8],
+    log_seq: u64,
+    now: u64,
+) -> Result<(), SdkError> {
+    let mut state = match store.get(&scope.conversation_id)? {
+        Some(mut state) => {
+            state.switch_to(group_id.to_vec(), log_seq, now);
+            state
+        }
+        None => ConvState::new(group_id.to_vec(), log_seq, now),
+    };
+    if let Some(expired) = state.expire_old(now) {
+        forget_group(mls, store, &expired)?;
+    }
+    store.put(&scope.conversation_id, &state)?;
+    store.establish_delete(&scope.conversation_id)
+}
+
+async fn finish_establish<K: MlsKv>(
+    access: &mut impl MlsFrameAccess,
+    mls: &Mls<K>,
+    store: &ConvStore<'_, K>,
+    scope: &Scope,
+    row: &EstablishRow,
+    now: u64,
+) -> Result<EstablishOutcome, SdkError> {
+    let request = DmSubmit {
+        group_id: row.group_id.clone(),
         kind: scope.kind,
         scope_id: scope.conversation_id.clone(),
-        // `AddOutput::epoch` is the epoch after the commit; the orderer wants the one it was made in.
-        epoch: added.epoch.saturating_sub(1),
-        commit: added.commit,
-        flag: Some(flag),
-        nonce: nonce.to_vec(),
+        epoch: row.epoch,
+        commit: row.commit.clone(),
+        flag: Some(row.flag),
+        nonce: row.nonce.clone(),
         anchors: scope.anchors.clone(),
     };
     match submit(access, request).await? {
-        SubmitOutcome::Accepted { epoch, log_seq } => {
-            let mut state = match store.get(&scope.conversation_id)? {
-                Some(mut state) => {
-                    state.switch_to(group_id.to_vec(), log_seq, now);
-                    state
-                }
-                None => ConvState::new(group_id.to_vec(), log_seq, now),
-            };
-            state.expire_old(now);
-            store.put(&scope.conversation_id, &state)?;
+        SubmitOutcome::Accepted { log_seq, .. } => {
+            let epoch = merge_staged(mls, &row.group_id, row.epoch)?;
+            record_established(mls, store, scope, &row.group_id, log_seq, now)?;
             Ok(EstablishOutcome::Established {
-                group_id: group_id.to_vec(),
+                group_id: row.group_id.clone(),
                 epoch,
                 log_seq,
-                welcome: added.welcome,
+                welcome: row.welcome.clone(),
             })
         }
         SubmitOutcome::NotYetAvailable => Ok(EstablishOutcome::NotYetAvailable),
-        SubmitOutcome::ScopeTaken { .. } | SubmitOutcome::Replaced { .. } => {
-            Ok(EstablishOutcome::LostRace(reconcile(access, mls, store, scope, now).await?))
-        }
-        SubmitOutcome::RateLimited { retry_after } if kind == EstablishKind::ReEstablish => {
-            // The losing re-establish: the winner's group is the scope's current one.
-            match reconcile(access, mls, store, scope, now).await? {
-                ReconcileOutcome::UnknownScope => Ok(EstablishOutcome::RateLimited { retry_after }),
-                other => Ok(EstablishOutcome::LostRace(other)),
-            }
-        }
-        SubmitOutcome::RateLimited { retry_after } => {
+        SubmitOutcome::RateLimited { retry_after } if row.flag == DmSubmitFlag::Create => {
             Ok(EstablishOutcome::RateLimited { retry_after })
         }
-        SubmitOutcome::Refused(code) => Err(refused_error(code)),
-        SubmitOutcome::GroupTaken | SubmitOutcome::Stale { .. } => Err(SdkError::Mls {
-            code: "dm_order_refused",
-            detail: "the orderer answered a first commit with a group or epoch conflict".to_owned(),
-        }),
+        SubmitOutcome::GroupTaken
+        | SubmitOutcome::ScopeTaken { .. }
+        | SubmitOutcome::Replaced { .. }
+        | SubmitOutcome::RateLimited { .. } => {
+            lost_or_adopted(access, mls, store, scope, row, now).await
+        }
+        SubmitOutcome::Refused(code) => {
+            abandon_establish(mls, store, &scope.conversation_id, &row.group_id)?;
+            Err(refused_error(code))
+        }
+        SubmitOutcome::Stale { .. } => {
+            abandon_establish(mls, store, &scope.conversation_id, &row.group_id)?;
+            Err(SdkError::Mls {
+                code: "dm_order_refused",
+                detail: "the orderer answered a first commit with a group or epoch conflict"
+                    .to_owned(),
+            })
+        }
     }
 }
 
-/// An own commit the facade merged locally.
+async fn lost_or_adopted<K: MlsKv>(
+    access: &mut impl MlsFrameAccess,
+    mls: &Mls<K>,
+    store: &ConvStore<'_, K>,
+    scope: &Scope,
+    row: &EstablishRow,
+    now: u64,
+) -> Result<EstablishOutcome, SdkError> {
+    let named_ours = matches!(
+        status(access, scope).await?,
+        StatusOutcome::Group { group_id, .. } if group_id == row.group_id
+    );
+    if named_ours {
+        let epoch = merge_staged(mls, &row.group_id, row.epoch)?;
+        record_established(mls, store, scope, &row.group_id, 0, now)?;
+        return Ok(EstablishOutcome::Established {
+            group_id: row.group_id.clone(),
+            epoch,
+            log_seq: 0,
+            welcome: row.welcome.clone(),
+        });
+    }
+    abandon_establish(mls, store, &scope.conversation_id, &row.group_id)?;
+    Ok(EstablishOutcome::LostRace(reconcile(access, mls, store, scope, now).await?))
+}
+
+/// An own commit staged locally, not yet merged.
 pub(crate) struct MadeCommit<T> {
-    /// Epoch after the commit (as the facade reports it).
-    pub(crate) epoch_after: u64,
+    /// Epoch the commit was made in. The group stays there until [`ramflux_mls::Mls::merge_own`].
+    pub(crate) epoch: u64,
     /// The commit message.
     pub(crate) commit: Vec<u8>,
+    /// Welcome of an Add. Stored beside `extra` so a retry can return it after a restart.
+    pub(crate) welcome: Option<Vec<u8>>,
     /// What the caller wants back (for an Add: the Welcome).
     pub(crate) extra: T,
 }
@@ -961,28 +1325,31 @@ pub(crate) struct MadeCommit<T> {
 /// How an own commit ended.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CommitOutcome<T> {
-    /// Ordered at this position.
+    /// Ordered at this position. The group is already merged.
     Accepted { log_seq: u64, extra: T },
     /// The group is not at the head; nothing was made.
     NotCurrent(CatchUpOutcome),
     /// An earlier own commit is still waiting for the orderer; nothing was made.
     EarlierPending,
-    /// The commit was made and merged locally but the orderer has not ordered it: it stays
-    /// pending and [`retry_pending`] re-submits it.
+    /// The commit is staged and the orderer has not ordered it. [`retry_pending`] re-submits the
+    /// same bytes.
     Pending { extra: T },
-    /// The commit lost its epoch to another commit: the group is forked.
+    /// Another commit took the epoch. Ours was discarded; rebuild it if it is still needed.
+    Lost,
+    /// The commit lost its epoch and the log could not be applied: the group is forked.
     Forked,
     /// The orderer replaced the group; reconcile.
     Replaced { group_id: Vec<u8> },
 }
 
-/// Catch up, make one own commit with `build`, and submit it.
+/// Catch up, stage one own commit with `build`, and submit it.
 ///
-/// `build` receives the group id and returns the merged commit (for example `Mls::remove`,
-/// `Mls::update` or `Mls::add` followed by `commit_plain`).
+/// `build` receives the group id and returns the staged commit (for example `Mls::remove`,
+/// `Mls::update` or `Mls::add` followed by `commit_plain`). A stage left behind with no pending
+/// row is discarded first.
 ///
 /// # Errors
-/// Storage failures, MLS failures from `make`, an orderer refusal and the errors of
+/// Storage failures, MLS failures from `build`, an orderer refusal and the errors of
 /// [`catch_up`].
 pub(crate) async fn commit_and_submit<K, T, F>(
     access: &mut impl MlsFrameAccess,
@@ -1001,26 +1368,45 @@ where
         // An earlier own commit is still unordered: it goes first ([`retry_pending`]).
         return Ok(CommitOutcome::EarlierPending);
     }
+    discard_staged(mls, &state.group_id)?;
     match catch_up(access, mls, store, scope).await? {
         CatchUpOutcome::Current { .. } => {}
         other => return Ok(CommitOutcome::NotCurrent(other)),
     }
     let mut state = store.require(scope)?;
+    if state.pending.is_some() {
+        return Ok(CommitOutcome::EarlierPending);
+    }
     let made = build(mls, &state.group_id)?;
-    let epoch = made.epoch_after.saturating_sub(1);
-    state.pending = Some(PendingCommit { epoch, commit: made.commit.clone(), submitted_at: now });
+    state.pending = Some(PendingCommit {
+        epoch: made.epoch,
+        commit: made.commit.clone(),
+        welcome: made.welcome,
+        submitted_at: now,
+    });
     store.put(&scope.conversation_id, &state)?;
     let request = DmSubmit {
         group_id: state.group_id.clone(),
         kind: scope.kind,
         scope_id: scope.conversation_id.clone(),
-        epoch,
+        epoch: made.epoch,
         commit: made.commit,
         flag: None,
         nonce: Vec::new(),
         anchors: Vec::new(),
     };
     finish_submit(access, mls, store, scope, request, made.extra).await
+}
+
+fn discard_pending<K: MlsKv>(
+    mls: &Mls<K>,
+    store: &ConvStore<'_, K>,
+    scope: &Scope,
+) -> Result<(), SdkError> {
+    let mut state = store.require(scope)?;
+    discard_staged(mls, &state.group_id)?;
+    state.pending = None;
+    store.put(&scope.conversation_id, &state)
 }
 
 async fn finish_submit<K: MlsKv, T>(
@@ -1031,8 +1417,11 @@ async fn finish_submit<K: MlsKv, T>(
     request: DmSubmit,
     extra: T,
 ) -> Result<CommitOutcome<T>, SdkError> {
+    let group_id = request.group_id.clone();
+    let epoch = request.epoch;
     match submit(access, request).await? {
         SubmitOutcome::Accepted { log_seq, .. } => {
+            merge_staged(mls, &group_id, epoch)?;
             let mut state = store.require(scope)?;
             state.pending = None;
             state.log_seq = log_seq;
@@ -1040,26 +1429,44 @@ async fn finish_submit<K: MlsKv, T>(
             Ok(CommitOutcome::Accepted { log_seq, extra })
         }
         SubmitOutcome::Stale { .. } => match catch_up(access, mls, store, scope).await? {
+            CatchUpOutcome::Current { log_seq, own: OwnResolution::Merged { .. } } => {
+                Ok(CommitOutcome::Accepted { log_seq, extra })
+            }
+            CatchUpOutcome::Current { own: OwnResolution::Discarded, .. } => {
+                Ok(CommitOutcome::Lost)
+            }
+            CatchUpOutcome::Current { own: OwnResolution::None, .. }
+            | CatchUpOutcome::NotYetAvailable => Ok(CommitOutcome::Pending { extra }),
+            // The removal already cleared the stage. The device is out; nothing is rebuilt.
+            CatchUpOutcome::Removed => Ok(CommitOutcome::NotCurrent(CatchUpOutcome::Removed)),
             CatchUpOutcome::Forked | CatchUpOutcome::Pruned => Ok(CommitOutcome::Forked),
             CatchUpOutcome::Replaced { group_id } => Ok(CommitOutcome::Replaced { group_id }),
-            CatchUpOutcome::Current { .. }
-            | CatchUpOutcome::Removed
-            | CatchUpOutcome::NotYetAvailable => Ok(CommitOutcome::Pending { extra }),
         },
-        SubmitOutcome::Replaced { group_id } => Ok(CommitOutcome::Replaced { group_id }),
         SubmitOutcome::NotYetAvailable | SubmitOutcome::RateLimited { .. } => {
             Ok(CommitOutcome::Pending { extra })
         }
-        SubmitOutcome::Refused(code) => Err(refused_error(code)),
-        SubmitOutcome::ScopeTaken { .. } | SubmitOutcome::GroupTaken => Err(SdkError::Mls {
-            code: "dm_order_refused",
-            detail: "the orderer answered an ordinary commit with a scope or group conflict"
-                .to_owned(),
-        }),
+        SubmitOutcome::Replaced { group_id } => {
+            discard_pending(mls, store, scope)?;
+            Ok(CommitOutcome::Replaced { group_id })
+        }
+        SubmitOutcome::Refused(code) => {
+            discard_pending(mls, store, scope)?;
+            Err(refused_error(code))
+        }
+        SubmitOutcome::ScopeTaken { .. } | SubmitOutcome::GroupTaken => {
+            discard_pending(mls, store, scope)?;
+            Err(SdkError::Mls {
+                code: "dm_order_refused",
+                detail: "the orderer answered an ordinary commit with a scope or group conflict"
+                    .to_owned(),
+            })
+        }
     }
 }
 
 /// Re-submit the pending own commit (orderer back up, rate limit over, answer lost).
+///
+/// `Accepted` carries the Welcome stored with the pending commit (`None` for any other commit).
 ///
 /// # Errors
 /// Storage failures, an orderer refusal, gateway failures other than the not-yet-available
@@ -1070,12 +1477,14 @@ pub(crate) async fn retry_pending<K: MlsKv>(
     store: &ConvStore<'_, K>,
     scope: &Scope,
     now: u64,
-) -> Result<Option<CommitOutcome<()>>, SdkError> {
+) -> Result<Option<CommitOutcome<Option<Vec<u8>>>>, SdkError> {
     let mut state = store.require(scope)?;
-    let Some(pending) = state.pending.clone() else {
+    let Some(mut pending) = state.pending.clone() else {
         return Ok(None);
     };
-    state.pending = Some(PendingCommit { submitted_at: now, ..pending.clone() });
+    let welcome = pending.welcome.clone();
+    pending.submitted_at = now;
+    state.pending = Some(pending.clone());
     store.put(&scope.conversation_id, &state)?;
     let request = DmSubmit {
         group_id: state.group_id,
@@ -1087,7 +1496,7 @@ pub(crate) async fn retry_pending<K: MlsKv>(
         nonce: Vec::new(),
         anchors: Vec::new(),
     };
-    finish_submit(access, mls, store, scope, request, ()).await.map(Some)
+    finish_submit(access, mls, store, scope, request, welcome).await.map(Some)
 }
 
 #[cfg(test)]
@@ -1126,7 +1535,11 @@ mod tests {
             "inside the window"
         );
         assert!(!state.readable(&[1; 32], 5_000 + OLD_GROUP_READ_ONLY_SECS), "window over");
-        assert!(state.expire_old(5_000 + OLD_GROUP_READ_ONLY_SECS), "the old group is dropped");
+        assert_eq!(
+            state.expire_old(5_000 + OLD_GROUP_READ_ONLY_SECS),
+            Some(vec![1; 32]),
+            "the dropped group id"
+        );
         assert!(state.old.is_none(), "nothing left to read");
     }
 
@@ -1142,9 +1555,41 @@ mod tests {
     fn pending_lookup_waits_thirty_seconds() {
         let mut state = state();
         assert!(!state.pending_lookup_due(10_000), "nothing pending");
-        state.pending = Some(PendingCommit { epoch: 3, commit: vec![9], submitted_at: 10_000 });
+        state.pending =
+            Some(PendingCommit { epoch: 3, commit: vec![9], welcome: None, submitted_at: 10_000 });
         assert!(!state.pending_lookup_due(10_000 + PENDING_LOOKUP_SECS - 1), "too early");
         assert!(state.pending_lookup_due(10_000 + PENDING_LOOKUP_SECS), "30 s unanswered");
+    }
+
+    #[test]
+    fn classify_entry_orders_own_other_below_and_above() {
+        let ours =
+            PendingCommit { epoch: 4, commit: vec![1, 2, 3], welcome: None, submitted_at: 0 };
+        assert_eq!(
+            classify_entry(Some(&ours), 4, 4, &[1, 2, 3]),
+            EntryAction::MergeOwn,
+            "our bytes at the staged epoch"
+        );
+        assert_eq!(
+            classify_entry(Some(&ours), 4, 4, &[9]),
+            EntryAction::DiscardThenApply,
+            "other bytes at the staged epoch"
+        );
+        assert_eq!(
+            classify_entry(Some(&ours), 4, 3, &[9]),
+            EntryAction::Skip,
+            "an entry below the local epoch"
+        );
+        assert_eq!(
+            classify_entry(None, 4, 5, &[9]),
+            EntryAction::Fork,
+            "an entry above the local epoch"
+        );
+        assert_eq!(
+            classify_entry(Some(&ours), 4, 6, &[9]),
+            EntryAction::Fork,
+            "an entry past the staged epoch"
+        );
     }
 
     #[test]

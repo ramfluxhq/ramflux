@@ -288,10 +288,11 @@ pub(crate) async fn remove_leaves<K: MlsKv>(
                 });
             }
             let output = mls.remove(group_id, leaf)?.commit_plain().map_err(MlsError::from)?;
-            Ok(MadeCommit { epoch_after: output.epoch, commit: output.message, extra: () })
+            Ok(MadeCommit { epoch: output.epoch, commit: output.message, welcome: None, extra: () })
         })
         .await;
         match outcome {
+            // `Lost` stops the run, like every outcome other than `Accepted`.
             Ok(CommitOutcome::Accepted { .. }) => report.removed.push(leaf),
             Err(error) if not_found(&error) => report.removed.push(leaf),
             Ok(other) => {
@@ -328,7 +329,12 @@ pub(crate) async fn add_devices<K: MlsKv>(
         key_packages.iter().map(|entry| entry.key_package.clone()).collect();
     commit_and_submit(access, mls, store, scope, now, |mls, group_id| {
         let output = mls.add(group_id, &packages)?.commit_plain().map_err(MlsError::from)?;
-        Ok(MadeCommit { epoch_after: output.epoch, commit: output.commit, extra: output.welcome })
+        Ok(MadeCommit {
+            epoch: output.epoch,
+            commit: output.commit,
+            welcome: Some(output.welcome.clone()),
+            extra: output.welcome,
+        })
     })
     .await
 }
@@ -348,7 +354,7 @@ pub(crate) async fn update_own_leaf<K: MlsKv>(
 ) -> Result<CommitOutcome<()>, SdkError> {
     let outcome = commit_and_submit(access, mls, store, scope, now, |mls, group_id| {
         let output = mls.update(group_id)?.commit_plain().map_err(MlsError::from)?;
-        Ok(MadeCommit { epoch_after: output.epoch, commit: output.message, extra: () })
+        Ok(MadeCommit { epoch: output.epoch, commit: output.message, welcome: None, extra: () })
     })
     .await?;
     if matches!(outcome, CommitOutcome::Accepted { .. })

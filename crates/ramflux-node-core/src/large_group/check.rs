@@ -471,7 +471,7 @@ mod tests {
         let crypto = ramflux_mls::CryptoHandle::init().expect("test: crypto probe");
         let mls = ramflux_mls::Mls::new(NullKv, crypto);
         let minted = mls
-            .key_package(ramflux_mls::GroupKind::Group)
+            .key_package(ramflux_mls::GroupKind::Group, false)
             .expect("test: key package")
             .commit_plain()
             .expect("test: staged key package");

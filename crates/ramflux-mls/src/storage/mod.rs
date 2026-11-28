@@ -45,9 +45,11 @@ struct OwnKeyPackageEntry {
     reference_key: Vec<u8>,
     /// Unix seconds after which the `KeyPackage` is deleted.
     not_after: u64,
-    /// Public key of the leaf signature key made for this `KeyPackage`; its secret is deleted with
-    /// an unused, expired `KeyPackage` (a consumed one leaves the index and keeps its key).
+    /// Public key of the leaf signature key made for this `KeyPackage`. An expired entry deletes
+    /// that secret only when no group still uses it (the use count is zero).
     leaf_signature_key: Vec<u8>,
+    /// The `KeyPackage` was marked last-resort.
+    last_resort: bool,
 }
 
 /// openmls storage: overlay in front of an [`MlsKv`] backend.
@@ -111,18 +113,32 @@ impl<'k, K: MlsKv> MlsStorage<'k, K> {
         self.rows.delete(label, key.to_vec())
     }
 
-    /// Record an own `KeyPackage` with its expiry.
+    /// Record an own `KeyPackage` with its expiry. The entry is not last-resort.
+    /// `debug.rs` (feature `itest-mls-debug`) is the only caller.
+    #[cfg(feature = "itest-mls-debug")]
     pub(crate) fn own_kp_remember<R: Serialize + ?Sized>(
         &self,
         hash_ref: &R,
         not_after: u64,
         leaf_signature_key: &[u8],
     ) -> Result<(), MlsKvError> {
+        self.own_kp_remember_with(hash_ref, not_after, leaf_signature_key, false)
+    }
+
+    /// Record an own `KeyPackage` with its expiry and last-resort flag.
+    pub(crate) fn own_kp_remember_with<R: Serialize + ?Sized>(
+        &self,
+        hash_ref: &R,
+        not_after: u64,
+        leaf_signature_key: &[u8],
+        last_resort: bool,
+    ) -> Result<(), MlsKvError> {
         let mut entries = self.own_kp_entries()?;
         entries.push(OwnKeyPackageEntry {
             reference_key: key_of(hash_ref)?,
             not_after,
             leaf_signature_key: leaf_signature_key.to_vec(),
+            last_resort,
         });
         self.own_kp_store(&entries)
     }
@@ -137,19 +153,83 @@ impl<'k, K: MlsKv> MlsStorage<'k, K> {
         self.own_kp_store(&entries)
     }
 
-    /// Delete every own `KeyPackage` whose expiry passed, with its keys. Returns the count.
+    /// Delete every own `KeyPackage` whose expiry passed. The leaf signer is deleted only when
+    /// no group still uses it and no surviving index entry names it. Returns the count.
     pub(crate) fn own_kp_purge_expired(&self, now: u64) -> Result<usize, MlsKvError> {
         let entries = self.own_kp_entries()?;
         let (expired, live): (Vec<_>, Vec<_>) =
             entries.into_iter().partition(|entry| entry.not_after <= now);
         for entry in &expired {
             self.rows.delete(LABEL_KEY_PACKAGE, entry.reference_key.clone())?;
-            self.rows.delete(crate::RF_LABEL_LEAF_SIG, entry.leaf_signature_key.clone())?;
+            let still_named =
+                live.iter().any(|kept| kept.leaf_signature_key == entry.leaf_signature_key);
+            if !still_named && self.leaf_sig_use_get(&entry.leaf_signature_key)? == 0 {
+                self.rows.delete(crate::RF_LABEL_LEAF_SIG, entry.leaf_signature_key.clone())?;
+            }
         }
         if !expired.is_empty() {
             self.own_kp_store(&live)?;
         }
         Ok(expired.len())
+    }
+
+    /// Groups that still sign with `pk` (absent is zero).
+    pub(crate) fn leaf_sig_use_get(&self, pk: &[u8]) -> Result<u32, MlsKvError> {
+        let Some(raw) = self.rf_get(crate::RF_LABEL_LEAF_SIG_USE, pk)? else {
+            return Ok(0);
+        };
+        let bytes: [u8; 4] = raw
+            .as_slice()
+            .try_into()
+            .map_err(|_| MlsKvError::Codec("leaf signer use count is not 4 bytes".to_owned()))?;
+        Ok(u32::from_be_bytes(bytes))
+    }
+
+    /// Count one more group that signs with `pk`.
+    pub(crate) fn leaf_sig_use_increment(&self, pk: &[u8]) -> Result<(), MlsKvError> {
+        let next = self
+            .leaf_sig_use_get(pk)?
+            .checked_add(1)
+            .ok_or_else(|| MlsKvError::Codec("leaf signer use count overflow".to_owned()))?;
+        self.rf_put(crate::RF_LABEL_LEAF_SIG_USE, pk, &next.to_be_bytes())
+    }
+
+    /// Count one fewer group that signs with `pk`. At zero the use row is deleted, and the
+    /// signer secret is deleted when no own `KeyPackage` still names the key.
+    pub(crate) fn leaf_sig_use_release(&self, pk: &[u8]) -> Result<(), MlsKvError> {
+        let count = self.leaf_sig_use_get(pk)?;
+        if count == 0 {
+            return Err(MlsKvError::Codec("leaf signer use count is already zero".to_owned()));
+        }
+        let next = count - 1;
+        if next == 0 {
+            self.rf_delete(crate::RF_LABEL_LEAF_SIG_USE, pk)?;
+            if !self.own_kp_names(pk)? {
+                self.rf_delete(crate::RF_LABEL_LEAF_SIG, pk)?;
+            }
+        } else {
+            self.rf_put(crate::RF_LABEL_LEAF_SIG_USE, pk, &next.to_be_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// True when a new last-resort `KeyPackage` is due. False only when some stored one is
+    /// last-resort, younger than half its lifetime, and unused. `now` is supplied by the caller.
+    pub(crate) fn own_kp_last_resort_due(&self, now: u64) -> Result<bool, MlsKvError> {
+        let horizon = now.saturating_add(crate::KEY_PACKAGE_LIFETIME_SECS / 2);
+        for entry in self.own_kp_entries()? {
+            if entry.last_resort
+                && horizon < entry.not_after
+                && self.leaf_sig_use_get(&entry.leaf_signature_key)? == 0
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn own_kp_names(&self, pk: &[u8]) -> Result<bool, MlsKvError> {
+        Ok(self.own_kp_entries()?.iter().any(|entry| entry.leaf_signature_key == pk))
     }
 
     fn own_kp_entries(&self) -> Result<Vec<OwnKeyPackageEntry>, MlsKvError> {
