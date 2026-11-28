@@ -37,9 +37,8 @@ subtle = { workspace = true }
 thiserror = "2.0"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1.8", features = ["derive"] }
+curve25519-dalek = "5.0.0"
+voprf = { version = "=0.6.0-pre.2", default-features = false, features = ["ristretto255-ciphersuite", "alloc"] }
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-curve25519-dalek = "5.0.0"
