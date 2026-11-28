@@ -595,7 +595,7 @@ pub(crate) struct Backoff {
 impl Backoff {
     /// Delay after `failures` consecutive failures (1 is the first).
     pub(crate) fn delay_secs(failures: u32) -> u64 {
-        let shift = failures.checked_sub(1).unwrap_or(0).min(16);
+        let shift = failures.saturating_sub(1).min(16);
         BACKOFF_BASE_SECS.saturating_mul(1_u64 << shift).min(BACKOFF_MAX_SECS)
     }
 
@@ -763,12 +763,10 @@ fn classify_entry(
             return EntryAction::Fork;
         }
     }
-    if entry_epoch < local_epoch {
-        EntryAction::Skip
-    } else if entry_epoch > local_epoch {
-        EntryAction::Fork
-    } else {
-        EntryAction::Apply
+    match entry_epoch.cmp(&local_epoch) {
+        std::cmp::Ordering::Less => EntryAction::Skip,
+        std::cmp::Ordering::Equal => EntryAction::Apply,
+        std::cmp::Ordering::Greater => EntryAction::Fork,
     }
 }
 
@@ -816,7 +814,7 @@ fn discard_staged<K: MlsKv>(mls: &Mls<K>, group_id: &[u8]) -> Result<bool, SdkEr
 
 fn delete_local_group<K: MlsKv>(mls: &Mls<K>, group_id: &[u8]) -> Result<(), SdkError> {
     match mls.delete_group(group_id) {
-        Ok(staged) => staged.commit_plain().map_err(kv_error).map(|_| ()),
+        Ok(staged) => staged.commit_plain().map_err(kv_error),
         Err(MlsError::NotFound(_)) => Ok(()),
         Err(error) => Err(error.into()),
     }
@@ -882,12 +880,10 @@ fn apply_entry<K: MlsKv>(
         EntryAction::DiscardThenApply => {
             discard_staged(mls, &state.group_id)?;
             state.pending = None;
-            let applied = if entry.epoch < local_epoch {
-                Applied::Skipped
-            } else if entry.epoch > local_epoch {
-                Applied::Failed
-            } else {
-                receive_commit(mls, entry)?
+            let applied = match entry.epoch.cmp(&local_epoch) {
+                std::cmp::Ordering::Less => Applied::Skipped,
+                std::cmp::Ordering::Equal => receive_commit(mls, entry)?,
+                std::cmp::Ordering::Greater => Applied::Failed,
             };
             Ok(ApplyResult { applied, own: Some(OwnMark::Discarded) })
         }
