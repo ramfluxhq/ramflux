@@ -16,6 +16,8 @@ mod durable_ingress_registry;
 mod durable_mode;
 mod ephemeral;
 mod ephemeral_forward;
+mod group_direct;
+mod group_gate;
 mod hub_index;
 #[cfg(all(test, feature = "itest-http"))]
 mod ijson_ingress_tests;

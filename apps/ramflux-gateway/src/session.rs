@@ -244,6 +244,10 @@ pub(crate) async fn handle_gateway_session_transport(
     context: GatewayQuicContext,
     first_frame: ramflux_node_core::GatewayClientFrame,
 ) -> anyhow::Result<()> {
+    // Group sessions are anonymous: no `Open`, no `Auth`, no device authority (spec r1.2 2.1).
+    if crate::group_direct::starts_direct_group(&first_frame) {
+        return crate::group_direct::run(send, recv, context, first_frame).await;
+    }
     Box::pin(handle_gateway_session_transport_inner(send, recv, context, first_frame, None)).await
 }
 
@@ -1146,7 +1150,10 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
                     }
                 }
                 ramflux_node_core::GatewayClientFrame::Open { .. }
-                | ramflux_node_core::GatewayClientFrame::Auth { .. } => {
+                | ramflux_node_core::GatewayClientFrame::Auth { .. }
+                | ramflux_node_core::GatewayClientFrame::GroupOpen { .. }
+                | ramflux_node_core::GatewayClientFrame::GroupIdent { .. }
+                | ramflux_node_core::GatewayClientFrame::Group { .. } => {
                     write_gateway_handle(
                         &send,
                         &ramflux_node_core::GatewayServerFrame::Nack {

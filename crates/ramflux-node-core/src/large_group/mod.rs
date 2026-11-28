@@ -8,7 +8,7 @@
 //! function here is one transaction on the `lg_*` tables.
 
 pub mod blobs;
-pub mod check;
+pub(crate) mod check;
 pub mod entries;
 pub mod host;
 pub mod issue;

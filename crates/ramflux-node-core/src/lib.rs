@@ -92,8 +92,9 @@ pub use inbox_page::{
     KnownLoss, PAGE_BYTE_CAP, PageEntryRecord, PageError, PageReason, ResumePage,
 };
 mod dm_order;
-#[allow(dead_code, reason = "MLS: allowance removed in G4")]
-mod large_group;
+mod group_dispatch;
+mod group_wire;
+pub mod large_group;
 mod lifecycle;
 mod mesh_identity;
 mod mls_header;
@@ -159,6 +160,13 @@ pub use gateway_auth::{
 };
 pub use gateway_frames::*;
 pub use gateway_state::*;
+pub use group_dispatch::{dispatch as run_group_op, refusal_reply as group_refusal_reply};
+pub use group_wire::{
+    BlobPutHead, CREATE_SCOPE as GROUP_CREATE_SCOPE, GROUP_BODY_B64_MAX, GROUP_BODY_MAX_BYTES,
+    GROUP_HOST_ROUTER_PATH, GroupDirectKind, GroupHostCall, GroupHostReply, UploadCap,
+    blob_put_head as group_blob_put_head, decode_b64 as group_decode_b64,
+    decode_body as group_decode_body, frame_op_allowed as group_frame_op_allowed,
+};
 pub use home_node_migration::*;
 pub use http_support::*;
 pub use inbox::*;

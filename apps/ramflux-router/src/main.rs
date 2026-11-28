@@ -13,6 +13,7 @@ mod durable_mode;
 #[cfg(test)]
 mod entry_admission_tests;
 mod forward_http;
+mod group_routes;
 mod handlers;
 mod home_migration;
 mod identity_authority;
@@ -117,6 +118,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         router.enable_custody(&config)?;
         custody_listener::start(&config, Arc::clone(&router))?;
         retention::start(Arc::clone(&router));
+        group_routes::start(&config, Arc::clone(&router))?;
         serve_router_mesh_from_env(&config, &router)?;
         #[cfg(feature = "itest-http")]
         if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
