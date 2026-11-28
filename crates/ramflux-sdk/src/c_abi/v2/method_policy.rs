@@ -102,6 +102,7 @@ policies! {
     "attachment.import.finish" => ("account", true, true, false, false),
     "attachment.import.read" => ("account", true, true, false, false),
     "attachment.import.status" => ("account", false, true, false, false),
+    "attachment.limits" => ("account", false, false, false, false),
     "attachment.prepare.begin" => ("account", true, true, false, false),
     "attachment.prepare.cancel" => ("account", true, true, false, false),
     "attachment.prepare.chunk" => ("account", true, true, false, false),
