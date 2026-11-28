@@ -216,11 +216,11 @@ fn friend() -> Result<Control, SdkError> {
 }
 
 fn round_trip_all_operations() -> TestResult {
-    assert_eq!(CONTROLS.len(), 18);
+    assert_eq!(CONTROLS.len(), 15);
     let operations: BTreeSet<u32> = CONTROLS.iter().map(|binding| binding.operation).collect();
     let tags: BTreeSet<u32> = CONTROLS.iter().map(|binding| binding.tag).collect();
-    assert_eq!(operations, (1..=18).collect());
-    assert_eq!(tags, (16..=32).chain(34..=34).collect());
+    assert_eq!(operations, (1..=18).filter(|n| !matches!(n, 4 | 5 | 14)).collect());
+    assert_eq!(tags, (16..=32).filter(|n| !matches!(n, 19 | 20 | 29)).chain(34..=34).collect());
     let mut events = stream();
     let mut seen = BTreeSet::new();
     for (index, control) in samples()?.into_iter().enumerate() {

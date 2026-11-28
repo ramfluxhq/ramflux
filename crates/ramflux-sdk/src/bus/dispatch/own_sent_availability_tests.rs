@@ -232,11 +232,9 @@ async fn an_oversized_copy_payload_cannot_roll_back_primary_storage_or_submissio
 }
 
 #[tokio::test]
-async fn missing_group_or_peer_copy_context_cannot_roll_back_a_primary_transaction() -> TestResult {
-    for group in [false, true] {
-        let f =
-            Fixture::new(if group { "own-copy-missing-group" } else { "own-copy-missing-peer" })
-                .await?;
+async fn missing_peer_copy_context_cannot_roll_back_a_primary_transaction() -> TestResult {
+    {
+        let f = Fixture::new("own-copy-missing-peer").await?;
         f.source.client.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             f.source.client.send_direct_message(
                 "thread",
@@ -250,12 +248,10 @@ async fn missing_group_or_peer_copy_context_cannot_roll_back_a_primary_transacti
                 b"primary body",
             )?;
             let ticket = f.source.client.queue_own_sent_copy("primary", || {
-                if !group {
-                    let mut missing =
-                        f.message("primary").map_err(|_| SdkError::IdentityRootMissing)?;
-                    missing.recipient_device_id = Some("absent-device".into());
-                    f.source.client.own_sent_peer(&missing)?;
-                }
+                let mut missing =
+                    f.message("primary").map_err(|_| SdkError::IdentityRootMissing)?;
+                missing.recipient_device_id = Some("absent-device".into());
+                f.source.client.own_sent_peer(&missing)?;
                 f.source.client.stage_own_sent_message(
                     crate::client::own_sent_message::OwnSentInput {
                         envelope: "primary-env",
