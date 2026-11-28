@@ -27,6 +27,7 @@ pub const MAX_ENVELOPE_BYTES: usize = MAX_INLINE_MLS + 16 * 1024;
 
 const REQ_DOMAIN: &[u8] = b"rf-lg-req-v1";
 const SIG_DOMAIN: &[u8] = b"rf-lg-env-sig-v1";
+const OP_DOMAIN: &[u8] = b"rf-lg-op-v1";
 const BIND_DOMAIN: &[u8] = b"rf-lg-entry-v1";
 const CHAIN_DOMAIN: &[u8] = b"rf-lg-entry-chain-v1";
 const MAX_BODY: usize = 16 * 1024;
@@ -810,6 +811,88 @@ fn join_proof_message(new_p: &[u8; 32]) -> Vec<u8> {
     enc.finish()
 }
 
+/// The hash a member-session join token binds to: `BLAKE3(rf-lg-join-v1 ‖ kind ‖ H(KeyPackage) ‖
+/// join_pk_id ‖ H(sealed))`.
+#[must_use]
+pub fn join_bind(req: &JoinRequest) -> [u8; 32] {
+    let mut enc = Enc::new(LG_JOIN_V1.as_bytes());
+    enc.u8(req.kind.code())
+        .fixed(blake3::hash(&req.key_package).as_bytes())
+        .fixed(&req.join_pk_id)
+        .fixed(blake3::hash(&req.sealed).as_bytes());
+    *blake3::hash(&enc.finish()).as_bytes()
+}
+
+/// The message an invite's key signs: `rf-lg-join-v1 ‖ group_id ‖ P ‖ join_pk_id`; the proof in
+/// `JoinRequest::auth` is `invite_id (16) ‖ signature (64)`.
+#[must_use]
+pub fn invite_proof_message(gid: &[u8; 32], p: &[u8; 32], join_pk_id: &[u8; 32]) -> Vec<u8> {
+    let mut enc = Enc::new(LG_JOIN_V1.as_bytes());
+    enc.fixed(gid).fixed(p).fixed(join_pk_id);
+    enc.finish()
+}
+
+/// What an operation's token is bound to: `BLAKE3(rf-lg-op-v1 ‖ op ‖ group_id ‖ body)`. Used by
+/// `invite.put/revoke`, `blob.put` and `attach.put` (the entry kinds bind to the envelope, the
+/// `open` token to the session nonce).
+#[must_use]
+pub fn op_bind(op: &str, gid: &[u8; 32], body: &[u8]) -> [u8; 32] {
+    let mut enc = Enc::new(OP_DOMAIN);
+    enc.var(op.as_bytes()).fixed(gid).var(body);
+    *blake3::hash(&enc.finish()).as_bytes()
+}
+
+/// The request body a `blob.put` authority covers (token bind or admin-signed body):
+/// `blob_ref ‖ total ‖ total_bytes`.
+#[must_use]
+pub fn blob_put_body(blob_ref: &[u8; 32], total: u32, total_bytes: u64) -> Vec<u8> {
+    let mut enc = Enc::default();
+    enc.fixed(blob_ref).u32(total).u64(total_bytes);
+    enc.finish()
+}
+
+/// The body an `attach.put` chunk-0 token covers: `blob_ref ‖ total ‖ total_bytes ‖ del_hash`
+/// (bind = `op_bind("attach.put", gid, attach_put_body(..))`).
+#[must_use]
+pub fn attach_put_body(
+    blob_ref: &[u8; 32],
+    total: u32,
+    total_bytes: u64,
+    del_hash: &[u8; 32],
+) -> Vec<u8> {
+    let mut enc = Enc::default();
+    enc.fixed(blob_ref).u32(total).u64(total_bytes).fixed(del_hash);
+    enc.finish()
+}
+
+/// What a joiner's `key_ack` signs: `rf-lg-join-v1 ‖ group_id ‖ join_pk_id`. The host never sees
+/// it (it sits in the sealed roster entry); the admitting member checks it.
+#[must_use]
+pub fn key_ack_message(gid: &[u8; 32], join_pk_id: &[u8; 32]) -> Vec<u8> {
+    let mut enc = Enc::new(LG_JOIN_V1.as_bytes());
+    enc.fixed(gid).fixed(join_pk_id);
+    enc.finish()
+}
+
+/// `key_ack = Sig_P(rf-lg-join-v1 ‖ group_id ‖ join_pk_id)` by the joiner's pseudonym seed.
+#[must_use]
+pub fn key_ack_sign(seed: &[u8; 32], gid: &[u8; 32], join_pk_id: &[u8; 32]) -> [u8; 64] {
+    SigningKey::from_bytes(seed).sign(&key_ack_message(gid, join_pk_id)).to_bytes()
+}
+
+/// # Errors
+/// Returns an error when `signature` is not `p`'s `key_ack` over `(gid, join_pk_id)`.
+pub fn key_ack_verify(
+    p: &[u8; 32],
+    gid: &[u8; 32],
+    join_pk_id: &[u8; 32],
+    signature: &[u8; 64],
+) -> Result<(), LgError> {
+    let key = VerifyingKey::from_bytes(p).map_err(|_| LgError::Verify("pseudonym"))?;
+    key.verify(&key_ack_message(gid, join_pk_id), &Signature::from_bytes(signature))
+        .map_err(|_| LgError::Verify("key ack"))
+}
+
 /// Void payload: the log sequence of the voided head commit.
 #[must_use]
 pub fn void_payload(target_seq: u64) -> Vec<u8> {
@@ -1033,5 +1116,48 @@ mod tests {
         };
         let decoded = JoinRequest::decode(&request.encode()).expect("test: join decodes");
         assert_eq!(decoded, request, "join request must round trip");
+    }
+
+    #[test]
+    fn attach_put_body_binds_every_field() {
+        let base = attach_put_body(&[1; 32], 2, 1 << 20, &[3; 32]);
+        assert_eq!(base.len(), 32 + 4 + 8 + 32, "blob_ref, total, total_bytes, del_hash");
+        assert_ne!(base, attach_put_body(&[2; 32], 2, 1 << 20, &[3; 32]), "blob_ref is bound");
+        assert_ne!(base, attach_put_body(&[1; 32], 3, 1 << 20, &[3; 32]), "total is bound");
+        assert_ne!(base, attach_put_body(&[1; 32], 2, 2 << 20, &[3; 32]), "total_bytes is bound");
+        assert_ne!(base, attach_put_body(&[1; 32], 2, 1 << 20, &[4; 32]), "del_hash is bound");
+        let gid = [9; 32];
+        assert_ne!(
+            op_bind("attach.put", &gid, &base),
+            op_bind("blob.put", &gid, &base),
+            "the op name is bound"
+        );
+        assert_ne!(
+            op_bind("attach.put", &gid, &base),
+            op_bind("attach.put", &[8; 32], &base),
+            "the group is bound"
+        );
+    }
+
+    #[test]
+    fn key_ack_is_its_own_message_and_binds_group_and_key() {
+        let seed = [5; 32];
+        let p = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+        let (gid, jpk) = ([1; 32], [2; 32]);
+        assert_ne!(
+            key_ack_message(&gid, &jpk),
+            invite_proof_message(&gid, &p, &jpk),
+            "key_ack differs from the invite proof message"
+        );
+        assert_ne!(
+            key_ack_message(&gid, &jpk),
+            join_proof_message(&gid),
+            "key_ack differs from the join proof message"
+        );
+        let sig = key_ack_sign(&seed, &gid, &jpk);
+        key_ack_verify(&p, &gid, &jpk, &sig).expect("test: key_ack verifies");
+        assert!(key_ack_verify(&p, &[3; 32], &jpk, &sig).is_err(), "another group is refused");
+        assert!(key_ack_verify(&p, &gid, &[4; 32], &sig).is_err(), "another join key is refused");
+        assert!(key_ack_verify(&[6; 32], &gid, &jpk, &sig).is_err(), "another signer is refused");
     }
 }

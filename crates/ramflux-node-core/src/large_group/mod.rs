@@ -7,6 +7,7 @@
 //! gateway (G4) authenticates sessions and passes `now_ms` and the session's `group_id`; every
 //! function here is one transaction on the `lg_*` tables.
 
+pub mod attach;
 pub mod blobs;
 pub mod check;
 pub mod entries;

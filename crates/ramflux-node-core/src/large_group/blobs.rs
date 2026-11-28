@@ -10,7 +10,7 @@
 //! cap belongs to the session) at chunk 0, and released when an entry or Welcome takes the blob or
 //! it expires unreferenced after 15 minutes.
 
-use ramflux_crypto::large_group::{LgWriter as Enc, MAX_INLINE_MLS};
+use ramflux_crypto::large_group::{MAX_INLINE_MLS, blob_put_body};
 
 use super::host::{Authority, Cx, LargeGroupHost};
 use super::refusal::{LgRefusal, LgResult};
@@ -59,15 +59,6 @@ pub struct BlobProgress {
     pub complete: bool,
 }
 
-/// The request body a `blob.put` authority covers (token bind or admin-signed body):
-/// `blob_ref ‖ total ‖ total_bytes`.
-#[must_use]
-pub fn blob_put_body(blob_ref: &[u8; 32], total: u32, total_bytes: u64) -> Vec<u8> {
-    let mut enc = Enc::default();
-    enc.fixed(blob_ref).u32(total).u64(total_bytes);
-    enc.finish()
-}
-
 /// The size rule of one chunk: `total` is `ceil(total_bytes / 512 KiB)` (at most 32 chunks and
 /// 16 MiB), every chunk but the last holds exactly 512 KiB and the last holds the rest.
 #[must_use]
@@ -111,7 +102,7 @@ fn chunk_key(gid: &[u8; 32], blob_ref: &[u8; 32], idx: u32) -> Vec<u8> {
 
 impl LargeGroupHost {
     /// Store one chunk. The first chunk (`idx` 0) needs `auth` (`op` `blob.put`, body
-    /// [`blob_put_body`]); later chunks of a pending upload need none.
+    /// [`blob_put_body`] (in `ramflux-crypto`)); later chunks of a pending upload need none.
     ///
     /// # Errors
     /// `unauthorized`, `blob_bad` (order, size, hash), `limit` (pending caps).

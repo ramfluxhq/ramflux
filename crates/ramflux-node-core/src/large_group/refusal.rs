@@ -71,9 +71,13 @@ pub enum LgRefusal {
     /// The invite is unknown, expired, revoked, used up or its proof is wrong.
     #[error("invite_invalid")]
     InviteInvalid,
-    /// The join request used a retired join key.
+    /// The join request used a retired join key; `join_pk` is the current one (sent only after the
+    /// invite row and proof were verified, or to a member-session request).
     #[error("join_key_stale")]
-    JoinKeyStale,
+    JoinKeyStale {
+        /// The group's current join public key.
+        join_pk: [u8; 32],
+    },
     /// The group's join bucket (1/s, burst 10) is empty.
     #[error("join_rate_limited")]
     JoinRateLimited,
@@ -133,7 +137,7 @@ impl LgRefusal {
             Self::OwnerUnremovable => "owner_unremovable",
             Self::GroupExists => "group_exists",
             Self::InviteInvalid => "invite_invalid",
-            Self::JoinKeyStale => "join_key_stale",
+            Self::JoinKeyStale { .. } => "join_key_stale",
             Self::JoinRateLimited => "join_rate_limited",
             Self::PendingFull => "pending_full",
             Self::AlreadyJoined => "already_joined",

@@ -490,6 +490,85 @@ impl BlobMeta {
     }
 }
 
+/// A pending attachment upload (`lg_attach`, key `[0] ‖ blob_ref`). Deleted when the upload
+/// completes, so its millisecond time never outlives the 15 minute orphan window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttachPending {
+    /// Host time the first chunk arrived (orphan expiry 15 min).
+    pub created_ms: u64,
+    /// Chunks the attachment has.
+    pub total: u32,
+    /// Chunks stored.
+    pub received: u32,
+    /// Bytes stored.
+    pub bytes: u64,
+    /// Bytes chunk 0 declared (reserved against the group's 128 MiB pending pool).
+    pub declared_bytes: u64,
+    /// `BLAKE3(del_secret)`.
+    pub del_hash: [u8; 32],
+}
+
+impl AttachPending {
+    pub(super) fn encode(&self) -> Vec<u8> {
+        let mut enc = Enc::default();
+        enc.u64(self.created_ms)
+            .u32(self.total)
+            .u32(self.received)
+            .u64(self.bytes)
+            .u64(self.declared_bytes)
+            .fixed(&self.del_hash);
+        enc.finish()
+    }
+
+    pub(super) fn decode(bytes: &[u8]) -> LgResult<Self> {
+        let mut dec = Dec::new(bytes);
+        let row = Self {
+            created_ms: dec.u64().map_err(bad)?,
+            total: dec.u32().map_err(bad)?,
+            received: dec.u32().map_err(bad)?,
+            bytes: dec.u64().map_err(bad)?,
+            declared_bytes: dec.u64().map_err(bad)?,
+            del_hash: dec.fixed().map_err(bad)?,
+        };
+        dec.finish().map_err(bad)?;
+        Ok(row)
+    }
+}
+
+/// A complete attachment (`lg_attach`, key `[2] ‖ blob_ref`). Nothing ties it to a post, a
+/// pseudonym or a session; completion is stored as the UTC day only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttachDone {
+    /// UTC day number of the completion (never the time of day).
+    pub completed_day: u64,
+    /// Chunks the attachment has.
+    pub total: u32,
+    /// Bytes stored (a multiple of 64 KiB).
+    pub bytes: u64,
+    /// `BLAKE3(del_secret)`.
+    pub del_hash: [u8; 32],
+}
+
+impl AttachDone {
+    pub(super) fn encode(&self) -> Vec<u8> {
+        let mut enc = Enc::default();
+        enc.u64(self.completed_day).u32(self.total).u64(self.bytes).fixed(&self.del_hash);
+        enc.finish()
+    }
+
+    pub(super) fn decode(bytes: &[u8]) -> LgResult<Self> {
+        let mut dec = Dec::new(bytes);
+        let row = Self {
+            completed_day: dec.u64().map_err(bad)?,
+            total: dec.u32().map_err(bad)?,
+            bytes: dec.u64().map_err(bad)?,
+            del_hash: dec.fixed().map_err(bad)?,
+        };
+        dec.finish().map_err(bad)?;
+        Ok(row)
+    }
+}
+
 /// A push route (`lg_route`): no account, device or pseudonym.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteRow {

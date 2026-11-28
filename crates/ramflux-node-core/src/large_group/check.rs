@@ -225,6 +225,40 @@ pub const fn welcome_expired(created_ms: u64, drained_ms: u64, now: u64) -> bool
         || (drained_ms != 0 && drained_ms.saturating_add(WELCOME_DRAINED_GRACE_MS) <= now)
 }
 
+/// Attachment pending bytes per group (declared bytes of all unfinished uploads).
+pub const ATTACH_PENDING_GROUP_BYTES: u64 = 128 * 1024 * 1024;
+/// A complete attachment lives until UTC day `completed_day + 31` (30 to 31 days).
+pub const ATTACH_RETAIN_DAYS: u64 = 31;
+
+/// A complete attachment completed on UTC day `completed_day` is dropped on `today`.
+#[must_use]
+pub const fn attach_expired(completed_day: u64, today: u64) -> bool {
+    completed_day.saturating_add(ATTACH_RETAIN_DAYS) <= today
+}
+
+/// Whether `declared` more bytes fit beside the `pending` ones of the group's other unfinished
+/// attachment uploads.
+#[must_use]
+pub const fn attach_pool_fits(pending: u64, declared: u64) -> bool {
+    pending.saturating_add(declared) <= ATTACH_PENDING_GROUP_BYTES
+}
+
+/// How many of the oldest complete attachments (`sizes`, oldest first) go so that the store
+/// (`stored` bytes) is at most `cap`.
+#[must_use]
+pub fn evict_until(stored: u64, cap: u64, sizes: &[u64]) -> usize {
+    let mut left = stored;
+    let mut count = 0;
+    for size in sizes {
+        if left <= cap {
+            break;
+        }
+        left = left.saturating_sub(*size);
+        count += 1;
+    }
+    count
+}
+
 /// A route registered on UTC day `registered_day` is dropped on `today`.
 #[must_use]
 pub const fn route_expired(registered_day: u64, today: u64) -> bool {
@@ -482,5 +516,29 @@ mod tests {
         assert!(welcome_expired(0, 0, WELCOME_TTL_MS), "and goes after 7 d");
         assert!(welcome_expired(0, 1_000, 1_000 + WELCOME_DRAINED_GRACE_MS), "fetched: grace");
         assert!(!route_expired(10, 17) && route_expired(10, 18), "registered_day + 8 <= today");
+    }
+
+    #[test]
+    fn attachment_pool_and_retention_edges() {
+        let mib = 1024 * 1024;
+        assert!(
+            attach_pool_fits(0, ATTACH_PENDING_GROUP_BYTES),
+            "the whole pool fits an empty group"
+        );
+        assert!(attach_pool_fits(112 * mib, 16 * mib), "112 + 16 MiB is the edge");
+        assert!(!attach_pool_fits(112 * mib + 1, 16 * mib), "one byte over the pool");
+        assert!(!attach_pool_fits(u64::MAX, 1), "no overflow");
+        assert!(!attach_expired(10, 40), "30 days after completion it is still kept");
+        assert!(attach_expired(10, 41), "completed_day + 31 is gone");
+        assert!(!attach_expired(u64::MAX, 0), "no overflow");
+    }
+
+    #[test]
+    fn eviction_goes_oldest_first_until_the_store_fits() {
+        assert_eq!(evict_until(10, 10, &[5, 5]), 0, "at the cap nothing goes");
+        assert_eq!(evict_until(11, 10, &[5, 5]), 1, "one eviction is enough");
+        assert_eq!(evict_until(20, 10, &[5, 4, 3]), 3, "evicts while still over");
+        assert_eq!(evict_until(20, 10, &[5, 5, 5]), 2, "stops once it fits");
+        assert_eq!(evict_until(20, 0, &[]), 0, "nothing to evict");
     }
 }

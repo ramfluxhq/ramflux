@@ -21,6 +21,7 @@ const BLOB: Tbl = TableDefinition::new("lg_blob_v1");
 const ROUTE: Tbl = TableDefinition::new("lg_route_v1");
 const ADMIN: Tbl = TableDefinition::new("lg_admin_v1");
 const WELCOME: Tbl = TableDefinition::new("lg_welcome_v1");
+const ATTACH: Tbl = TableDefinition::new("lg_attach_v1");
 
 /// The tables of the group host.
 #[derive(Clone, Copy, Debug)]
@@ -47,10 +48,13 @@ pub(crate) enum LgTable {
     Admin,
     /// Stored Welcomes.
     Welcome,
+    /// Attachment uploads, completed attachments, their age index and per-group stats (its own key
+    /// space: no commit or entry can name one, and `attach.*` never reads `Blob`).
+    Attach,
 }
 
 impl LgTable {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::Head,
         Self::Log,
         Self::Pset,
@@ -62,6 +66,7 @@ impl LgTable {
         Self::Route,
         Self::Admin,
         Self::Welcome,
+        Self::Attach,
     ];
 
     const fn def(self) -> Tbl {
@@ -77,6 +82,7 @@ impl LgTable {
             Self::Route => ROUTE,
             Self::Admin => ADMIN,
             Self::Welcome => WELCOME,
+            Self::Attach => ATTACH,
         }
     }
 }
