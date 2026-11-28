@@ -132,18 +132,36 @@ mod tests {
     fn opens_ops_and_live_sessions_are_counted_per_source_in_memory() {
         let gate = Arc::new(SourceGate::default());
         let mut held = Vec::new();
-        for _ in 0..LIVE_MAX {
-            held.push(gate.begin("a", 0).expect("test: below the live bound"));
+        // Opens reset each window; live sessions do not. The live cap can sit
+        // above the open cap, so fill it across as many windows as that takes.
+        let mut now = 0_u64;
+        let windows = LIVE_MAX.div_ceil(OPENS_PER_WINDOW);
+        for window in 0..windows {
+            now = u64::from(window).saturating_mul(WINDOW_MS);
+            let already = u32::try_from(held.len()).expect("test: held count fits");
+            let batch = LIVE_MAX.saturating_sub(already).min(OPENS_PER_WINDOW);
+            for _ in 0..batch {
+                held.push(gate.begin("a", now).expect("test: below the live bound"));
+            }
         }
-        assert_eq!(gate.begin("a", 0).err(), Some("rate_limited"));
-        assert!(gate.begin("b", 0).is_ok(), "another source is not affected");
+        assert_eq!(
+            u32::try_from(held.len()).expect("test: held count fits"),
+            LIVE_MAX,
+            "test: the live bound is reachable across open windows"
+        );
+        assert_eq!(gate.begin("a", now).err(), Some("rate_limited"), "test: at the live bound");
+        assert!(gate.begin("b", now).is_ok(), "another source is not affected");
         held.truncate(1);
         let first = held.pop().expect("test: one guard left");
+        let in_window = now.saturating_add(1);
         for _ in 0..OPS_PER_WINDOW {
-            assert!(first.allow_op(1));
+            assert!(first.allow_op(in_window), "test: below the ops bound");
         }
-        assert!(!first.allow_op(2), "ops over the window");
-        assert!(first.allow_op(WINDOW_MS + 1), "the window rolled");
+        assert!(!first.allow_op(now.saturating_add(2)), "ops over the window");
+        assert!(
+            first.allow_op(now.saturating_add(WINDOW_MS).saturating_add(1)),
+            "the window rolled"
+        );
     }
 
     #[test]
