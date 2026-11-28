@@ -156,7 +156,6 @@ fn custody_final_publication_failure_deletes_both_new_vault_entries() -> Result 
         "publication failure left a locked account"
     );
     assert!(super::super::load_account(&root.0, "final-failure", 100).is_err());
-    assert!(!root.0.join("local_bus_accounts/final-failure.json").exists());
     Ok(())
 }
 fn source_authority() -> Result<(Root, CustodyAuthority)> {

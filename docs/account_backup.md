@@ -180,10 +180,10 @@ Account-scoped headless restrictions do not authenticate another same-user proce
 
 ## Compatibility and own-device history
 
-`account.backup.export` / `account.backup.import` remain the legacy key recovery
-API. Manifest-only and manifest-plus-contact files stay importable with that API;
-they never acquire full-history semantics. The full job API uses the authenticated
-stream format documented in [backup_stream_format.md](backup_stream_format.md).
+The v1 manifest-file API (`account.backup.export` / `account.backup.import`, schema
+`ramflux.local_bus.account_backup.v1`) has been removed; v1 files can no longer be
+imported. The full job API uses the authenticated stream format documented in
+[backup_stream_format.md](backup_stream_format.md).
 
 Own-device synchronization retains the existing per-page authority admission
 budgets. Larger contact/member-authority sets use an authenticated encrypted

@@ -94,24 +94,6 @@
     {
       "bridge_allowed": true,
       "capability": "account",
-      "key_export": true,
-      "name": "account.backup.export",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "account",
-      "key_export": false,
-      "name": "account.backup.import",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "account",
       "key_export": false,
       "name": "account.backup.jobs",
       "secret_input": true,

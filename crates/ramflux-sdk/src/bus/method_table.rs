@@ -166,8 +166,6 @@ methods! {
         "account.app_lock.configure",
         "account.app_lock.lifecycle",
         "account.app_lock.lock",
-        "account.backup.export",
-        "account.backup.import",
         "account.export_agent_credentials",
         "account.remove_local",
         "account.switch",

@@ -205,29 +205,6 @@ fn account_with_setup(
         target_delivery_id: "target".to_owned(),
         prekey_http_url: None,
     };
-    write_local_bus_account_manifest(
-        root,
-        &LocalBusPersistedAccount {
-            label: None,
-            kind: None,
-            activation_pending: false,
-            node_id: None,
-            node_tcp_addr: None,
-            node_relay: None,
-            schema: "ramflux.local_bus.account_manifest.v1".to_owned(),
-            local_account_id: id.to_owned(),
-            principal_id: id.to_owned(),
-            principal_commitment: commitment.clone(),
-            device_id: format!("device-{id}"),
-            target_delivery_id: "target".to_owned(),
-            account_secret: "actor-test-secret".to_owned(),
-            root_seed,
-            device_seed: [0x62; 32],
-            client_mode: LocalBusClientMode::AttendedCli,
-            gateway: endpoint.clone(),
-            devices: Vec::new(),
-        },
-    )?;
     let config = GatewaySessionConfig::quic(endpoint).with_account_identity(&client)?;
     let engine = GatewaySessionEngine::with_test_transport(
         config,
@@ -395,6 +372,46 @@ fn mark_account_live(client: &mut RamfluxClient, root: &Path, id: &str) -> Resul
         .map_err(|error| SdkError::LocalBus(error.to_string()))?;
     client.born_v3_account = Some(Box::new(crate::custody::load_account(root, id, now)?));
     Ok(())
+}
+
+/// Persist a native account protected by the actor-test passphrase, for restart and unlock tests.
+pub(crate) async fn persisted_native(root: &Path, id: &str) -> Result<(), SdkError> {
+    drop(
+        born_account(root, id, id, &format!("device-{id}"), b"actor-test-secret", "target").await?,
+    );
+    Ok(())
+}
+
+/// Reopen an account made by `persisted_native` as a live, disconnected actor state.
+pub(crate) fn native_state(
+    root: &Path,
+    id: &str,
+    index: AccountIndex,
+) -> Result<LocalBusAccountState, SdkError> {
+    let mut client = RamfluxClient::new();
+    client.account_index = Some(index);
+    client.open_account_index(root)?;
+    client.unlock_account(id, b"actor-test-secret")?;
+    let native = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    let anchor = native.record().body.account_anchor.clone();
+    let endpoint = GatewayQuicEndpointConfig {
+        bind_addr: "127.0.0.1:0".parse().map_err(|_| SdkError::CustodySetupInvalid)?,
+        gateway_addr: "127.0.0.1:1".parse().map_err(|_| SdkError::CustodySetupInvalid)?,
+        server_name: "localhost".into(),
+        ca_cert: root.join("ca.pem"),
+        principal_id: native.record().body.principal_id.clone(),
+        device_id: format!("device-{id}"),
+        target_delivery_id: client.owned_device_identity()?.storage_key().into(),
+        prekey_http_url: None,
+    };
+    let gateway = GatewaySessionConfig::auto(endpoint).with_born_v3_account(native);
+    Ok(LocalBusAccountState::disconnected(client, gateway, anchor))
+}
+
+pub(crate) fn native_initializer(root: &Path, id: &str) -> AccountInitializer {
+    let root = root.to_path_buf();
+    let id = id.to_owned();
+    Box::new(move |index| native_state(&root, &id, index))
 }
 
 fn native_manifest(
@@ -809,7 +826,8 @@ async fn lock_waits_for_writer_and_readers_to_stop_and_unlock_starts_new_actor()
     LocalSet::new()
         .run_until(async {
             let root = root("lifecycle");
-            let account = actor_account(&root, "alice", None, Arc::new(AtomicBool::new(false)));
+            persisted_native(&root, "alice").await?;
+            let account = native_initializer(&root, "alice");
             let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), account)]))?;
             let (client, server) = client(Rc::clone(&supervisor), 1).await?;
             let old = supervisor.account_actor("alice").ok_or_else(|| failure("missing actor"))?;
@@ -838,7 +856,7 @@ async fn lock_waits_for_writer_and_readers_to_stop_and_unlock_starts_new_actor()
                     serde_json::json!({"passphrase":"actor-test-secret"}),
                 ))
                 .await?;
-            assert_eq!(unlocked["local_account_id"], "alice");
+            assert_eq!(unlocked["account_id"], "alice");
             assert!(
                 supervisor
                     .account_actor("alice")
@@ -1096,7 +1114,8 @@ async fn lifecycle_keys_remain_idempotent_after_lock_and_process_supervisor_rest
     LocalSet::new()
         .run_until(async {
             let root = root("lifecycle-keys");
-            let initialize = actor_account(&root, "alice", None, Arc::new(AtomicBool::new(false)));
+            persisted_native(&root, "alice").await?;
+            let initialize = native_initializer(&root, "alice");
             let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), initialize)]))?;
             let (client, server) = client(Rc::clone(&supervisor), 1).await?;
             let mut lock = request("lock", "alice", "account.lock", serde_json::json!({}));
@@ -1281,61 +1300,6 @@ async fn client_directories_progress_while_gateway_is_blocked() -> Result<(), Sd
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn account_read_model_retains_locked_manifest_profiles_after_restart() -> Result<(), SdkError>
-{
-    LocalSet::new()
-        .run_until(async {
-            let root = root("locked-directory");
-            let initialize = actor_account(&root, "alice", None, Arc::new(AtomicBool::new(false)));
-            let profile_root = root.clone();
-            let initialize: AccountInitializer = Box::new(move |index| {
-                let account = initialize(index)?;
-                let path = local_bus_account_manifest_path(&profile_root, "alice");
-                let mut manifest = read_local_bus_account_manifest(&path)?;
-                manifest.label = Some("Work".to_owned());
-                manifest.kind = Some("headless_ai".to_owned());
-                write_local_bus_account_manifest(&profile_root, &manifest)?;
-                Ok(account)
-            });
-            let first = supervisor(&root, BTreeMap::from([("alice".to_owned(), initialize)]))?;
-            let (socket, server) = client(Rc::clone(&first), 1).await?;
-            let list = socket
-                .request_frame(request("list", "alice", "account.list", serde_json::json!({})))
-                .await?;
-            assert_eq!(list["account_details"][0]["state"], "unlocked");
-            assert_eq!(list["account_details"][0]["label"], "Work");
-            socket
-                .request_frame(request("lock", "alice", "account.lock", serde_json::json!({})))
-                .await?;
-            drop(socket);
-            let _ = server.await;
-            first.shutdown().await?;
-            drop(first);
-            let restarted = supervisor(&root, BTreeMap::new())?;
-            let (socket, server) = client(Rc::clone(&restarted), 2).await?;
-            let list = socket
-                .request_frame(request(
-                    "list-again",
-                    "alice",
-                    "account.list",
-                    serde_json::json!({}),
-                ))
-                .await?;
-            assert_eq!(list["accounts"][0]["id"], "alice");
-            assert_eq!(list["accounts"][0]["locked"], true);
-            assert_eq!(list["accounts"][0]["display_name"], "Work");
-            assert_eq!(list["account_details"][0]["state"], "locked");
-            assert_eq!(list["account_details"][0]["kind"], "headless_ai");
-            drop(socket);
-            let _ = server.await;
-            restarted.shutdown().await?;
-            std::fs::remove_dir_all(root)?;
-            Ok(())
-        })
-        .await
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn approval_directory_and_events_preserve_origin_context() -> Result<(), SdkError> {
     LocalSet::new().run_until(async {
         let root=root("approval-context");let initialize=actor_account(&root,"alice",None,Arc::new(AtomicBool::new(false)));
@@ -1354,7 +1318,6 @@ async fn approval_directory_and_events_preserve_origin_context() -> Result<(), S
 
 mod metadata;
 mod push_clear;
-mod restore;
 mod stream;
 
 #[tokio::test]

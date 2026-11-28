@@ -4,7 +4,6 @@
 //! Verify again after quiescing, prepare an encrypted generation, then commit its index pointer.
 use super::{
     format,
-    io::{PrivateDirectory, check_space},
     service::{BackupJobs, now, refused},
 };
 use crate::{
@@ -12,30 +11,26 @@ use crate::{
     backup::{BackupJob, VerifiedBackupStaging},
 };
 use ramflux_storage::{
-    AccountDbKey, AccountIndex, BackupCounts, BackupDatabase, BackupIndexInstall,
-    FileVaultSecretSource, VaultSecretSource, WrappedAccountDbKey, unwrap_with_vault_secret,
-    wrap_with_vault_secret,
+    AccountDbKey, AccountIndex, BackupCounts, BackupDatabase, FileVaultSecretSource,
+    VaultSecretSource, unwrap_with_vault_secret,
 };
 use std::path::Path;
 use zeroize::Zeroizing;
 
+/// Unit tests model plain clients on a device with a vault (native data is device-bound).
+#[cfg(test)]
 pub(super) fn existing_key(
     index: &AccountIndex,
     root: &Path,
     id: &str,
     secret: &[u8],
 ) -> Result<AccountDbKey, SdkError> {
-    let vault = FileVaultSecretSource::new(root);
-    if !vault.vault_secret_path(id).exists() {
+    if !FileVaultSecretSource::new(root).vault_secret_path(id).exists() {
         return Err(SdkError::AccountDbNotUnlocked);
     }
-    // Unit tests model plain clients on a device with a vault (native data is device-bound).
-    #[cfg(test)]
     let secret_key = Zeroizing::new(
         crate::client::device_unlock::test_device::PlainSource::new(root).vault_secret(id)?,
     );
-    #[cfg(not(test))]
-    let secret_key = Zeroizing::new(vault.vault_secret(id)?);
     unwrap_local_key(index, id, &secret_key, secret)
 }
 
@@ -109,118 +104,10 @@ impl BackupJobs {
         let metadata =
             format::load_metadata(&staging.directory().join("identity.sealed"), staging.key())?;
         validate_staged_observation(&staging, &metadata)?;
-        if matches!(&metadata.identity, format::Identity::Native { .. }) {
-            return self.install_native(job, &staging, &metadata, (native_key, native_setup));
-        }
-        if native_setup.is_some() {
-            return Err(crate::SdkError::CustodyModeDowngrade);
-        }
-        let (id, restored, kept_newer) = self.install_legacy_generation(job, staging, metadata)?;
-        Ok((
-            crate::backup::BackupInstalledAccount { local_account_id: id, networking: None },
-            restored,
-            kept_newer,
-        ))
-    }
-    fn install_legacy_generation(
-        &self,
-        job: &BackupJob,
-        staging: VerifiedBackupStaging,
-        mut metadata: format::Metadata,
-    ) -> Result<(String, BackupCounts, BackupCounts), SdkError> {
-        let id = metadata.identity.account_id().to_owned();
-        let _writer = self.index.acquire_account_writer(&id)?;
-        let lease =
-            self.generations.try_acquire(&id)?.ok_or_else(|| refused("install_in_progress"))?;
-        let incoming = staging.directory().join("account.db");
-        let incoming_key = AccountDbKey::from_bytes(metadata.database_key);
-        self.check_existing_identity(&metadata, &incoming, &incoming_key).map_err(|failure| {
-            SdkError::LocalBusRefused {
-                code: "BackupRefused".into(),
-                message: "restore identity check failed".into(),
-                body: Box::new(serde_json::json!({"reason_code":failure.code,"failure":failure})),
-            }
-        })?;
-        let previous = match self.index.account(&id) {
-            Ok(record) => Some(record),
-            Err(ramflux_storage::StorageError::AccountNotFound(_)) => None,
-            Err(error) => return Err(error.into()),
-        };
-        let parent = self.data_root.join("accounts").join(&id);
-        std::fs::create_dir_all(&parent)?;
-        crate::bus::daemon::set_owner_only_dir_permissions(&parent)?;
-        check_generation_space(&parent, &incoming)?;
-        let generation = parent.join(format!("generation_{}", job.job_id));
-        std::fs::create_dir(&generation)?;
-        crate::bus::daemon::set_owner_only_dir_permissions(&generation)?;
-        let mut guard = PrivateDirectory { path: generation.clone(), transferred: false };
-        super::recovery::mark_install(&generation)?;
-        #[cfg(test)]
-        self.install_checkpoint(super::test_install::InstallPoint::Prepared, &generation)?;
-        let target = generation.join("account.db");
-        let installed_key = AccountDbKey::generate()?;
-        let (restored, kept_newer) = if let Some(record) = previous.as_ref() {
-            let local = crate::bus::daemon::read_local_bus_account_manifest(
-                &crate::bus::daemon::local_bus_account_manifest_path(&self.data_root, &id),
-            )?;
-            let key =
-                existing_key(&self.index, &self.data_root, &id, local.account_secret.as_bytes())?;
-            let mut merged = copy_live_stage(
-                &self.data_root.join(&record.db_relative_path),
-                &key,
-                &target,
-                &installed_key,
-            )?;
-            let report = merged.merge_backup_candidate(&incoming, &incoming_key, || Ok(()))?;
-            metadata.identity = format::Identity::Legacy { manifest: Box::new(local) };
-            #[cfg(test)]
-            super::tests::selector_normalization_tests::record_open("normalized");
-            (report.restored, report.kept_newer)
-        } else {
-            prepare_fresh_restore(
-                &incoming,
-                &incoming_key,
-                &target,
-                &installed_key,
-                &mut metadata,
-                staging.input_observation(),
-            )?
-        };
-        #[cfg(test)]
-        super::tests::selector_normalization_tests::record_open("strict");
-        let db = BackupDatabase::open(&target, &installed_key)?;
-        db.check_integrity()?;
-        db.enqueue_restore_events(&id, &job.job_id)?;
-        self.verify_install_contribution(job, &db, &incoming, &incoming_key, previous.is_some())?;
-        drop(db);
-        let ca = generation.join("ca.pem");
-        std::fs::write(&ca, &metadata.ca_pem)?;
-        crate::platform::fs::sync_path(&ca)?;
-        metadata.identity.legacy_mut()?.gateway.ca_cert = ca;
-        let wrapped = wrap_installed_key(&self.data_root, &metadata, &installed_key)?;
-        let manifest = Zeroizing::new(serde_json::to_vec(metadata.identity.legacy()?)?);
-        crate::platform::fs::sync_path(&target)?;
-        crate::platform::fs::sync_path(&generation)?;
-        crate::platform::fs::sync_path(&parent)?;
-        super::reclamation::remember(&generation, previous.as_ref())?;
-        #[cfg(test)]
-        self.install_checkpoint(super::test_install::InstallPoint::BeforeCommit, &generation)?;
-        self.index.install_backup_generation(&BackupIndexInstall {
-            account_id: &id,
-            principal_commitment: &metadata.identity.legacy()?.principal_commitment,
-            db_relative_path: &relative(&self.data_root, &target)?,
-            object_relative_path: &relative(&self.data_root, &generation)?,
-            manifest_json: &manifest,
-            wrapped_key: &wrapped,
-        })?;
-        guard.transferred = true;
-        #[cfg(test)]
-        self.install_checkpoint(super::test_install::InstallPoint::Committed, &generation)?;
-        super::recovery::selected(&generation);
-        drop(lease);
-        self.cleanup_committed_generations();
+        // The staging is owned here: it is discarded when this call ends, success or refusal.
+        let installed = self.install_native(job, &staging, &metadata, (native_key, native_setup));
         drop(staging);
-        Ok((id, restored, kept_newer))
+        installed
     }
 }
 
@@ -284,99 +171,12 @@ fn validate_staged_observation(
     Ok(())
 }
 
-fn prepare_fresh_restore(
-    incoming: &Path,
-    incoming_key: &AccountDbKey,
-    target: &Path,
-    installed_key: &AccountDbKey,
-    metadata: &mut format::Metadata,
-    original: Option<&ramflux_storage::BackupInputObservation>,
-) -> Result<(BackupCounts, BackupCounts), SdkError> {
-    let source = open_stage(incoming, incoming_key, original)?;
-    source.copy_to(target, installed_key)?;
-    #[cfg(test)]
-    super::tests::selector_normalization_tests::record_open("stage");
-    let mut db = source.reopen_restore_input(
-        target,
-        installed_key,
-        ramflux_storage::BackupOpenMode::PreNormalization,
-    )?;
-    db.normalize_backup_candidate()?;
-    #[cfg(test)]
-    super::tests::selector_normalization_tests::record_open("normalized");
-    db.archive_outbound()?;
-    db.put_state("backup/reestablishing", &true)?;
-    db.put_state("backup/fresh-outbound", &true)?;
-    let manifest = metadata.identity.legacy_mut()?;
-    manifest.activation_pending = true;
-    let previous = manifest
-        .devices
-        .iter()
-        .find(|device| device.device_id == manifest.device_id)
-        .map_or(1, |device| device.device_epoch);
-    db.put_state("backup/previous-device-epoch", &previous)?;
-    let next = previous.checked_add(1).ok_or_else(|| refused("identity_rollback"))?;
-    if let Some(device) =
-        manifest.devices.iter_mut().find(|device| device.device_id == manifest.device_id)
-    {
-        device.device_epoch = next;
-    } else {
-        manifest.devices.push(crate::LocalBusDeviceRecord {
-            device_id: manifest.device_id.clone(),
-            device_epoch: next,
-            target_delivery_id: manifest.target_delivery_id.clone(),
-            capability_scope: Vec::new(),
-            is_local: true,
-        });
-    }
-    Ok((db.counts()?, BackupCounts::default()))
-}
-
 pub(super) fn relative(root: &Path, path: &Path) -> Result<String, SdkError> {
     path.strip_prefix(root)
         .map_err(|_| refused("root_conflict"))?
         .to_str()
         .map(str::to_owned)
         .ok_or_else(|| refused("unreadable"))
-}
-
-fn wrap_installed_key(
-    root: &Path,
-    metadata: &format::Metadata,
-    key: &AccountDbKey,
-) -> Result<WrappedAccountDbKey, SdkError> {
-    let manifest = metadata.identity.legacy()?;
-    let id = &manifest.local_account_id;
-    let vault = FileVaultSecretSource::new(root);
-    let secret = Zeroizing::new(vault.vault_secret(id)?);
-    let kek = Zeroizing::new(crate::client::account::account_db_key_encryption_key(
-        &secret,
-        manifest.account_secret.as_bytes(),
-    )?);
-    let (nonce, wrapped_key) = wrap_with_vault_secret(&kek, key.bytes())?;
-    Ok(WrappedAccountDbKey {
-        key_wrapping_provider: "platform-local-vault".into(),
-        key_wrapping_ref: format!("platform-local-vault:{id}"),
-        nonce,
-        wrapped_key,
-    })
-}
-
-#[cfg(test)]
-pub(super) fn backup_device_branch(
-    local: &crate::bus::LocalBusPersistedAccount,
-) -> ramflux_crypto::DeviceBranch {
-    let epoch = local
-        .devices
-        .iter()
-        .find(|device| device.device_id == local.device_id)
-        .map_or(1, |device| device.device_epoch);
-    ramflux_crypto::create_device_branch(
-        &local.principal_id,
-        &local.device_id,
-        epoch,
-        local.device_seed,
-    )
 }
 
 fn open_stage(
@@ -394,34 +194,6 @@ fn open_stage(
     Ok(if let Some(original) = original { db.retain_original_input(original) } else { db })
 }
 
-fn copy_live_stage(
-    path: &Path,
-    key: &AccountDbKey,
-    target: &Path,
-    installed_key: &AccountDbKey,
-) -> Result<BackupDatabase, ramflux_storage::StorageError> {
-    let source = open_live_stage(path, key)?;
-    source.copy_to(target, installed_key)?;
-    #[cfg(test)]
-    super::tests::selector_normalization_tests::record_open("stage");
-    source.reopen_restore_input(
-        target,
-        installed_key,
-        ramflux_storage::BackupOpenMode::PreNormalization,
-    )
-}
-
-fn check_generation_space(parent: &Path, incoming: &Path) -> Result<(), SdkError> {
-    check_space(
-        parent,
-        incoming.metadata()?.len().saturating_mul(2).saturating_add(20 * 1024 * 1024),
-    )
-    .map_err(|failure| SdkError::LocalBusRefused {
-        code: "BackupRefused".into(),
-        message: "restore requires more space".into(),
-        body: Box::new(serde_json::json!({"reason_code":"insufficient_space","failure":failure})),
-    })
-}
 pub(super) fn open_live_stage(
     path: &Path,
     key: &AccountDbKey,

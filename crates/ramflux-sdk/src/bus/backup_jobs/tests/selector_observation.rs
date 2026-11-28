@@ -11,7 +11,7 @@ pub(super) fn assert_observation_refused(change: &str) -> TestResult {
     let client = initialized_at_scale(
         source.path(),
         AccountIndex::open(source.path())?,
-        Scale { messages: 1, contacts: 0, file_bytes: None },
+        Scale { messages: 1, contacts: 0 },
     )?
     .client;
     let identity = crate::bus::backup_jobs::capture_identity(&client, source.path(), "alice")?;
@@ -83,7 +83,7 @@ fn candidate_install_refuses_changed_staged_rows_and_classification() -> TestRes
 #[test]
 fn e14_staged_v12_upgrade_rollback() -> TestResult {
     RETRY_UPGRADE.set(true);
-    let result = run(PathKind::Fresh, 12, false, None, None);
+    let result = run(12, false, None, None);
     RETRY_UPGRADE.set(false);
     result
 }

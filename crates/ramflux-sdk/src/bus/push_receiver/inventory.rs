@@ -168,7 +168,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         file: "src/bus/dispatch/device.rs",
         symbol: "set_projection_checkpoint",
         class: WriterClass::ProductionLegacy,
-        executor: "non-receive push-route checkpoint",
+        executor: "non-receive push-route and device-policy checkpoints (gateway.push_route.v1 x2, gateway.device_policy.v1 x1)",
         hook: "none (not receive-cursor)",
         count: 3,
     },

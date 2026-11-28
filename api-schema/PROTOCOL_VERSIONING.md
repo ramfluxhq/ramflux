@@ -160,7 +160,6 @@ Current request methods include:
 - account: `account.create`, `account.list`, `account.switch`,
   `account.status`, `account.config.get`, `account.config.set`,
   `account.lock`, `account.unlock`,
-  `account.backup.export`, `account.backup.import`,
   `account.passphrase.rotate`
 - device: `device.list`
 - message and conversation: `message.submit`, `message.receive`,

@@ -487,7 +487,6 @@ fn is_storage_or_io(error: &SdkError) -> bool {
             | SdkError::AccountDbNotUnlocked
             | SdkError::AccountNotOpen(_)
             | SdkError::AccountIndexNotOpen
-            | SdkError::AccountManifestUnreadable
     )
 }
 

@@ -39,8 +39,6 @@ policies! {
     "account.app_lock.state" => ("account", false, false, false, false),
     "account.backup.cancel" => ("account", true, false, false, false),
     "account.backup.create" => ("account", true, false, false, false),
-    "account.backup.export" => ("account", true, true, false, true),
-    "account.backup.import" => ("account", true, true, false, false),
     "account.backup.jobs" => ("account", true, false, false, false),
     "conversation.start" => ("conversation", true, true, false, false),
     "contact.requests.reply" => ("contact", true, true, false, false),

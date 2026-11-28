@@ -21,10 +21,17 @@ pub(super) fn initialize(
     root: &Path,
     index: AccountIndex,
 ) -> Result<LocalBusAccountState, SdkError> {
+    initialize_account(root, index, "account")
+}
+pub(super) fn initialize_account(
+    root: &Path,
+    index: AccountIndex,
+    id: &str,
+) -> Result<LocalBusAccountState, SdkError> {
     let mut client = RamfluxClient::new();
     client.account_index = Some(index);
     client.open_account_index(root)?;
-    client.unlock_account("account", LOCAL_SECRET.as_bytes())?;
+    client.unlock_account(id, LOCAL_SECRET.as_bytes())?;
     let native = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
     let anchor = native.record().body.account_anchor.clone();
     let endpoint = GatewayQuicEndpointConfig {
@@ -87,9 +94,7 @@ fn archive_with_different_local_origin(source: &Path, output: &Path) -> TestResu
     let mut unpack = format::Unpack::new(std::fs::File::create(&snapshot)?);
     decoder.decrypt(&mut file, &mut unpack)?;
     let mut metadata = unpack.finish()?;
-    let format::Identity::Native { native } = &mut metadata.identity else {
-        return Err("native archive".into());
-    };
+    let format::Identity::Native { native } = &mut metadata.identity;
     native.local_account_id = "previous-installation-local-id".into();
     context.account_id.clone_from(&native.local_account_id);
     let mut payload = format::payload(&metadata, &snapshot)?;
@@ -165,7 +170,6 @@ fn restored_data_assertions(
     assert!(db.actor_state_exists("backup/inactive-pair/imported")?);
     assert!(restored.identity_root.is_none());
     assert!(restored.device_branch.is_none());
-    assert!(!root.join("local_bus_accounts/account.json").exists());
     Ok(())
 }
 

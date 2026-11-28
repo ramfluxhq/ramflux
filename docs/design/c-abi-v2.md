@@ -607,7 +607,7 @@ both successful and failed callbacks; load buffers and decoded temporary seeds
 are zeroized on every exit. Hosts must wipe their own temporary plaintext copies.
 
 `allow_secret_exports` gates **every** method whose generated policy row declares
-`key_export:true`: agent credentials, account backups,
+`key_export:true`: agent credentials,
 device sync and both show-once calls. The policy column is the authority for
 this admission check; there is no per-method exception list.
 
@@ -645,7 +645,7 @@ when adopting this SDK commit; ABI majors remain SDK 2 and Card 4.
 ### Receipt capacity and key exports (policy version 2)
 
 The export permission applies only to `account.export_agent_credentials`,
-`account.backup.export`, `device.sync.export`,
+`device.sync.export`,
 `account.create.show_once` and `account.custody.show_once`. Ordinary reads and
 conversation operations work with the default configuration; `secret_output`
 remains confidential-data handling metadata.

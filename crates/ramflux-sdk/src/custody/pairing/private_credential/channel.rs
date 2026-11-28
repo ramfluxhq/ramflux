@@ -149,7 +149,23 @@ impl PrivateCredentialChannel {
             state.slot.retire();
         }
     }
-    fn begin(self: &Arc<Self>, scope: &PrivateCredentialScope) -> Result<Pending, SdkError> {
+    /// Retire the request `issued` names, if it is still the waiting one. Taking the state lock
+    /// orders this against `begin`, which records `issued` under the same lock before prompting.
+    fn retire_issued(&self, issued: &AtomicU64) {
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = issued.load(Ordering::Acquire);
+        if generation != 0
+            && state.waiting.as_ref().is_some_and(|waiting| waiting.generation == generation)
+        {
+            state.waiting = None;
+            state.slot.retire();
+        }
+    }
+    fn begin(
+        self: &Arc<Self>,
+        scope: &PrivateCredentialScope,
+        issued: &AtomicU64,
+    ) -> Result<Pending, SdkError> {
         let (reply, receiver) = mpsc::sync_channel(1);
         let generation = {
             let mut state = self.state.lock().map_err(|_| invalid())?;
@@ -161,10 +177,14 @@ impl PrivateCredentialChannel {
             }
             let generation = state.slot.issue(scope.clone())?;
             state.waiting = Some(Waiting { generation, scope: scope.clone(), reply: Some(reply) });
+            issued.store(generation, Ordering::Release);
             generation
         };
         let pending = Pending { channel: self.clone(), generation, receiver: Some(receiver) };
-        (self.prompt)(generation, &scope.request)?;
+        if let Err(error) = (self.prompt)(generation, &scope.request) {
+            let _ = issued.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
+            return Err(error);
+        }
         Ok(pending)
     }
     /// Consume one raw frame in this connection's private reader, never a JSON reader.
@@ -344,9 +364,11 @@ impl LocalCredentialProvider for Provider {
         if scope.request != *request {
             return Err(invalid());
         }
-        let mut pending = self.channel.begin(&scope)?;
-        self.issued.store(pending.generation, Ordering::Release);
+        let mut pending = self.channel.begin(&scope, &self.issued)?;
         let _issued = Issued { owner: &self.issued, generation: pending.generation };
+        // Rule: `begin` records `issued` under the state lock before the prompt goes out, and
+        // `cancel` reads it under the same lock. After `cancel()` returns, a prompt already sent
+        // has its slot freed; one not yet issued sees `cancelled` here (the mutex orders both).
         if self.cancelled.load(Ordering::Acquire) {
             return Ok(CredentialOutcome::Refused);
         }
@@ -362,9 +384,6 @@ impl LocalCredentialProvider for Provider {
     }
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
-        let generation = self.issued.load(Ordering::Acquire);
-        if generation != 0 {
-            self.channel.retire_generation(generation);
-        }
+        self.channel.retire_issued(&self.issued);
     }
 }

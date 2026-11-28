@@ -26,7 +26,7 @@ impl RamfluxClient {
             .filter(|epoch| *epoch <= ramflux_protocol::MAX_SAFE_JSON_INTEGER)
             .ok_or_else(|| invalid("profile epoch exhausted"))?;
         let profile =
-            ramflux_crypto::sign_identity_profile(root, self.local_principal_kind()?, name, epoch)?;
+            ramflux_crypto::sign_identity_profile(root, self.local_principal_kind(), name, epoch)?;
         self.account_db()?.persist_actor_state(DESIRED, &profile)?;
         Ok(profile)
     }
@@ -35,7 +35,7 @@ impl RamfluxClient {
         previous: Option<&SignedDeviceSetRecord>,
     ) -> Result<Option<SignedIdentityProfile>, SdkError> {
         let root = self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let kind = self.local_principal_kind()?;
+        let kind = self.local_principal_kind();
         // Legacy workflow principals have no profile in this version of the public contract.
         if kind == PrincipalKind::Workflow {
             return Ok(None);

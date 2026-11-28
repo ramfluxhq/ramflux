@@ -65,7 +65,6 @@ pub(crate) use crate::cli::*;
 pub(crate) use crate::utils::*;
 pub(crate) use ramflux_sdk::{
     GatewayQuicEndpointConfig, LocalBusA2iAcknowledgeRequest, LocalBusA2iAppendRequest,
-    LocalBusAccountBackupExportRequest, LocalBusAccountBackupImportRequest,
     LocalBusAccountCreateRequest, LocalBusAccountPassphraseRotateRequest,
     LocalBusAccountUnlockRequest, LocalBusBotInstallRequest, LocalBusBotRevokeRequest,
     LocalBusBotTrustAddRequest, LocalBusCallAnswerRequest, LocalBusCallHangupRequest,

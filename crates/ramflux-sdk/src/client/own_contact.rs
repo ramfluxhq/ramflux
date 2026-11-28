@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 //! Accepted root relationships replicated only inside authenticated own-device packets.
-use crate::bus::protocol::{LocalBusBackupContactSkip, LocalBusBackupContactSkipReason};
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
@@ -53,137 +52,14 @@ struct MissingManifest {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OwnContactReceiveOutcome {
+    #[cfg(test)]
     NotPacket,
     Restored,
     TombstoneApplied,
-    TombstoneSkippedOlder,
     AlreadyPresent,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum OwnContactReceiveMode {
-    Sibling,
-    BackupRestore,
-}
 impl RamfluxClient {
-    pub(super) fn backup_contact_skip(
-        &self,
-        body: &[u8],
-    ) -> Result<Option<LocalBusBackupContactSkip>, SdkError> {
-        if tombstone::is_packet(body) {
-            return Ok(None);
-        }
-        let Some(contact) = Contact::decode(body)? else {
-            return Ok(None);
-        };
-        let own = self.owned_device_identity()?;
-        let peer = &contact.manifest.principal_commitment;
-        let link = &contact.link;
-        if peer == own.root_commitment()
-            || link.state != "accepted"
-            || link.blocked
-            || link.capability_revoked_at.is_some()
-            || !((link.requester_id == own.root_commitment() && link.target_id == *peer)
-                || (link.target_id == own.root_commitment() && link.requester_id == *peer))
-        {
-            return Err(SdkError::InboundRejected("own contact relationship root mismatch".into()));
-        }
-        crate::client::contact::verify_device_manifest(&contact.manifest, peer)?;
-        let db = self.account_db()?;
-        let skip = |reason| {
-            Some(LocalBusBackupContactSkip {
-                principal_id: contact.manifest.principal_id.clone(),
-                reason,
-            })
-        };
-        if db.find_friend_link(&link.link_id)?.is_some_and(|existing| {
-            existing.requester_id != link.requester_id || existing.target_id != link.target_id
-        }) {
-            return Ok(skip(LocalBusBackupContactSkipReason::LinkCollision));
-        }
-        if db.client_record("identity", &contact.manifest.principal_id)?.is_some_and(|old| {
-            old["contact_identity_commitment"].as_str().is_some_and(|root| root != peer)
-        }) {
-            return Ok(skip(LocalBusBackupContactSkipReason::PinnedConflict));
-        }
-        if let Some(native) = &contact.manifest.custody {
-            // A generation-1 contact carries its custody authority, never a signed device set.
-            return Ok(self.native_backup_authority_skip(native, peer)?.and_then(skip));
-        }
-        let record = contact
-            .manifest
-            .signed_device_set
-            .as_ref()
-            .ok_or_else(|| SdkError::InboundRejected("missing signed set".into()))?;
-        if let Some((epoch, hash)) = db.contact_request_authority_floor(
-            &record.principal_commitment,
-            crate::time::now_unix_timestamp(),
-        )? {
-            if record.device_set_epoch < epoch {
-                return Ok(skip(LocalBusBackupContactSkipReason::StaleAuthority));
-            }
-            if record.device_set_epoch == epoch
-                && crate::client::contact_requests::authority_digest(record)? != hash
-            {
-                self.record_authority_rejection(record)?;
-                tracing::warn!(principal_id = %record.principal_id, "backup contact authority equivocation skipped");
-                return Ok(skip(LocalBusBackupContactSkipReason::Equivocation));
-            }
-        }
-        if let Some(old) = self.observed_device_set(&record.principal_commitment)? {
-            if record.device_set_epoch < old.device_set_epoch {
-                return Ok(skip(LocalBusBackupContactSkipReason::StaleAuthority));
-            }
-            if record.device_set_epoch == old.device_set_epoch && record != &old {
-                self.record_authority_rejection(record)?;
-                tracing::warn!(principal_id = %record.principal_id, "backup contact authority equivocation skipped");
-                return Ok(skip(LocalBusBackupContactSkipReason::Equivocation));
-            }
-        }
-        if let Err(error) = self.check_observed_set(record) {
-            if matches!(error, SdkError::Crypto(_)) {
-                self.record_authority_rejection(record)?;
-                tracing::warn!(principal_id = %record.principal_id, "backup contact authority equivocation skipped");
-                return Ok(skip(LocalBusBackupContactSkipReason::Equivocation));
-            }
-            return Err(error);
-        }
-        Ok(None)
-    }
-
-    fn native_backup_authority_skip(
-        &self,
-        native: &ramflux_protocol::custody::CustodyManifest,
-        peer: &str,
-    ) -> Result<Option<LocalBusBackupContactSkipReason>, SdkError> {
-        let record = &native.publication.record;
-        let epoch = record.body.device_set_epoch;
-        let hash = ramflux_protocol::custody::object_hash(record)?;
-        if let Some((floor, retained)) = self
-            .account_db()?
-            .contact_request_authority_floor(peer, crate::time::now_unix_timestamp())?
-        {
-            if epoch < floor {
-                return Ok(Some(LocalBusBackupContactSkipReason::StaleAuthority));
-            }
-            if epoch == floor && hash != retained {
-                return Ok(Some(LocalBusBackupContactSkipReason::Equivocation));
-            }
-        }
-        if self.custody_epoch_floor(peer)?.is_some_and(|floor| floor > epoch) {
-            return Ok(Some(LocalBusBackupContactSkipReason::StaleAuthority));
-        }
-        if let Some(current) =
-            self.current_custody_authority(peer, crate::custody::network_now()?)?
-            && current.envelope().body.device_set_epoch == epoch
-            && ramflux_protocol::custody::object_hash(current.envelope())? != hash
-        {
-            tracing::warn!("backup contact custody authority equivocation skipped");
-            return Ok(Some(LocalBusBackupContactSkipReason::Equivocation));
-        }
-        Ok(None)
-    }
-
     pub(crate) fn stage_own_contact(
         &self,
         manifest: &SdkDeviceManifestResponse,
@@ -280,6 +156,7 @@ impl RamfluxClient {
             })
             .transpose()
     }
+    #[cfg(test)]
     pub(super) fn own_history_contacts(&self) -> Result<Vec<String>, SdkError> {
         let own = self.owned_device_identity()?;
         let db = self.account_db()?;
@@ -466,15 +343,14 @@ impl RamfluxClient {
     /// sibling packet or the account backup AEAD. This decoder never establishes that authority.
     #[cfg(test)]
     pub(super) fn receive_own_contact(&self, body: &[u8]) -> Result<bool, SdkError> {
-        Ok(self.receive_own_contact_outcome(body, OwnContactReceiveMode::Sibling)?
-            != OwnContactReceiveOutcome::NotPacket)
+        Ok(self.receive_own_contact_outcome(body)? != OwnContactReceiveOutcome::NotPacket)
     }
+    #[cfg(test)]
     pub(super) fn receive_own_contact_outcome(
         &self,
         body: &[u8],
-        mode: OwnContactReceiveMode,
     ) -> Result<OwnContactReceiveOutcome, SdkError> {
-        if let Some(outcome) = self.receive_own_contact_tombstone(body, mode)? {
+        if let Some(outcome) = self.receive_own_contact_tombstone(body)? {
             return Ok(outcome);
         }
         let Some(contact) = Contact::decode(body)? else {
