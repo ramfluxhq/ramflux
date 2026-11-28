@@ -1304,13 +1304,18 @@ impl Drop for Supervisor {
 #[inline(never)]
 fn spawn_agent_repairs(owner: std::rc::Weak<Supervisor>) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_local(async move {
+        let mut tick = 0_u32;
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
+            tick = tick.wrapping_add(1);
             let Some(supervisor) = owner.upgrade() else { break };
             if *supervisor.stop_requested.borrow() {
                 break;
             }
             Box::pin(supervisor.maintain_agent_repairs()).await;
+            if tick.is_multiple_of(super::agent_advance::EXPIRY_SWEEP_SECS) {
+                Box::pin(supervisor.expire_overdue_creations()).await;
+            }
         }
     })
 }
