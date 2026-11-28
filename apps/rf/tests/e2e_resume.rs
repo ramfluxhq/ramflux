@@ -79,7 +79,7 @@ fn offline_demo_b(wal: bool, crash_after: Option<u64>) -> e2e::Result<()> {
     let base_cursor = e2e::receive_counter(&base, "committed_cursor")?;
     let (socket, root) = shutdown_daemon(bob_d)?;
     let bodies: Vec<String> = (0..20).map(|i| format!("offline-dm-{i:02}")).collect();
-    let mut ids: Vec<String> = (0..20).map(|i| unique(&format!("offline-dm-{i:02}"))).collect();
+    let ids: Vec<String> = (0..20).map(|i| unique(&format!("offline-dm-{i:02}"))).collect();
     for (id, body) in ids.iter().zip(&bodies) {
         dm_send(&alice_d, &alice, &bob, &conversation, id, body)?;
     }
