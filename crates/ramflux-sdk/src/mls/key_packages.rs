@@ -72,11 +72,11 @@ mod b64_list {
 }
 
 /// An optional binary field in the JSON frames.
-mod opt_b64 {
+pub(crate) mod opt_b64 {
     use serde::{Deserialize, Deserializer, Serializer};
 
     #[allow(clippy::ref_option, reason = "serde `with` hands the field by reference")]
-    pub(super) fn serialize<S: Serializer>(
+    pub(crate) fn serialize<S: Serializer>(
         value: &Option<Vec<u8>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
@@ -86,7 +86,7 @@ mod opt_b64 {
         }
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<Vec<u8>>, D::Error> {
         Option::<String>::deserialize(deserializer)?
@@ -194,8 +194,12 @@ impl TopUpPlan {
 }
 
 /// The publish plan for the node's answer to `KeyPackageStatus`. A device that never published
-/// (`None`) starts with a full batch and a last-resort `KeyPackage`.
-pub(crate) fn plan_top_up(status: Option<&KeyPackageStatusResponse>) -> TopUpPlan {
+/// (`None`) starts with a full batch and a last-resort `KeyPackage`. `rotate_last_resort` replaces
+/// a stored last-resort package (it is older than half its lifetime, or a group already uses it).
+pub(crate) fn plan_top_up(
+    status: Option<&KeyPackageStatusResponse>,
+    rotate_last_resort: bool,
+) -> TopUpPlan {
     let (stored, last_resort_stored) = status.map_or((0, false), |status| {
         (usize::try_from(status.one_time).unwrap_or(ONE_TIME_STORED_MAX), status.last_resort)
     });
@@ -207,7 +211,7 @@ pub(crate) fn plan_top_up(status: Option<&KeyPackageStatusResponse>) -> TopUpPla
     } else {
         0
     };
-    TopUpPlan { one_time, last_resort: !last_resort_stored }
+    TopUpPlan { one_time, last_resort: !last_resort_stored || rotate_last_resort }
 }
 
 /// Mint the `KeyPackages` of `plan`. Each is its own staged operation, committed at once.
@@ -220,15 +224,17 @@ pub(crate) fn mint<K: MlsKv>(
 ) -> Result<KeyPackagePublishRequest, SdkError> {
     let mut one_time = Vec::with_capacity(plan.one_time.min(PUBLISH_ONE_TIME_MAX));
     for _ in 0..plan.one_time.min(PUBLISH_ONE_TIME_MAX) {
-        one_time.push(mint_one(mls)?);
+        one_time.push(mint_one(mls, false)?);
     }
-    let last_resort = if plan.last_resort { Some(mint_one(mls)?) } else { None };
+    let last_resort = if plan.last_resort { Some(mint_one(mls, true)?) } else { None };
     Ok(KeyPackagePublishRequest { one_time, last_resort })
 }
 
-fn mint_one<K: MlsKv>(mls: &Mls<K>) -> Result<Vec<u8>, SdkError> {
-    let output =
-        mls.key_package(GroupKind::Dm)?.commit_plain().map_err(ramflux_mls::MlsError::from)?;
+fn mint_one<K: MlsKv>(mls: &Mls<K>, last_resort: bool) -> Result<Vec<u8>, SdkError> {
+    let output = mls
+        .key_package(GroupKind::Dm, last_resort)?
+        .commit_plain()
+        .map_err(ramflux_mls::MlsError::from)?;
     if output.bytes.len() > KEY_PACKAGE_MAX_BYTES {
         return Err(SdkError::Mls {
             code: "too_large",
@@ -256,13 +262,14 @@ pub(crate) enum TopUpOutcome {
 pub(crate) async fn top_up<K: MlsKv>(
     access: &mut impl MlsFrameAccess,
     mls: &Mls<K>,
+    now: u64,
 ) -> Result<TopUpOutcome, SdkError> {
     let status = match access.key_package_status().await {
         Ok(status) => Some(status),
         Err(error) if is_not_yet_available(&error) => return Ok(TopUpOutcome::NotYetAvailable),
         Err(error) => return Err(error),
     };
-    let plan = plan_top_up(status.as_ref());
+    let plan = plan_top_up(status.as_ref(), mls.last_resort_due(now)?);
     if plan.is_empty() {
         return Ok(TopUpOutcome::Sufficient);
     }
@@ -337,27 +344,37 @@ mod tests {
 
     #[test]
     fn first_publish_is_a_full_batch_with_last_resort() {
-        let plan = plan_top_up(None);
+        let plan = plan_top_up(None, false);
         assert_eq!(plan, TopUpPlan { one_time: REFILL_TARGET, last_resort: true }, "fresh device");
     }
 
     #[test]
     fn enough_stored_publishes_nothing() {
-        let plan = plan_top_up(Some(&status(20, true)));
+        let plan = plan_top_up(Some(&status(20, true)), false);
         assert!(plan.is_empty(), "20 stored one-time packages and a last resort need no top-up");
     }
 
     #[test]
     fn below_threshold_refills_to_target() {
-        let plan = plan_top_up(Some(&status(5, true)));
+        let plan = plan_top_up(Some(&status(5, true)), false);
         assert_eq!(plan.one_time, REFILL_TARGET - 5, "refill up to the target");
         assert!(!plan.last_resort, "the stored last resort is kept");
     }
 
     #[test]
     fn missing_last_resort_is_republished() {
-        let plan = plan_top_up(Some(&status(30, false)));
+        let plan = plan_top_up(Some(&status(30, false)), false);
         assert_eq!(plan, TopUpPlan { one_time: 0, last_resort: true }, "only the last resort");
+    }
+
+    #[test]
+    fn rotate_replaces_a_stored_last_resort() {
+        let plan = plan_top_up(Some(&status(30, true)), true);
+        assert_eq!(
+            plan,
+            TopUpPlan { one_time: 0, last_resort: true },
+            "rotation replaces the stored last resort"
+        );
     }
 
     #[test]

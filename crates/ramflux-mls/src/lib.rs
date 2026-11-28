@@ -48,8 +48,8 @@ pub use group::context::{CommitCtx, CommitMeta, WelcomeCtx};
 pub use group::conversation::{ConversationRole, ExpectedPrincipals, RfConversation};
 pub use group::policy::{CommitPolicy, DenyAllRoster, PermissiveCommitPolicy, RosterPolicy};
 pub use group::{
-    AddOutput, CommitOutput, CreateOutput, JoinOutput, KeyPackageOutput, MemberSummary, Mls,
-    ReceivedMessage, SendOutput, StatusOutput, Tier, key_package_signature_key,
+    AddOutput, CommitOutput, CreateOutput, JoinOutput, KeyPackageOutput, MemberSummary,
+    MergeOutput, Mls, ReceivedMessage, SendOutput, StatusOutput, Tier, key_package_signature_key,
 };
 pub use provider::{CryptoHandle, RfMlsProvider};
 pub use storage::kv::{MlsKv, MlsKvError, RowStats, Staged, WriteBatch, WriteOp};
@@ -102,3 +102,7 @@ pub const RF_LABEL_GROUP_KIND: &str = "rf/group_kind";
 pub const RF_LABEL_GROUP_TIER: &str = "rf/group_tier";
 /// Leaf signature secret keys, keyed by the public key.
 pub const RF_LABEL_LEAF_SIG: &str = "rf/leaf_sig";
+/// How many joined or created groups still use a leaf signature key. Keyed by the public key;
+/// the value is a `u32` in big-endian. Absent means zero. Fresh accounts only: older rows are
+/// not rewritten.
+pub const RF_LABEL_LEAF_SIG_USE: &str = "rf/leaf_sig_use";

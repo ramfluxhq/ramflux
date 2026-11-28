@@ -319,28 +319,39 @@ impl<K: MlsKv> Gate<'_, '_, K> {
         Ok(tree)
     }
 
-    fn merge_own(
+    fn refuse_if_staged(group: &MlsGroup) -> Result<(), MlsError> {
+        if group.pending_commit().is_some() {
+            Err(MlsError::PolicyRejected("an own commit is already staged".to_owned()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Check the staged own commit. Does not merge it.
+    fn check_own(
         &self,
-        group: &mut MlsGroup,
+        group: &MlsGroup,
         leaf_cap: usize,
         meta: CommitMeta<'_>,
     ) -> Result<(), MlsError> {
         let own = group.own_leaf_index();
-        {
-            let pending = group
-                .pending_commit()
-                .ok_or_else(|| MlsError::internal("no pending commit to merge"))?;
-            let group_id = group.group_id().to_vec();
-            let ctx =
-                CommitCtx { group_id: &group_id, epoch: group.epoch().as_u64(), meta: meta.aad };
-            self.check_commit(group, pending, own, leaf_cap, &ctx)?;
-        }
-        group.merge_pending_commit(self.provider).map_err(MlsError::mls)
+        let pending = group
+            .pending_commit()
+            .ok_or_else(|| MlsError::internal("no pending commit to check"))?;
+        let group_id = group.group_id().to_vec();
+        let ctx = CommitCtx { group_id: &group_id, epoch: group.epoch().as_u64(), meta: meta.aad };
+        self.check_commit(group, pending, own, leaf_cap, &ctx)
+    }
+
+    /// Merge the staged own commit. The only `merge_pending_commit` call in this crate.
+    pub(crate) fn merge_staged_own(&self, group: &mut MlsGroup) -> Result<u64, MlsError> {
+        group.merge_pending_commit(self.provider).map_err(MlsError::mls)?;
+        Ok(group.epoch().as_u64())
     }
 
     /// Add members: every `KeyPackage` is verified, the own cap (tier) is applied, then the commit
-    /// is staged, checked as a whole and merged (debug mode: no orderer).
-    pub(crate) fn add(
+    /// is staged and checked. The group stays in the epoch the commit was made in.
+    pub(crate) fn stage_add(
         &self,
         group: &mut MlsGroup,
         signer: &LeafSigner,
@@ -348,6 +359,7 @@ impl<K: MlsKv> Gate<'_, '_, K> {
         own_leaf_cap: usize,
         meta: CommitMeta<'_>,
     ) -> Result<(MlsMessageOut, MlsMessageOut), MlsError> {
+        Self::refuse_if_staged(group)?;
         if self.kind == GroupKind::Group
             && leaf_count(group).saturating_add(key_packages.len()) > own_leaf_cap
         {
@@ -356,7 +368,7 @@ impl<K: MlsKv> Gate<'_, '_, K> {
         let own = self.describe_at(group, group.own_leaf_index())?;
         {
             // Pre-check each KeyPackage on its own (the adding device's directory path); the
-            // staged commit is judged as a whole in `merge_own` (V1 only).
+            // staged commit is judged as a whole in `check_own` (V1 only).
             let group_id = group.group_id().to_vec();
             let ctx =
                 CommitCtx { group_id: &group_id, epoch: group.epoch().as_u64(), meta: meta.aad };
@@ -368,52 +380,83 @@ impl<K: MlsKv> Gate<'_, '_, K> {
         group.set_aad(meta.aad.to_vec());
         let (commit, welcome, _group_info) =
             group.add_members(self.provider, signer, key_packages).map_err(MlsError::mls)?;
-        self.merge_own(group, own_leaf_cap, meta)?;
+        self.check_own(group, own_leaf_cap, meta)?;
         Ok((commit, welcome))
     }
 
-    /// Remove one member.
-    pub(crate) fn remove(
+    /// Remove one member. The commit is staged and checked, not merged.
+    pub(crate) fn stage_remove(
         &self,
         group: &mut MlsGroup,
         signer: &LeafSigner,
         leaf: LeafNodeIndex,
         meta: CommitMeta<'_>,
     ) -> Result<MlsMessageOut, MlsError> {
+        Self::refuse_if_staged(group)?;
         group.set_aad(meta.aad.to_vec());
         let (commit, _welcome, _group_info) =
             group.remove_members(self.provider, signer, &[leaf]).map_err(MlsError::mls)?;
-        self.merge_own(group, LEAF_CAP, meta)?;
+        self.check_own(group, LEAF_CAP, meta)?;
         Ok(commit)
     }
 
-    /// Commit to the stored proposals (the second half of a leave).
+    /// Commit to the stored proposals (the second half of a leave). Staged and checked, not merged.
+    pub(crate) fn stage_commit_pending(
+        &self,
+        group: &mut MlsGroup,
+        signer: &LeafSigner,
+        meta: CommitMeta<'_>,
+    ) -> Result<MlsMessageOut, MlsError> {
+        Self::refuse_if_staged(group)?;
+        group.set_aad(meta.aad.to_vec());
+        let (commit, _welcome, _group_info) =
+            group.commit_to_pending_proposals(self.provider, signer).map_err(MlsError::mls)?;
+        self.check_own(group, LEAF_CAP, meta)?;
+        Ok(commit)
+    }
+
+    /// Rotate the own leaf keys. The update commit is staged and checked, not merged.
+    pub(crate) fn stage_update(
+        &self,
+        group: &mut MlsGroup,
+        signer: &LeafSigner,
+        meta: CommitMeta<'_>,
+    ) -> Result<MlsMessageOut, MlsError> {
+        Self::refuse_if_staged(group)?;
+        group.set_aad(meta.aad.to_vec());
+        let bundle = group
+            .self_update(self.provider, signer, LeafNodeParameters::default())
+            .map_err(MlsError::mls)?;
+        let (commit, _welcome, _group_info) = bundle.into_contents();
+        self.check_own(group, LEAF_CAP, meta)?;
+        Ok(commit)
+    }
+
+    /// Merge-at-once add used by `debug.rs` (no orderer). Production callers stage only.
+    #[cfg(feature = "itest-mls-debug")]
+    pub(crate) fn add(
+        &self,
+        group: &mut MlsGroup,
+        signer: &LeafSigner,
+        key_packages: &[KeyPackage],
+        own_leaf_cap: usize,
+        meta: CommitMeta<'_>,
+    ) -> Result<(MlsMessageOut, MlsMessageOut), MlsError> {
+        let staged = self.stage_add(group, signer, key_packages, own_leaf_cap, meta)?;
+        self.merge_staged_own(group)?;
+        Ok(staged)
+    }
+
+    /// Merge-at-once commit of stored proposals used by `debug.rs`. Production callers stage only.
+    #[cfg(feature = "itest-mls-debug")]
     pub(crate) fn commit_pending(
         &self,
         group: &mut MlsGroup,
         signer: &LeafSigner,
         meta: CommitMeta<'_>,
     ) -> Result<MlsMessageOut, MlsError> {
-        group.set_aad(meta.aad.to_vec());
-        let (commit, _welcome, _group_info) =
-            group.commit_to_pending_proposals(self.provider, signer).map_err(MlsError::mls)?;
-        self.merge_own(group, LEAF_CAP, meta)?;
-        Ok(commit)
-    }
-
-    /// Rotate the own leaf keys.
-    pub(crate) fn update(
-        &self,
-        group: &mut MlsGroup,
-        signer: &LeafSigner,
-        meta: CommitMeta<'_>,
-    ) -> Result<MlsMessageOut, MlsError> {
-        group.set_aad(meta.aad.to_vec());
-        let bundle = group
-            .self_update(self.provider, signer, LeafNodeParameters::default())
-            .map_err(MlsError::mls)?;
-        let (commit, _welcome, _group_info) = bundle.into_contents();
-        self.merge_own(group, LEAF_CAP, meta)?;
+        let commit = self.stage_commit_pending(group, signer, meta)?;
+        self.merge_staged_own(group)?;
         Ok(commit)
     }
 

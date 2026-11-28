@@ -32,8 +32,9 @@ fn ratchet(kind: GroupKind) -> SenderRatchetConfiguration {
     SenderRatchetConfiguration::new(tolerance, RATCHET_FORWARD_DISTANCE)
 }
 
-/// Capabilities of every own leaf: suite 0x0001 only, both rf credential types. Basic is added
-/// only under `itest-mls-debug` (interop), never in production.
+/// Capabilities of every own leaf: suite 0x0001 only, both rf credential types, the
+/// `rf_conversation` extension and the last-resort extension. Basic is added only under
+/// `itest-mls-debug` (interop), never in production.
 #[must_use]
 pub fn capabilities() -> Capabilities {
     let mut credentials = vec![
@@ -45,7 +46,10 @@ pub fn capabilities() -> Capabilities {
     }
     Capabilities::builder()
         .ciphersuites(vec![MLS_SUITE])
-        .extensions(vec![RfConversation::extension_type()])
+        .extensions(vec![
+            RfConversation::extension_type(),
+            openmls::prelude::ExtensionType::LastResort,
+        ])
         .credentials(credentials)
         .build()
 }

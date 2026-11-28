@@ -244,10 +244,11 @@ mod enabled {
             key_packages.push(read_blob(&path, MAX_KEY_PACKAGE_BYTES)?);
         }
         let output = mls.add(&gid, &key_packages)?.commit_plain()?;
+        let merged = mls.merge_own(&gid)?.commit_plain()?;
         write(&commit_path, &output.commit)?;
         write(&welcome_path, &output.welcome)?;
         Ok(json!({
-            "epoch": output.epoch,
+            "epoch": merged.epoch,
             "commit_bytes": output.commit.len(),
             "welcome_bytes": output.welcome.len(),
         }))
@@ -324,11 +325,27 @@ mod enabled {
         }))
     }
 
+    /// Stage the own commit, then merge it. The reply epoch is the epoch after the merge.
+    fn stage_then_merge(
+        mls: &Facade,
+        gid: &[u8],
+        staged: ramflux_mls::CommitOutput,
+        out: &Path,
+    ) -> Result<Value, MlsError> {
+        let merged = mls.merge_own(gid)?.commit_plain()?;
+        write(out, &staged.message)?;
+        Ok(json!({
+            "epoch": merged.epoch,
+            "commit_bytes": staged.message.len(),
+            "wire_format": wire_format(&staged.message),
+        }))
+    }
+
     fn update(mls: &Facade, body: &Value) -> Result<Value, MlsError> {
         let gid = group_id(body)?;
         let out = out_path(body, "out_path")?;
         match body.get("tamper").and_then(Value::as_str) {
-            None => commit_reply(&mls.update(&gid)?.commit_plain()?, &out),
+            None => stage_then_merge(mls, &gid, mls.update(&gid)?.commit_plain()?, &out),
             Some("credential") => commit_reply(&mls.tampered_update(&gid)?, &out),
             Some(other) => Err(bad(&format!("unknown tamper {other}"))),
         }
@@ -345,14 +362,14 @@ mod enabled {
     fn commit_pending(mls: &Facade, body: &Value) -> Result<Value, MlsError> {
         let gid = group_id(body)?;
         let out = out_path(body, "out_path")?;
-        commit_reply(&mls.commit_pending(&gid)?.commit_plain()?, &out)
+        stage_then_merge(mls, &gid, mls.commit_pending(&gid)?.commit_plain()?, &out)
     }
 
     fn remove(mls: &Facade, body: &Value) -> Result<Value, MlsError> {
         let gid = group_id(body)?;
         let out = out_path(body, "out_path")?;
         let leaf = u32::try_from(number(body, "leaf")?).map_err(|_| bad("leaf"))?;
-        commit_reply(&mls.remove(&gid, leaf)?.commit_plain()?, &out)
+        stage_then_merge(mls, &gid, mls.remove(&gid, leaf)?.commit_plain()?, &out)
     }
 
     fn status(mls: &Facade, body: &Value) -> Result<Value, MlsError> {

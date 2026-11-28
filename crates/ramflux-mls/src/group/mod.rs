@@ -109,7 +109,8 @@ pub struct CreateOutput {
 /// Result of adding members.
 #[derive(Debug)]
 pub struct AddOutput {
-    /// New epoch.
+    /// Epoch the commit was made in (the orderer's `epoch`); the group stays there until
+    /// [`Mls::merge_own`].
     pub epoch: u64,
     /// TLS-encoded commit.
     pub commit: Vec<u8>,
@@ -157,10 +158,18 @@ pub struct SendOutput {
 /// A handshake message produced by an own operation.
 #[derive(Debug)]
 pub struct CommitOutput {
-    /// New epoch (the commit is merged at once; there is no orderer in MLS-0).
+    /// Epoch the commit was made in (the orderer's `epoch`); the group stays there until
+    /// [`Mls::merge_own`].
     pub epoch: u64,
     /// TLS-encoded message.
     pub message: Vec<u8>,
+}
+
+/// The epoch after [`Mls::merge_own`] applied a staged own commit.
+#[derive(Debug)]
+pub struct MergeOutput {
+    /// Epoch the group is in after the merge.
+    pub epoch: u64,
 }
 
 /// Group status.
@@ -479,13 +488,15 @@ impl<K: MlsKv> Mls<K> {
         Ok(members)
     }
 
-    /// A fresh `KeyPackage` of `kind`. Expired own `KeyPackages` are deleted first (bounded rows).
+    /// A fresh `KeyPackage` of `kind`. `last_resort` marks the reusable package. Expired own
+    /// `KeyPackages` are deleted first (bounded rows).
     ///
     /// # Errors
     /// Missing device identity (`dm`), `device_set_too_large`, provider or storage failure.
     pub fn key_package(
         &self,
         kind: GroupKind,
+        last_resort: bool,
     ) -> Result<Staged<'_, K, KeyPackageOutput>, MlsError> {
         let op = self.begin()?;
         let now = unix_now()?;
@@ -494,17 +505,22 @@ impl<K: MlsKv> Mls<K> {
         let credential_with_key = self.credential_for(kind, &signer)?;
         let credential_bytes = credential_with_key.credential.serialized_content().len();
         Self::store_signer(&op, &signer)?;
-        let bundle = KeyPackage::builder()
+        let mut builder = KeyPackage::builder()
             .key_package_lifetime(config::key_package_lifetime())
-            .leaf_node_capabilities(config::capabilities())
+            .leaf_node_capabilities(config::capabilities());
+        if last_resort {
+            builder = builder.mark_as_last_resort();
+        }
+        let bundle = builder
             .build(MLS_SUITE, &op.provider, &signer, credential_with_key)
             .map_err(MlsError::mls)?;
         let hash_ref =
             bundle.key_package().hash_ref(self.crypto.crypto()).map_err(MlsError::mls)?;
-        op.provider.mls_storage().own_kp_remember(
+        op.provider.mls_storage().own_kp_remember_with(
             &hash_ref,
             now.saturating_add(KEY_PACKAGE_LIFETIME_SECS),
             signer.public(),
+            last_resort,
         )?;
         let bytes = MlsMessageOut::from(bundle).to_bytes().map_err(MlsError::mls)?;
         op.finish(KeyPackageOutput { bytes, leaf_sig_pk: *signer.public(), credential_bytes })
@@ -575,6 +591,7 @@ impl<K: MlsKv> Mls<K> {
         )
         .map_err(MlsError::mls)?;
         let storage = op.provider.mls_storage();
+        storage.leaf_sig_use_increment(signer.public())?;
         storage.rf_put(RF_LABEL_GROUP_KIND, &group_id, kind.as_str().as_bytes())?;
         if let Some(tier) = tier {
             storage.rf_put(
@@ -587,7 +604,8 @@ impl<K: MlsKv> Mls<K> {
         op.finish(CreateOutput { group_id, epoch, leaf_cap, leaf_sig_pk: *signer.public() })
     }
 
-    /// Add the members behind the `KeyPackage` messages: verify, stage, check, merge.
+    /// Add the members behind the `KeyPackage` messages: verify, stage and check. The group is
+    /// not merged; [`Self::merge_own`] does that after the orderer accepts.
     ///
     /// # Errors
     /// `too_large`, `credential_rejected`, `policy_rejected`, `not_found` or a provider failure.
@@ -626,7 +644,7 @@ impl<K: MlsKv> Mls<K> {
     ) -> Result<Staged<'a, K, AddOutput>, MlsError> {
         let mut loaded = Self::load(&op, group_id)?;
         let signer = Self::load_signer(&op, &loaded.group)?;
-        let (commit, welcome) = op.gate(loaded.kind).add(
+        let (commit, welcome) = op.gate(loaded.kind).stage_add(
             &mut loaded.group,
             &signer,
             key_packages,
@@ -704,6 +722,11 @@ impl<K: MlsKv> Mls<K> {
                 tier.members().to_string().as_bytes(),
             )?;
         }
+        let signer_pk = group
+            .own_leaf_node()
+            .map(|leaf| leaf.signature_key().as_slice().to_vec())
+            .ok_or_else(|| MlsError::internal("own leaf is missing"))?;
+        op.provider.mls_storage().leaf_sig_use_increment(&signer_pk)?;
         let members = Self::summarize(&op, kind, &group)?;
         let output = JoinOutput {
             group_id,
@@ -778,7 +801,7 @@ impl<K: MlsKv> Mls<K> {
         op.gate(loaded.kind).check_leaf_directory(&loaded.group, LeafNodeIndex::new(leaf))
     }
 
-    /// Rotate the own leaf keys with an update commit (merged at once).
+    /// Rotate the own leaf keys with an update commit. The commit is staged, not merged.
     ///
     /// # Errors
     /// `not_found`, gate rejections or a provider failure.
@@ -842,10 +865,10 @@ impl<K: MlsKv> Mls<K> {
         let signer = Self::load_signer(&op, &loaded.group)?;
         let gate = op.gate(loaded.kind);
         let message = match operation {
-            OwnOp::Update => gate.update(&mut loaded.group, &signer, meta)?,
-            OwnOp::CommitPending => gate.commit_pending(&mut loaded.group, &signer, meta)?,
+            OwnOp::Update => gate.stage_update(&mut loaded.group, &signer, meta)?,
+            OwnOp::CommitPending => gate.stage_commit_pending(&mut loaded.group, &signer, meta)?,
             OwnOp::Remove(leaf) => {
-                gate.remove(&mut loaded.group, &signer, LeafNodeIndex::new(leaf), meta)?
+                gate.stage_remove(&mut loaded.group, &signer, LeafNodeIndex::new(leaf), meta)?
             }
         };
         let output = CommitOutput {
@@ -853,6 +876,62 @@ impl<K: MlsKv> Mls<K> {
             message: message.to_bytes().map_err(MlsError::mls)?,
         };
         op.finish(output)
+    }
+
+    /// Merge the staged own commit. The group advances to the next epoch.
+    ///
+    /// # Errors
+    /// `not_found` when the group or its pending commit is absent, or a provider failure.
+    pub fn merge_own(&self, group_id: &[u8]) -> Result<Staged<'_, K, MergeOutput>, MlsError> {
+        let op = self.begin()?;
+        let mut loaded = Self::load(&op, group_id)?;
+        if loaded.group.pending_commit().is_none() {
+            return Err(MlsError::NotFound("pending commit".to_owned()));
+        }
+        let epoch = op.gate(loaded.kind).merge_staged_own(&mut loaded.group)?;
+        op.finish(MergeOutput { epoch })
+    }
+
+    /// Drop a staged own commit. `true` when one was dropped, `false` when the group had none.
+    ///
+    /// # Errors
+    /// `not_found` when the group is absent, or a provider failure.
+    pub fn discard_own(&self, group_id: &[u8]) -> Result<Staged<'_, K, bool>, MlsError> {
+        let op = self.begin()?;
+        let mut loaded = Self::load(&op, group_id)?;
+        let dropped = loaded.group.pending_commit().is_some();
+        loaded.group.clear_pending_commit(op.provider.storage()).map_err(MlsError::mls)?;
+        op.finish(dropped)
+    }
+
+    /// Delete the group, its kind and tier rows, and one use of its leaf signer. At zero uses
+    /// the signer secret is deleted when no own `KeyPackage` still names it.
+    ///
+    /// # Errors
+    /// `not_found` when the group is absent, a broken use count, or a provider failure.
+    pub fn delete_group(&self, group_id: &[u8]) -> Result<Staged<'_, K, ()>, MlsError> {
+        let op = self.begin()?;
+        let mut loaded = Self::load(&op, group_id)?;
+        let signer_pk = loaded
+            .group
+            .own_leaf_node()
+            .map(|leaf| leaf.signature_key().as_slice().to_vec())
+            .ok_or_else(|| MlsError::internal("own leaf is missing"))?;
+        loaded.group.delete(op.provider.storage()).map_err(MlsError::mls)?;
+        let storage = op.provider.mls_storage();
+        storage.rf_delete(RF_LABEL_GROUP_KIND, group_id)?;
+        storage.rf_delete(RF_LABEL_GROUP_TIER, group_id)?;
+        storage.leaf_sig_use_release(&signer_pk)?;
+        op.finish(())
+    }
+
+    /// Whether a new last-resort `KeyPackage` should be published. `now` is the caller's clock.
+    ///
+    /// # Errors
+    /// Storage failure.
+    pub fn last_resort_due(&self, now: u64) -> Result<bool, MlsError> {
+        let op = self.begin()?;
+        Ok(op.provider.mls_storage().own_kp_last_resort_due(now)?)
     }
 
     /// Announce leaving: a Remove proposal by reference. Another member commits it.
@@ -929,5 +1008,58 @@ impl<K: MlsKv> Mls<K> {
     /// Storage failure.
     pub fn row_stats(&self) -> Result<RowStats, MlsError> {
         Ok(self.kv.row_stats()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openmls::prelude::ExtensionType;
+
+    use super::*;
+    use crate::MlsError;
+    use crate::credential::GroupKind;
+    use crate::provider::CryptoHandle;
+    use crate::storage::kv::{MlsKv, MlsKvError, RowStats, WriteBatch};
+
+    /// Keeps nothing. Enough to build a `KeyPackage` in memory.
+    struct MemKv;
+
+    impl MlsKv for MemKv {
+        type Tx<'a> = ();
+
+        fn get(
+            &self,
+            _label: &str,
+            _key: &[u8],
+        ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, MlsKvError> {
+            Ok(None)
+        }
+
+        fn row_stats(&self) -> Result<RowStats, MlsKvError> {
+            Ok(RowStats::default())
+        }
+
+        fn commit_batch<F>(&self, _batch: WriteBatch, _caller: F) -> Result<(), MlsKvError>
+        where
+            F: for<'a> FnOnce(&mut Self::Tx<'a>) -> Result<(), crate::storage::kv::MlsKvError>
+                + Send
+                + 'static,
+        {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn last_resort_key_package_carries_the_extension() -> Result<(), MlsError> {
+        let crypto = CryptoHandle::init()?;
+        let mls = Mls::new(MemKv, crypto);
+        let minted =
+            mls.key_package(GroupKind::Group, true)?.commit_plain().map_err(MlsError::from)?;
+        let package = parse_key_package(&minted.bytes, &mls.crypto)?;
+        assert!(
+            package.extensions().contains(ExtensionType::LastResort),
+            "a last-resort KeyPackage carries the legacy last_resort extension"
+        );
+        Ok(())
     }
 }

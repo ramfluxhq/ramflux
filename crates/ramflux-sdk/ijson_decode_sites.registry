@@ -328,6 +328,7 @@ crates/ramflux-sdk/src/gateway/session_push.rs | direct_frame | 1 | A | strict=p
 crates/ramflux-sdk/src/gateway/session_push.rs | from_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/gateway/session_push.rs | from_bytes | 2 | E | excluded=establishment echo; the key set document inside is verified by push_keyset offer before use
 crates/ramflux-sdk/src/gateway/session_push.rs | route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/mls/order.rs | decode_establish_row | 1 | D | admitted-before-persist: the establish row is written by this module before submit from a typed EstablishRow; not an ingress decoder
 crates/ramflux-sdk/src/mls/order.rs | get | 1 | D | admitted-before-persist: the conversation row is written by this module through put from a typed ConvState; not an ingress decoder
 crates/ramflux-sdk/src/node/discovery.rs | fetch_client_record | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/node/probe.rs | app_challenge | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
