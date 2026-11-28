@@ -47,8 +47,13 @@ pub fn socket_path(path: &Path, uid: u32) -> Result<()> {
 pub fn peer(stream: &UnixStream, expected: u32) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let credentials = rustix::net::sockopt::socket_peercred(stream)?;
-        if credentials.uid.as_raw() != expected {
+        // Only the peer UID is authority here. The kernel reports pid 0 when the peer lives in
+        // another PID namespace (witness and centre in separate containers); that is expected
+        // and the PID is not used. rustix's UCred cannot represent pid 0 (NonZero), so read the
+        // raw ucred through nix instead.
+        let credentials =
+            nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)?;
+        if credentials.uid() != expected {
             return refuse("witness peer UID mismatch");
         }
         Ok(())

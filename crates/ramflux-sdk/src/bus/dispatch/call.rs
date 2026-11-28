@@ -38,7 +38,13 @@ pub(crate) async fn dispatch(
         let _: LocalBusCallHangupRequest = serde_json::from_value(request.body.clone())?;
         return media(account, id);
     }
-    let _: LocalBusCallHangupRequest = serde_json::from_value(request.body.clone())?;
+    let video_accept = if request.method == "call.answer" {
+        let answer: LocalBusCallAnswerRequest = serde_json::from_value(request.body.clone())?;
+        answer.video
+    } else {
+        let _: LocalBusCallHangupRequest = serde_json::from_value(request.body.clone())?;
+        false
+    };
     if request.method == "call.answer" {
         account.client.reserve_call_audio(id)?;
     }
@@ -51,9 +57,13 @@ pub(crate) async fn dispatch(
                 && next.row.state == "incoming_ringing"
                 && !next.expired(now) =>
         {
+            next.video.set_accept(video_accept);
             next.request_answer();
         }
-        "call.answer" => next.answer(now)?,
+        "call.answer" => {
+            next.video.set_accept(video_accept);
+            next.answer(now)?;
+        }
         "call.reject" => next.end(true, now)?,
         "call.hangup" => next.end(false, now)?,
         _ => return Err(invalid("unknown call method")),
@@ -84,7 +94,7 @@ async fn invite(
     if account.client.voice_calls.values().any(|c| c.row.state != "ended") {
         return Err(invalid("account busy"));
     }
-    let _: LocalBusCallInviteRequest = serde_json::from_value(request.body.clone())?;
+    let invite_request: LocalBusCallInviteRequest = serde_json::from_value(request.body.clone())?;
     if live_session_lacks_call_resolution(account) {
         return Err(SdkError::CapabilityDenied(
             "voice calls are unavailable: the home node did not negotiate call resolution".into(),
@@ -133,6 +143,7 @@ async fn invite(
         conversation.into(),
         account.client.call_local_endpoint()?,
         invited,
+        invite_request.video,
         now,
     )?;
     call.media_held = true;

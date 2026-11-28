@@ -8,10 +8,7 @@ use crate::bus::connection_manager::{AccountWork, ReceiveTurn, SessionMetadata};
 use crate::bus::state::LocalBusAccountState;
 #[cfg(test)]
 use crate::bus::{actor::AccountCommand, mutation_intent::MutationIntent};
-use crate::prelude::{
-    SdkError, local_bus_account_manifest_path, read_local_bus_account_manifest,
-    write_local_bus_account_manifest,
-};
+use crate::prelude::SdkError;
 use tokio::time::{Instant, timeout_at};
 
 enum WorkRace {
@@ -821,16 +818,6 @@ impl AccountRuntime {
             )
             .await?;
             super::super::native_account::record_networking(account, None)?;
-        } else {
-            let root = account.client.account_index()?.root();
-            let path = local_bus_account_manifest_path(root, &self.id);
-            if let Ok(mut manifest) = read_local_bus_account_manifest(&path)
-                && manifest.activation_pending
-            {
-                manifest.activation_pending = false;
-                write_local_bus_account_manifest(root, &manifest)?;
-                account.activation_pending = false;
-            }
         }
         account.finish_restored_resume_checkpoint(true)?;
         account.client.complete_backup_activation()?;

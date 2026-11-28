@@ -123,6 +123,8 @@ def render(state, override, label, record):
                    "username-socket:"+ROOT+"/socket"]
         if role == "witness":
             env.update(RAMFLUX_USERNAME_LISTEN_ADDR="0.0.0.0:"+config['DEMO_USERNAME_CENTER_PORT'],
+                RAMFLUX_USERNAME_REGISTERED_NODES_FILE=ROOT+"/witness/registered-nodes.v1.json",
+                DEMO_REGISTERED_NODE_KEY="${DEMO_EXPECTED_NODE_PUBLIC_KEY}",
                 RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE="/etc/ramflux/node-identity/node-signing.key")
             volumes.extend(["./certs/node-identity:/etc/ramflux/node-identity:ro",
                             "./certs/federation:/etc/ramflux/mesh:ro"])

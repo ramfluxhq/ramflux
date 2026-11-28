@@ -5,9 +5,7 @@
 
 use super::{AccountRuntime, stopped};
 use crate::bus::readers::AccountReaders;
-use crate::prelude::{
-    LocalBusFrame, SdkError, local_bus_account_manifest_path, now_unix_timestamp,
-};
+use crate::prelude::{LocalBusFrame, SdkError, now_unix_timestamp};
 
 impl AccountRuntime {
     pub(super) fn initialize_readers(&mut self) -> Result<(), SdkError> {
@@ -17,12 +15,10 @@ impl AccountRuntime {
             super::super::control_state::trim(account);
             super::super::read_model::initialize(account)?;
             let db = account.client.account_db()?;
-            let path = local_bus_account_manifest_path(&self.state.config.data_root, &self.id);
             let node_id = if account.client.born_v3_account.is_some() {
                 db.load_actor_state::<String>("account/node-id")?
             } else {
-                super::super::sync_status::optional_manifest(&path)
-                    .and_then(|manifest| manifest.node_id)
+                None
             };
             db.persist_actor_state("sync/node-id", &node_id)?;
             let tick = db.journal_bounds()?.head_seq;

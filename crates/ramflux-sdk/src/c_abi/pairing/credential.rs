@@ -141,7 +141,13 @@ impl LocalCredentialProvider for CallbackProvider {
             return Err(invalid());
         }
         let _serial = self.serial.lock().map_err(|_| invalid())?;
-        let _invocation = self.enter()?;
+        // A provider cleared after it was taken but before this point refuses the prompt, so the
+        // parent request ends with `reauth_required` and the client worker keeps running.
+        let _invocation = match self.enter() {
+            Ok(invocation) => invocation,
+            Err(SdkError::PairingCode("Retired")) => return Ok(CredentialOutcome::Refused),
+            Err(error) => return Err(error),
+        };
         self.invoke(request)
     }
     fn cancel(&self) {

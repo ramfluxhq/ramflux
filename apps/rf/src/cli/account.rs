@@ -20,6 +20,8 @@ pub(crate) enum AccountAction {
     Create(Box<AccountCreate>),
     ExportAgentCredentials(AccountExportAgentCredentials),
     Recover(AccountSelector),
+    /// Erase one account's data from this device. The account id is typed at the terminal.
+    RemoveLocal(AccountSelector),
     List,
     Lock(AccountLock),
     Passphrase(AccountPassphraseCommand),
@@ -39,6 +41,33 @@ pub(crate) enum AccountAppLockAction {
     Lock(AccountSelector),
     State(AccountSelector),
     Set(AccountAppLockSet),
+    Lifecycle(AccountAppLockLifecycle),
+}
+
+#[derive(Args)]
+pub(crate) struct AccountAppLockLifecycle {
+    #[arg(allow_hyphen_values = true, long)]
+    pub(crate) account: String,
+    #[arg(long, value_enum)]
+    pub(crate) state: AppLockLifecycleState,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub(crate) enum AppLockLifecycleState {
+    Background,
+    Foreground,
+    DeviceLocked,
+}
+
+impl AppLockLifecycleState {
+    pub(crate) const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::Foreground => "foreground",
+            Self::DeviceLocked => "device_locked",
+        }
+    }
 }
 
 #[derive(Args)]

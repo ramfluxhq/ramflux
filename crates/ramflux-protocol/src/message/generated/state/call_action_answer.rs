@@ -9,6 +9,9 @@ use super::super::*;
 pub struct CallActionAnswer {
     #[prost(string, tag = "1")]
     pub base_key: ::prost::alloc::string::String,
+    /// Layer 6 (CALLS-VIDEO-V1): an explicit decline is a selection with accepted = false.
+    #[prost(message, optional, tag = "2")]
+    pub video_selection: ::core::option::Option<CallVideoSelection>,
 }
 impl serde::Serialize for CallActionAnswer {
     #[allow(deprecated)]
@@ -21,10 +24,16 @@ impl serde::Serialize for CallActionAnswer {
         if !self.base_key.is_empty() {
             len += 1;
         }
+        if self.video_selection.is_some() {
+            len += 1;
+        }
         let mut struct_ser =
             serializer.serialize_struct("ramflux.message.v1.CallActionAnswer", len)?;
         if !self.base_key.is_empty() {
             struct_ser.serialize_field("baseKey", &self.base_key)?;
+        }
+        if let Some(v) = self.video_selection.as_ref() {
+            struct_ser.serialize_field("videoSelection", v)?;
         }
         struct_ser.end()
     }
@@ -35,10 +44,11 @@ impl<'de> serde::Deserialize<'de> for CallActionAnswer {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] = &["base_key", "baseKey"];
+        const FIELDS: &[&str] = &["base_key", "baseKey", "video_selection", "videoSelection"];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             BaseKey,
+            VideoSelection,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -61,6 +71,9 @@ impl<'de> serde::Deserialize<'de> for CallActionAnswer {
                     {
                         match value {
                             "baseKey" | "base_key" => Ok(GeneratedField::BaseKey),
+                            "videoSelection" | "video_selection" => {
+                                Ok(GeneratedField::VideoSelection)
+                            }
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -79,6 +92,7 @@ impl<'de> serde::Deserialize<'de> for CallActionAnswer {
                 V: serde::de::MapAccess<'de>,
             {
                 let mut base_key__ = None;
+                let mut video_selection__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -91,9 +105,18 @@ impl<'de> serde::Deserialize<'de> for CallActionAnswer {
                             }
                             base_key__ = Some(map_.next_value()?);
                         }
+                        GeneratedField::VideoSelection => {
+                            if video_selection__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("videoSelection"));
+                            }
+                            video_selection__ = map_.next_value()?;
+                        }
                     }
                 }
-                Ok(CallActionAnswer { base_key: base_key__.unwrap_or_default() })
+                Ok(CallActionAnswer {
+                    base_key: base_key__.unwrap_or_default(),
+                    video_selection: video_selection__,
+                })
             }
         }
         deserializer.deserialize_struct(

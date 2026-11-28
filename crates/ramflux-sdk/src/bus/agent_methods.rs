@@ -31,6 +31,8 @@ pub(super) enum AgentCall {
     PersonaEdit(Box<g::AgentPersonaEdit>),
     /// `agent.access.set` (contract 2 `AgentAccessSet`).
     AccessSet(Box<g::AgentAccessSet>),
+    /// Internal (not a bus method): close a create whose PRX publish was refused.
+    AbandonCreate(String),
 }
 
 pub(super) fn handles(method: &str) -> bool {
@@ -105,7 +107,12 @@ async fn apply(
         AgentCall::Get(id) => Some(id.clone()),
         _ => None,
     };
-    let publish = limit_publish(&call);
+    let reads_record = matches!(call, AgentCall::Record(_));
+    let publish = config_publish(&call);
+    if let Some(publish) = &publish {
+        // PRX must accept the tool names before anything is saved locally.
+        publish.precheck(supervisor.config.prx.as_deref()).await?;
+    }
     let purge = purge_anchor(&call);
     if let AgentCall::Delete(mutation) = &call {
         // The running session of the agent goes first (decision r23 F1 a).
@@ -116,15 +123,26 @@ async fn apply(
         prove_node_retirement(supervisor, &actor, &account_id, &call).await?;
     }
     let result = actor.agent_call(call).await?;
-    crate::prx_owner::after_agent(
+    if let Err(error) = crate::prx_owner::after_agent(
         supervisor.config.prx.as_deref(),
         &supervisor.config.data_root,
         publish.as_ref(),
         purge.as_deref(),
         &result,
     )
-    .await?;
+    .await
+    {
+        if publish.is_some() {
+            abandon_create(supervisor, &actor, &result, &error).await;
+        }
+        return Err(error);
+    }
     let result = super::agent_directory::attach_hosted(&actor, list_limit, result).await?;
+    let result = if reads_record {
+        crate::prx_owner::fill_revision(supervisor.config.prx.as_deref(), result).await
+    } else {
+        result
+    };
     match read_id {
         Some(id) if advances_on_read(&result) => {
             // A failed advance leaves the request where it was; the reread reports that state.
@@ -136,22 +154,38 @@ async fn apply(
     }
 }
 
-fn limit_publish(call: &AgentCall) -> Option<crate::prx_owner::LimitPublish> {
+/// Undoes a create that PRX refused: PRX copy (best effort), phone plan, vault items and request
+/// file. Failures are logged; the caller still gets the PRX error.
+async fn abandon_create(
+    supervisor: &Supervisor,
+    actor: &AccountActor,
+    result: &g::AgentConfigResult,
+    cause: &SdkError,
+) {
+    let Some(g::agent_config_result::Value::Custody(status)) = &result.value else {
+        return;
+    };
+    let request_id = status.request_id.clone();
+    if let (Some(client), Some(anchor)) =
+        (supervisor.config.prx.as_deref(), status.agent_anchor.as_deref())
+    {
+        crate::prx_owner::abandon_publish(client, anchor).await;
+    }
+    match actor.agent_call(AgentCall::AbandonCreate(request_id.clone())).await {
+        Ok(_) => {
+            tracing::info!(%request_id, cause = %cause, "agent create abandoned after PRX refusal");
+        }
+        Err(error) => {
+            tracing::warn!(%request_id, step = "local", %error, "agent create cleanup failed");
+        }
+    }
+}
+
+fn config_publish(call: &AgentCall) -> Option<crate::prx_owner::ConfigPublish> {
     let AgentCall::Create(body) = call else {
         return None;
     };
-    let config = body.config.as_ref()?;
-    let limits = config.limits.as_ref()?;
-    if limits.max_concurrent_turns.is_none() && limits.max_cost_per_day_cents.is_none() {
-        return None;
-    }
-    Some(crate::prx_owner::LimitPublish {
-        provider: config.provider.clone(),
-        model: config.model.clone(),
-        tools: config.tools.clone(),
-        turns: limits.max_concurrent_turns,
-        cost: limits.max_cost_per_day_cents,
-    })
+    crate::prx_owner::ConfigPublish::of(body)
 }
 
 fn purge_anchor(call: &AgentCall) -> Option<String> {

@@ -37,8 +37,6 @@ pub(super) fn handles(method: &str) -> bool {
             | "account.lock"
             | "account.sign_out"
             | "account.switch"
-            | "account.backup.import"
-            | "account.backup.export"
             | "account.passphrase.rotate"
             | "node.add"
             | "node.confirm"
@@ -158,14 +156,6 @@ pub(super) async fn complete(
     .await
     .map_err(|error| SdkError::LocalBus(format!("supervisor receipt worker failed: {error}")))??;
     Ok(())
-}
-
-pub(super) async fn import_account_id(request: &LocalBusFrame) -> Result<String, SdkError> {
-    let body: LocalBusAccountBackupImportRequest = serde_json::from_value(request.body.clone())
-        .map_err(|_| SdkError::LocalBus("invalid account request".to_owned()))?;
-    spawn_blocking(move || local_bus_backup_account_id(body))
-        .await
-        .map_err(|error| SdkError::LocalBus(format!("backup inspection failed: {error}")))?
 }
 
 /// Holds a lifecycle operation at a selected boundary and signals durable completion.

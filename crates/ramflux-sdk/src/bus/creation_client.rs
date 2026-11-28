@@ -67,8 +67,18 @@ struct Body {
 struct Error {
     code: String,
     #[serde(default)]
+    message: String,
+    #[serde(default)]
     reason_code: Option<String>,
 }
+/// Frame header only; lets the reader skip pushed events without parsing their bodies.
+#[derive(Deserialize)]
+struct Head {
+    kind: String,
+}
+/// Pushed events (for example `account.app_lock.changed` after a recovery reopens the fence)
+/// may precede the reply on this connection; more than this many is a protocol violation.
+const MAX_SKIPPED_EVENTS: u32 = 16;
 
 impl LocalBusCreationClient {
     /// # Errors
@@ -211,14 +221,25 @@ impl LocalBusCreationClient {
         self.stream.write_all(&bytes).await?;
         self.stream.flush().await?;
         drop(bytes);
-        let len = self.stream.read_u32().await?;
-        if len > 8192 {
-            return Err(SdkError::CustodySetupInvalid);
-        }
-        let mut bytes = Zeroizing::new(vec![0; len as usize]);
-        self.stream.read_exact(&mut bytes).await?;
-        let reply: Reply =
-            serde_json::from_slice(&bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
+        let mut skipped = 0_u32;
+        let reply: Reply = loop {
+            let len = self.stream.read_u32().await?;
+            if len > 8192 {
+                return Err(SdkError::CustodySetupInvalid);
+            }
+            let mut bytes = Zeroizing::new(vec![0; len as usize]);
+            self.stream.read_exact(&mut bytes).await?;
+            let head: Head =
+                serde_json::from_slice(&bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
+            if head.kind == "event" {
+                skipped = skipped.checked_add(1).ok_or(SdkError::CustodySetupInvalid)?;
+                if skipped > MAX_SKIPPED_EVENTS {
+                    return Err(SdkError::CustodySetupInvalid);
+                }
+                continue;
+            }
+            break serde_json::from_slice(&bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
+        };
         if reply.bus_protocol != "ramflux.local_bus.v1"
             || reply.request_id != id
             || reply.method != method
@@ -227,7 +248,7 @@ impl LocalBusCreationClient {
         }
         if reply.kind == "error" {
             return Err(match reply.error.as_ref() {
-                Some(error) => decode_error(&error.code, error.reason_code.as_deref()),
+                Some(error) => decode_reply_error(error),
                 None => SdkError::CustodySetupInvalid,
             });
         }
@@ -238,22 +259,41 @@ impl LocalBusCreationClient {
     }
 }
 
+/// A refusal the ceremony does not own (`wrong_passphrase`, `app_locked`, ...) keeps its
+/// daemon code so the caller can tell it apart from a malformed ceremony.
+fn decode_reply_error(error: &Error) -> SdkError {
+    known_error(&error.code, error.reason_code.as_deref()).unwrap_or_else(|| {
+        SdkError::LocalBusRefused {
+            code: error.code.clone(),
+            message: error.message.clone(),
+            body: Box::new(serde_json::json!({"reason_code": error.reason_code})),
+        }
+    })
+}
+
+#[cfg(test)]
 fn decode_error(code: &str, reason_code: Option<&str>) -> SdkError {
+    known_error(code, reason_code).unwrap_or(SdkError::CustodySetupInvalid)
+}
+
+fn known_error(code: &str, reason_code: Option<&str>) -> Option<SdkError> {
     if let Some(reason) = crate::custody::CustodyVaultReason::from_wire(code, reason_code) {
-        return SdkError::CustodyVault(reason);
+        return Some(SdkError::CustodyVault(reason));
     }
     if let Some(error) = crate::CustodyConfirmReason::decode(code, reason_code) {
-        return error;
+        return Some(error);
     }
-    match code {
+    Some(match code {
+        "CustodySetupInvalid" => SdkError::CustodySetupInvalid,
         "CustodyConfirmationFailed" => SdkError::CustodyConfirmationFailed,
         "CustodyPublicationFailed" => SdkError::CustodyPublicationFailed,
         "CustodyVaultUnavailable" => SdkError::CustodyVaultUnavailable,
         "CustodyExpired" => SdkError::CustodyExpired,
         "CustodyAccountConflict" => SdkError::CustodyAccountConflict,
         "NoNodeSelected" => SdkError::NoNodeSelected,
-        _ => SdkError::CustodySetupInvalid,
-    }
+        "NetworkingPending" => SdkError::NetworkingPending,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -342,7 +382,11 @@ mod compatibility_tests {
 struct Empty {}
 
 /// Exclusive local-only recovery transport. No ordinary/network request can prompt phrase input.
-pub struct LocalBusRecoveryClient(LocalBusCreationClient);
+pub struct LocalBusRecoveryClient {
+    inner: LocalBusCreationClient,
+    /// Account named by `begin`; later frames carry it in the header for the app-lock fence.
+    account_id: Option<String>,
+}
 /// Display the anchor and warning before requesting explicit phrase confirmation.
 #[derive(Debug)]
 pub struct LocalBusPendingRecovery {
@@ -355,7 +399,7 @@ impl LocalBusRecoveryClient {
     /// # Errors
     /// Returns socket/peer-policy failures.
     pub async fn connect(socket: impl AsRef<std::path::Path>) -> Result<Self, SdkError> {
-        Ok(Self(LocalBusCreationClient::connect(socket).await?))
+        Ok(Self { inner: LocalBusCreationClient::connect(socket).await?, account_id: None })
     }
     /// Begin only at the user's explicit request. This sends no recovery secret.
     /// # Errors
@@ -365,7 +409,11 @@ impl LocalBusRecoveryClient {
         struct Input<'a> {
             account_id: &'a str,
         }
-        let body = self.0.exchange("account.recover.begin", Input { account_id }).await?;
+        self.account_id = Some(account_id.to_owned());
+        let body = self
+            .inner
+            .exchange_for(Some(account_id), "account.recover.begin", Input { account_id })
+            .await?;
         Ok(LocalBusPendingRecovery {
             ceremony_id: body.ceremony_id.ok_or(SdkError::CustodySetupInvalid)?,
             account_anchor: body.account_anchor.ok_or(SdkError::CustodySetupInvalid)?,
@@ -389,8 +437,12 @@ impl LocalBusRecoveryClient {
             confirmed_anchor: &'a str,
         }
         let body = self
-            .0
-            .exchange("account.recover.confirm", Input { phrase, passphrase, confirmed_anchor })
+            .inner
+            .exchange_for(
+                self.account_id.as_deref(),
+                "account.recover.confirm",
+                Input { phrase, passphrase, confirmed_anchor },
+            )
             .await?;
         Ok(LocalBusCreatedAccount {
             account_id: body.account_id.ok_or(SdkError::CustodySetupInvalid)?,
@@ -402,10 +454,11 @@ impl LocalBusRecoveryClient {
     /// # Errors
     /// Returns transport/protocol errors. Cancellation is idempotent after consumption.
     pub async fn cancel(&mut self) -> Result<(), SdkError> {
-        if self.0.exchange("account.recover.cancel", Empty {}).await?.cancelled == Some(true) {
-            Ok(())
-        } else {
-            Err(SdkError::CustodySetupInvalid)
-        }
+        let cancelled = self
+            .inner
+            .exchange_for(self.account_id.as_deref(), "account.recover.cancel", Empty {})
+            .await?
+            .cancelled;
+        if cancelled == Some(true) { Ok(()) } else { Err(SdkError::CustodySetupInvalid) }
     }
 }

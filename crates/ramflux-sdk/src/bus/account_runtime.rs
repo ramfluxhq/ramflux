@@ -215,6 +215,7 @@ type WriterBudget = ();
 
 impl AccountRuntime {
     async fn close_actor(&mut self) -> Result<(), SdkError> {
+        crate::client::surface::card_session::drop_account(&self.id, "actor_stop");
         if let Some(state) = self.state.accounts.get(&self.id) {
             state.client.stop_in_process_media(ramflux_media::authorization::GateReason::Terminal);
         }
@@ -517,6 +518,7 @@ impl AccountRuntime {
         }
         self.refresh_transient_host().await;
         self.publish_transient_updates();
+        self.publish_cleared_updates();
         let transient = self.transient_deadline();
         let username = self.username.deadline();
         Box::pin(self.refresh_pairing_reader_generation()).await?;
@@ -607,7 +609,7 @@ impl AccountRuntime {
             },
             () = std::future::ready(()), if head_demand::demand_active() && !self.head_rx.is_empty() => {
                 if let Ok(work) = self.head_rx.try_recv() {
-                    *checkpoints += 1;
+                    *checkpoints = checkpoints.saturating_add(1);
                     return Box::pin(self.drive_connection_work(work, checkpoints)).await;
                 }
                 return Ok(false);
@@ -623,9 +625,9 @@ impl AccountRuntime {
                 tokio::task::yield_now().await;
                 return Ok(false);
             },
-            checkpoint=self.transfers.receive.recv()=>{*checkpoints += 1;if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}return Ok(false);},
+            checkpoint=self.transfers.receive.recv()=>{*checkpoints = checkpoints.saturating_add(1);if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}return Ok(false);},
             work = recv(&mut self.deferred, &mut self.head_rx, &mut self.connection_work) => {
-                *checkpoints += 1;
+                *checkpoints = checkpoints.saturating_add(1);
                 if let Some(work)=work {
                     return Box::pin(self.drive_connection_work(work, checkpoints)).await;
                 }

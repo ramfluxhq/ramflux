@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Centre role (UID 10001). No public listener; reaches the witness through the socket only.
+[Unit]
+Description=Username centre primary
+Requires=nn-central-username-witness.service
+After=nn-central-username-witness.service
+[Container]
+Image=ghcr.io/ramfluxhq/ramflux-federation@sha256:<DIGEST>
+ContainerName=nn-central-username-center
+User=10001:10003
+Entrypoint=/usr/local/bin/username-start.sh
+Exec=center
+EnvironmentFile=/etc/ramflux-username/center.env
+ReadOnly=true
+DropCapability=ALL
+NoNewPrivileges=true
+Tmpfs=/tmp
+Network=none
+Volume=nn-central-username-center.volume:/var/lib/ramflux/username/center
+Volume=nn-central-username-socket.volume:/var/lib/ramflux/username/socket
+[Service]
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target

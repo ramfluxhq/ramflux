@@ -10,6 +10,7 @@ pub(crate) enum FrameKind {
     PushRouteRegistered,
     PushRouteRefused,
     PushRouteDeregistered,
+    PushRouteTested,
     VoiceLease,
     Attachment,
     SessionEstablished,
@@ -29,6 +30,8 @@ pub(crate) enum FrameKind {
     Heartbeat,
     Drain,
     InBandWake,
+    NotificationsCleared,
+    PushKeyset,
     Ephemeral,
     EphemeralResult,
     Close,
@@ -53,6 +56,7 @@ impl FrameKind {
             GatewayServerFrame::PushRouteRegistered { .. } => Self::PushRouteRegistered,
             GatewayServerFrame::PushRouteRefused { .. } => Self::PushRouteRefused,
             GatewayServerFrame::PushRouteDeregistered { .. } => Self::PushRouteDeregistered,
+            GatewayServerFrame::PushRouteTested { .. } => Self::PushRouteTested,
             GatewayServerFrame::VoiceLease { .. } => Self::VoiceLease,
             GatewayServerFrame::Attachment { .. } => Self::Attachment,
             GatewayServerFrame::SessionEstablished { .. } => Self::SessionEstablished,
@@ -74,6 +78,8 @@ impl FrameKind {
             GatewayServerFrame::Heartbeat { .. } => Self::Heartbeat,
             GatewayServerFrame::Drain { .. } => Self::Drain,
             GatewayServerFrame::InBandWake { .. } => Self::InBandWake,
+            GatewayServerFrame::NotificationsCleared {} => Self::NotificationsCleared,
+            GatewayServerFrame::PushKeyset { .. } => Self::PushKeyset,
             GatewayServerFrame::Ephemeral { .. } => Self::Ephemeral,
             GatewayServerFrame::EphemeralResult { .. } => Self::EphemeralResult,
             GatewayServerFrame::Close { .. } => Self::Close,
@@ -92,11 +98,14 @@ impl FrameKind {
 
     pub(crate) const fn class(self) -> FrameClass {
         match self {
-            Self::PushRouteRegistered | Self::PushRouteRefused | Self::PushRouteDeregistered => {
-                FrameClass::PushRoute
-            }
+            Self::PushRouteRegistered
+            | Self::PushRouteRefused
+            | Self::PushRouteDeregistered
+            | Self::PushRouteTested => FrameClass::PushRoute,
             Self::Deliver
             | Self::InBandWake
+            | Self::NotificationsCleared
+            | Self::PushKeyset
             | Self::Resync
             | Self::Ephemeral
             | Self::CallResolved => FrameClass::Event,
@@ -173,6 +182,7 @@ impl ExpectedReply {
                 FrameKind::PushRouteRegistered
                     | FrameKind::PushRouteRefused
                     | FrameKind::PushRouteDeregistered
+                    | FrameKind::PushRouteTested
             ),
             Self::GrantRenew => matches!(kind, FrameKind::GrantRenewed),
         }

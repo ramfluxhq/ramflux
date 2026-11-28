@@ -84,6 +84,15 @@ impl AccountRuntime {
                     self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
                 account.client.agent_rebind_commit(vault.as_ref(), &request_id, &capabilities, now)
             }
+            AgentStep::Expire { request_id, now } => {
+                let vault = super::super::custody_setup::primary_provider(&self.state.config);
+                crate::custody::agent_creation::resume_request(
+                    &store,
+                    vault.as_ref(),
+                    &request_id,
+                    now,
+                )
+            }
             AgentStep::Complete { request_id } => {
                 crate::custody::agent_creation::complete_with_receipt(&store, &request_id)
             }
@@ -165,6 +174,9 @@ impl AccountRuntime {
             AgentCall::Create(body) => {
                 custody(account.client.agent_create(vault.as_ref(), &body, now)?)
             }
+            AgentCall::AbandonCreate(request_id) => {
+                custody(account.client.agent_create_abandon(vault.as_ref(), &request_id, now)?)
+            }
             AgentCall::Decide(body) => {
                 custody(account.client.agent_creation_decide(vault.as_ref(), &body, now)?)
             }
@@ -177,7 +189,7 @@ impl AccountRuntime {
                 let head = account.client.agent_record_head()?;
                 g::AgentConfigResult {
                     value: Some(g::agent_config_result::Value::Page(g::AgentPage {
-                        records: records.iter().map(crate::agent_record::to_wire).collect(),
+                        records: records.iter().map(crate::agent_record::to_wire_listed).collect(),
                         next,
                         journal_cursor: head.to_string(),
                     })),

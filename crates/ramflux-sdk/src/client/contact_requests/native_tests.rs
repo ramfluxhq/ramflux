@@ -201,7 +201,6 @@ async fn native_contact_delayed_consent_requires_exact_old_record_and_current_br
     assert!(target.client.verify_contact_control(&entry, &route, &bytes).is_err());
     assert!(sender.client.identity_root.is_none());
     assert!(target.client.identity_root.is_none());
-    assert!(!sender.root.0.join("local_bus_accounts").exists());
     Ok(())
 }
 

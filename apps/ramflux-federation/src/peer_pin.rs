@@ -5,7 +5,7 @@
 //!
 //! The caller does not supply the URL. Production fetches
 //! `https://<node-id>/.well-known/ramflux/server`. A loopback test socket, when configured,
-//! is the only other destination. A key change is refused. Pins are not evicted.
+//! is the only other destination. A key change is refused. Pins are not evicted, except a pin whose key the directory revoked.
 
 use std::net::SocketAddr;
 
@@ -37,7 +37,10 @@ pub(crate) fn ensure_forward_pin(
         return Err(invalid("federation peer id rejected"));
     }
     let now = crate::now_unix_seconds()?;
+    crate::node_directory::sanction::release_revoked_pin(target, state, store)?;
     let snapshot = state.snapshot()?;
+    let pinned_key = snapshot.pinned_node_public_key(target);
+    crate::node_directory::sanction::check_peer(target, pinned_key.as_deref(), "outbound")?;
     if snapshot.peer_pin_blocked(target, now) {
         return Err(invalid("federation node blocked"));
     }
@@ -131,6 +134,11 @@ pub(crate) fn install_candidate(
     if trust.peer_pin_blocked(&record.node_id, now) {
         return Err(invalid("federation node blocked"));
     }
+    crate::node_directory::sanction::check_peer(
+        &record.node_id,
+        Some(&record.node_public_key),
+        "install",
+    )?;
     trust.admit_new_peer_pin(&record.node_id, now)?;
     let discovered = trust.resolve_discovery_result(
         &ramflux_node_core::FederationDiscoveryRequest {

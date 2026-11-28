@@ -199,7 +199,10 @@ pub const DM_FS_V3_RETIREMENT_LIST: &str = "ramflux.dm_bootstrap_fs.retirement_l
 /// Native bootstrap domain `ramflux.dm_bootstrap_fs.request_hash.v1`.
 pub const DM_FS_V3_REQUEST_HASH: &str = "ramflux.dm_bootstrap_fs.request_hash.v1";
 
-pub const ALL: [&str; 167] = [
+/// MLS leaf certificate tag: the device signing key signs `tag || u16 suite || leaf signature key`.
+pub const MLS_LEAF_CERT_V1: &str = "rf-mls-leaf-v1";
+
+pub const ALL: [&str; 168] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -367,6 +370,7 @@ pub const ALL: [&str; 167] = [
     NOTIFICATION_CALL_INTENT_V1,
     NOTIFICATION_CALL_INTENT_DIGEST_V1,
     NOTIFICATION_DEVICE_COLLAPSE_V1,
+    MLS_LEAF_CERT_V1,
 ];
 
 pub const USERNAME_BINDING: &str = "ramflux.identity.username_binding.v1";
@@ -437,8 +441,8 @@ mod tests {
         assert!(super::ALL[154..163].contains(&super::REPORT_OPENING));
         assert!(super::ALL[154..163].contains(&super::COLLAPSE_KEY));
         assert!(super::ALL[154..163].contains(&super::FRANKING_NODE_TAG_V2));
-        assert_eq!(super::ALL[163..].len(), 4);
-        for label in &super::ALL[163..] {
+        assert_eq!(super::ALL[163..167].len(), 4);
+        for label in &super::ALL[163..167] {
             assert!(label.starts_with("ramflux.notification."));
         }
         assert!(super::ALL.contains(&super::NOTIFICATION_WAKE_V2));

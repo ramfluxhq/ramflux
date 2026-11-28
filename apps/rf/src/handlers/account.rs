@@ -15,8 +15,16 @@ pub(crate) async fn handle_account(
         AccountAction::Recover(selector) => {
             return super::account_ceremony::recover(&socket, &selector.account).await;
         }
+        AccountAction::RemoveLocal(selector) => {
+            return super::account_ceremony::remove_local(&socket, &selector.account).await;
+        }
         AccountAction::Create(create) => {
             return super::account_ceremony::create(&socket, &create.display_name).await;
+        }
+        AccountAction::AppLock(AccountAppLockCommand {
+            action: AccountAppLockAction::Set(set),
+        }) => {
+            return app_lock_set(&socket, set).await;
         }
         _ => {}
     }
@@ -66,9 +74,11 @@ pub(crate) async fn handle_account(
         ),
         AccountAction::Unlock(unlock) => handle_account_unlock(&mut bus, unlock, &OsKeychain).await,
         AccountAction::AppLock(command) => handle_app_lock(&mut bus, command).await,
-        AccountAction::Recover(_) | AccountAction::Create(_) => Err(RfError::Message(
-            "Account ceremonies require the exclusive ceremony client.".into(),
-        )),
+        AccountAction::Recover(_) | AccountAction::RemoveLocal(_) | AccountAction::Create(_) => {
+            Err(RfError::Message(
+                "Account ceremonies require the exclusive ceremony client.".into(),
+            ))
+        }
     }
 }
 
@@ -95,16 +105,38 @@ async fn handle_app_lock(
             )
             .await?,
         ),
-        AccountAppLockAction::Set(set) => print_json(
+        AccountAppLockAction::Lifecycle(lifecycle) => print_json(
             &bus.request(
-                Some(set.account),
+                Some(lifecycle.account),
                 "account",
-                "account.app_lock.configure",
-                serde_json::json!({"enabled": set.enabled, "timeout_ms": set.timeout_ms}),
+                "account.app_lock.lifecycle",
+                serde_json::json!({"state": lifecycle.state.as_wire()}),
             )
             .await?,
         ),
+        AccountAppLockAction::Set(_) => {
+            Err(RfError::Message("Changing the app lock requires the attended client.".into()))
+        }
     }
+}
+
+/// Weakening the app lock asks for the account code at the terminal, on a dedicated
+/// connection that can answer the daemon's private prompt.
+async fn app_lock_set(socket: &std::path::Path, set: &AccountAppLockSet) -> Result<(), RfError> {
+    let mut bus = ramflux_sdk::custody::pairing::private_credential::PairingBusClient::connect(
+        socket,
+        std::sync::Arc::new(super::pairing::TerminalProvider),
+    )
+    .await?;
+    print_json(
+        &bus.request(
+            Some(set.account.clone()),
+            "account",
+            "account.app_lock.configure",
+            serde_json::json!({"enabled": set.enabled, "timeout_ms": set.timeout_ms}),
+        )
+        .await?,
+    )
 }
 
 async fn handle_account_unlock(

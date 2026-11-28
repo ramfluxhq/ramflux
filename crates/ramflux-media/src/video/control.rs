@@ -1,0 +1,269 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Video control state (V2.2a): the receiving side counts the peer's video
+//! and reports it back on PT113; the sending side accepts reports about its
+//! own track and learns from them. Pure logic: the engine feeds it fragments,
+//! accepted reports and clock readings, and sends what it returns.
+//!
+//! Keyframes: this side asks for an IDR with `keyframe_request_revision`
+//! (repeated until the peer acknowledges, at most once per second) and
+//! acknowledges the peer's requests with `keyframe_ack_revision`. The engine
+//! sets that acknowledgement when an IDR access unit is queued
+//! ([`VideoControl::apply_keyframe`]).
+
+use std::time::{Duration, Instant};
+
+use super::feedback::{Error as FeedbackError, Feedback, FeedbackState, KeyframeRequests};
+use super::packet::FragmentHeader;
+use super::rate::{Mode, RateController, Rung, Sample};
+
+/// Spacing of reports while video flows (or a keyframe request is pending).
+pub const REPORT_INTERVAL: Duration = Duration::from_millis(200);
+/// Highest rung until a negotiated maximum exists (V0: 720p30).
+const DEFAULT_MAX_RUNG: Rung = Rung::High;
+
+/// Counters of the peer's video as this side receives it.
+#[derive(Debug, Default)]
+struct Inbound {
+    revision: Option<u32>,
+    origin: Option<Instant>,
+    highest: Option<u64>,
+    received_packets: u64,
+    missing_packets: u64,
+    received_bytes: u64,
+    delay_base_us: Option<i64>,
+    delay_delta_us: i32,
+}
+
+impl Inbound {
+    /// Counts one authenticated fragment. A new track revision restarts the counters.
+    fn observe(
+        &mut self,
+        header: &FragmentHeader,
+        extended: Option<u64>,
+        bytes: usize,
+        now: Instant,
+    ) {
+        if self.revision != Some(header.track_revision) {
+            *self = Self { revision: Some(header.track_revision), ..Self::default() };
+        }
+        let origin = *self.origin.get_or_insert(now);
+        self.received_packets = self.received_packets.saturating_add(1);
+        self.received_bytes =
+            self.received_bytes.saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        if let Some(sequence) = extended {
+            self.observe_sequence(sequence);
+        }
+        let arrival =
+            i64::try_from(now.saturating_duration_since(origin).as_micros()).unwrap_or(i64::MAX);
+        let transit = arrival.saturating_sub(i64::try_from(header.pts_us).unwrap_or(i64::MAX));
+        let base = *self.delay_base_us.get_or_insert(transit);
+        let delta = transit.saturating_sub(base).clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+        self.delay_delta_us = i32::try_from(delta).unwrap_or(0);
+    }
+
+    /// Missing packets are the gaps in the extended sequence; a late packet
+    /// fills one gap.
+    fn observe_sequence(&mut self, sequence: u64) {
+        match self.highest {
+            None => self.highest = Some(sequence),
+            Some(high) if sequence > high => {
+                self.missing_packets = self.missing_packets.saturating_add(sequence - high - 1);
+                self.highest = Some(sequence);
+            }
+            Some(_) => self.missing_packets = self.missing_packets.saturating_sub(1),
+        }
+    }
+}
+
+/// The video control state of one call.
+#[derive(Debug)]
+pub struct VideoControl {
+    rate: RateController,
+    inbound: Inbound,
+    report_seq: u64,
+    last_report: Option<Instant>,
+    outbound: FeedbackState,
+    requests: KeyframeRequests,
+    requested_on_wire: u32,
+    peer_request: u32,
+    applied: u32,
+    /// Reassembly drop count already turned into one keyframe request.
+    drops_seen: u64,
+}
+
+impl Default for VideoControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The loss, delay trend and queue of one accepted report, relative to the
+/// previous accepted one (cumulative counters become a window).
+fn sample_between(previous: Option<&Feedback>, report: &Feedback, queue_ms: u32) -> Sample {
+    let (received_before, missing_before, delay_before) =
+        previous.map_or((0, 0, 0), |p| (p.received_packets, p.missing_packets, p.delay_delta_us));
+    let received = report.received_packets.saturating_sub(received_before);
+    let missing = report.missing_packets.saturating_sub(missing_before);
+    let expected = received.saturating_add(missing);
+    let loss_per_mille = missing
+        .saturating_mul(1000)
+        .checked_div(expected)
+        .map_or(0, |per_mille| u32::try_from(per_mille).unwrap_or(1000));
+    let delay_growth_us = i64::from(report.delay_delta_us) - i64::from(delay_before);
+    Sample { loss_per_mille, delay_growth_us, queue_ms }
+}
+
+impl VideoControl {
+    /// A fresh control state (no reports, no requests).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            rate: RateController::new(DEFAULT_MAX_RUNG),
+            inbound: Inbound::default(),
+            report_seq: 0,
+            last_report: None,
+            outbound: FeedbackState::new(0),
+            requests: KeyframeRequests::default(),
+            requested_on_wire: 0,
+            peer_request: 0,
+            applied: 0,
+            drops_seen: 0,
+        }
+    }
+
+    /// Counts one authenticated incoming fragment.
+    pub fn on_fragment(
+        &mut self,
+        header: &FragmentHeader,
+        extended: Option<u64>,
+        bytes: usize,
+        now: Instant,
+    ) {
+        self.inbound.observe(header, extended, bytes, now);
+    }
+
+    /// Follows the track revision of this side's outgoing video: reports for
+    /// another revision are refused from now on.
+    pub fn note_outbound_revision(&mut self, revision: u32) {
+        if self.outbound.track_revision() != revision {
+            self.outbound = FeedbackState::new(revision);
+        }
+    }
+
+    /// Accepts a report about this side's outgoing video. A stale or foreign
+    /// report is refused and changes nothing. An accepted report feeds the
+    /// rate controller (`queue_ms` is this side's current send queue age) and
+    /// records the peer's acknowledgement and keyframe request. Feedback
+    /// grants no authority.
+    ///
+    /// # Errors
+    ///
+    /// The refusal of [`FeedbackState::accept`].
+    pub fn on_feedback(
+        &mut self,
+        report: Feedback,
+        now: Instant,
+        queue_ms: u32,
+    ) -> Result<(), FeedbackError> {
+        let sample = sample_between(self.outbound.last(), &report, queue_ms);
+        self.outbound.accept(report)?;
+        self.rate.on_report(now, sample);
+        // A revision never requested (or regressing) is ignored; the report
+        // itself was accepted.
+        let _ = self.requests.acknowledge(report.keyframe_ack_revision);
+        self.peer_request = self.peer_request.max(report.keyframe_request_revision);
+        Ok(())
+    }
+
+    /// Runs the rate rules when a tick is due (the engine calls this each turn).
+    pub fn tick(&mut self, now: Instant) {
+        self.rate.tick(now);
+    }
+
+    /// The current target video bitrate, bits per second.
+    #[must_use]
+    pub fn target_bps(&self) -> u32 {
+        self.rate.target_bps()
+    }
+
+    /// Whether video is paused by the rate rules (stale feedback or a starved
+    /// Low rung). Cleared only by a fresh video activation.
+    #[must_use]
+    pub fn paused(&self) -> bool {
+        self.rate.mode() == Mode::Paused
+    }
+
+    /// Asks the peer for a keyframe; several asks coalesce into one revision.
+    ///
+    /// # Errors
+    ///
+    /// [`FeedbackError::Wrap`] when the revision would wrap.
+    pub fn request_keyframe(&mut self) -> Result<u32, FeedbackError> {
+        self.requests.request()
+    }
+
+    /// One keyframe request for a newly observed reassembly drop count.
+    /// A count already seen, including from another thread, does not ask again.
+    #[must_use]
+    pub(crate) fn request_if_dropped(&mut self, dropped: u64) -> bool {
+        if dropped <= self.drops_seen {
+            return false;
+        }
+        match self.request_keyframe() {
+            Ok(_) => {
+                self.drops_seen = dropped;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Records that this side queued the IDR for the peer's request
+    /// `revision` (never beyond what the peer asked for).
+    pub fn apply_keyframe(&mut self, revision: u32) {
+        self.applied = self.applied.max(revision.min(self.peer_request));
+    }
+
+    /// The highest peer keyframe request this side has acknowledged.
+    #[must_use]
+    pub fn applied(&self) -> u32 {
+        self.applied
+    }
+
+    /// The highest keyframe revision the peer asked of this side's outgoing video.
+    #[must_use]
+    pub fn peer_request(&self) -> u32 {
+        self.peer_request
+    }
+
+    /// The report to send now, if one is due at `now`.
+    pub fn report_due(&mut self, now: Instant) -> Option<Feedback> {
+        if self.inbound.revision.is_none() && !self.requests.pending() {
+            return None;
+        }
+        let due =
+            self.last_report.is_none_or(|at| now.saturating_duration_since(at) >= REPORT_INTERVAL);
+        if !due {
+            return None;
+        }
+        if let Some(revision) = self.requests.due(now) {
+            self.requested_on_wire = revision;
+        }
+        self.last_report = Some(now);
+        self.report_seq = self.report_seq.saturating_add(1);
+        let inbound = &self.inbound;
+        Some(Feedback {
+            track_revision: inbound.revision.unwrap_or(0),
+            report_seq: self.report_seq,
+            highest_video_counter: inbound.highest.unwrap_or(0),
+            received_packets: inbound.received_packets,
+            missing_packets: inbound.missing_packets,
+            received_bytes: inbound.received_bytes,
+            delay_delta_us: inbound.delay_delta_us,
+            keyframe_request_revision: self.requested_on_wire,
+            keyframe_ack_revision: self.applied,
+        })
+    }
+}

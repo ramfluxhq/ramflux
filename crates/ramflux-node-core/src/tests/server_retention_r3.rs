@@ -50,7 +50,7 @@ fn revoked_device_is_not_a_current_push_owner_and_its_route_is_deleted()
     store.set_push_route_authorizer(router_backed_authorizer(std::sync::Arc::clone(&router)));
     let now = now_unix_seconds();
     let mut route = notify_webpush_route(&owner.target_delivery_id, "web");
-    route.registered_at = now;
+    route.registered_at_ms = now;
     route.expires_at = now + PUSH_ROUTE_TTL_SECONDS;
     store.register_authenticated_push_route(&owner, &route)?;
     store.sweep_push_route_revocations()?;

@@ -76,7 +76,7 @@ impl Drop for Input {
         }
     }
 }
-fn prompt(
+pub(crate) fn prompt(
     request: &LocalBusFrame,
     frame: &LocalBusFrame,
 ) -> Result<(u64, CredentialRequest), SdkError> {
@@ -107,7 +107,8 @@ fn prompt(
             matches!(metadata.action.as_str(), "setup" | "unlock")
         }
         "device.transfer.prepare" => metadata.action == "phrase",
-        "device.transfer.status" => metadata.action == "unlock",
+        // Weakening the app lock (`account.app_lock.configure`) re-asks the account code.
+        "device.transfer.status" | "account.app_lock.configure" => metadata.action == "unlock",
         "account.unlock" => metadata.action == "unlock" && request.body.get("passphrase").is_none(),
         _ => false,
     };
@@ -136,12 +137,21 @@ pub(super) async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
             let mut pending_input = Input(Some(provider.clone()));
             let callback = provider.clone();
             let mut input = tokio::task::spawn_blocking(move || callback.provide(&metadata));
-            let outcome = tokio::select! {
-                value = &mut input => value.map_err(|_| invalid())?.unwrap_or(CredentialOutcome::Refused),
-                // Detect EOF and stop local input even while the synchronous UI is waiting.
-                value = crate::bus::io::read_local_bus_frame(stream) => {
-                    drop(value);
-                    return Err(invalid());
+            let outcome = loop {
+                tokio::select! {
+                    value = &mut input => {
+                        break value.map_err(|_| invalid())?.unwrap_or(CredentialOutcome::Refused);
+                    }
+                    // Detect EOF and stop local input even while the synchronous UI is
+                    // waiting. A broadcast event (the configure change notice) is not a
+                    // reply: drop it and keep the input window open.
+                    value = crate::bus::io::read_local_bus_frame(stream) => {
+                        let mut other = value?;
+                        if other.kind != LocalBusFrameKind::Event {
+                            return Err(invalid());
+                        }
+                        crate::bus::secrets::wipe(&mut other.body);
+                    }
                 }
             };
             // The callback has completed; keep its reusable UI provider available for
@@ -151,6 +161,10 @@ pub(super) async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
             drop(outcome);
             stream.write_all(&reply).await?;
             stream.flush().await?;
+        } else if frame.kind == LocalBusFrameKind::Event {
+            // The daemon may emit events on this connection around the response.
+            let mut frame = frame;
+            crate::bus::secrets::wipe(&mut frame.body);
         } else {
             if !matches!(frame.kind, LocalBusFrameKind::Response | LocalBusFrameKind::Error)
                 || frame.request_id != request.request_id

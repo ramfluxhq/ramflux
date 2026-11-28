@@ -31,6 +31,7 @@ fn control(a: &Fixture, b: &Fixture, id: u8, thread: &str) -> Result<LiveCall, S
         thread.into(),
         a.client.call_local_endpoint()?,
         vec![b.client.call_local_endpoint()?],
+        false,
         now_unix_timestamp(),
     )?;
     call.pin_peer(

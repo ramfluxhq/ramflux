@@ -324,7 +324,7 @@ async fn push_reader_routes_shared_and_capable_frames() {
         }
     }
 
-    refusal_rows().await;
+    Box::pin(refusal_rows()).await;
 }
 
 #[tokio::test]

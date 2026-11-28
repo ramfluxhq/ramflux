@@ -32,6 +32,6 @@ pub use package::{
 pub use presentation::{Direction, Presentation};
 pub use runtime::CardRuntime;
 pub use session::{CardSession, EventResult, EventToken, HostEvent, HostEventKind};
-pub use slots::{HostSlot, HostSlotReply, ImageResult, SlotOutcome, SlotRequest};
+pub use slots::{HostSlot, HostSlotReply, SlotOutcome, SlotRequest};
 pub use spec::CardSpec;
 pub use tree::{Mutation, MutationBatch, Node, Tree};

@@ -163,7 +163,10 @@ async fn pull_snapshot(
     stop: &mut watch::Receiver<bool>,
     publisher: &mut Publisher,
 ) -> Result<(), Flow> {
-    let caps = client.capabilities().await.map_err(|_| Flow::Retry)?;
+    let caps = client.capabilities().await.map_err(|error| {
+        eprintln!("prx sync capabilities unavailable: {error}");
+        Flow::Retry
+    })?;
     if require(&caps, SYNC_SNAPSHOT_V1).is_err() || require(&caps, SYNC_WS_V1).is_err() {
         eprintln!("prx sync capabilities are missing");
         return Err(Flow::Retry);
@@ -208,11 +211,17 @@ fn on_page(
     cuts: &mut u8,
 ) -> PageStep {
     match mirror.apply_page(store, page) {
-        Ok(()) if mirror.ready() => {
+        Ok(removed) if mirror.ready() => {
+            if removed > 0 {
+                eprintln!(
+                    "prx sync retention removed turns={removed} retained_since={}",
+                    page.retained_since.as_deref().unwrap_or("-")
+                );
+            }
             log_ready(mirror);
             PageStep::Ready
         }
-        Ok(()) => {
+        Ok(_) => {
             *cuts = 0;
             PageStep::Continue
         }
@@ -228,7 +237,10 @@ fn on_page(
             eprintln!("prx sync mirror is full; sync stopped");
             PageStep::Flow(Flow::Park)
         }
-        Err(_) => PageStep::Flow(Flow::Retry),
+        Err(error) => {
+            eprintln!("prx sync snapshot page not applied: {error:?}");
+            PageStep::Flow(Flow::Retry)
+        }
     }
 }
 
@@ -239,15 +251,14 @@ fn on_snapshot_err(
     expired: &mut bool,
 ) -> Option<Flow> {
     if let PrxError::Api { code: ApiCode::SnapshotExpired, .. } = error {
-        if mirror.clear_cut(store).is_err() {
-            return Some(Flow::Retry);
-        }
-        if *expired {
+        if mirror.clear_cut(store).is_err() || *expired {
+            eprintln!("prx sync snapshot rejected: {error}");
             return Some(Flow::Retry);
         }
         *expired = true;
         return None;
     }
+    eprintln!("prx sync snapshot rejected: {error}");
     Some(Flow::Retry)
 }
 

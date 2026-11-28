@@ -53,6 +53,9 @@ pub extern "C" fn ramflux_v2_client_suspend(handle: u64) -> i32 {
                 );
             }
         }
+        if result.is_ok() {
+            crate::diag::events::account_event("account.suspend", serde_json::json!({}));
+        }
         if let Some(diag) = &client.diagnostics {
             diag.flush();
         }
@@ -76,6 +79,7 @@ pub extern "C" fn ramflux_v2_client_resume(handle: u64) -> i32 {
             .map_err(|_| CAbiError::new(RamfluxErrorCode::AccountBusy, "lifecycle_in_progress"))?;
         drive(&client, true)?;
         client.shared.suspended.store(false, Ordering::Release);
+        crate::diag::events::account_event("account.resume", serde_json::json!({}));
         Ok(())
     }))
 }

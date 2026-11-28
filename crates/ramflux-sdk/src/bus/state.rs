@@ -108,6 +108,8 @@ pub(crate) struct LocalBusAccountState {
     /// (unlock, pairing, role refresh) and regains them only when a session is installed. Anything
     /// that seals or signs an envelope outside a live session uses [`Self::sealing_config`].
     pub(crate) gateway_config: GatewaySessionConfig,
+    /// Last `device.activity.report` send (ms); the SDK sends at most one per 60 s.
+    pub(crate) last_activity_ms: Option<u64>,
     pub(crate) principal_commitment: String,
     pub(crate) target_delivery_id: String,
     pub(crate) pending_deliveries: Vec<GatewayInboxEntry>,
@@ -125,6 +127,8 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) task_approval_cursor: usize,
     pub(crate) task_ack_cursor: usize,
     pub(crate) task_forward_cursor: usize,
+    /// In-band `notifications_cleared` frames not yet published as `device.notifications.cleared`.
+    pub(crate) notifications_cleared_pending: u32,
     #[cfg(test)]
     pub(crate) task_forward_first: bool,
     pub(crate) task_courier_wake: Option<mpsc::Sender<()>>,
@@ -139,6 +143,9 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) receive_active_cache: Option<(u64, String, bool)>,
     /// Prepared-send upload parked off the actor (`attachment_sends`).
     pub(crate) attachment_send: super::account_runtime::attachment_sends::Slot,
+    /// MLS runtime of this account, opened on first use by the debug.mls surface (MLS-0c, debug builds only).
+    #[cfg(feature = "itest-mls-debug")]
+    pub(crate) mls: Option<crate::mls::MlsRuntime>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -183,6 +190,7 @@ impl LocalBusAccountState {
             #[cfg(test)]
             test_task_deliveries_applied: None,
             relay_quic_pool: None,
+            last_activity_ms: None,
             gateway_config,
             principal_commitment,
             target_delivery_id,
@@ -201,6 +209,7 @@ impl LocalBusAccountState {
             task_approval_cursor: 0,
             task_ack_cursor: 0,
             task_forward_cursor: 0,
+            notifications_cleared_pending: 0,
             #[cfg(test)]
             task_forward_first: false,
             task_courier_wake: None,
@@ -210,6 +219,8 @@ impl LocalBusAccountState {
             object_get_spools: BTreeMap::new(),
             receive_active_cache: None,
             attachment_send: super::account_runtime::attachment_sends::Slot::default(),
+            #[cfg(feature = "itest-mls-debug")]
+            mls: None,
         }
     }
 
@@ -246,6 +257,7 @@ impl LocalBusAccountState {
             #[cfg(test)]
             test_task_deliveries_applied: None,
             relay_quic_pool: None,
+            last_activity_ms: None,
             gateway_config,
             principal_commitment,
             target_delivery_id,
@@ -264,6 +276,7 @@ impl LocalBusAccountState {
             task_approval_cursor: 0,
             task_ack_cursor: 0,
             task_forward_cursor: 0,
+            notifications_cleared_pending: 0,
             #[cfg(test)]
             task_forward_first: false,
             task_courier_wake: None,
@@ -273,6 +286,8 @@ impl LocalBusAccountState {
             object_get_spools: BTreeMap::new(),
             receive_active_cache: None,
             attachment_send: super::account_runtime::attachment_sends::Slot::default(),
+            #[cfg(feature = "itest-mls-debug")]
+            mls: None,
         }
     }
 
@@ -544,6 +559,8 @@ impl LocalBusAccountState {
         self.gateway_config.resume_token = config.resume_token;
         self.gateway_config.last_seen_inbox_seq =
             self.gateway_config.last_seen_inbox_seq.max(config.last_seen_inbox_seq);
+        // The key set store is shared with the session; only a pending failed save is retried.
+        self.gateway_config.push.retry_save();
     }
 
     pub(crate) fn retire_session(&mut self, client: &SessionClient) -> Result<(), SdkError> {

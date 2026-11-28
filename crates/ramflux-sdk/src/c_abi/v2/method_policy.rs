@@ -39,8 +39,6 @@ policies! {
     "account.app_lock.state" => ("account", false, false, false, false),
     "account.backup.cancel" => ("account", true, false, false, false),
     "account.backup.create" => ("account", true, false, false, false),
-    "account.backup.export" => ("account", true, true, false, true),
-    "account.backup.import" => ("account", true, true, false, false),
     "account.backup.jobs" => ("account", true, false, false, false),
     "conversation.start" => ("conversation", true, true, false, false),
     "contact.requests.reply" => ("contact", true, true, false, false),
@@ -77,6 +75,7 @@ policies! {
     "agent.approval.decide" => ("agent", false, false, false, false),
     "agent.approval.list" => ("agent", false, false, false, false),
     "agent.approval.publish" => ("agent", false, false, false, false),
+    "agent.catalog" => ("agent", false, false, false, false),
     "agent.job.list" => ("agent", false, false, false, false),
     "agent.job.pause" => ("agent", false, false, false, false),
     "agent.job.remove" => ("agent", false, false, false, false),
@@ -90,6 +89,9 @@ policies! {
     "agent.host.manage" => ("agent", false, false, false, false),
     "agent.list" => ("agent", false, false, false, false),
     "agent.operation.get" => ("agent", false, false, false, false),
+    "agent.pause" => ("agent", false, false, false, false),
+    "agent.resume" => ("agent", false, false, false, false),
+    "agent.update" => ("agent", false, false, false, false),
     "agent.persona.edit" => ("agent", false, false, false, false),
     "agent.delete" => ("agent", false, false, false, false),
     "agent.retire" => ("agent", false, false, false, false),
@@ -157,14 +159,21 @@ policies! {
     "daemon.status" => ("daemon", false, false, false, false),
     "daemon.stop" => ("daemon", true, false, false, false),
     "diag.residue" => ("diag", true, false, false, false),
+    "diag.export" => ("diag", true, false, false, false),
+    "diag.snapshot" => ("diag", true, false, false, false),
+    "device.activity.report" => ("device", true, true, false, false),
     "device.list" => ("device", false, true, false, false),
+    "device.notifications.cleared" => ("device", true, true, false, false),
     "device.pair.approve" => ("device", true, true, false, false),
     "device.pair.begin" => ("device", true, true, false, false),
     "device.pair.cancel" => ("device", true, true, false, false),
     "device.pair.confirm" => ("device", true, true, false, false),
     "device.pair.join" => ("device", true, true, false, false),
     "device.pair.status" => ("device", false, true, false, false),
+    "device.push_policy.set" => ("device", true, true, false, false),
     "device.push_route.set" => ("device", true, true, false, false),
+    "device.push_route.test" => ("device", true, true, false, false),
+    "push.keyset.get" => ("push", false, true, false, false),
     "device.refresh" => ("device", true, true, false, false),
     "device.revoke" => ("device", true, true, false, false),
     "device.sync.export" => ("device", true, true, false, true),
@@ -311,6 +320,7 @@ pub(super) fn requires_key_export(name: &str) -> bool {
 pub(super) fn allowed(name: &str) -> bool {
     !DENIED_METHODS.contains(&name)
         && !name.contains("itest")
+        && !name.starts_with("debug.mls.")
         && METHOD_POLICIES.iter().any(|row| row.name == name)
 }
 
@@ -322,9 +332,9 @@ pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
     "ramflux.message.v1.ContactSafetyVerifyResult";
 /// blake3 of the generated message descriptor set.
 pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
-    "4592908138d7d8c4663410190eb494c646b94994b579388f4bff8b4a41bc1546";
+    "b81c4216fc565566fe75bdc8b9958afc22aebb40e643d5952fc1cb563553fd4a";
 /// Immutable product commit whose tree contains this CAS policy and descriptor.
-pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "9434d71db5b24728720a3762303fa467b7b99284";
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "206666d26134babcfc491af326b308d4deb8cb83";
 
 pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
     let mut rows = METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify");
@@ -340,7 +350,7 @@ pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
         && CONTACT_VERIFY_CAS_CONTRACT == "CONTACT-VERIFY-CAS-01"
         && CONTACT_VERIFY_CAS_REQUEST_TYPE == "ramflux.message.v1.ContactSafetyVerifyRequest"
         && CONTACT_VERIFY_CAS_RESPONSE_TYPE == "ramflux.message.v1.ContactSafetyVerifyResult"
-        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "9434d71db5b24728720a3762303fa467b7b99284"
+        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "206666d26134babcfc491af326b308d4deb8cb83"
 }
 
 #[cfg(test)]

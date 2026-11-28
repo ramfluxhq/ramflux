@@ -316,5 +316,8 @@ pub(super) fn auth_failure(name: &str) -> bool {
             | "TransportSecurity"
             | "CustodyConfirmationFailed"
             | "credential_unavailable"
+            | "wrong_passphrase"
+            | "reauth_required"
+            | "AccountCodeRequired"
     )
 }

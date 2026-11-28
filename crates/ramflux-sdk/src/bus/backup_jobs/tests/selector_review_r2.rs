@@ -8,15 +8,7 @@ use ramflux_storage::{AccountDb, AccountDbKey};
 const SELECTOR: &str = "private-canary";
 const BODY: &[u8] = b"unowned-reference-body-canary";
 
-fn client(root: &Path, native: bool) -> TestResult<RamfluxClient> {
-    if !native {
-        return Ok(initialized_at_scale(
-            root,
-            AccountIndex::open(root)?,
-            Scale { messages: 1, contacts: 0, groups: 0, file_bytes: None },
-        )?
-        .client);
-    }
+fn client(root: &Path) -> TestResult<RamfluxClient> {
     let vault = crate::custody::tests::TestVault::default();
     let account =
         crate::custody::tests::create(root, "account", &vault, crate::custody::network_now()?)?;
@@ -61,37 +53,29 @@ fn archive(
     legacy(&source, revoke)?;
     Ok(source.write_backup_snapshot(&root.join("archive.db"))?)
 }
-fn run_review(kind: PathKind, revoke: bool) -> TestResult {
+fn run_review(revoke: bool) -> TestResult {
     let original = tempfile::tempdir()?;
     let input = tempfile::tempdir()?;
-    let fresh = tempfile::tempdir()?;
-    let native = matches!(kind, PathKind::Native);
-    let mut client = client(original.path(), native)?;
+    let mut client = client(original.path())?;
     producers(&mut client)?;
-    let id = if native { "account" } else { "alice" };
+    let id = "account";
     let identity = crate::bus::backup_jobs::capture_identity(&client, original.path(), id)?;
-    let native_key = if native {
-        Some(crate::bus::backup_jobs::NativeInstallKey {
-            account_id: id.into(),
-            key: crate::bus::backup_jobs::install::existing_key(
-                client.account_index()?,
-                original.path(),
-                id,
-                b"local-secret",
-            )?,
-        })
-    } else {
-        None
-    };
+    let native_key = Some(crate::bus::backup_jobs::NativeInstallKey {
+        account_id: id.into(),
+        key: crate::bus::backup_jobs::install::existing_key(
+            client.account_index()?,
+            original.path(),
+            id,
+            b"local-secret",
+        )?,
+    });
     let saved = archive(&client, input.path(), id, revoke)?;
     let source = input.path().join("archive.db");
-    if native {
-        BackupDatabase::open_restore_input(&source, &saved.key, BackupOpenMode::PreNormalization)?
-            .sanitize_native_backup()?;
-    }
+    BackupDatabase::open_restore_input(&source, &saved.key, BackupOpenMode::PreNormalization)?
+        .sanitize_native_backup()?;
     let source_bytes = std::fs::read(&source)?;
     assert_input(&source, &saved.key, revoke)?;
-    let root = if matches!(kind, PathKind::Fresh) { fresh.path() } else { original.path() };
+    let root = original.path();
     let index = AccountIndex::open(root)?;
     let previous = index.account(id).ok();
     let jobs = BackupJobs::new(root, index.clone())?;
@@ -135,12 +119,8 @@ fn run_review(kind: PathKind, revoke: bool) -> TestResult {
         assert_eq!(index.account(id).ok(), previous);
     } else {
         result?;
-        let key = crate::bus::backup_jobs::install::existing_key(
-            &index,
-            root,
-            id,
-            if native { b"local-secret" } else { b"account-test-secret" },
-        )?;
+        let key =
+            crate::bus::backup_jobs::install::existing_key(&index, root, id, b"local-secret")?;
         let path = root.join(index.account(id)?.db_relative_path);
         BackupDatabase::open(&path, &key)?.check_integrity()?;
         let live = AccountDb::open(&index, id, &key)?;
@@ -216,61 +196,14 @@ fn scan(db: &rusqlite::Connection) -> TestResult {
     Ok(())
 }
 #[test]
-fn incoming_legacy_revocation_refuses_full_and_native_install_atomically() -> TestResult {
-    for kind in [PathKind::Full, PathKind::Native] {
-        run_review(kind, true)?;
-    }
-    Ok(())
+fn incoming_legacy_revocation_refuses_native_install_atomically() -> TestResult {
+    run_review(true)
 }
 #[test]
-fn unowned_reference_without_placeholder_omitted_full_native_fresh() -> TestResult {
-    for kind in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
-        run_review(kind, false)?;
-    }
-    Ok(())
+fn unowned_reference_without_placeholder_omitted_native() -> TestResult {
+    run_review(false)
 }
 
-fn install_chain_fresh(
-    root: &Path,
-    source: &Path,
-    saved: &ramflux_storage::AccountBackupSnapshot,
-    identity: format::Identity,
-) -> TestResult<(AccountIndex, AccountDbKey)> {
-    let index = AccountIndex::open(root)?;
-    let jobs = BackupJobs::new(root, index.clone())?;
-    let job = jobs.start(crate::backup::BackupJobKind::Restore, "first.rfb".into())?;
-    let dir = jobs.directory(&job.job_id)?;
-    std::fs::copy(source, dir.join("account.db"))?;
-    let metadata = format::Metadata {
-        identity,
-        database_key: *saved.key.bytes(),
-        ca_pem: b"test-ca".to_vec(),
-    };
-    let master = [8; 32];
-    format::save_metadata(&dir.join("identity.sealed"), &master, &metadata)?;
-    let staging = crate::backup::VerifiedBackupStaging::new(
-        dir.clone(),
-        master,
-        crate::bus::backup_jobs::service::now(),
-    )?
-    .with_input_observation(
-        BackupDatabase::open_restore_input(
-            &dir.join("account.db"),
-            &AccountDbKey::from_bytes(metadata.database_key),
-            BackupOpenMode::PreNormalization,
-        )?
-        .original_input()
-        .clone(),
-    );
-    jobs.install_generation(&job, staging, None, None)?;
-    let key = crate::bus::backup_jobs::install::existing_key(
-        &index,
-        root,
-        "alice",
-        b"account-test-secret",
-    )?;
-    Ok((index, key))
-}
 fn registration(db: &rusqlite::Connection) -> TestResult<(u64, u64, u64, u64)> {
     Ok((
         db.query_row("SELECT count(*) FROM object_index WHERE object_id='private-canary' AND tombstoned=1",[],|r|r.get(0))?,
@@ -279,56 +212,6 @@ fn registration(db: &rusqlite::Connection) -> TestResult<(u64, u64, u64, u64)> {
         db.query_row("SELECT count(*) FROM runtime_actor_state WHERE state_kind='attachment/reference/private-canary'",[],|r|r.get(0))?,
     ))
 }
-#[test]
-fn fresh_restore_backup_registered_placeholder_refuses_full_and_native_merge() -> TestResult {
-    let original = tempfile::tempdir()?;
-    let input = tempfile::tempdir()?;
-    let fresh = tempfile::tempdir()?;
-    let mut client = client(original.path(), false)?;
-    producers(&mut client)?;
-    let identity = crate::bus::backup_jobs::capture_identity(&client, original.path(), "alice")?;
-    let first = archive(&client, input.path(), "alice", true)?;
-    let first_path = input.path().join("archive.db");
-    let first_bytes = std::fs::read(&first_path)?;
-    let (index, key) = install_chain_fresh(fresh.path(), &first_path, &first, identity)?;
-    assert_eq!(std::fs::read(&first_path)?, first_bytes);
-    let installed = fresh.path().join(index.account("alice")?.db_relative_path);
-    assert_eq!(registration(&raw(&installed, &key)?)?, (1, 1, 1, 0));
-    let restored = AccountDb::open(&index, "alice", &key)?;
-    restored.checkpoint_retired_secrets()?;
-    let second_path = input.path().join("second-generation.db");
-    let second = restored.write_backup_snapshot(&second_path)?;
-    assert_eq!(registration(&raw(&second_path, &second.key)?)?, (1, 1, 1, 0));
-    let second_bytes = std::fs::read(&second_path)?;
-    let selected = client.account_index()?.account("alice")?;
-    for native in [false, true] {
-        let target_path =
-            input.path().join(if native { "native-target.db" } else { "full-target.db" });
-        let target = client.account_db()?.write_backup_snapshot(&target_path)?;
-        let mut stage = BackupDatabase::open_restore_input(
-            &target_path,
-            &target.key,
-            BackupOpenMode::PreNormalization,
-        )?;
-        let before = registration(&raw(&target_path, &target.key)?)?;
-        assert_eq!(before, (0, 0, 0, 0), "target must predate the revocation");
-        let result = if native {
-            stage.merge_native_backup_candidate(&second_path, &second.key, || Ok(()))
-        } else {
-            stage.merge_backup_candidate(&second_path, &second.key, || Ok(()))
-        };
-        assert!(
-            matches!(result, Err(ramflux_storage::StorageError::ObjectOwnershipUnverified { .. })),
-            "registered second-generation input must refuse: {result:?}"
-        );
-        assert_eq!(registration(&raw(&target_path, &target.key)?)?, before);
-        stage.check_integrity()?;
-        assert_eq!(std::fs::read(&second_path)?, second_bytes);
-        assert_eq!(client.account_index()?.account("alice")?, selected);
-    }
-    Ok(())
-}
-
 // Native restores require independently installed local authority. Seed only the
 // private data generation with the same single-input normalizer used by fresh restore.
 fn native_fresh_target(
@@ -367,48 +250,32 @@ fn native_fresh_target(
     Ok(())
 }
 
-fn restored_target_older_install(native: bool) -> TestResult {
+fn restored_target_older_install() -> TestResult {
     let original = tempfile::tempdir()?;
     let older_dir = tempfile::tempdir()?;
     let revoked_dir = tempfile::tempdir()?;
-    let fresh = tempfile::tempdir()?;
-    let mut client = client(original.path(), native)?;
+    let mut client = client(original.path())?;
     producers(&mut client)?;
-    let id = if native { "account" } else { "alice" };
+    let id = "account";
     let identity = crate::bus::backup_jobs::capture_identity(&client, original.path(), id)?;
     let older = archive(&client, older_dir.path(), id, false)?;
     let revoked = archive(&client, revoked_dir.path(), id, true)?;
     let older_path = older_dir.path().join("archive.db");
     let revoked_path = revoked_dir.path().join("archive.db");
-    if native {
-        BackupDatabase::open_restore_input(
-            &older_path,
-            &older.key,
-            BackupOpenMode::PreNormalization,
-        )?
+    BackupDatabase::open_restore_input(&older_path, &older.key, BackupOpenMode::PreNormalization)?
         .sanitize_native_backup()?;
-    }
     let older_bytes = std::fs::read(&older_path)?;
     let revoked_bytes = std::fs::read(&revoked_path)?;
-    let (root, index, key) = if native {
-        let index = client.account_index()?.clone();
-        let key = crate::bus::backup_jobs::install::existing_key(
-            &index,
-            original.path(),
-            id,
-            b"local-secret",
-        )?;
-        drop(client);
-        native_fresh_target(original.path(), &index, &key, &revoked_path, &revoked)?;
-        (original.path(), index, key)
-    } else {
-        drop(client);
-        // Capture an independent metadata value for the first SDK install.
-        let first_identity = serde_json::from_slice(&serde_json::to_vec(&identity)?)?;
-        let (index, key) =
-            install_chain_fresh(fresh.path(), &revoked_path, &revoked, first_identity)?;
-        (fresh.path(), index, key)
-    };
+    let index = client.account_index()?.clone();
+    let key = crate::bus::backup_jobs::install::existing_key(
+        &index,
+        original.path(),
+        id,
+        b"local-secret",
+    )?;
+    drop(client);
+    native_fresh_target(original.path(), &index, &key, &revoked_path, &revoked)?;
+    let root = original.path();
     let before = index.account(id)?;
     let before_path = root.join(&before.db_relative_path);
     assert_eq!(registration(&raw(&before_path, &key)?)?, (1, 1, 1, 0));
@@ -437,17 +304,12 @@ fn restored_target_older_install(native: bool) -> TestResult {
         .original_input()
         .clone(),
     );
-    let native_key =
-        native.then(|| crate::bus::backup_jobs::NativeInstallKey { account_id: id.into(), key });
+    let native_key = Some(crate::bus::backup_jobs::NativeInstallKey { account_id: id.into(), key });
     jobs.install_generation(&job, staging, native_key, None)?;
     let selected = index.account(id)?;
     assert_ne!(selected.db_relative_path, before.db_relative_path);
-    let selected_key = crate::bus::backup_jobs::install::existing_key(
-        &index,
-        root,
-        id,
-        if native { b"local-secret" } else { b"account-test-secret" },
-    )?;
+    let selected_key =
+        crate::bus::backup_jobs::install::existing_key(&index, root, id, b"local-secret")?;
     let selected_path = root.join(&selected.db_relative_path);
     assert_eq!(registration(&raw(&selected_path, &selected_key)?)?, (1, 1, 1, 0));
     BackupDatabase::open(&selected_path, &selected_key)?.check_integrity()?;
@@ -462,9 +324,6 @@ fn restored_target_older_install(native: bool) -> TestResult {
 }
 
 #[test]
-fn fresh_restored_target_keeps_revocation_on_older_full_and_native_install() -> TestResult {
-    for native in [false, true] {
-        restored_target_older_install(native)?;
-    }
-    Ok(())
+fn fresh_restored_target_keeps_revocation_on_older_native_install() -> TestResult {
+    restored_target_older_install()
 }

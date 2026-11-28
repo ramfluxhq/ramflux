@@ -7,13 +7,6 @@ use crate::bus::backup_jobs::{format, service::BackupJobs, test_install::Install
 use ramflux_storage::{BackupDatabase, BackupOpenMode};
 use std::sync::Mutex;
 
-#[derive(Clone, Copy, Debug)]
-enum PathKind {
-    Fresh,
-    Full,
-    Native,
-}
-
 fn raw(path: &Path, key: &ramflux_storage::AccountDbKey) -> TestResult<rusqlite::Connection> {
     use std::fmt::Write;
     let mut hex = zeroize::Zeroizing::new(String::new());
@@ -64,7 +57,6 @@ fn producers(client: &mut RamfluxClient) -> TestResult {
 }
 
 fn run(
-    kind: PathKind,
     version: i64,
     unwrapped: bool,
     fault: Option<InstallPoint>,
@@ -73,87 +65,7 @@ fn run(
     OPEN_LOG.with(|log| log.borrow_mut().clear());
     let source_root = tempfile::tempdir()?;
     let target_root = tempfile::tempdir()?;
-    let source_index = AccountIndex::open(source_root.path())?;
-    let mut state = initialized_at_scale(
-        source_root.path(),
-        source_index,
-        Scale { messages: 1, contacts: 0, groups: 0, file_bytes: None },
-    )?;
-    producers(&mut state.client)?;
-    if matches!(kind, PathKind::Fresh) {
-        fresh_restrictions(&mut state.client)?;
-    }
-    if matches!(kind, PathKind::Native) {
-        drop(state);
-        return native_case(
-            source_root.path(),
-            target_root.path(),
-            (version, unwrapped, fault, invalid),
-        );
-    }
-    let id = "alice";
-    let manifest =
-        read_local_bus_account_manifest(&local_bus_account_manifest_path(source_root.path(), id))?;
-    let identity = format::Identity::Legacy { manifest: Box::new(manifest) };
-    let target_index = AccountIndex::open(target_root.path())?;
-    if matches!(kind, PathKind::Full) {
-        initialize_local(target_root.path(), &target_index)?;
-        prepare_local_inherited(version, target_root.path(), &target_index)?;
-    }
-    let jobs = BackupJobs::new(target_root.path(), target_index.clone())?;
-    let job = jobs.start(
-        crate::backup::BackupJobKind::Restore,
-        target_root.path().join("archive.rfb").to_string_lossy().into_owned(),
-    )?;
-    let dir = jobs.directory(&job.job_id)?;
-    let path = dir.join("account.db");
-    let saved = state.client.account_db()?.write_backup_snapshot(&path)?;
-    drop(state);
-    prepare_input(&path, &saved.key, version, unwrapped, invalid)?;
-    if !observation_tests::RETRY_UPGRADE.get() {
-        check_input(&path, &saved.key)?;
-    }
-    let before = std::fs::read(&path)?;
-    let source_copy = source_root.path().join("unchanged.db");
-    std::fs::write(&source_copy, &before)?;
-    std::fs::copy(&source_copy, &path)?;
-    let metadata = format::Metadata {
-        identity,
-        database_key: *saved.key.bytes(),
-        ca_pem: b"test-ca".to_vec(),
-    };
-    let staging = worker_staging(&jobs, &job, &dir, &metadata)?;
-    let archive_before = std::fs::read(&job.path)?;
-    let previous = target_index.account(id).ok().map(|r| r.db_relative_path);
-    let seen = install_hook(&jobs, &target_index, id, fault)?;
-    let result = jobs.install_generation(&job, staging, None, None);
-    assert_eq!(std::fs::read(&job.path)?, archive_before);
-    if invalid.is_some() {
-        assert!(matches!(
-            result,
-            Err(SdkError::Storage(
-                ramflux_storage::StorageError::ObjectOwnershipUnverified { .. }
-                    | ramflux_storage::StorageError::AuthorizationRejected
-            ))
-        ));
-    } else if fault.is_some() {
-        assert!(result.is_err());
-    } else {
-        result?;
-    }
-    assert_eq!(std::fs::read(&source_copy)?, before);
-    let selected = target_index.account(id).ok().map(|r| r.db_relative_path);
-    if fault == Some(InstallPoint::BeforeCommit) || invalid.is_some() {
-        assert_eq!(selected, previous);
-    } else {
-        assert!(selected.is_some());
-        assert_installed(&target_index, target_root.path(), id, b"account-test-secret")?;
-    }
-    if invalid.is_none() {
-        let seen = seen.lock().map_err(|_| "seen")?;
-        assert!(seen.contains(&fault.unwrap_or(InstallPoint::BeforeCommit)));
-    }
-    Ok(())
+    native_case(source_root.path(), target_root.path(), (version, unwrapped, fault, invalid))
 }
 
 fn corrupt(db: &rusqlite::Connection, what: &str) -> TestResult {
@@ -315,57 +227,39 @@ fn run_native(
 }
 
 #[test]
-fn e14_fresh_full_restore_normalizes_before_index_selection() -> TestResult {
-    run(PathKind::Fresh, 14, false, None, None)
-}
-#[test]
-fn e14_full_restore_local_then_merge_normalized() -> TestResult {
-    run(PathKind::Full, 14, false, None, None)
-}
-#[test]
 fn e14_native_data_restore_uses_two_input_classification() -> TestResult {
-    run(PathKind::Native, 14, false, None, None)
+    run(14, false, None, None)
 }
 #[test]
 fn e14_fault_before_index_selection() -> TestResult {
-    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
-        run(k, 14, false, Some(InstallPoint::BeforeCommit), None)?;
-    }
+    run(14, false, Some(InstallPoint::BeforeCommit), None)?;
     Ok(())
 }
 #[test]
 fn e14_fault_after_index_commit() -> TestResult {
-    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
-        run(k, 14, false, Some(InstallPoint::Committed), None)?;
-    }
+    run(14, false, Some(InstallPoint::Committed), None)?;
     Ok(())
 }
 #[test]
 fn e14_transport_owner_reference_restores_full_native_fresh() -> TestResult {
-    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
-        for version in [12, 14] {
-            run(k, version, false, None, None)?;
-        }
+    for version in [12, 14] {
+        run(version, false, None, None)?;
     }
     Ok(())
 }
 #[test]
 fn e14_wrapped_and_unwrapped_attachment_references_restore() -> TestResult {
-    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
-        for version in [12, 14] {
-            for unwrapped in [false, true] {
-                run(k, version, unwrapped, None, None)?;
-            }
+    for version in [12, 14] {
+        for unwrapped in [false, true] {
+            run(version, unwrapped, None, None)?;
         }
     }
     Ok(())
 }
 #[test]
 fn e14_reference_validation_rejects_hash_owner_domain_substitution() -> TestResult {
-    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
-        for what in ["hash", "owner", "domain"] {
-            run(k, 14, false, None, Some(what))?;
-        }
+    for what in ["hash", "owner", "domain"] {
+        run(14, false, None, Some(what))?;
     }
     Ok(())
 }
@@ -464,45 +358,6 @@ fn prepare_input(
     Ok(())
 }
 
-fn initialize_local(root: &Path, index: &AccountIndex) -> TestResult {
-    drop(initialized_at_scale(
-        root,
-        index.clone(),
-        Scale { messages: 1, contacts: 0, groups: 0, file_bytes: None },
-    )?);
-    // Each independent fixture encrypted `file` randomly; it is not a shared identity.
-    let key = crate::bus::backup_jobs::install::existing_key(
-        index,
-        root,
-        "alice",
-        b"account-test-secret",
-    )?;
-    let db = raw(&root.join(index.account("alice")?.db_relative_path), &key)?;
-    db.execute_batch("DELETE FROM object_index WHERE object_id='file'; DELETE FROM object_manifest WHERE object_id='file'; DELETE FROM object_chunk WHERE object_id='file'; DELETE FROM object_key_slot WHERE object_id='file'; DELETE FROM object_retention_payload WHERE wire_id='file';")?;
-    Ok(())
-}
-
-fn fresh_restrictions(client: &mut RamfluxClient) -> TestResult {
-    client.account_db()?.send_direct_message(
-        "thread",
-        "retired-owner",
-        "peer",
-        b"normalization-only-canary",
-    )?;
-    client.prepare_history_transport(
-        "retired-history",
-        br#"{"message_id":"retired-owner"}"#,
-        &[],
-    )?;
-    let fenced =
-        client.prepare_history_transport("fenced-history", br#"{"message_id":"owner"}"#, &[])?;
-    client.account_db()?.persist_actor_state(
-            "attachment/upload/fenced",
-            &json!({"wire_object_id":"fenced-history","manifest_hash":fenced.manifest_hash,"content_key":"normalization-only-canary"}),
-        )?;
-    Ok(())
-}
-
 fn db_count_unowned(path: &Path, key: &ramflux_storage::AccountDbKey) -> TestResult<u64> {
     Ok(raw(path, key)?.query_row(
         "SELECT count(*) FROM runtime_actor_state WHERE state_kind='attachment/reference/unowned'",
@@ -546,39 +401,29 @@ fn check_input(path: &Path, key: &ramflux_storage::AccountDbKey) -> TestResult {
 #[test]
 fn e14_v12_unowned_actor_with_placeholder_check_and_install_omits() -> TestResult {
     observation_tests::assert_observation_refused("schema")?;
-    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
-        run(k, 12, false, None, None)?;
-    }
+    run(12, false, None, None)?;
     Ok(())
 }
 #[test]
 fn e14_p1_upgraded_target_inherited_unowned_state_restores() -> TestResult {
-    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
-        run(k, 13, false, None, None)?;
-    }
+    run(13, false, None, None)?;
     Ok(())
 }
 #[test]
 fn e14_every_intermediate_reopen_reaches_normalization_before_strict_validation() -> TestResult {
     observation_tests::assert_observation_refused("schema")?;
-    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
-        run(k, 12, false, None, None)?;
-    }
+    run(12, false, None, None)?;
     Ok(())
 }
 #[test]
 fn e14_malformed_authenticated_graph_still_refuses_atomically() -> TestResult {
-    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
-        run(k, 12, false, None, Some("hash"))?;
-    }
+    run(12, false, None, Some("hash"))?;
     Ok(())
 }
 #[test]
 fn e14_source_archive_hash_unchanged() -> TestResult {
-    for k in [PathKind::Fresh, PathKind::Full, PathKind::Native] {
-        run(k, 12, false, Some(InstallPoint::BeforeCommit), None)?;
-        run(k, 12, false, None, None)?;
-    }
+    run(12, false, Some(InstallPoint::BeforeCommit), None)?;
+    run(12, false, None, None)?;
     Ok(())
 }
 
@@ -665,19 +510,6 @@ fn worker_staging(
     assert_eq!(observation.unowned_legacy_actor_count, 1);
     assert_eq!(observation.counts, counts);
     Ok(staging)
-}
-
-fn prepare_local_inherited(version: i64, root: &Path, index: &AccountIndex) -> TestResult {
-    if version == 13 {
-        let key = crate::bus::backup_jobs::install::existing_key(
-            index,
-            root,
-            "alice",
-            b"account-test-secret",
-        )?;
-        prepare_input(&root.join(index.account("alice")?.db_relative_path), &key, 13, false, None)?;
-    }
-    Ok(())
 }
 
 fn assert_installed(index: &AccountIndex, root: &Path, id: &str, secret: &[u8]) -> TestResult {

@@ -265,6 +265,12 @@ impl Forwarder for AdmittedPeer<'_> {
     ) -> Result<Vec<u8>, RenewalRefusal> {
         let state = self.state.snapshot().map_err(transport)?;
         let route = state.route(node).ok_or(RenewalRefusal::SourceUnknown)?;
+        crate::node_directory::sanction::check_peer(
+            node,
+            state.pinned_node_public_key(node).as_deref(),
+            "renewal",
+        )
+        .map_err(|_| RenewalRefusal::SourceUnknown)?;
         let endpoint =
             crate::peer_pin::checked_forward_endpoint_until(node, &route.endpoint, deadline)
                 .map_err(transport)?;
@@ -292,7 +298,13 @@ fn view_of(
     let Ok(snapshot) = state.snapshot() else {
         return PeerView { advertised, admitted: false, negotiated: false };
     };
-    let admitted = crate::now_unix_seconds().is_ok_and(|now| snapshot.can_deliver_to(node, now));
+    let admitted = crate::now_unix_seconds().is_ok_and(|now| snapshot.can_deliver_to(node, now))
+        && crate::node_directory::sanction::check_peer(
+            node,
+            snapshot.pinned_node_public_key(node).as_deref(),
+            "renewal",
+        )
+        .is_ok();
     let negotiated = snapshot
         .negotiated_capabilities(node)
         .is_some_and(|caps| caps.contains(ramflux_node_core::ATTACHMENT_RENEWAL_CAPABILITY));
@@ -323,6 +335,16 @@ fn pin_answer_for(
         return Ok(ramflux_node_core::PinAnswer::Unavailable);
     }
     let snapshot = state.snapshot()?;
+    // A sanctioned peer gets no pin from this node (section 3a point 4; refuse mode only).
+    if crate::node_directory::sanction::check_peer(
+        node_id,
+        snapshot.pinned_node_public_key(node_id).as_deref(),
+        "renewal_pin",
+    )
+    .is_err()
+    {
+        return Ok(ramflux_node_core::PinAnswer::SourceUnknown);
+    }
     Ok(state.attachment_authority().answer(store, &snapshot, node_id, crate::now_unix_seconds()?))
 }
 

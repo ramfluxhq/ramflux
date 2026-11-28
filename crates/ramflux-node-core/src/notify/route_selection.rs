@@ -21,6 +21,32 @@ pub fn voip_push_enabled() -> bool {
     crate::environment::var("RAMFLUX_NOTIFY_APNS_VOIP_ENABLED").as_deref() == Ok("1")
 }
 
+/// `NotificationWake.ext` key that names the one route a push test wake may use.
+pub const TEST_ROUTE_TAG_EXT_KEY: &str = "test_route_tag";
+
+/// The route tag a push test wake is bound to; `None` for every other wake.
+#[must_use]
+pub fn test_target_route_tag(wake: &ramflux_protocol::NotificationWake) -> Option<&str> {
+    if wake.delivery_class != NotificationDeliveryClass::PushTestNotification {
+        return None;
+    }
+    wake.ext.ext.get(TEST_ROUTE_TAG_EXT_KEY).and_then(serde_json::Value::as_str)
+}
+
+/// Narrows `routes` to the one route a push test wake is bound to. Other wakes are untouched.
+/// A test wake that names no route keeps none (it is never a fan-out).
+#[must_use]
+pub fn only_test_target(
+    mut routes: Vec<super::DevicePushRoute>,
+    wake: &ramflux_protocol::NotificationWake,
+) -> Vec<super::DevicePushRoute> {
+    if wake.delivery_class == NotificationDeliveryClass::PushTestNotification {
+        let tag = test_target_route_tag(wake);
+        routes.retain(|route| tag == Some(route.route_tag.as_str()));
+    }
+    routes
+}
+
 /// Keep the routes this wake may send.
 ///
 /// `voip_ready` reports whether a `VoIP` route still has a current `VoIP` credential.
@@ -31,6 +57,8 @@ pub(super) fn select_wake_routes(
     voip_enabled: bool,
     mut voip_ready: impl FnMut(&super::DevicePushRoute) -> bool,
 ) -> Vec<super::DevicePushRoute> {
+    // Sealed routes belong to central mode and are never sent as raw provider tokens (L5).
+    routes.retain(|route| !route.sealed);
     routes.retain(|route| {
         route.capability == super::DevicePushRoute::capability_for(&route.provider)
     });
@@ -45,6 +73,44 @@ pub(super) fn select_wake_routes(
         PushProviderKind::Apns => !use_voip,
         PushProviderKind::WebPush => !call,
         PushProviderKind::Fcm => true,
+    });
+    routes
+}
+
+/// Keep the sealed routes a central wake may use (A6.3, A6.4).
+///
+/// A route is usable when it is sealed, not marked for reseal, not paused by `unserved`, and its
+/// provider is served (`dir.served`). A provider that is not served is never submitted to. An iOS
+/// call uses the `VoIP` route when it is usable, otherwise the alert route, never both. `m`, `x`
+/// and `t` never use a `VoIP` route. Web Push has no central route.
+pub(super) fn select_central_routes(
+    routes: Vec<super::DevicePushRoute>,
+    class: crate::push_handoff::CentralClass,
+    served: crate::push_handoff::Served,
+    now_ms: u64,
+) -> Vec<super::DevicePushRoute> {
+    use crate::push_handoff::CentralClass;
+    let provider_served = |provider: &PushProviderKind| match provider {
+        PushProviderKind::Apns => served.apns,
+        PushProviderKind::ApnsVoip => served.apns_voip,
+        PushProviderKind::Fcm => served.fcm,
+        PushProviderKind::WebPush => false,
+    };
+    let mut routes = routes;
+    routes.retain(|route| {
+        route.sealed
+            && !route.needs_reseal
+            && now_ms >= route.unserved_until_ms
+            && route.capability == super::DevicePushRoute::capability_for(&route.provider)
+            && provider_served(&route.provider)
+    });
+    let use_voip = class == CentralClass::Call
+        && routes.iter().any(|route| route.provider == PushProviderKind::ApnsVoip);
+    routes.retain(|route| match route.provider {
+        PushProviderKind::ApnsVoip => use_voip,
+        PushProviderKind::Apns => !use_voip,
+        PushProviderKind::Fcm => true,
+        PushProviderKind::WebPush => false,
     });
     routes
 }

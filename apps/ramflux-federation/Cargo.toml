@@ -16,6 +16,9 @@ itest-http = ["ramflux-node-core/itest-http"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 compio = { version = "=0.19.1", optional = true }
+# SO_PEERCRED without rustix: rustix 1.1 types UCred.pid as NonZero, and a peer in another PID
+# namespace (separate containers) reports pid 0, which turns the Ok value into a bogus Err.
+nix = { version = "0.29", default-features = false, features = ["socket"] }
 
 [dependencies]
 zeroize = { workspace = true }
@@ -25,7 +28,7 @@ ramflux-protocol = { workspace = true }
 ramflux-transport = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }

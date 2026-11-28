@@ -6,6 +6,7 @@
 use super::handoff::InProcessMediaReceipt;
 use crate::{SdkError, client::RamfluxClient};
 use ramflux_media::authorization::{GateReason, GateSnapshot};
+use ramflux_media::video::packet::{self, AccessUnit, MAX_AU_BYTES};
 use ramflux_media::{Capture, Engine, EngineStats, MediaSession, Playback};
 use std::cell::RefCell;
 use std::sync::Mutex;
@@ -19,6 +20,16 @@ impl Drop for Reservation {
     fn drop(&mut self) {
         AUDIO_RESERVED.store(false, Ordering::Release);
     }
+}
+
+/// What [`RamfluxClient::take_in_process_video`] removed, or why it removed nothing.
+pub(crate) enum TakeOutcome {
+    /// No complete access unit is waiting.
+    Empty,
+    /// The next unit is larger than the caller's buffer. It stays queued.
+    TooLarge,
+    /// One complete access unit.
+    Unit(AccessUnit),
 }
 
 /// Credential-free view of the private engine owner. No key-export path.
@@ -35,6 +46,9 @@ pub(crate) struct OwnedMedia {
     pub session: Mutex<Option<MediaSession>>,
     binding: Binding,
     running: Mutex<Running>,
+    /// The call selected a video track (its keys reached the session). Video
+    /// authority follows the SDK grant, never the host audio readiness.
+    video_selected: bool,
 }
 
 struct Binding {
@@ -73,7 +87,9 @@ impl OwnedMedia {
         receipt: InProcessMediaReceipt,
         call: &super::state::LiveCall,
     ) -> Self {
+        let video_selected = session.video_receive_key().is_some();
         Self {
+            video_selected,
             binding: Binding {
                 call_ref: call.call_ref.clone(),
                 caller: call.caller.clone(),
@@ -143,6 +159,10 @@ impl OwnedMedia {
         running.last.drained = true;
     }
 
+    fn engine_running(&self) -> bool {
+        self.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner).engine.is_some()
+    }
+
     fn snapshot(&self) -> InProcessMediaStatus {
         let mut running = self.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(engine) = &running.engine {
@@ -210,6 +230,91 @@ impl RamfluxClient {
             .filter(|owned| owned.receipt.call_id == call_id)
             .ok_or_else(unavailable)?;
         Ok(owned.snapshot())
+    }
+
+    /// Start the private engine on the first frame, if this call has not taken one yet.
+    fn ensure_in_process_engine(&mut self, call_id: &str) -> Result<(), SdkError> {
+        if let Some(owned) = &self.in_process_media {
+            if owned.receipt.call_id != call_id {
+                return Err(SdkError::LocalBusPermissionDenied);
+            }
+            if owned.engine_running() {
+                self.reconcile_in_process_media();
+                return Ok(());
+            }
+            return Err(unavailable());
+        }
+        let seq = self.voice_calls.get(call_id).map(|call| call.row.seq).ok_or_else(unavailable)?;
+        self.start_in_process_media(
+            call_id,
+            seq,
+            Box::new(SilentCapture),
+            Box::new(SilentPlayback),
+        )?;
+        Ok(())
+    }
+
+    /// Queue one encoded access unit on the live in-process engine.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a missing call, a closed video gate, or a malformed access unit.
+    pub fn submit_in_process_video(
+        &mut self,
+        call_id: &str,
+        au: &AccessUnit,
+    ) -> Result<InProcessMediaStatus, SdkError> {
+        if au.rotation >= 4 || au.data.len() > MAX_AU_BYTES {
+            return Err(SdkError::LocalBus("voice call: video frame refused".into()));
+        }
+        packet::validate_avcc(&au.data)
+            .map_err(|_| SdkError::LocalBus("voice call: video frame refused".into()))?;
+        self.ensure_in_process_engine(call_id)?;
+        let owned = self
+            .in_process_media
+            .as_ref()
+            .filter(|owned| owned.receipt.call_id == call_id)
+            .ok_or_else(unavailable)?;
+        {
+            let running = owned.running.lock().map_err(|_| unavailable())?;
+            let engine = running.engine.as_ref().ok_or_else(unavailable)?;
+            let submitted = engine
+                .submit_video(au)
+                .map_err(|error| SdkError::LocalBus(format!("voice call: {error}")))?;
+            if !submitted.queued {
+                return Err(SdkError::LocalBus("voice call: video frame not admitted".into()));
+            }
+        }
+        self.in_process_media_status(call_id)
+    }
+
+    /// Take one complete access unit when it fits in `capacity`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a missing call or an engine that is not running.
+    pub(crate) fn take_in_process_video(
+        &mut self,
+        call_id: &str,
+        capacity: usize,
+    ) -> Result<TakeOutcome, SdkError> {
+        self.ensure_in_process_engine(call_id)?;
+        let owned = self
+            .in_process_media
+            .as_ref()
+            .filter(|owned| owned.receipt.call_id == call_id)
+            .ok_or_else(unavailable)?;
+        let running = owned.running.lock().map_err(|_| unavailable())?;
+        let engine = running.engine.as_ref().ok_or_else(unavailable)?;
+        let outcome = match engine.next_video_access_unit_len() {
+            None => TakeOutcome::Empty,
+            Some(len) if len > capacity || len > MAX_AU_BYTES => TakeOutcome::TooLarge,
+            Some(_) => match engine.take_video_access_unit() {
+                Some(unit) => TakeOutcome::Unit(unit),
+                None => TakeOutcome::Empty,
+            },
+        };
+        Ok(outcome)
     }
 
     /// Report OS audio readiness; this can never grant SDK authority.
@@ -347,6 +452,10 @@ impl RamfluxClient {
         let mut running = owned.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(engine) = &running.engine {
             engine.authorize(reason, lease, allocation.expires_at > running.lease_expires_at);
+            if owned.video_selected {
+                // Independent of audio_active: refused by the engine while the gate is closed.
+                let _ = engine.video_active(true);
+            }
         }
         running.lease_expires_at = allocation.expires_at;
         running.last.receipt.lease_expires_at = allocation.expires_at;
@@ -357,3 +466,23 @@ impl RamfluxClient {
 }
 
 pub(crate) type AudioReservation = RefCell<Option<Reservation>>;
+
+/// No microphone. Blocks for one audio frame so the send thread does not spin.
+struct SilentCapture;
+
+impl Capture for SilentCapture {
+    fn next_frame(&mut self, timeout: Duration) -> Option<ramflux_media::codec::Frame> {
+        let pause = timeout.min(Duration::from_millis(20));
+        if !pause.is_zero() {
+            std::thread::sleep(pause);
+        }
+        None
+    }
+}
+
+/// Discards decoded audio. Video frames leave through [`RamfluxClient::take_in_process_video`].
+struct SilentPlayback;
+
+impl Playback for SilentPlayback {
+    fn play(&mut self, _frame: &ramflux_media::codec::Frame) {}
+}

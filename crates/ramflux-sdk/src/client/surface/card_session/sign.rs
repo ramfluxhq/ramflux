@@ -3,6 +3,7 @@
 
 //! Sign one resolver action inside the SDK. The author remains the acceptor.
 use super::super::{Carrier, PayloadKind, invalid};
+use super::codes::typed;
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::a2ui::{ResolvedAction, ResolvedSurface, SurfaceState};
 use ramflux_protocol::{SurfaceAction, domain};
@@ -30,8 +31,8 @@ pub(super) fn sign_action(
     let parsed = SurfaceAction::from_wire_bytes(&wire)?;
     state.validate_action(&parsed)?;
     let conversation =
-        state.conversation_id().ok_or_else(|| invalid("card_session_refused"))?.to_owned();
-    let surface_hash = state.hash().ok_or_else(|| invalid("card_session_refused"))?.to_owned();
+        state.conversation_id().ok_or_else(|| typed("card_session_refused"))?.to_owned();
+    let surface_hash = state.hash().ok_or_else(|| typed("card_session_refused"))?.to_owned();
     let device = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let message_id = crate::new_surface_message_id()?;
     let carrier = client.sign_surface_carrier(Carrier {

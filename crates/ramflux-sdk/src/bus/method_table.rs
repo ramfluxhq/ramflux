@@ -58,7 +58,7 @@ methods! {
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     NeedsNetwork(AuthorityFromNode) => Actor: ["attachment.enable"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin", "username.mutate", "profile.update", "account.reach.set"];
-    LocalRead(Always) => Actor: ["a2i.list_pending", "agent.approval.list", "agent.job.list", "agent.job.sessions", "device.pair.status", "device.transfer.status"];
+    LocalRead(Always) => Actor: ["a2i.list_pending", "agent.approval.list", "agent.catalog", "agent.job.list", "agent.job.sessions", "device.pair.status", "device.transfer.status", "push.keyset.get"];
     LocalMutation(Always) => Actor: [
         "account.config.set",
         "a2i.acknowledge",
@@ -68,7 +68,10 @@ methods! {
         "agent.job.remove",
         "agent.job.resume",
         "agent.job.session",
+        "agent.pause",
         "agent.progress",
+        "agent.resume",
+        "agent.update",
         "attachment.import.begin",
         "attachment.import.cancel",
         "attachment.import.finish",
@@ -127,6 +130,21 @@ methods! {
         "group.invitation.decline",
         "group.sender_key.export",
         "group.sender_key.import",
+        "debug.mls.key_package",
+        "debug.mls.create",
+        "debug.mls.add",
+        "debug.mls.bulk_add",
+        "debug.mls.join",
+        "debug.mls.send",
+        "debug.mls.receive",
+        "debug.mls.update",
+        "debug.mls.leave",
+        "debug.mls.commit_pending",
+        "debug.mls.remove",
+        "debug.mls.status",
+        "debug.mls.export",
+        "debug.mls.kat",
+        "debug.mls.trust_pinned",
         "itest.migration.approve_once",
         "itest.agent.approve_once",
         "mcp.approval.denied",
@@ -152,8 +170,6 @@ methods! {
         "account.app_lock.configure",
         "account.app_lock.lifecycle",
         "account.app_lock.lock",
-        "account.backup.export",
-        "account.backup.import",
         "account.export_agent_credentials",
         "account.remove_local",
         "account.switch",
@@ -206,6 +222,8 @@ methods! {
         "task.list",
     ];
     LocalRead(Always) => Supervisor: [
+        "diag.export",
+        "diag.snapshot",
         "account.app_lock.state",
         "account.list",
         "daemon.status",
@@ -223,7 +241,11 @@ methods! {
         "contact.card.import",
         "contact.request",
         "contact.safety_number",
+        "device.activity.report",
+        "device.notifications.cleared",
+        "device.push_policy.set",
         "device.push_route.set",
+        "device.push_route.test",
         "device.refresh",
         "device.revoke",
         "device.sync.export",

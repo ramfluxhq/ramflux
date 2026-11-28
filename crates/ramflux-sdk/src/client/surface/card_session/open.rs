@@ -3,7 +3,8 @@
 
 //! Open one session from the current publication of a surface reference.
 use super::body::{self, OpenBody};
-use super::gate::{Admission, admit, card_err, refused};
+use super::codes::typed;
+use super::gate::{Admission, admit, open_err, refused};
 use super::package;
 use super::respond::{View, view};
 use super::spec_build;
@@ -12,7 +13,12 @@ use crate::{RamfluxClient, SdkError};
 use ramflux_card::CardSession;
 use serde_json::Value;
 
-pub(super) fn open(client: &RamfluxClient, account: &str, body: &Value) -> Result<Value, SdkError> {
+pub(super) fn open(
+    client: &RamfluxClient,
+    account: &str,
+    connection: u64,
+    body: &Value,
+) -> Result<Value, SdkError> {
     let parsed: OpenBody = body::parse(body, 4 * 1024)?;
     let (locale, dark) = body::presentation(parsed.locale.as_deref(), parsed.dark);
     match admit(client, &parsed.surface_ref)? {
@@ -23,22 +29,30 @@ pub(super) fn open(client: &RamfluxClient, account: &str, body: &Value) -> Resul
                 state.content().map(|content| content.fallback_text.clone()).unwrap_or_default();
             let spec = spec_build::authorized(&stored, &state, locale, dark)?;
             let spec = super::host_view::stamp(client, spec, &state)?;
+            // A reopen of the same card replaces the held session: free its VM slot first.
+            store::drop_surface(account, &parsed.surface_ref);
             let (session, batch) =
-                CardSession::open(spec, package::bundled()?).map_err(card_err)?;
-            let hash = state.hash().ok_or_else(|| super::super::invalid("card_session_refused"))?;
+                CardSession::open(spec, package::bundled()?).map_err(open_err)?;
+            let hash = state.hash().ok_or_else(|| typed("card_session_refused"))?;
+            let conversation =
+                state.conversation_id().ok_or_else(|| typed("card_session_refused"))?;
             let id = store::insert(
-                account,
-                &parsed.surface_ref,
                 session,
-                &fallback,
-                state.version(),
-                hash,
+                &store::Opened {
+                    account,
+                    connection,
+                    surface_ref: &parsed.surface_ref,
+                    conversation,
+                    fallback: &fallback,
+                    signed_version: state.version(),
+                    signed_hash: hash,
+                },
             )?;
             store::with_session(account, id, |held| {
                 held.set_presentation(locale, dark);
                 Ok(())
             })?;
-            let batch = super::respond::batch_value(&batch)?;
+            let batch = super::respond::batch_value(client, conversation, &batch)?;
             Ok(view(View {
                 result: "opened",
                 allowed: true,

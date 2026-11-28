@@ -26,6 +26,14 @@ pub(crate) fn provider_key(provider: &str) -> Result<Zeroizing<String>, RfError>
     Ok(key)
 }
 
+/// The provider key from stdin alone, for the bus path: no keychain read and no keychain write.
+pub(crate) fn stdin_provider_key(provider: &str) -> Result<Zeroizing<String>, RfError> {
+    if !label_ok(provider) {
+        return Err(refused("field_invalid", "provider"));
+    }
+    read_stdin_key()
+}
+
 fn read_stdin_key() -> Result<Zeroizing<String>, RfError> {
     let mut buf = Zeroizing::new(Vec::new());
     let mut stdin = std::io::stdin();

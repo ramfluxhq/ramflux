@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Unit A rows at pin `238fa1706`: admission limits, history erase, and purge.
+//! Unit A rows at pin `46e829e5`: admission limits, history erase, and purge.
 //! Ignored with the rest of `prx_contract`. No wall-clock wait is added here.
 
 use super::{bounded, capabilities, config, list_revision, put_agent, report, rf_message};

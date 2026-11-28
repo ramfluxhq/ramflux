@@ -14,10 +14,16 @@ pub(super) struct Found {
     pub request_ref: String,
     pub task_binding: TaskBinding,
     pub facts: Option<ApprovalFacts>,
+    /// The approval row's `decision_id`, the id `task.resolve` canonicalizes.
+    pub decision_id: String,
+    pub grant_id: String,
+    /// The task's current version: the newest valid `base_revision`.
+    pub base_revision: u64,
 }
 
 struct Pending {
     approval_id: String,
+    decision_id: String,
     grant_id: String,
     binding: TaskApprovalBinding,
     value: Value,
@@ -67,6 +73,7 @@ fn pending_row(value: &Value, hint: &Hint<'_>) -> Option<Pending> {
     }
     Some(Pending {
         approval_id: approval_id.to_owned(),
+        decision_id: decision_id.to_owned(),
         grant_id: grant_id.to_owned(),
         binding,
         value: value.clone(),
@@ -146,7 +153,7 @@ fn task_hits(hint: Option<&TaskBinding>, binding: &TaskApprovalBinding) -> bool 
 }
 
 fn confirm_current(client: &RamfluxClient, row: Pending) -> Result<Option<Found>, SdkError> {
-    let target = NeedsMe::Approval { grant_id: row.grant_id };
+    let target = NeedsMe::Approval { grant_id: row.grant_id.clone() };
     let fresh = client.task_approval_binding(
         &row.binding.conversation_id,
         &row.binding.task_id,
@@ -155,8 +162,14 @@ fn confirm_current(client: &RamfluxClient, row: Pending) -> Result<Option<Found>
     );
     match fresh {
         Ok(fresh) if fresh == row.binding => {
+            let Some(base_revision) = current_version(client, &row.binding)? else {
+                return Ok(None);
+            };
             let facts = facts_of(&row.value, &row.binding);
             Ok(Some(Found {
+                decision_id: row.decision_id,
+                grant_id: row.grant_id,
+                base_revision,
                 request_ref: row.approval_id,
                 task_binding: TaskBinding {
                     task_id: row.binding.task_id,
@@ -168,6 +181,19 @@ fn confirm_current(client: &RamfluxClient, row: Pending) -> Result<Option<Found>
         Ok(_) => Ok(None),
         Err(error) => closed(error),
     }
+}
+
+/// The task version, when it is not older than the intervention that opened the approval.
+fn current_version(
+    client: &RamfluxClient,
+    binding: &TaskApprovalBinding,
+) -> Result<Option<u64>, SdkError> {
+    let history = match client.task_history(&binding.conversation_id, &binding.task_id) {
+        Ok(history) => history,
+        Err(error) => return closed(error).map(|_| None),
+    };
+    let state = history.state()?;
+    Ok(state.task().map(|task| task.version).filter(|version| *version >= binding.opening_revision))
 }
 
 fn facts_of(value: &Value, binding: &TaskApprovalBinding) -> Option<ApprovalFacts> {

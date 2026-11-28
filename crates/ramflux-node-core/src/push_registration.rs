@@ -33,6 +33,45 @@ pub struct PushRouteRegistration {
     pub webpush_p256dh: Option<String>,
     #[serde(default)]
     pub webpush_auth: Option<String>,
+    /// `true` when `token` is a sealed central token (`st`, central mode only). Omitted when false
+    /// so direct-mode canonical bytes do not change.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sealed: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Largest sealed token (`st`) in bytes, and its base64url length (`sv = 1`, see A2.3).
+pub const SEALED_TOKEN_MIN_BYTES: usize = 52;
+pub const SEALED_TOKEN_MAX_BYTES: usize = 1110;
+
+/// `true` when `token` is a sealed central token: unpadded base64url, 52..1110 bytes, `sv = 1`,
+/// `klen` 1..32, `kid` grammar `^[a-z0-9-]{1,32}$`, and the length of `2 + klen + 32 + 16` at least.
+/// The node never opens the token; it checks only what it can see.
+#[must_use]
+pub fn sealed_token_valid(token: &str) -> bool {
+    let Ok(bytes) = ramflux_protocol::decode_base64url(token) else {
+        return false;
+    };
+    if ramflux_protocol::encode_base64url(&bytes) != token
+        || !(SEALED_TOKEN_MIN_BYTES..=SEALED_TOKEN_MAX_BYTES).contains(&bytes.len())
+        || bytes.first() != Some(&1)
+    {
+        return false;
+    }
+    let Some(&klen) = bytes.get(1) else {
+        return false;
+    };
+    let klen = usize::from(klen);
+    if !(1..=32).contains(&klen) || bytes.len() < 2 + klen + 32 + 16 {
+        return false;
+    }
+    bytes.get(2..2 + klen).is_some_and(|kid| {
+        kid.iter().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+    })
 }
 
 /// APNs host the node will use. FCM and Web Push are production only.
@@ -181,8 +220,10 @@ impl PushRouteRegistration {
                     .as_ref()
                     .is_none_or(|value| value.len() <= 4096 && !value.chars().any(char::is_control))
             });
+        let sealed_valid = !self.sealed || sealed_token_valid(&self.token);
         if !token_valid
             || !keys_valid
+            || !sealed_valid
             || !push_route_tag_valid(&self.route_tag)
             || !capability_matches(&self.provider, self.capability)
         {
@@ -251,4 +292,59 @@ pub enum PushRouteRefusal {
 pub enum PushRouteRegisterAnswer {
     Registered { expires_at: u64 },
     Refused { code: PushRouteRefusal },
+}
+
+/// Gateway path the signed push test request is bound to (client session frame).
+pub const PUSH_ROUTE_TEST_SIGNED_PATH: &str = "/notify/v1/push-route/test";
+/// Notify mesh path of the authenticated push test. The gateway posts its signed test wake here.
+pub const PUSH_ROUTE_TEST_PATH: &str = "/s13/notify/push-test";
+
+/// Client request body of `device.push_route.test`. The route must be one of the caller's own.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushRouteTestRequest {
+    /// Route tag of one of the calling device's registered routes.
+    pub route_tag: String,
+}
+
+/// Gateway to notify mesh request of the push test: the signed wake plus the one route it targets.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushRouteTestMeshRequest {
+    pub device_delivery_id: String,
+    pub signed_wake: ramflux_protocol::SignedWakeV2,
+    pub route_tag: String,
+}
+
+/// Signed session frame of the push test; its signature domain is the route-control one.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushRouteTestFrame {
+    pub signed_request: ramflux_protocol::SignedRequest,
+    pub body: PushRouteTestRequest,
+}
+
+/// Answer of the push test. `queued` means accepted into the wake queue, not delivered.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushRouteTestAnswer {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+}
+
+impl PushRouteTestAnswer {
+    /// Accepted into the wake queue.
+    #[must_use]
+    pub fn queued() -> Self {
+        Self { status: "queued".to_owned(), reason: None, retry_after_ms: None }
+    }
+
+    /// Refused with a closed reason and an optional retry hint.
+    #[must_use]
+    pub fn refused(reason: &str, retry_after_ms: Option<u64>) -> Self {
+        Self { status: "refused".to_owned(), reason: Some(reason.to_owned()), retry_after_ms }
+    }
 }

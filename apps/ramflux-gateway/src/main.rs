@@ -31,8 +31,10 @@ mod pre_auth;
 #[cfg(test)]
 mod pre_auth_transport_tests;
 mod principal_directory;
+mod push_central;
 mod push_queue;
 mod push_registration;
+mod push_test;
 mod quic_dispatch;
 #[cfg(test)]
 mod real_router_fixture;
@@ -185,6 +187,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     shutdown.wait_and_finalize(|| Ok(())).map_err(Into::into)
 }
 
+mod device_policy;
 mod device_set_limit;
 mod durable_work;
 mod startup_admission;

@@ -16,7 +16,7 @@ fn registration_older_than_the_confirmed_deregistration_is_refused()
     let owner = gateway_registered_key(&open)?;
     let now = now_unix_seconds();
     let mut route = notify_webpush_route("fenced-delivery", "web");
-    route.registered_at = now;
+    route.registered_at_ms = now;
     route.expires_at = now + PUSH_ROUTE_TTL_SECONDS;
     assert!(store.register_authenticated_push_route_at(&owner, &route, Some(5))?);
     // The clear (sequence 10) commits first; the registration sent before it (sequence 9)

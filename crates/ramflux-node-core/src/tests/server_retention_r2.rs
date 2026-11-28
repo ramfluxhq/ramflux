@@ -166,7 +166,7 @@ fn device_owner(
 
 fn route_for(target: &str, now: u64) -> DevicePushRoute {
     let mut route = notify_webpush_route(target, "web");
-    route.registered_at = now;
+    route.registered_at_ms = now;
     route.expires_at = now + PUSH_ROUTE_TTL_SECONDS;
     route
 }
@@ -199,7 +199,7 @@ fn provider_collapse_value_is_keyed_per_node() -> Result<(), Box<dyn std::error:
         let store =
             NotifyRedbStore::open_with_route_key(&store_directory_3, NodeSecret::ephemeral()?)?;
         let mut route = notify_webpush_route("delivery", "web");
-        route.registered_at = now;
+        route.registered_at_ms = now;
         route.expires_at = now + 600;
         store.register_push_route(route)?;
         store.update_provider_credential(&notify_webpush_credential("web"))?;

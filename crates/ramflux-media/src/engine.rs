@@ -35,6 +35,11 @@ use crate::jitter::{JitterBuffer, JitterStats, Playout};
 use crate::pipeline::{Inbound, Outbound, PipelineError, Rebinder};
 use crate::relay::MAX_DATAGRAM;
 use crate::session::MediaSession;
+use crate::video::control::VideoControl;
+use crate::video::feedback::Error as FeedbackError;
+use crate::video::packet::AccessUnit;
+use crate::video::reassembly::Reassembler;
+use crate::video::send::{MAX_DATAGRAMS_PER_TURN, Submitted, VideoSender};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Where captured audio comes from.
@@ -125,6 +130,41 @@ pub struct EngineStats {
     pub send_errors: u64,
     /// Rebinding challenges from the relay answered.
     pub rebinds_answered: u64,
+    /// Video fragments authenticated (before reassembly).
+    pub video_authenticated: u64,
+    /// Video packets refused (no gate, authentication, replay or framing).
+    pub video_rejected: u64,
+    /// Video fragments or access units dropped by the bounded reassembly.
+    pub video_dropped: u64,
+    /// Video feedback reports accepted (PT113).
+    pub video_feedback: u64,
+    /// The target video bitrate of the rate controller, bits per second (0 without video).
+    pub video_target_bps: u32,
+    /// The highest keyframe revision the peer asked of this side's video
+    /// (increasing; an IDR submitted on this side acknowledges it).
+    pub keyframe_request_revision: u32,
+    /// The highest peer keyframe request this side has acknowledged by queueing an IDR.
+    pub keyframe_ack_revision: u32,
+    /// Complete video access units reassembled (drained by the itest synthetic source only).
+    pub video_access_units: u64,
+    /// Video datagrams sent.
+    pub video_sent: u64,
+    /// Bytes of the video datagrams sent (the bitrate evidence).
+    pub video_sent_bytes: u64,
+    /// IDR access units the itest synthetic source queued (periodic or answering a request).
+    pub video_idr_sent: u64,
+    /// Keyframe requests the itest synthetic source raised after a reassembly drop.
+    pub video_keyframe_requests: u64,
+    /// Peer keyframe requests the itest synthetic source answered with an IDR.
+    pub video_keyframes_answered: u64,
+    /// Video access units dropped before sending (queue full, or waiting for a keyframe).
+    pub video_send_dropped: u64,
+    /// Video datagrams that failed to send or to seal.
+    pub video_send_errors: u64,
+    /// Packets refused because their `SFrame` KID belongs to another track
+    /// (audio KIDs on PT112/PT113, video KIDs on PT111). Also counted in
+    /// `rejected` or `video_rejected`.
+    pub kid_mismatch: u64,
 }
 
 #[derive(Debug, Default)]
@@ -142,6 +182,9 @@ pub struct Engine {
     stop: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
+    video: Arc<Mutex<Reassembler>>,
+    video_out: Option<Arc<Mutex<VideoSender>>>,
+    control: Arc<Mutex<VideoControl>>,
     threads: Vec<JoinHandle<()>>,
     local: SocketAddr,
 }
@@ -209,6 +252,9 @@ impl Engine {
         let ssrc = random_u32()?;
         let initial = random_u32()?;
         let outbound = Outbound::new(&mut session, ssrc, (initial >> 16) as u16, random_u32()?)?;
+        let video_ssrc = random_u32()?;
+        let video_out = VideoSender::new(&mut session, video_ssrc, (random_u32()? >> 16) as u16)?
+            .map(|sender| Arc::new(Mutex::new(sender)));
         let inbound = Inbound::new(&session)?;
         let rebinder = Rebinder::new(&mut session);
         drop(session);
@@ -219,6 +265,8 @@ impl Engine {
         let muted = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(Mutex::new(Shared::default()));
         let jitter = Arc::new(Mutex::new(JitterBuffer::new()));
+        let video = Arc::new(Mutex::new(Reassembler::new()));
+        let control = Arc::new(Mutex::new(VideoControl::new()));
         let started = Instant::now();
         let send_socket = socket.try_clone()?;
 
@@ -231,6 +279,8 @@ impl Engine {
             stop: stop.clone(),
             muted: muted.clone(),
             shared: shared.clone(),
+            video: video_out.clone(),
+            control: control.clone(),
         };
         let receiver = ReceiveLoop {
             socket,
@@ -238,6 +288,9 @@ impl Engine {
             inbound,
             rebinder,
             jitter: jitter.clone(),
+            video: video.clone(),
+            video_out: video_out.clone(),
+            control: control.clone(),
             authorization: authorization.clone(),
             stop: stop.clone(),
             shared: shared.clone(),
@@ -251,11 +304,22 @@ impl Engine {
             stop: stop.clone(),
             shared: shared.clone(),
         };
-        let mut engine =
-            Self { authorization, jitter, stop, muted, shared, threads: Vec::new(), local };
+        let mut engine = Self {
+            authorization,
+            jitter,
+            stop,
+            muted,
+            shared,
+            video,
+            video_out,
+            control,
+            threads: Vec::new(),
+            local,
+        };
         engine.threads.push(spawn("ramflux-call-send", move || sender.run())?);
         engine.threads.push(spawn("ramflux-call-receive", move || receiver.run())?);
         engine.threads.push(spawn("ramflux-call-playout", move || player.run())?);
+        spawn_synthetic_video(&mut engine)?;
         Ok(engine)
     }
 
@@ -284,6 +348,81 @@ impl Engine {
         self.authorization.snapshot()
     }
 
+    /// Sets video authority, independent of audio. Turning it off drops the
+    /// pending video units. Refused once the gate is closed or retired.
+    #[must_use]
+    pub fn video_active(&self, active: bool) -> bool {
+        let accepted = self.authorization.activate_video(active);
+        if !active {
+            *lock_video(&self.video) = Reassembler::new();
+            self.flush_video();
+        }
+        accepted
+    }
+
+    /// Asks the peer for a keyframe (PT113 request revision, repeated until acknowledged).
+    ///
+    /// # Errors
+    ///
+    /// [`FeedbackError::Wrap`] when the revision would wrap.
+    pub fn request_keyframe(&self) -> Result<u32, FeedbackError> {
+        lock_control(&self.control).request_keyframe()
+    }
+
+    /// The host calls this after it produced the IDR for the peer's request
+    /// `revision` (the peer then sees the acknowledgement).
+    pub fn keyframe_applied(&self, revision: u32) {
+        lock_control(&self.control).apply_keyframe(revision);
+    }
+
+    /// Queues one encoded access unit on the video track. Refused (counted
+    /// as dropped) while the video gate is closed. A full queue flushes to
+    /// the next keyframe (see [`VideoSender::submit`]). An IDR that is queued
+    /// acknowledges the peer's current keyframe request.
+    ///
+    /// # Errors
+    ///
+    /// [`PipelineError::VideoNotNegotiated`] without video keys, or
+    /// [`PipelineError::Video`] for a malformed access unit.
+    pub fn submit_video(&self, au: &AccessUnit) -> Result<Submitted, PipelineError> {
+        let out = self.video_out.as_ref().ok_or(PipelineError::VideoNotNegotiated)?;
+        submit_video_on(&self.authorization, &self.control, out, &self.shared, au)
+    }
+
+    fn flush_video(&self) {
+        if let Some(out) = self.video_out.as_ref() {
+            lock_sender(out).flush();
+        }
+        *lock_control(&self.control) = VideoControl::new();
+    }
+
+    /// Byte length of the next complete video access unit, after expiry, without removing it.
+    /// A reassembly drop observed here asks the peer for a keyframe.
+    #[must_use]
+    pub fn next_video_access_unit_len(&self) -> Option<usize> {
+        let (len, dropped) = {
+            let mut video = lock_video(&self.video);
+            let len = video.front_len(Instant::now());
+            (len, video.dropped())
+        };
+        let _ = lock_control(&self.control).request_if_dropped(dropped);
+        len
+    }
+
+    /// The next complete video access unit, in presentation order (expired
+    /// partial units are dropped first). A reassembly drop observed here asks
+    /// the peer for a keyframe.
+    #[must_use]
+    pub fn take_video_access_unit(&self) -> Option<AccessUnit> {
+        let (unit, dropped) = {
+            let mut video = lock_video(&self.video);
+            let unit = video.pop_ready(Instant::now());
+            (unit, video.dropped())
+        };
+        let _ = lock_control(&self.control).request_if_dropped(dropped);
+        unit
+    }
+
     fn flush_playout(&self) {
         *self.jitter.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
             JitterBuffer::new();
@@ -294,6 +433,8 @@ impl Engine {
     pub fn fence(&self, reason: GateReason) -> GateSnapshot {
         self.authorization.retire(reason);
         self.flush_playout();
+        *lock_video(&self.video) = Reassembler::new();
+        self.flush_video();
         self.authorization.snapshot()
     }
 
@@ -316,8 +457,17 @@ impl Engine {
 
     /// The counters so far.
     pub fn stats(&self) -> EngineStats {
+        let (video_target_bps, keyframe_request_revision, keyframe_ack_revision) = {
+            let control = lock_control(&self.control);
+            (control.target_bps(), control.peer_request(), control.applied())
+        };
         let shared = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut stats = shared.stats;
+        if self.video_out.is_some() {
+            stats.video_target_bps = video_target_bps;
+        }
+        stats.keyframe_request_revision = keyframe_request_revision;
+        stats.keyframe_ack_revision = keyframe_ack_revision;
         stats.since_last_packet_ms = shared
             .last_packet
             .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX));
@@ -382,6 +532,148 @@ fn lock(shared: &Mutex<Shared>) -> std::sync::MutexGuard<'_, Shared> {
     shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// The submit path shared by [`Engine::submit_video`] and the itest synthetic source.
+fn submit_video_on(
+    authorization: &Authorization,
+    control: &Mutex<VideoControl>,
+    out: &Mutex<VideoSender>,
+    shared: &Mutex<Shared>,
+    au: &AccessUnit,
+) -> Result<Submitted, PipelineError> {
+    let outcome = if authorization.lock().admitted_video() {
+        let paused = {
+            let mut control = lock_control(control);
+            control.note_outbound_revision(au.track_revision);
+            control.paused()
+        };
+        if paused {
+            Submitted { queued: false, dropped: 1 }
+        } else {
+            let submitted = lock_sender(out).submit(au, Instant::now())?;
+            if au.idr && submitted.queued {
+                let mut control = lock_control(control);
+                let request = control.peer_request();
+                control.apply_keyframe(request);
+            }
+            submitted
+        }
+    } else {
+        Submitted { queued: false, dropped: 1 }
+    };
+    if outcome.dropped > 0 {
+        let dropped = u64::try_from(outcome.dropped).unwrap_or(u64::MAX);
+        lock(shared).stats.video_send_dropped += dropped;
+    }
+    Ok(outcome)
+}
+
+/// Starts the synthetic video source on a call with a video track (itest builds only).
+#[cfg(feature = "itest-synthetic-video")]
+fn spawn_synthetic_video(engine: &mut Engine) -> std::io::Result<()> {
+    let Some(out) = engine.video_out.clone() else {
+        return Ok(());
+    };
+    let authorization = engine.authorization.clone();
+    let control = engine.control.clone();
+    let video = engine.video.clone();
+    let shared = engine.shared.clone();
+    let stop = engine.stop.clone();
+    engine.threads.push(spawn("ramflux-call-synthetic-video", move || {
+        let feed = Feed { authorization: &authorization, control: &control, video: &video };
+        synthetic_feeder(&feed, &out, &shared, &stop);
+    })?);
+    Ok(())
+}
+
+#[cfg(not(feature = "itest-synthetic-video"))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the itest build of this function returns the thread spawn error"
+)]
+fn spawn_synthetic_video(_engine: &mut Engine) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// The shared state the itest synthetic source runs against.
+#[cfg(feature = "itest-synthetic-video")]
+struct Feed<'a> {
+    authorization: &'a Authorization,
+    control: &'a Mutex<VideoControl>,
+    video: &'a Mutex<Reassembler>,
+}
+
+/// One synthetic access unit per frame interval while the video gate admits. An IDR every
+/// `IDR_EVERY` frames, and an IDR answering each new peer keyframe request (then acknowledged).
+/// It also drains complete received units (counted) and asks the peer for a keyframe whenever
+/// the bounded reassembly drops a unit (loss).
+#[cfg(feature = "itest-synthetic-video")]
+fn synthetic_feeder(
+    feed: &Feed<'_>,
+    out: &Mutex<VideoSender>,
+    shared: &Mutex<Shared>,
+    stop: &AtomicBool,
+) {
+    use crate::video::synthetic::{FRAME_INTERVAL, IDR_EVERY, access_unit};
+    let mut index = 0_u64;
+    let mut applied = lock_control(feed.control).peer_request();
+    let mut seen_drops = 0_u64;
+    while !stop.load(Ordering::SeqCst) {
+        if feed.authorization.lock().retired {
+            break;
+        }
+        let now = Instant::now();
+        let mut complete = 0_u64;
+        while lock_video(feed.video).pop_ready(now).is_some() {
+            complete += 1;
+        }
+        let drops = lock_video(feed.video).dropped();
+        {
+            let mut stats = lock(shared);
+            stats.stats.video_access_units += complete;
+        }
+        if drops > seen_drops {
+            seen_drops = drops;
+            // The receive path already asks on a push drop. This covers expiry
+            // from the feeder's own drain, and does not ask a second time.
+            if lock_control(feed.control).request_if_dropped(drops) {
+                lock(shared).stats.video_keyframe_requests += 1;
+            }
+        }
+        if feed.authorization.lock().admitted_video() {
+            let request = lock_control(feed.control).peer_request();
+            let answer = request != applied;
+            let idr = answer || index % IDR_EVERY == 0;
+            let au = access_unit(index, idr);
+            let queued = submit_video_on(feed.authorization, feed.control, out, shared, &au)
+                .is_ok_and(|outcome| outcome.queued);
+            if idr && queued {
+                lock(shared).stats.video_idr_sent += 1;
+            }
+            if answer {
+                lock_control(feed.control).apply_keyframe(request);
+                applied = request;
+            }
+            if answer {
+                lock(shared).stats.video_keyframes_answered += 1;
+            }
+            index = index.saturating_add(1);
+        }
+        std::thread::sleep(FRAME_INTERVAL);
+    }
+}
+
+fn lock_video(video: &Mutex<Reassembler>) -> std::sync::MutexGuard<'_, Reassembler> {
+    video.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock_sender(video: &Mutex<VideoSender>) -> std::sync::MutexGuard<'_, VideoSender> {
+    video.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock_control(control: &Mutex<VideoControl>) -> std::sync::MutexGuard<'_, VideoControl> {
+    control.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 struct SendLoop {
     socket: UdpSocket,
     endpoint: SocketAddr,
@@ -391,6 +683,8 @@ struct SendLoop {
     stop: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
+    video: Option<Arc<Mutex<VideoSender>>>,
+    control: Arc<Mutex<VideoControl>>,
 }
 
 impl SendLoop {
@@ -407,6 +701,7 @@ impl SendLoop {
                 if !gate.admitted() {
                     drop(gate);
                     self.capture.discard_pending();
+                    self.video_turn();
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 }
@@ -436,6 +731,8 @@ impl SendLoop {
                     let _ = self.socket.send_to(&keepalive, self.endpoint);
                     last_sent = Instant::now();
                 }
+                drop(gate);
+                self.video_turn();
                 continue;
             };
             let mut frame = frame;
@@ -450,6 +747,7 @@ impl SendLoop {
             let sent = self.outbound.packet(&frame).ok().and_then(|datagram| {
                 gate.admitted().then(|| self.socket.send_to(&datagram, self.endpoint).is_ok())
             });
+            drop(gate);
             last_sent = Instant::now();
             let mut shared = lock(&self.shared);
             match sent {
@@ -457,6 +755,56 @@ impl SendLoop {
                 _ => shared.stats.send_errors += 1,
             }
             shared.stats.microphone_blocked = silent_frames >= BLOCKED_AFTER_FRAMES;
+            drop(shared);
+            self.video_turn();
+        }
+    }
+
+    /// Sends the video datagrams the pacer allows. It runs after this turn's
+    /// audio send, under the video gate, and never holds the gate and the
+    /// sender while it waits for anything.
+    fn video_turn(&self) {
+        let Some(video) = self.video.as_ref() else {
+            return;
+        };
+        let mut gate = self.authorization.lock();
+        if !gate.admitted_video() {
+            return;
+        }
+        let now = Instant::now();
+        let (report, paused) = {
+            let mut control = lock_control(&self.control);
+            control.tick(now);
+            (control.report_due(now), control.paused())
+        };
+        let mut sender = lock_sender(video);
+        if let Some(report) = report {
+            sender.queue_feedback(&report);
+        }
+        // A paused sender still sends its feedback so the peer does not see stale reports.
+        for _ in 0..MAX_DATAGRAMS_PER_TURN {
+            let next = if paused {
+                sender.next_feedback_datagram(Instant::now())
+            } else {
+                sender.next_datagram(Instant::now())
+            };
+            match next {
+                Ok(Some(datagram)) => {
+                    let sent = self.socket.send_to(&datagram, self.endpoint).is_ok();
+                    let mut shared = lock(&self.shared);
+                    if sent {
+                        shared.stats.video_sent += 1;
+                        shared.stats.video_sent_bytes += u64::try_from(datagram.len()).unwrap_or(0);
+                    } else {
+                        shared.stats.video_send_errors += 1;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    lock(&self.shared).stats.video_send_errors += 1;
+                    break;
+                }
+            }
         }
     }
 }
@@ -467,6 +815,9 @@ struct ReceiveLoop {
     inbound: Inbound,
     rebinder: Rebinder,
     jitter: Arc<Mutex<JitterBuffer>>,
+    video: Arc<Mutex<Reassembler>>,
+    video_out: Option<Arc<Mutex<VideoSender>>>,
+    control: Arc<Mutex<VideoControl>>,
     authorization: Arc<Authorization>,
     stop: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
@@ -489,11 +840,31 @@ impl ReceiveLoop {
             let Some(datagram) = buffer.get(..len).filter(|bytes| !bytes.is_empty()) else {
                 continue;
             };
+            // Audio (PT111) and video (PT112) share this socket; each track
+            // has its own gate, so video authority never depends on audio_active.
+            let video = Inbound::is_video(datagram);
+            let feedback = !video && Inbound::is_feedback(datagram);
             let mut gate = self.authorization.lock();
-            if !gate.admitted() {
+            let admitted = if video || feedback { gate.admitted_video() } else { gate.admitted() };
+            if !admitted {
                 if gate.retired {
                     break;
                 }
+                continue;
+            }
+            if video {
+                receive_video(
+                    &mut self.inbound,
+                    &self.video,
+                    &self.control,
+                    &self.shared,
+                    datagram,
+                );
+                continue;
+            }
+            if feedback {
+                let out = self.video_out.as_deref();
+                receive_feedback(&mut self.inbound, out, &self.control, &self.shared, datagram);
                 continue;
             }
             if Rebinder::is_challenge(datagram) {
@@ -524,9 +895,85 @@ impl ReceiveLoop {
                     shared.last_packet = Some(Instant::now());
                     shared.stats.authenticated += 1;
                 }
-                Err(_) => lock(&self.shared).stats.rejected += 1,
+                Err(error) => {
+                    let mut shared = lock(&self.shared);
+                    shared.stats.rejected += 1;
+                    if matches!(error, PipelineError::KidMismatch) {
+                        shared.stats.kid_mismatch += 1;
+                    }
+                }
             }
         }
+    }
+}
+
+/// Authenticates one video fragment and feeds the bounded reassembly. Runs
+/// under the video gate the caller holds.
+fn receive_video(
+    inbound: &mut Inbound,
+    video: &Mutex<Reassembler>,
+    control: &Mutex<VideoControl>,
+    shared: &Mutex<Shared>,
+    datagram: &[u8],
+) {
+    match inbound.open_video(datagram) {
+        Ok(received) => {
+            let now = Instant::now();
+            lock_control(control).on_fragment(
+                &received.fragment,
+                received.extended_sequence,
+                datagram.len(),
+                now,
+            );
+            let (outcome, dropped) = {
+                let mut video = lock_video(video);
+                let outcome = video.push(&received.fragment, &received.payload, now);
+                // Incomplete units expire here, not only when the host takes.
+                video.expire(now);
+                (outcome, video.dropped())
+            };
+            // A reassembly drop (eviction, expiry pressure, or a broken unit)
+            // asks the peer for an IDR. The itest feeder does not own this.
+            let _ = lock_control(control).request_if_dropped(dropped);
+            let mut stats = lock(shared);
+            match outcome {
+                Ok(_) => stats.stats.video_authenticated += 1,
+                Err(_) => stats.stats.video_dropped += 1,
+            }
+        }
+        Err(error) => count_video_refusal(shared, &error),
+    }
+}
+
+/// Authenticates one feedback report (PT113) and feeds the control state.
+/// Runs under the video gate the caller holds.
+fn receive_feedback(
+    inbound: &mut Inbound,
+    out: Option<&Mutex<VideoSender>>,
+    control: &Mutex<VideoControl>,
+    shared: &Mutex<Shared>,
+    datagram: &[u8],
+) {
+    match inbound.open_feedback(datagram) {
+        Ok(report) => {
+            let now = Instant::now();
+            let queue_ms = out.map_or(0, |out| lock_sender(out).queue_age_ms(now));
+            let outcome = lock_control(control).on_feedback(report, now, queue_ms);
+            let mut stats = lock(shared);
+            match outcome {
+                Ok(()) => stats.stats.video_feedback += 1,
+                Err(_) => stats.stats.video_rejected += 1,
+            }
+        }
+        Err(error) => count_video_refusal(shared, &error),
+    }
+}
+
+fn count_video_refusal(shared: &Mutex<Shared>, error: &PipelineError) {
+    let mut stats = lock(shared);
+    stats.stats.video_rejected += 1;
+    if matches!(error, PipelineError::KidMismatch) {
+        stats.stats.kid_mismatch += 1;
     }
 }
 

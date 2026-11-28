@@ -2,28 +2,88 @@
 // Copyright (c) 2026 Span Brain
 
 //! PRX follow-up for the desktop daemon. The account writer does not call PRX.
-//! Limits are published after `agent.create` returns a plan anchor. Purge runs
+//! The full config of an agent is published after `agent.create` returns a plan anchor (AGENT-MGMT-01A:
+//! provider, model, autonomy, prompt, tools, enabled and limits, with or without limits). Purge runs
 //! after local `agent.delete`. History erase uses the conversation id as the
 //! session id, which matches PRX only when that session was created with the
 //! same key. The agent host's server-assigned session is a separate path.
 
 use ramflux_protocol::decode_base64url;
 use ramflux_protocol::message as g;
-use ramflux_prx_client::{AgentLimits, AgentName, ApiCode, PrxClient, PrxError};
+use ramflux_prx_client::{
+    AgentConfig, AgentLimits, AgentName, ApiCode, ApplyOutcome, PrxClient, PrxError,
+};
 use std::path::Path;
 
 use crate::SdkError;
 
-/// Limits copied off an `agent.create` body before the account writer takes it.
-pub(crate) struct LimitPublish {
-    pub(crate) provider: String,
-    pub(crate) model: String,
-    pub(crate) tools: Vec<String>,
-    pub(crate) turns: Option<u32>,
-    pub(crate) cost: Option<u64>,
+/// The config of an `agent.create` body, copied off before the account writer takes it.
+pub(crate) struct ConfigPublish {
+    config: AgentConfig,
+    /// The create carried `confirmed: true`, so a PRX high-risk confirmation is answered once.
+    confirmed: bool,
 }
 
-/// Publishes limits and purges after the account writer has finished.
+impl ConfigPublish {
+    /// The config of a create body. `None` when the body has no config or the config is not one
+    /// PRX accepts; the account writer refuses such a create before any effect.
+    pub(crate) fn of(body: &g::AgentCreate) -> Option<Self> {
+        use crate::agent_record::config as fields;
+        let config = body.config.as_ref()?;
+        let limits = config.limits.as_ref().map(|limits| AgentLimits {
+            max_concurrent_turns: limits.max_concurrent_turns,
+            max_cost_per_day_cents: limits.max_cost_per_day_cents,
+        });
+        Some(Self {
+            config: AgentConfig {
+                provider: config.provider.clone(),
+                model: config.model.clone(),
+                prompt: config.prompt.clone(),
+                autonomy: if config.autonomy.is_empty() {
+                    ramflux_prx_client::Autonomy::Full
+                } else {
+                    fields::autonomy_of(&config.autonomy)?
+                },
+                tools: fields::tools_of(&config.tools),
+                enabled: config.enabled.unwrap_or(true),
+                limits,
+                approval_wait_secs: ramflux_prx_client::DEFAULT_APPROVAL_WAIT_SECS,
+            },
+            confirmed: body.confirmed == Some(true),
+        })
+    }
+}
+
+impl ConfigPublish {
+    /// Asks PRX before the account writer saves anything: its capabilities must answer, and the
+    /// requested tool names must be in its catalog, so a create PRX would refuse for those reasons
+    /// leaves no local request. No client means nothing to check. The agent anchor does not exist
+    /// until the account writer has stored the request, so the PUT itself can only follow it.
+    ///
+    /// # Errors
+    /// `agent_tools_invalid` when a name is not in the catalog; a capabilities or catalog failure
+    /// maps like any other PRX failure (`prx_unavailable`, ...).
+    pub(crate) async fn precheck(&self, client: Option<&PrxClient>) -> Result<(), SdkError> {
+        let Some(client) = client else {
+            return Ok(());
+        };
+        client.capabilities().await.map_err(|error| map_prx(&error))?;
+        let ramflux_prx_client::Tools::List(names) = &self.config.tools else {
+            return Ok(());
+        };
+        if names.is_empty() {
+            return Ok(());
+        }
+        let catalog = client.catalog().await.map_err(|error| map_prx(&error))?;
+        if names.iter().all(|name| catalog.tools.iter().any(|tool| tool.name == *name)) {
+            Ok(())
+        } else {
+            Err(SdkError::PrxCall("agent_tools_invalid"))
+        }
+    }
+}
+
+/// Publishes the config and purges after the account writer has finished.
 /// No client means the local result stands and nothing is sent.
 ///
 /// # Errors
@@ -32,7 +92,7 @@ pub(crate) struct LimitPublish {
 pub(crate) async fn after_agent(
     client: Option<&PrxClient>,
     data_root: &Path,
-    publish: Option<&LimitPublish>,
+    publish: Option<&ConfigPublish>,
     purge_anchor: Option<&str>,
     result: &g::AgentConfigResult,
 ) -> Result<(), SdkError> {
@@ -41,12 +101,65 @@ pub(crate) async fn after_agent(
     };
     if let Some(publish) = publish {
         let anchor = custody_anchor(result).ok_or(SdkError::PrxCall("prx_rejected"))?;
-        publish_limits(client, anchor, publish).await?;
+        publish_config(client, anchor, publish).await?;
     }
     if let Some(anchor) = purge_anchor {
         purge_agent(client, data_root, anchor).await?;
     }
     Ok(())
+}
+
+/// Best effort after a refused create: when PRX holds the agent for this anchor (the outcome of
+/// the PUT was unknown), retire and purge it. Failures are logged and never returned.
+pub(crate) async fn abandon_publish(client: &PrxClient, anchor: &str) {
+    let Ok(name) = name_from_anchor(anchor) else {
+        return;
+    };
+    let Ok(caps) = client.capabilities().await else {
+        return;
+    };
+    // A refused PUT stores nothing, so a failed read is the normal case and is not logged.
+    let Ok(readback) = client.get(&caps, &name).await else {
+        return;
+    };
+    let key = stable_key("rf-purge-", anchor);
+    if let Err(error) = client.retire_and_purge(&caps, &name, &readback.revision, &key).await {
+        tracing::warn!(step = "prx", error = %map_prx(&error), "agent create cleanup failed");
+    }
+}
+
+/// An `agent.get` shows the agent's revision (`config::agent_revision`, the value `agent.update`
+/// compares). When PRX is reachable and holds the config the mirror shows, the revision is
+/// computed from PRX's current config, also over an older mirrored one. A PRX that is absent,
+/// down, or holds another config leaves the reply as the mirror has it.
+pub(crate) async fn fill_revision(
+    client: Option<&PrxClient>,
+    mut result: g::AgentConfigResult,
+) -> g::AgentConfigResult {
+    let (Some(client), Some(g::agent_config_result::Value::Record(record))) =
+        (client, result.value.as_mut())
+    else {
+        return result;
+    };
+    if record.lifecycle != crate::agent_record::LIFECYCLE_ACTIVE {
+        return result;
+    }
+    let Some(mirror) = record.config.as_ref().and_then(crate::agent_record::config::config_of_wire)
+    else {
+        return result;
+    };
+    let Ok(name) = name_from_anchor(&record.agent_anchor) else {
+        return result;
+    };
+    let Ok(caps) = client.capabilities().await else {
+        return result;
+    };
+    if let Ok(current) = client.get(&caps, &name).await
+        && crate::agent_record::config::configs_match(&mirror, &current.config)
+    {
+        record.revision = Some(crate::agent_record::config::agent_revision(&current.config));
+    }
+    result
 }
 
 /// Best-effort session erase after an everyone-delete has already committed locally.
@@ -63,25 +176,29 @@ pub(crate) async fn erase_if_configured(
     }
 }
 
-async fn publish_limits(
+async fn publish_config(
     client: &PrxClient,
     anchor: &str,
-    publish: &LimitPublish,
+    publish: &ConfigPublish,
 ) -> Result<(), SdkError> {
     let name = name_from_anchor(anchor)?;
     let caps = client.capabilities().await.map_err(|error| map_prx(&error))?;
-    let limits =
-        AgentLimits { max_concurrent_turns: publish.turns, max_cost_per_day_cents: publish.cost };
-    let spec = ramflux_prx_client::NamedLimits {
-        provider: &publish.provider,
-        model: &publish.model,
-        tool_names: &publish.tools,
-        limits: &limits,
-    };
-    ramflux_prx_client::publish_named_limits(client, &caps, &name, &spec)
+    let outcome = client
+        .apply_agent(&caps, &name, &publish.config, None)
         .await
         .map_err(|error| map_prx(&error))?;
-    Ok(())
+    match outcome {
+        ApplyOutcome::Applied(_) | ApplyOutcome::AlreadyApplied(_) => Ok(()),
+        ApplyOutcome::NeedsConfirmation { revision } if publish.confirmed => client
+            .put(&caps, &name, &publish.config, &revision, true)
+            .await
+            .map(|_| ())
+            .map_err(|error| map_prx(&error)),
+        ApplyOutcome::NeedsConfirmation { .. } => {
+            Err(SdkError::AgentCreationRefused("confirmation_required"))
+        }
+        ApplyOutcome::NeedsReview { .. } => Err(SdkError::PrxCall("revision_conflict")),
+    }
 }
 
 async fn purge_agent(client: &PrxClient, data_root: &Path, anchor: &str) -> Result<(), SdkError> {
@@ -137,7 +254,7 @@ fn custody_anchor(result: &g::AgentConfigResult) -> Option<&str> {
     }
 }
 
-fn name_from_anchor(anchor: &str) -> Result<AgentName, SdkError> {
+pub(crate) fn name_from_anchor(anchor: &str) -> Result<AgentName, SdkError> {
     let bytes = decode_base64url(anchor).map_err(|_| SdkError::PrxCall("prx_rejected"))?;
     let array: [u8; 32] = bytes.try_into().map_err(|_| SdkError::PrxCall("prx_rejected"))?;
     Ok(AgentName::from_anchor(&array))
@@ -149,10 +266,86 @@ fn map_prx(error: &PrxError) -> SdkError {
         PrxError::Api { code: ApiCode::ModelCapabilitiesUnknown, .. } => {
             SdkError::PrxCall("model_capabilities_unknown")
         }
+        // PRX answers `agent_tools_invalid` when a tool name is not in its catalog; keep the
+        // code so the caller sees which field was refused.
+        PrxError::Api { code: ApiCode::AgentToolsInvalid, .. } => {
+            SdkError::PrxCall("agent_tools_invalid")
+        }
+        PrxError::Api { code: ApiCode::FieldInvalid, .. } => SdkError::PrxCall("field_invalid"),
+        PrxError::Api { code: ApiCode::RevisionConflict, .. } => {
+            SdkError::PrxCall("revision_conflict")
+        }
         PrxError::Unsupported { .. } => SdkError::PrxCall("prx_unsupported"),
         PrxError::Unavailable | PrxError::Timeout => SdkError::PrxCall("prx_unavailable"),
-        _ => SdkError::PrxCall("prx_rejected"),
+        _ => rejected(error),
     }
+}
+
+/// The `prx_rejected` refusal for a PRX failure with no rf code of its own. The rf code stays,
+/// and `details` carries what PRX answered (its code and HTTP status when it sent them, and the
+/// client's one-line description, which holds no secret) so the cause can be diagnosed.
+pub(crate) fn rejected(error: &PrxError) -> SdkError {
+    if let PrxError::RateLimited { retry_after_ms } = error {
+        return rate_limited(*retry_after_ms);
+    }
+    let (prx_code, prx_status) = match error {
+        PrxError::Api { code, status, .. } => (Some(api_code_text(code)), Some(*status)),
+        _ => (None, None),
+    };
+    let body = serde_json::json!({
+        "reason_code": "prx_rejected",
+        "details": {
+            "cause": "prx_rejected",
+            "prx_code": prx_code,
+            "prx_status": prx_status,
+            "message": error.to_string(),
+        },
+    });
+    SdkError::LocalBusRefused {
+        code: "prx_rejected".to_owned(),
+        message: "prx_rejected".to_owned(),
+        body: Box::new(body),
+    }
+}
+
+/// PRX answered HTTP 429: its own request limit, not a refusal of the request. The rf code is
+/// `prx_rate_limited`; `details` has `retry_after_ms` when PRX sent one and `prx_status` 429.
+fn rate_limited(retry_after_ms: Option<u64>) -> SdkError {
+    let body = serde_json::json!({
+        "reason_code": "prx_rate_limited",
+        "details": {
+            "cause": "prx_rate_limited",
+            "prx_code": "rate_limited",
+            "prx_status": 429,
+            "retry_after_ms": retry_after_ms,
+            "message": "PRX rate-limited the request",
+        },
+    });
+    SdkError::LocalBusRefused {
+        code: "prx_rate_limited".to_owned(),
+        message: "prx_rate_limited".to_owned(),
+        body: Box::new(body),
+    }
+}
+
+/// PRX's wire spelling of an error code (`snake_case`); an unknown code is PRX's own string,
+/// bounded and limited to printable ASCII.
+fn api_code_text(code: &ApiCode) -> String {
+    if let ApiCode::Unknown(text) = code {
+        return text.chars().filter(char::is_ascii_graphic).take(64).collect();
+    }
+    let mut out = String::new();
+    for (index, ch) in format!("{code:?}").chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn stable_key(prefix: &str, material: &str) -> String {

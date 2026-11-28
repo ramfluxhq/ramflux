@@ -6,6 +6,8 @@
 use super::actor::{AccountActor, PrivateCommand};
 use crate::SdkError;
 use crate::client::call::InProcessMediaStatus;
+use crate::client::call::media_owner::TakeOutcome;
+use ramflux_media::video::packet::AccessUnit;
 use ramflux_media::{Capture, Playback};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -28,6 +30,19 @@ pub(crate) enum MediaCommand {
     Close {
         call_id: String,
     },
+    SubmitVideo {
+        call_id: String,
+        au: Box<AccessUnit>,
+    },
+    TakeVideo {
+        call_id: String,
+        capacity: usize,
+    },
+}
+
+pub(crate) enum MediaResult {
+    Status(Box<InProcessMediaStatus>),
+    Taken(TakeOutcome),
 }
 
 /// Trusted host-side control of the engine in this process; adapters see PCM only.
@@ -56,7 +71,7 @@ impl InProcessMediaControl {
         capture: Box<dyn Capture>,
         playback: Box<dyn Playback>,
     ) -> Result<InProcessMediaStatus, SdkError> {
-        self.request(
+        self.status_request(
             account,
             MediaCommand::Open { call_id: call_id.to_owned(), expected_seq, capture, playback },
         )
@@ -71,7 +86,7 @@ impl InProcessMediaControl {
         account: &str,
         call_id: &str,
     ) -> Result<InProcessMediaStatus, SdkError> {
-        self.request(account, MediaCommand::Status { call_id: call_id.to_owned() }).await
+        self.status_request(account, MediaCommand::Status { call_id: call_id.to_owned() }).await
     }
 
     /// Report audio readiness. A host report cannot open an SDK authority gate.
@@ -83,8 +98,11 @@ impl InProcessMediaControl {
         call_id: &str,
         active: bool,
     ) -> Result<InProcessMediaStatus, SdkError> {
-        self.request(account, MediaCommand::AudioActive { call_id: call_id.to_owned(), active })
-            .await
+        self.status_request(
+            account,
+            MediaCommand::AudioActive { call_id: call_id.to_owned(), active },
+        )
+        .await
     }
 
     /// Close and drain. This does not hang up or allow a second take.
@@ -95,14 +113,66 @@ impl InProcessMediaControl {
         account: &str,
         call_id: &str,
     ) -> Result<InProcessMediaStatus, SdkError> {
-        self.request(account, MediaCommand::Close { call_id: call_id.to_owned() }).await
+        self.status_request(account, MediaCommand::Close { call_id: call_id.to_owned() }).await
     }
 
-    async fn request(
+    /// Copy one encoded access unit onto the live in-process video track.
+    ///
+    /// # Errors
+    /// Returns the owning writer's typed refusal. A unit that is not queued is refused.
+    pub async fn submit_video(
+        &self,
+        account: &str,
+        call_id: &str,
+        au: AccessUnit,
+    ) -> Result<InProcessMediaStatus, SdkError> {
+        self.status_request(
+            account,
+            MediaCommand::SubmitVideo { call_id: call_id.to_owned(), au: Box::new(au) },
+        )
+        .await
+    }
+
+    /// Copy one complete access unit out when it fits in `capacity`.
+    /// `Ok(None)` means the queue is empty. A unit larger than `capacity` stays queued.
+    ///
+    /// # Errors
+    /// Returns the owning writer's typed refusal, including a unit that does not fit.
+    pub async fn take_video(
+        &self,
+        account: &str,
+        call_id: &str,
+        capacity: usize,
+    ) -> Result<Option<AccessUnit>, SdkError> {
+        match self
+            .request(account, MediaCommand::TakeVideo { call_id: call_id.to_owned(), capacity })
+            .await?
+        {
+            MediaResult::Taken(TakeOutcome::Empty) => Ok(None),
+            MediaResult::Taken(TakeOutcome::Unit(unit)) => Ok(Some(unit)),
+            MediaResult::Taken(TakeOutcome::TooLarge) => {
+                Err(SdkError::LocalBus("voice call: video frame does not fit".into()))
+            }
+            MediaResult::Status(_) => {
+                Err(SdkError::LocalBus("voice call: media reply mismatch".into()))
+            }
+        }
+    }
+
+    async fn status_request(
         &self,
         account: &str,
         command: MediaCommand,
     ) -> Result<InProcessMediaStatus, SdkError> {
+        match self.request(account, command).await? {
+            MediaResult::Status(status) => Ok(*status),
+            MediaResult::Taken(_) => {
+                Err(SdkError::LocalBus("voice call: media reply mismatch".into()))
+            }
+        }
+    }
+
+    async fn request(&self, account: &str, command: MediaCommand) -> Result<MediaResult, SdkError> {
         let actor = self
             .actors
             .lock()
@@ -122,18 +192,28 @@ impl InProcessMediaControl {
 pub(super) fn apply(
     account: &mut super::state::LocalBusAccountState,
     command: MediaCommand,
-) -> Result<InProcessMediaStatus, SdkError> {
+) -> Result<MediaResult, SdkError> {
     reconcile(account);
     let client = &mut account.client;
     match command {
-        MediaCommand::Open { call_id, expected_seq, capture, playback } => {
-            client.start_in_process_media(&call_id, expected_seq, capture, playback)
+        MediaCommand::Open { call_id, expected_seq, capture, playback } => client
+            .start_in_process_media(&call_id, expected_seq, capture, playback)
+            .map(|status| MediaResult::Status(Box::new(status))),
+        MediaCommand::Status { call_id } => client
+            .in_process_media_status(&call_id)
+            .map(|status| MediaResult::Status(Box::new(status))),
+        MediaCommand::AudioActive { call_id, active } => client
+            .set_in_process_audio_active(&call_id, active)
+            .map(|status| MediaResult::Status(Box::new(status))),
+        MediaCommand::Close { call_id } => client
+            .close_in_process_media(&call_id)
+            .map(|status| MediaResult::Status(Box::new(status))),
+        MediaCommand::SubmitVideo { call_id, au } => client
+            .submit_in_process_video(&call_id, &au)
+            .map(|status| MediaResult::Status(Box::new(status))),
+        MediaCommand::TakeVideo { call_id, capacity } => {
+            client.take_in_process_video(&call_id, capacity).map(MediaResult::Taken)
         }
-        MediaCommand::Status { call_id } => client.in_process_media_status(&call_id),
-        MediaCommand::AudioActive { call_id, active } => {
-            client.set_in_process_audio_active(&call_id, active)
-        }
-        MediaCommand::Close { call_id } => client.close_in_process_media(&call_id),
     }
 }
 

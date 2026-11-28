@@ -1,0 +1,35 @@
+[package]
+name = "ramflux-mls"
+description = "MLS (RFC 9420) foundation for ramflux: openmls with RustCrypto, account-DB storage surface, credential gate."
+version.workspace = true
+edition = "2024"
+rust-version = "1.99.0"
+license.workspace = true
+repository = "https://github.com/ramflux/ramflux-mls"
+
+[dependencies]
+# Exact pins: crates.io release candidates, no git sources (deny.toml). Default features of
+# openmls are empty; `crypto-debug`, `content-debug`, `test-utils`, `unchecked-conversions`,
+# `fork-resolution`, `async` and every draft feature are forbidden (scripts guard, card MLS-0).
+openmls = { version = "=0.10.0-rc.1", default-features = false }
+openmls_traits = "=0.7.0-rc.1"
+openmls_rust_crypto = { version = "=0.7.0-rc.1", default-features = false }
+tls_codec = { version = "0.5", features = ["mls"] }
+ramflux-crypto = { workspace = true }
+ramflux-protocol = { workspace = true }
+ed25519-dalek = { workspace = true }
+getrandom = "0.4"
+zeroize = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+hex = "0.4"
+
+[features]
+# Debug-only paths: in-memory scratch store, synthetic members, tamper builders, pinned roster.
+# Forbidden in the production dependency graph (scripts/check-production-features.py, part 0c).
+itest-mls-debug = []
+
+[lints]
+workspace = true

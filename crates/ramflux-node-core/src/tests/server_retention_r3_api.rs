@@ -33,7 +33,7 @@ fn explicit_deregistration_deletes_only_the_bound_owners_routes()
     let owner = gateway_registered_key(&open)?;
     let now = now_unix_seconds();
     let mut route = notify_webpush_route("dereg-delivery", "web");
-    route.registered_at = now;
+    route.registered_at_ms = now;
     route.expires_at = now + PUSH_ROUTE_TTL_SECONDS;
     store.register_authenticated_push_route(&owner, &route)?;
     let mut stranger_open = gateway_open_frame("tablet", "stream");

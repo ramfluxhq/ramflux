@@ -3,10 +3,7 @@
 
 //! Human-only daemon job requests; installation quiesces only the affected account.
 use super::service::refused;
-use crate::bus::{
-    actor::{AccountCommand, ActorResponse},
-    supervisor::Supervisor,
-};
+use crate::bus::{actor::ActorResponse, supervisor::Supervisor};
 use crate::prelude::*;
 impl Supervisor {
     pub(crate) async fn backup_request(
@@ -76,10 +73,6 @@ impl Supervisor {
                 self.installing.borrow_mut().insert(account.clone());
                 let supervisor = self.owned_backup_handle()?;
                 let job = row.clone();
-                let context = LocalBusConnectionState::new(
-                    connection.connection_id,
-                    connection.outbound.clone(),
-                );
                 self.backup_jobs.task(tokio::task::spawn_local(async move {
                     let result=async {
                         if let Some(actor)=supervisor.account_actor(&account){actor.stop().await?;}
@@ -88,7 +81,7 @@ impl Supervisor {
                         tokio::task::spawn_blocking(move||service.install_generation(&work,stage,key,setup)).await.map_err(|_|refused("interrupted"))?
                     }.await;
                     supervisor.installing.borrow_mut().remove(&account);
-                    let reopened=if supervisor.index.account(&account).is_ok(){supervisor.restart_backup_actor(&account,&context).await}else{Ok(())};
+                    let reopened=if supervisor.index.account(&account).is_ok(){supervisor.restart_backup_actor(&account)}else{Ok(())};
                     if reopened.is_ok() {
                         supervisor.clear_restore_state(&account);
                     }
@@ -165,17 +158,7 @@ impl Supervisor {
                 }
                 return Ok(());
             }
-            let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
-                &self.config.data_root,
-                id,
-            ))?;
-            if manifest.kind.as_deref().unwrap_or("human") != "human"
-                || manifest.client_mode == LocalBusClientMode::HeadlessAi
-            {
-                return Err(SdkError::CapabilityDenied(
-                    "backup jobs require a human account".into(),
-                ));
-            }
+            return Err(crate::bus::account_local::missing());
         }
         Ok(())
     }
@@ -201,42 +184,12 @@ impl Supervisor {
             self.backup_jobs.app_visible_jobs(&self.app_fences)
         }
     }
-    async fn restart_backup_actor(
-        &self,
-        id: &str,
-        connection: &LocalBusConnectionState,
-    ) -> Result<(), SdkError> {
+    fn restart_backup_actor(&self, id: &str) -> Result<(), SdkError> {
         if crate::custody::account_exists(&self.config.data_root, id)? {
             // Native data passphrases are not persisted. Reopen only on an explicit unlock.
             return Ok(());
         }
-        let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
-            &self.config.data_root,
-            id,
-        ))?;
-        let actor = self.new_backup_actor(id)?;
-        let request = LocalBusFrame::request(
-            "restore-open",
-            Some(id.into()),
-            "account",
-            "account.unlock",
-            serde_json::json!({"passphrase":manifest.account_secret}),
-        );
-        let (reply, _) = tokio::sync::oneshot::channel();
-        actor
-            .request(AccountCommand {
-                admission: None,
-                private: None,
-                request,
-                connection_id: connection.connection_id,
-                topics: BTreeSet::default(),
-                attended: true,
-                nodes: None,
-                outbound: connection.outbound.clone(),
-                reply: Some(reply),
-            })
-            .await?;
-        Ok(())
+        Err(crate::bus::account_local::missing())
     }
 }
 

@@ -939,9 +939,8 @@ macro_rules! sdk_invalid_argument {
             | SdkError::ContactInput(_)
             | SdkError::AccountNotOpen(_)
             | SdkError::AccountRestorePending(_)
-            | SdkError::AccountRestoreFailed { .. }
-            | SdkError::AccountManifestUnreadable
             | SdkError::LocalBus(_)
+            | SdkError::Mls { .. }
             | SdkError::LocalBusRefused { .. }
             | SdkError::InboundRejected(_)
             | SdkError::PayloadTooLarge
@@ -967,7 +966,9 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         SdkError::LifecycleShared(source) => sdk_error_code(source),
         SdkError::DirectoryAuthorityUnavailable { source, .. } => sdk_error_code(source),
         SdkError::DataRootInUse => RamfluxErrorCode::AccountBusy,
-        SdkError::PushRouteRefused(_) => RamfluxErrorCode::CapabilityRejected,
+        SdkError::PushRouteRefused(_) | SdkError::PushTestRefused { .. } => {
+            RamfluxErrorCode::CapabilityRejected
+        }
         SdkError::LocalBusRefused { code, .. } if code == "SessionLeaseBusy" => {
             RamfluxErrorCode::AccountBusy
         }
@@ -994,6 +995,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::Crypto(_)
         | SdkError::SignatureVerificationFailed(_) => RamfluxErrorCode::CryptoFailed,
         SdkError::SurfaceCheckpointMismatch
+        | SdkError::PushKeysetCheckpointMalformed(_)
         | SdkError::StorageCapacity { .. }
         | SdkError::LegacyBindingChanged
         | SdkError::AccountIndexNotOpen

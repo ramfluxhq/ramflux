@@ -242,3 +242,36 @@ fn mint_wake_id() -> Option<String> {
     let prefix = bytes.get(..16)?;
     Some(ramflux_protocol::encode_base64url(prefix))
 }
+
+/// Sign one push test wake (class `t`, 300 s cap) for the caller's own device.
+///
+/// Nothing is committed here: notify claims the wake id on admission, and a test that notify
+/// refuses leaves no gateway record. `None` means nothing may be sent.
+pub(crate) fn signed_test_wake(
+    signer: &NodeServiceSigningKey,
+    target_delivery_id: &str,
+    target_owner_epoch: u64,
+    now: u64,
+) -> Option<ramflux_protocol::SignedWakeV2> {
+    let wake_id = mint_wake_id()?;
+    let source_event_id = format!("push-test-{}", mint_wake_id()?);
+    let body = WakeV2 {
+        version: 2,
+        signing_key_id: signer.signing_key_id().to_owned(),
+        signature_alg: WakeSignatureAlg::Ed25519,
+        audience: NOTIFY_WAKE_AUDIENCE.to_owned(),
+        action: WakeAction::Enqueue,
+        wake_id,
+        target_delivery_id: target_delivery_id.to_owned(),
+        target_owner_epoch,
+        source_event_id,
+        class: WakeClass::Test,
+        created_at: now,
+        expires_at: now.saturating_add(ramflux_protocol::TEST_MAX_LIFETIME_SECONDS),
+        call_intent_digest: None,
+    };
+    if body.validate_shape().is_err() || body.validate_times(now).is_err() {
+        return None;
+    }
+    signer.sign_wake_v2(&body).ok()
+}

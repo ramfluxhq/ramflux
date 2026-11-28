@@ -47,8 +47,8 @@ pub(crate) use host_revoked::{
     suspend_hosted_agents,
 };
 pub use machine::{
-    BeginInput, BeginOutcome, PrimarySigning, apply_decision, begin, cancel, primary_sign_decision,
-    receive_plan, resume_request,
+    BeginInput, BeginOutcome, PrimarySigning, apply_decision, begin, cancel, overdue_creations,
+    primary_sign_decision, receive_plan, resume_request,
 };
 pub(crate) use operable::require_agent_operable;
 pub(crate) use publish::complete_with_receipt;
