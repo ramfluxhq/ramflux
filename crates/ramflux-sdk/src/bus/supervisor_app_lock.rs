@@ -312,6 +312,14 @@ impl Supervisor {
                 fields.insert("code_retry_after_ms".into(), throttle.retry_after_ms().into());
                 fields.insert("code_retry_after_secs".into(), throttle.retry_after_secs.into());
                 fields.insert("code_attempts_exhausted".into(), throttle.exhausted.into());
+                fields.insert(
+                    "code_attempts_before_wait".into(),
+                    serde_json::Value::from(u64::from(throttle.attempts_before_wait)),
+                );
+                fields.insert(
+                    "code_attempts_before_exhausted".into(),
+                    serde_json::Value::from(u64::from(throttle.attempts_before_exhausted)),
+                );
                 body
             }
             PolicyRead::Unreadable => unavailable_body(),

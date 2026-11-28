@@ -36,6 +36,12 @@ struct NativeError {
     retry_after_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<&'static str>,
+    /// Copied from the code-throttle refusal body. Absent on every other error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_attempts_before_wait: Option<u64>,
+    /// Copied from the code-throttle refusal body. Absent on every other error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_attempts_before_exhausted: Option<u64>,
 }
 fn token(value: &Value) -> Option<String> {
     let s = value.as_str()?;
@@ -109,6 +115,28 @@ fn details(value: &Value, code: &Code) -> Details {
     }
     Details::Generated(ErrorDetails::Empty {})
 }
+fn attempt_count(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(Value::as_u64)
+}
+
+fn copy_attempt_counts(frame: &mut Value) {
+    let (wait, left) = {
+        let body = frame.get("body").unwrap_or(&Value::Null);
+        (
+            attempt_count(body, "code_attempts_before_wait"),
+            attempt_count(body, "code_attempts_before_exhausted"),
+        )
+    };
+    let Some(error) = frame.get_mut("error").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if let Some(wait) = wait {
+        error.insert("code_attempts_before_wait".into(), serde_json::Value::from(wait));
+    }
+    if let Some(left) = left {
+        error.insert("code_attempts_before_exhausted".into(), serde_json::Value::from(left));
+    }
+}
 fn retry_ms(value: &Value) -> Option<u64> {
     value.get("retry_after_ms").and_then(Value::as_u64).or_else(|| {
         value
@@ -137,6 +165,8 @@ fn project(value: &mut Value) {
         reason_code: Some(reason),
         retry_after_ms: retry_ms(value),
         state: (value.get("state").and_then(Value::as_str) == Some("error")).then_some("error"),
+        code_attempts_before_wait: attempt_count(value, "code_attempts_before_wait"),
+        code_attempts_before_exhausted: attempt_count(value, "code_attempts_before_exhausted"),
     };
     let replacement =
         serde_json::to_value(error).unwrap_or_else(|_| serde_json::json!({"code":16,"name":"Internal","reason":"internal_error","reason_code":"internal_error"}));
@@ -163,6 +193,10 @@ fn receipt(value: &mut Value) {
 pub(super) fn frame(value: &mut Value) {
     let method = value.get("method").and_then(Value::as_str).unwrap_or("").to_owned();
     let error = value.get("kind").and_then(Value::as_str) == Some("error");
+    if error {
+        // The refusal body is the source. Copy the counters onto `error` before projection.
+        copy_attempt_counts(value);
+    }
     field(value, "error");
     if error {
         field(value, "body");

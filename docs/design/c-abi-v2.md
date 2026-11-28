@@ -101,7 +101,17 @@ answered `NetworkingPending`), it unlocks with `account.unlock` and the account 
 `account.app_lock.state` reports the code throttle in its ready body:
 `code_retry_after_ms` (milliseconds until a code is accepted; 0 when accepted
 now or when attempts are exhausted), `code_retry_after_secs` (the same wait in
-whole seconds, integer; 0 when no wait applies) and `code_attempts_exhausted` (boolean).
+whole seconds, integer; 0 when no wait applies), `code_attempts_exhausted`
+(boolean), `code_attempts_before_wait` (free failed attempts left before the
+next wait starts; 0 while a wait is active) and `code_attempts_before_exhausted`
+(attempts left before exhaustion; 0 once attempts are exhausted).
+
+The `wrong_passphrase` refusal body carries those same two counters, read after
+the failed attempt has been counted. `reason_code` stays `wrong_passphrase`.
+After `n` counted failures the counters are `max(0, 5 - n)` and `max(0, 10 - n)`.
+A wait in progress forces `code_attempts_before_wait` to 0. The waits are 30,
+60, 120, 240 and 480 seconds after failures 5 through 9. Failure 10 exhausts
+the account: both counters are 0.
 
 ### App lock and recovery
 

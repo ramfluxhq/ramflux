@@ -263,6 +263,10 @@ pub(crate) struct CodeThrottle {
     pub(crate) exhausted: bool,
     /// Whole seconds until a code is accepted; 0 when accepted now or when exhausted.
     pub(crate) retry_after_secs: u64,
+    /// Free failed attempts left before the next wait starts. Zero while a wait is active.
+    pub(crate) attempts_before_wait: u32,
+    /// Failed attempts left before [`MAX_CODE_FAILURES`]. Zero once exhausted.
+    pub(crate) attempts_before_exhausted: u32,
 }
 
 impl CodeThrottle {
@@ -283,7 +287,14 @@ pub(crate) fn code_throttle(
     let now = ramflux_storage::unix_now();
     let attempts = index.code_attempts(account_id)?;
     if attempts.failures >= MAX_CODE_FAILURES {
-        return Ok(CodeThrottle { exhausted: true, retry_after_secs: 0 });
+        let (attempts_before_wait, attempts_before_exhausted) =
+            attempt_counters(attempts.failures, false);
+        return Ok(CodeThrottle {
+            exhausted: true,
+            retry_after_secs: 0,
+            attempts_before_wait,
+            attempts_before_exhausted,
+        });
     }
     let mut retry_after_secs = 0;
     if attempts.failures >= FREE_CODE_FAILURES {
@@ -294,7 +305,25 @@ pub(crate) fn code_throttle(
             retry_after_secs = u64::try_from(ready_at.saturating_sub(now)).unwrap_or(0);
         }
     }
-    Ok(CodeThrottle { exhausted: false, retry_after_secs })
+    let (attempts_before_wait, attempts_before_exhausted) =
+        attempt_counters(attempts.failures, retry_after_secs > 0);
+    Ok(CodeThrottle {
+        exhausted: false,
+        retry_after_secs,
+        attempts_before_wait,
+        attempts_before_exhausted,
+    })
+}
+
+/// Remaining attempts on the existing ladder: five free failures, then a wait, ten exhausts.
+///
+/// `code_attempts_before_wait` is the free failures still left before the next wait, and is 0
+/// while a wait is active. `code_attempts_before_exhausted` is the failures still left before
+/// [`MAX_CODE_FAILURES`].
+fn attempt_counters(failures: u32, wait_active: bool) -> (u32, u32) {
+    let before_exhausted = MAX_CODE_FAILURES.saturating_sub(failures);
+    let before_wait = if wait_active { 0 } else { FREE_CODE_FAILURES.saturating_sub(failures) };
+    (before_wait, before_exhausted)
 }
 
 /// After a correct recovery phrase, lets an exhausted account take one more code check. The
@@ -343,19 +372,37 @@ pub(crate) fn code_attempt_wait(index: &AccountIndex, account_id: &str) -> Resul
 
 /// Maps the code-wrap authentication failure of a native code check to `wrong_passphrase`;
 /// every other error passes through.
-pub(crate) fn wrong_code(error: SdkError) -> SdkError {
+///
+/// The refusal body is read from [`code_throttle`] after the attempt has already been counted.
+/// Passphrase storage and comparison are untouched. A missing index keeps the previous body.
+pub(crate) fn wrong_code(
+    index: Option<&AccountIndex>,
+    account_id: &str,
+    error: SdkError,
+) -> SdkError {
     match error {
         SdkError::Storage(ramflux_storage::StorageError::Integrity(message))
             if message == ramflux_storage::WRAP_AUTH_FAILED =>
         {
-            refusal(
-                "wrong_passphrase",
-                "the account code is wrong",
-                serde_json::json!({"reason_code": "wrong_passphrase"}),
-            )
+            let body = match index {
+                Some(index) => match code_throttle(index, account_id) {
+                    Ok(throttle) => wrong_passphrase_body(throttle),
+                    Err(read_error) => return read_error,
+                },
+                None => serde_json::json!({"reason_code": "wrong_passphrase"}),
+            };
+            refusal("wrong_passphrase", "the account code is wrong", body)
         }
         other => other,
     }
+}
+
+fn wrong_passphrase_body(throttle: CodeThrottle) -> serde_json::Value {
+    serde_json::json!({
+        "reason_code": "wrong_passphrase",
+        "code_attempts_before_wait": throttle.attempts_before_wait,
+        "code_attempts_before_exhausted": throttle.attempts_before_exhausted,
+    })
 }
 
 /// Clears the failure count after a correct code.
