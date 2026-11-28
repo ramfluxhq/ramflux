@@ -40,9 +40,7 @@ with `retry_after_ms` and `details.networking`. A fetch that still has no Apply
 returns the same pending outcome at five seconds. No send uses an unapplied head,
 and a fetch started before the command began does not authorize it. A successful verified
 apply permits the command to continue. Legacy
-freshness refusals are serialized as this typed pending outcome. `group.history`
-reads stored history, name and roster through the local reader pool without a
-session, sync or inbound application.
+freshness refusals are serialized as this typed pending outcome.
 Already-admitted projection skips only the 300-second freshness clock; revocation,
 signature/authority and erasure fences remain. New sends, mutations and inbound
 admission still require fresh authority. Existing inline peer refresh can admit
@@ -50,12 +48,8 @@ on the first receive pass. Otherwise, authority-dependent entries remain in the
 durable inbox retry path; verified refresh makes matching retries immediately
 eligible and wakes the existing receive courier for ordered, once-only admission.
 Failed or old refreshes leave them pending; unrelated retry backoff is preserved.
-`group.read` keeps network/admission semantics. Only a decoded,
-authenticated route for the requested group can hold those RPCs pending; unknown
-routes and unrelated conversations continue background refresh and retry.
-
-Within one account command, `group.read` reuses a successfully
-completed admission sync only when its first freshness check found no stale roots.
+Within one account command, a successfully
+completed admission sync is reused only when its first freshness check found no stale roots.
 If the command waits for head refresh, dispatch syncs again to admit ready entries.
 The marker belongs to the command future: cancellation, lifecycle preemption,
 failure and completion discard it. Later requests and direct dispatch sync again.
@@ -410,9 +404,8 @@ native account session refreshes its own directory when the current-head clock
 is missing or expired. Read-only account data remains separate from this
 permission to use a device for a new operation.
 
-The ordinary SDK separately checks certified `call`, `group` and `sync` branch
-scopes before new call controls/media access, group creation/signing/sender-key
-publication and network group delivery, and own-device copies/history transfer.
+The ordinary SDK separately checks certified `call` and `sync` branch
+scopes before new call controls/media access and own-device copies/history transfer.
 A live `message` scope cannot substitute for these permissions. These checks do
 not gate decryption of data already stored in local history.
 

@@ -140,17 +140,13 @@ Released/deleted held contact messages have per-message erasure fences retained 
 
 For legacy archives on an empty data root, restore preserves all history, attachment keys and inbound
 or archived sessions needed for late messages. Saved outbound DM sessions are
-inactive; saved outbound group chains stay archived. Before the first send, the
+inactive. Before the first send, the
 device performs fresh root-authorized activation at an increased device epoch.
-The first post-restore send establishes fresh outbound DM sessions; each group's
-first send rotates its sender seed/chain ID before distributing it to members. All newly created distributions use
-`ramflux.sdk.group_sender_key.distribution.v3`, which binds the fresh seed into the
-chain ID; participating receivers need v3 support. Existing v1/v2 receive chains
-remain readable. The UI must show **re-establishing secure
+The first post-restore send establishes fresh outbound DM sessions. The UI must show **re-establishing secure
 sessions** while `account.status` / `sync.status.get` has
 `secure_sessions:reestablishing`; `account.secure_sessions.changed` announces ready.
 If activation is refused, history remains readable and sending fails closed.
-Merge preserves existing live outbound sessions. The first group send without a live sending checkpoint gets a fresh seed-bound chain; a known chain ID with different secret material is refused loudly. Inactive receive-only DM chains remain subject to the ordinary eight-chain retirement limit and a 24-hour late-delivery deadline measured from restore/migration, never from last use. Retirement erases private archived copies as well as live session records.
+Merge preserves existing live outbound sessions. Inactive receive-only DM chains remain subject to the ordinary eight-chain retirement limit and a 24-hour late-delivery deadline measured from restore/migration, never from last use. Retirement erases private archived copies as well as live session records.
 
 Transient network work is intentionally not resumed: queued gateway sends,
 own-device sends and runtime command idempotency/outbox receipts are not replayed

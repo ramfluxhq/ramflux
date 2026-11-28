@@ -7,9 +7,6 @@ conversation and the events it follows to stay current.
 The SDK and `rf` use this contract at storage generation 1. Opening generation-0
 stores requires an explicit profile reset; old output and codec paths are retired.
 The activation candidate requires exact-head validation before release.
-`group.history` resolves the group conversation and returns the same rendered
-page. Group receive and sender-key import point callers to the durable reader;
-they do not return a second plaintext page.
 
 Contract name: `ramflux.message.read_model.v1`. Every response carries it in
 `schema`. Fields are only added within this name; a removal or a change of

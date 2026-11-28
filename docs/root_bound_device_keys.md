@@ -280,93 +280,10 @@ Moving the root offline or introducing constrained enrollment subkeys requires
 an owner decision and a separate migration. This implementation does not change
 root custody or claim recovery from root compromise.
 
-Peer revocation does not itself rotate existing group sender keys. A previously
-issued group key remains known to that terminal until the group advances its key
-epoch; delivery filtering alone cannot erase that knowledge. Legacy migration
+Legacy migration
 still requires independently root-authorized material for every listed device;
 a lost or phantom legacy entry can block migration and needs explicit recovery.
 
-
-## Group controls and literal device names
-
-New group controls use `ramflux.client_event.v2` with the existing group signature
-domain. The signed `group_device_roots` extension binds the actor and each member
-selector to their root commitments; the body retains literal device names. The
-actor must match a pinned group key and current root authority. An accepted
-invite must also match the root recorded for that exact invite. A legacy join
-without a root uses only its group's invite provenance. Missing or conflicting
-provenance leaves the event pending and does not pin a directory candidate.
-
-New enrollment and ready-proof verification reject `root~` and `legacy~` device
-name prefixes, blank names, Unicode control/format and line/paragraph separator characters,
-and names over 256 bytes. Printable Unicode names remain supported. Storage
-address encoding continues to preserve historical literal names. Historical
-message sender names never acquire a new principal from today's device directory;
-receipts resolve roots through their conversation's explicit route or participant
-relationship, or a group-specific pin. Pending own-root revocations are checked
-explicitly before sibling history imports. A failed scheduled proof refresh
-surfaces `OwnDeviceAuthorizationRefreshFailed` in the sync status reason code.
-
-
-Direct-conversation authorization verifies the sender under its root-qualified
-device reference and compares its principal with participant principals. Neither
-literal nor qualified device names substitute for principal identities. Delivered/read receipt payloads must name their authenticated route
-and literal sending device. Root-bound receive stores receipt deduplication and
-read/delivery state under the verified root-qualified device reference, so peers
-with equal device names remain distinct. Legacy receipts remain in their original
-namespace and do not acquire new root attribution. Self-conversation receipts use
-the account's own root, including when a foreign peer reuses a sibling's name.
-
-Root-qualified group-pin reads exclude unscoped legacy rows even if their public
-key matches. Explicit qualified pin creation stores its root at insertion; it does
-not adopt an old by-name pin. Group-scoped literal-slot reads prefer that explicit
-root-bound pin over leftover unscoped rows, while multiple bound roots remain
-ambiguous. Sender admission still verifies that key's root
-proof and active signed set. Old unscoped rows remain historical data. Direct-add
-v1 joins from administrators without the signed-root extension/invite witness
-stay pending; later epoch changes may wait too. Administrators must upgrade and
-provide a root-bound join/invite to resume that group's control sequence.
-
-The device identity used by replay, control, receipt, retry, pair-session,
-private-prekey, group-pin, group-ratchet and sender-counter APIs is an opaque
-`RootQualifiedDeviceRef`. It has no string constructor or serde implementation.
-Factories require an owned account root or a complete verified signed device set.
-Naming a revoked historical device for cleanup does not authorize a live operation:
-the current set, key commitments, relationship and operation policy still apply.
-
-Registration proof replay has a separate root-qualified persistence set.
-Historical `seen_proofs` entries never satisfy a current proof lookup, even when
-an old sender chose a value that resembles a current encoded key. Opaque gateway
-delivery event IDs and group distribution retries are likewise scoped by verified
-device identities instead of caller-chosen device names or envelope IDs.
-
-Unattributable group ratchet checkpoints and name-only sender counters remain in
-legacy storage. Receivers require a fresh authenticated sender-key distribution.
-Counters additionally include the ratchet session ID, so restarting a distribution
-under the same root and group epoch cannot suppress its first message.
-When a group message is deleted, its message-indexed sender-key replay-counter row
-is erased with the other message attribution. Replay safety for that deleted item
-then comes from the retained message tombstone and the account-keyed routed replay
-marker: replay may not recreate content or sender attribution. Counter rows for
-other messages and the sender-key session state remain intact, so deletion does
-not reset the session's replay history or permit a fresh counter sequence.
-Unscoped membership pins require a root-bound remove/re-add operation; importing a
-snapshot cannot supply missing root authority by selecting the first directory row.
-
-CI runs `python3 -B scripts/check-device-identity.py` and its mutation checks.
-The source gate rejects untyped device key builders, direct bare-name device
-indexes, inline device replay keys, identity-view impostors and reference
-deserialization shortcuts. Rust APIs provide the primary boundary; the source
-gate checks for accidental new bypasses. It does not prove arbitrary application
-code correct or replace signed-evidence and adversarial tests.
-
-Group mutation permissions and control-event replay use the same authenticated
-device reference. Invitation records bind an expected root and literal name as
-an offer claim; acceptance checks the authenticated actor against that claim.
-Unattributed legacy invitations need a fresh root-bound invitation unless their
-original persisted root witness can be recovered. A cached manifest is also saved
-under its verified root so replacing a provisional principal alias does not
-reassign historical device references to the alias's new owner.
 
 ## Forwarded authority and durable admission bounds
 

@@ -117,7 +117,7 @@ Pages target a 512 KiB response budget and are checked against the actual 1 MiB 
 limit. A single record larger than the budget returns an error rather than silently dropping fields.
 A shorter page may still have a next cursor. No directory silently truncates a row.
 
-Existing `group.list`, `mcp.server.list`, and `mcp.approval.list` support the same optional paging.
+Existing `mcp.server.list` and `mcp.approval.list` support the same optional paging.
 With neither pagination field supplied they retain complete legacy list semantics, with an explicit
 error if the response exceeds the frame limit or the remote approval scan exceeds 1024 keys;
 use paging for large accounts.
@@ -133,7 +133,6 @@ Response key: `conversations`. Each row contains:
 | `title` | Explicit local title, or null; never an invented display name |
 | `participants` | Known principal IDs, excluding unresolved device references |
 | `self_principal_id` | Local account principal ID |
-| `member_routes` | Group member device IDs, commitments, signing keys, targets and `delivery_target_known`; absent for DMs |
 | `group_id` | Explicit group ID, or null |
 | `direct_route` | Object below, or null when unresolved/no longer active |
 | `unread_count` | Count after the stored reader watermark and clear boundary |
@@ -150,9 +149,7 @@ Routes are captured from successful submissions and checked against the current 
 An expired/revoked selected device produces a null route; the client must select an active device.
 
 There is no network lookup to invent a route for an unknown contact. Existing conversations with
-no captured association keep unknown peer/title fields empty/null. `group.create` may supply an
-additional `conversation_id`; `group.send`/`group.read` already carry it explicitly. Those
-operations persist the association. Group IDs are never treated as conversation IDs by the reader.
+no captured association keep unknown peer/title fields empty/null.
 
 ## Identity directory
 
@@ -244,9 +241,6 @@ receive-time import behavior. A per-object fetch never advances the main message
   Locked manifests are read without opening account databases. New `account.create` bodies may
   supply `label` and `kind`; both are retained in the private account manifest. This index-wide
   method belongs to the Supervisor and does not require an unlocked account.
-- `group.list` adds `id`, `conversation_id`, and `conversation_ids` to its existing group rows.
-  A single explicit association gives `conversation_id`; no association or multiple distinct
-  associations gives null. Every explicit association remains in `conversation.directory`.
 - `mcp.approval.list` includes `conversation_id`/`context_id` when supplied on the originating
   MCP/grant request; lifecycle events carry the same fields. Pending records survive restart.
   Granted/denied records disappear from the pending list. A context is never guessed from tool
@@ -258,18 +252,6 @@ receive-time import behavior. A per-object fetch never advances the main message
 
 The directories are additive local projections; node protocol and authorization checks are unchanged.
 
-## Group delivery completeness
-
-Without an explicit single-recipient envelope override, `group.send` resolves routes for every
-current member other than the sender. Verified directory entries take precedence over stored
-routes. The server validates the entire route set before encrypting, writing a local message or
-sending any distribution. Missing targets, commitments or signing keys fail with
-`group routes unresolved` and an `unreachable_members` array listing every unresolved device.
-No member is silently skipped. Transport failure during an attempted send still returns an error;
-preflight cannot make distributed delivery atomic.
-
-`conversation.directory` group rows and `group.list` expose `member_routes` including unresolved
-members. `delivery_target_known` describes available routing metadata, not network reachability.
 `account.status` now includes `principal_commitment` and the local sender `device_id`, matching the self
 identity directory row.
 
@@ -347,16 +329,12 @@ Very late authenticated bootstraps remain subject to the archive's existing comp
 No conversation descriptor is exposed outside the encrypted body. Failed attachment-slot decrypts
 leave the live message ratchet unchanged.
 
-Group invitations and accepts reject already active members. Generic member-key persistence
-cannot overwrite an active member's key; a verified device-manifest refresh is the rotation path.
-Inactive members can still rejoin with the key proven by their signed accept and the invited role.
-
 Retained retry and dead-letter ciphertext never evict a different source. A claimed source gets
 at most two retained failures before authentication/relationship confirmation, or eight for a
 verified related peer; strangers share a 16-entry admission budget. Each queue remains bounded
 to 64 entries. Trusted failures expire within ten minutes and eight attempts; stranger failures
 expire within thirty seconds and three attempts. Gateway TTL can shorten these windows.
-Only live retries wake after matching newer group/manifest changes. Original age, expiry and
+Only live retries wake after matching newer manifest changes. Original age, expiry and
 attempts remain unchanged, with at most eight wakes per second and one per entry per minute.
 Dead letters are terminal diagnostics and are never automatically reinserted or re-ACKed by
 membership changes. Idempotent key imports and unrelated device records do not advance scoped

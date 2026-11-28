@@ -349,9 +349,8 @@ retired and returns Content
 (`retired conversation attachment input; use media with r4 large_manifest`)
 before route or network work. Mixing non-empty `prepares` with non-empty `media`
 returns `layout_invalid`. Routing fields are refused.
-The SDK derives the sender from its authenticated device. A group send passes
-`group_id`. Sealing, friend-link checks, TTL, own-device copies and gateway
-submission use the existing SDK delivery paths. DM and group media use the same
+The SDK derives the sender from its authenticated device. Sealing, friend-link checks, TTL, own-device copies and gateway
+submission use the existing SDK delivery paths. DM media uses the
 generated Message contract.
 
 Finish also accepts optional `width`, `height`, `duration_ms`, and `animated`.
@@ -490,7 +489,7 @@ with `conversation_id` and the existing `message_id`:
 The SDK reads the authenticated stored target identity and derives its author,
 reference, edit revision and exact previous-content digest. It applies the shared
 author/moderator rules, allocates one durable source-qualified event identity and
-private revision entropy, and uses SDK routing/sealing and ordinary group or
+private revision entropy, and uses SDK routing/sealing and ordinary
 verified peer-device fanout. Hosts cannot supply a sender, device, envelope,
 written revision, digest or tombstone. `expected_revision` is the observed base,
 not the revision the edit will write. Unknown fields are refused. An edit replaces
@@ -608,8 +607,8 @@ both successful and failed callbacks; load buffers and decoded temporary seeds
 are zeroized on every exit. Hosts must wipe their own temporary plaintext copies.
 
 `allow_secret_exports` gates **every** method whose generated policy row declares
-`key_export:true`: agent credentials, account backups, group sender
-keys, device sync and both show-once calls. The policy column is the authority for
+`key_export:true`: agent credentials, account backups,
+device sync and both show-once calls. The policy column is the authority for
 this admission check; there is no per-method exception list.
 
 After status PanicAborted (17), stop using that client, close it off the UI thread,
