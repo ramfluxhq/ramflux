@@ -4,8 +4,9 @@
 #![allow(unused_imports)]
 
 use crate::{
-    FederatedEnvelopeForwardRequest, FederationNodeInvitation, FederationNodeKeyRotation,
-    FederationPeerRoute, FederationServerRecord, FederationSrvRecord, NodeCoreError,
+    FederatedDmOrderRequest, FederatedEnvelopeForwardRequest, FederationNodeInvitation,
+    FederationNodeKeyRotation, FederationPeerRoute, FederationServerRecord, FederationSrvRecord,
+    NodeCoreError,
 };
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -130,6 +131,56 @@ pub fn verify_federated_envelope_forward_with_timings(
         public_key_parse: verify_timings.public_key_parse,
         verify: verify_timings.verify,
     })
+}
+
+fn dm_order_signing_bytes(request: &FederatedDmOrderRequest) -> Result<Vec<u8>, NodeCoreError> {
+    let body = ramflux_protocol::signed_bytes(request)
+        .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
+    let mut bytes = Vec::with_capacity(body.len().saturating_add(64));
+    bytes.extend_from_slice(ramflux_protocol::domain::FEDERATION_DM_ORDER_V1.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&body);
+    Ok(bytes)
+}
+
+/// Sign a `dm-order` call with the node's federation key.
+///
+/// # Errors
+/// Returns an error when canonical signing fails.
+pub fn sign_federated_dm_order(
+    request: &mut FederatedDmOrderRequest,
+    signing_seed: [u8; 32],
+) -> Result<(), NodeCoreError> {
+    request.signed.signing_key_id = format!("{}#federation", request.source_node_id);
+    request.signed.signature_alg = ramflux_protocol::SignatureAlg::Ed25519;
+    request.signed.signature.clear();
+    let bytes = dm_order_signing_bytes(request)?;
+    request.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(&bytes, signing_seed);
+    Ok(())
+}
+
+/// Verify a `dm-order` call against the pinned key of its source node.
+///
+/// # Errors
+/// Returns an error when the version, key id or signature is wrong.
+pub fn verify_federated_dm_order(
+    request: &FederatedDmOrderRequest,
+    pinned_public_key: &str,
+) -> Result<(), NodeCoreError> {
+    if request.version != crate::FEDERATED_DM_ORDER_VERSION {
+        return Err(NodeCoreError::ItestHttp("federation dm-order version".to_owned()));
+    }
+    if request.signed.signing_key_id != format!("{}#federation", request.source_node_id) {
+        return Err(NodeCoreError::ItestHttp(
+            "federation dm-order signing key id mismatch".to_owned(),
+        ));
+    }
+    if request.signed.signature.is_empty() {
+        return Err(NodeCoreError::ItestHttp("missing federation dm-order signature".to_owned()));
+    }
+    let bytes = dm_order_signing_bytes(request)?;
+    ramflux_crypto::verify_canonical_signature(&bytes, &request.signed.signature, pinned_public_key)
+        .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))
 }
 
 pub(crate) fn has_overlap(left: &[String], right: &[String]) -> bool {

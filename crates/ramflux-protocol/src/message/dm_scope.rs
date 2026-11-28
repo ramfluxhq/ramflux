@@ -56,6 +56,25 @@ pub fn derive(first: &str, second: &str) -> Result<String, DmScopeError> {
     ))
 }
 
+/// Kind byte of a one-to-one DM group in [`mls_group_id`].
+pub const MLS_KIND_DM: u8 = 1;
+/// Kind byte of an own-device (self) group in [`mls_group_id`].
+pub const MLS_KIND_SELF: u8 = 2;
+
+/// The id of a DM or self MLS group: `BLAKE3(MLS_GROUP_ID_V1 || u8 kind || scope_id || nonce)`.
+///
+/// The creator draws the 16 byte nonce; the orderer recomputes the id from the request and
+/// refuses a mismatch, so one id belongs to exactly one kind, scope and nonce.
+#[must_use]
+pub fn mls_group_id(kind: u8, scope_id: &[u8], nonce: &[u8; 16]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(crate::domain::MLS_GROUP_ID_V1.as_bytes());
+    hasher.update(&[kind]);
+    hasher.update(scope_id);
+    hasher.update(nonce);
+    *hasher.finalize().as_bytes()
+}
+
 /// Check every reserved direct id, including an existing one; callers also check bound roots/kind.
 /// # Errors
 /// Refuses another pair's reserved id or malformed verified anchors.

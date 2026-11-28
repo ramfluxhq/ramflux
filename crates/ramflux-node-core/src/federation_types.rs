@@ -234,6 +234,34 @@ pub struct FederatedEnvelopeForwardResponse {
     pub delivery: EnvelopeSubmitResponse,
 }
 
+/// `POST /federation/v1/dm-order`: one `dm_order` operation forwarded to the orderer.
+///
+/// Signed like [`FederatedEnvelopeForwardRequest`] under `FEDERATION_DM_ORDER_V1`. There is no
+/// replay window: a replayed `submit` fails the exact-epoch CAS or the fresh-id check, and
+/// replayed `since` / `status` are reads. The orderer accepts the call from any pinned peer.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FederatedDmOrderRequest {
+    pub version: u8,
+    #[serde(default = "default_federation_forward_signed_fields", flatten)]
+    pub signed: ramflux_protocol::SignedFields,
+    pub source_node_id: String,
+    pub target_node_id: String,
+    pub request_id: String,
+    pub issued_at: u64,
+    /// Account anchor the submitting device belongs to; its home already checked the device.
+    pub anchor: String,
+    pub op: crate::DmOrderOp,
+}
+
+/// Reply of `POST /federation/v1/dm-order`, in the same call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FederatedDmOrderResponse {
+    pub reply: crate::DmOrderReply,
+}
+
+/// Version of [`FederatedDmOrderRequest`].
+pub const FEDERATED_DM_ORDER_VERSION: u8 = 1;
+
 /// Same-node router-to-federation mTLS handoff; never served by an admin listener.
 pub const HOME_SUBMIT_FORWARD_PATH: &str = "/internal/cross-node/forward";
 

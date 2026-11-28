@@ -41,10 +41,12 @@ pub(crate) use custody_accounts::CustodyAccountWrite;
 mod custody_budget_policy;
 pub use custody_accounts::CustodyPublicationBudgetRow;
 mod custody_history;
+pub(crate) mod dm_order;
 pub(crate) mod expiry_index;
 mod identity_registry;
 pub(crate) mod incarnation;
 pub(crate) mod incarnation_state;
+pub mod key_packages;
 mod migration_barrier;
 pub mod publication;
 mod retention;
@@ -720,6 +722,8 @@ impl RouterRedbStore {
                 .open_table(ROUTER_ABUSE_REPORT_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
+        dm_order::initialize(&write_txn)?;
+        key_packages::initialize(&write_txn)?;
         mailbox_keys::initialize(&write_txn)?;
         migration_barrier::initialize_snapshot_index(&write_txn)?;
         expiry_index::upgrade(&write_txn)?;

@@ -91,9 +91,9 @@ pub use entry_fetch::{EntryFetchError, EntryGoneReason, InboxEntryResponse};
 pub use inbox_page::{
     KnownLoss, PAGE_BYTE_CAP, PageEntryRecord, PageError, PageReason, ResumePage,
 };
+mod dm_order;
 mod lifecycle;
 mod mesh_identity;
-#[allow(dead_code, reason = "MLS: allowance removed in D1")]
 mod mls_header;
 mod mvp1_registry;
 mod registration_receipts;
@@ -127,12 +127,17 @@ mod voice;
 pub use voice::*;
 
 pub use config::*;
+pub use dm_order::{
+    DmCaller, DmCommitEntry, DmGroupKind, DmOrderOp, DmOrderReply, DmOrderService, DmRefusal,
+    DmSince, DmStatus, DmSubmit, DmSubmitFlag,
+};
 pub use error::NodeCoreError;
 pub use federation_crypto::{
-    FederatedEnvelopeForwardVerifyTimings, sign_federated_envelope_forward,
-    sign_federation_key_rotation, sign_federation_server_record,
-    sign_federation_server_record_with_seed, verify_federated_envelope_forward,
-    verify_federated_envelope_forward_with_timings, verify_federation_server_record,
+    FederatedEnvelopeForwardVerifyTimings, sign_federated_dm_order,
+    sign_federated_envelope_forward, sign_federation_key_rotation, sign_federation_server_record,
+    sign_federation_server_record_with_seed, verify_federated_dm_order,
+    verify_federated_envelope_forward, verify_federated_envelope_forward_with_timings,
+    verify_federation_server_record,
 };
 pub(crate) use federation_crypto::{
     choose_srv_record, has_overlap, is_bootstrap_ip_literal, verify_federation_handshake,
@@ -208,6 +213,10 @@ pub use report_receipt::{
 };
 pub use retention::*;
 pub use router::*;
+pub use router_store::key_packages::{
+    FetchedKeyPackage, KeyPackageFetchLimits, KeyPackageFetchResponse, KeyPackagePublishOutcome,
+    KeyPackagePublishRequest, KeyPackageRefusal, KeyPackageStatusResponse,
+};
 pub use router_store::publication;
 pub use router_store::{
     CustodyPublicationBudgetRow, IdentityJournalDiscardReport, RouterRedbStore, SubmissionLease,
