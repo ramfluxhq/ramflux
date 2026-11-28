@@ -40,6 +40,10 @@ pub mod debug;
 pub use credential::authority::{DeviceAuthority, NoAuthority, VerifiedRecord};
 pub use credential::{DeviceCertSigner, DeviceIdentity, GroupKind, MemberIdentity, VerifiedMember};
 pub use error::MlsError;
+pub use group::call_keying::{
+    CALL_BASE_KEY_LEN, CALL_CONTEXT_PREFIX, CALL_EXPORT_LABEL, CALL_ID_MAX_LEN, CALL_LEAF_LIMIT,
+    CallKeying, CallMember, call_context,
+};
 pub use group::context::{CommitCtx, CommitMeta, WelcomeCtx};
 pub use group::conversation::{ConversationRole, ExpectedPrincipals, RfConversation};
 pub use group::policy::{CommitPolicy, DenyAllRoster, PermissiveCommitPolicy, RosterPolicy};
