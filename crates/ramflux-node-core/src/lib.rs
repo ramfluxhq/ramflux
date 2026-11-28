@@ -92,6 +92,8 @@ pub use inbox_page::{
     KnownLoss, PAGE_BYTE_CAP, PageEntryRecord, PageError, PageReason, ResumePage,
 };
 mod dm_order;
+#[allow(dead_code, reason = "MLS: allowance removed in G4")]
+mod large_group;
 mod lifecycle;
 mod mesh_identity;
 mod mls_header;
