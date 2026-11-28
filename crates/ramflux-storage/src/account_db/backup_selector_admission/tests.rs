@@ -461,7 +461,7 @@ fn install_input_marker(
             "INSERT OR IGNORE INTO message_copy_binding VALUES('envelope:envelope','message')",
             [],
         )?;
-        assert!(!input.query_row("SELECT EXISTS(SELECT 1 FROM direct_message_projection WHERE deleted=1) OR EXISTS(SELECT 1 FROM message_tombstone_projection) OR EXISTS(SELECT 1 FROM group_message_tombstone_projection)", [], |r|r.get::<_,bool>(0))?);
+        assert!(!input.query_row("SELECT EXISTS(SELECT 1 FROM direct_message_projection WHERE deleted=1) OR EXISTS(SELECT 1 FROM message_tombstone_projection)", [], |r|r.get::<_,bool>(0))?);
     }
     Ok(())
 }

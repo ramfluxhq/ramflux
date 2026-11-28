@@ -9,15 +9,18 @@ use super::*;
 // unowned-actor query against the raw input first.
 #[test]
 fn probe_p211_pre_v12_input_still_opens() -> TestResult {
-    let (root, db) = crate::tests::test_db("p211-v11")?;
+    let (root, db) = crate::tests::test_db("p211-pre-v12")?;
     db.connection.execute_batch("DROP TABLE IF EXISTS account_mac_bundle; DELETE FROM schema_migration WHERE schema_version>=12; DROP INDEX IF EXISTS runtime_outbox_object_selector; UPDATE schema_migration SET checksum='2026-06-14-account-core-v1' WHERE schema_version=1; DROP TABLE object_message_reference; DROP TABLE object_retention_reference;")?;
     let path = db.path.clone();
     drop(db);
     let key = AccountDbKey::derive("acct", b"storage-test-secret");
     let result = BackupDatabase::open_restore_input(&path, &key, BackupOpenMode::PreNormalization);
-    eprintln!("v11 input open: {:?}", result.as_ref().map(|d| d.original_input().schema_version));
+    eprintln!(
+        "pre-v12 input open: {:?}",
+        result.as_ref().map(|d| d.original_input().schema_version)
+    );
     let opened = result?;
-    assert_eq!(opened.original_input().schema_version, 11);
+    assert_eq!(opened.original_input().schema_version, 8);
     drop(opened);
     std::fs::remove_dir_all(root)?;
     Ok(())

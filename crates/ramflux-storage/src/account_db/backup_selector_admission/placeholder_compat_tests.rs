@@ -56,11 +56,6 @@ fn review_probe_target_legacy_revocation_not_resurrected() -> TestResult {
 }
 
 #[test]
-fn review_spoofed_group_binding_cannot_drop_target_veto() -> TestResult {
-    target_legacy_veto(Some("group:g:gm"))
-}
-
-#[test]
 fn review_spoofed_envelope_binding_cannot_drop_target_veto() -> TestResult {
     target_legacy_veto(Some("envelope:deleted-envelope"))
 }
@@ -88,9 +83,7 @@ fn target_legacy_veto(spoof: Option<&str>) -> TestResult {
     }
     drop(source);
     // Only the target knows these deletions; the archive invents their owner link.
-    if spoof == Some("group:g:gm") {
-        live.connection.execute("INSERT INTO group_message_tombstone_projection VALUES('g','gm','tombstone','peer','all',1,'deleted',10)", [])?;
-    } else if spoof.is_some() {
+    if spoof.is_some() {
         let mac = live.account_mac(b"ramflux/deleted-envelope/v1", b"deleted-envelope")?;
         live.persist_actor_state(
             &format!("message/deleted-envelope/{mac}"),

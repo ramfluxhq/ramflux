@@ -23,7 +23,7 @@ fn target_only_dm_restriction(deleted_projection: bool) -> TestResult {
         )?,
         1
     );
-    assert_eq!(source.db.query_row("SELECT (SELECT count(*) FROM message_tombstone_projection)+(SELECT count(*) FROM direct_message_projection WHERE deleted=1)+(SELECT count(*) FROM group_message_tombstone_projection)+(SELECT count(*) FROM runtime_actor_state WHERE state_kind GLOB 'message/deleted*')+(SELECT count(*) FROM object_erasure_fence)+(SELECT count(*) FROM object_erasure_lookup)", [], |r| r.get::<_, u64>(0))?, 0, "archive must contain no competing deletion authority");
+    assert_eq!(source.db.query_row("SELECT (SELECT count(*) FROM message_tombstone_projection)+(SELECT count(*) FROM direct_message_projection WHERE deleted=1)+(SELECT count(*) FROM runtime_actor_state WHERE state_kind GLOB 'message/deleted*')+(SELECT count(*) FROM object_erasure_fence)+(SELECT count(*) FROM object_erasure_lookup)", [], |r| r.get::<_, u64>(0))?, 0, "archive must contain no competing deletion authority");
     drop(source);
     let before = std::fs::read(&input)?;
     let mut target = BackupDatabase::open(&target_path, &target_key.key)?;
@@ -41,7 +41,7 @@ fn target_only_dm_restriction(deleted_projection: bool) -> TestResult {
         u64::from(!deleted_projection)
     );
     assert_eq!(target.db.query_row("SELECT count(*) FROM direct_message_projection WHERE message_id='message' AND deleted=1", [], |r| r.get::<_, u64>(0))?, u64::from(deleted_projection));
-    assert_eq!(target.db.query_row("SELECT (SELECT count(*) FROM group_message_tombstone_projection)+(SELECT count(*) FROM runtime_actor_state WHERE state_kind GLOB 'message/deleted*')+(SELECT count(*) FROM object_erasure_fence)+(SELECT count(*) FROM object_erasure_lookup)+(SELECT count(*) FROM object_retention_reference)", [], |r| r.get::<_, u64>(0))?, 0, "target DM row must be the only veto");
+    assert_eq!(target.db.query_row("SELECT (SELECT count(*) FROM runtime_actor_state WHERE state_kind GLOB 'message/deleted*')+(SELECT count(*) FROM object_erasure_fence)+(SELECT count(*) FROM object_erasure_lookup)+(SELECT count(*) FROM object_retention_reference)", [], |r| r.get::<_, u64>(0))?, 0, "target DM row must be the only veto");
     target.merge_backup_pipeline(
         &input,
         &input_key.key,

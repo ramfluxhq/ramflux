@@ -76,13 +76,6 @@ const RAMFLUX_LOCAL_TABLES: &[&str] = &[
     "conversation_projection",
     "message_projection",
     "friend_projection",
-    "group_projection",
-    "group_member_projection",
-    "group_member_device_key",
-    "group_control_event_seen",
-    "group_message_tombstone_projection",
-    "group_ban_projection",
-    "group_invite_projection",
     "receipt_projection",
     "conversation_tombstone",
     "device_inbox_cursor",
@@ -214,7 +207,7 @@ fn client_local_db_design_tables_are_present() -> Result<(), StorageError> {
         assert!(table_exists(&db.connection, table)?, "missing ramflux_local table {table}");
     }
     assert_eq!(ACCOUNT_INDEX_TABLES.len(), 4);
-    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 55);
+    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 48);
     Ok(())
 }
 
@@ -910,7 +903,7 @@ fn account_db_migrations_are_replayable() -> Result<(), StorageError> {
     let key = AccountDbKey::derive("acct", b"storage-test-secret");
     let reopened = AccountDb::open(&index, "acct", &key)?;
     assert_eq!(migration_versions(&reopened)?, before);
-    assert_eq!(before, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    assert_eq!(before, vec![1, 2, 3, 4, 5, 6, 7, 8, 12, 13, 14]);
     Ok(())
 }
 

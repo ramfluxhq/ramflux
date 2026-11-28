@@ -214,8 +214,8 @@ fn primary_transfer_full_census_every_family() -> TestResult {
     let rules = full_transfer_catalog();
     assert_eq!(
         rules.len(),
-        170,
-        "test: census counts the service body fence, drops group_pending_undecrypted, and excludes the cleanup ledger"
+        151,
+        "test: census counts every declared family and excludes the cleanup ledger"
     );
     let census = match db.inspect_full_transfer_schema(rules) {
         Ok(census) => census,
@@ -236,11 +236,7 @@ fn primary_transfer_full_census_every_family() -> TestResult {
             FamilySelector::ActorPrefix(_) => None,
         })
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        tables.len(),
-        164,
-        "test: schema coverage includes the service body fence and omits group_pending_undecrypted and the cleanup ledger"
-    );
+    assert_eq!(tables.len(), 146, "test: schema coverage omits the cleanup ledger");
     assert!(
         matches!(
             census.require_typed_owners(rules),
@@ -351,33 +347,6 @@ fn pairing_full_local_migration_actor_checks_exact_kind_and_boolean_bytes() -> T
     let schema = db.inspect_full_transfer_schema(full_transfer_catalog())?;
     assert!(matches!(
         schema.require_typed_owners(full_transfer_catalog()),
-        Err(crate::StorageError::PairingField("UnsupportedRecord"))
-    ));
-    Ok(())
-}
-
-#[test]
-fn pairing_full_local_group_upgrade_marker_is_exact_canonical_integer_metadata() -> TestResult {
-    let (_root, db) = crate::tests::test_db("full-local-group-upgrade")?;
-    for invalid in
-        [b"{}".as_slice(), b"null", b"01", b"1.0", b"1e1", b"\"1\"", b"9223372036854775808"]
-    {
-        db.connection.execute("UPDATE runtime_actor_state SET state_json=?1 WHERE state_kind='group-message/upgrade-start'",rusqlite::params![invalid])?;
-        assert!(matches!(
-            db.inspect_full_transfer_schema(full_transfer_catalog()),
-            Err(crate::StorageError::PairingField("UnsupportedRecord"))
-        ));
-    }
-    db.connection.execute("UPDATE runtime_actor_state SET state_json=?1 WHERE state_kind='group-message/upgrade-start'",rusqlite::params![b"100".as_slice()])?;
-    db.inspect_full_transfer_schema(full_transfer_catalog())?
-        .require_typed_owners(full_transfer_catalog())?;
-    db.connection.execute(
-        "INSERT INTO runtime_actor_state VALUES('group-message/upgrade-start/unknown',?1)",
-        rusqlite::params![b"100".as_slice()],
-    )?;
-    assert!(matches!(
-        db.inspect_full_transfer_schema(full_transfer_catalog())?
-            .require_typed_owners(full_transfer_catalog()),
         Err(crate::StorageError::PairingField("UnsupportedRecord"))
     ));
     Ok(())

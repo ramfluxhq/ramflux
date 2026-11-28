@@ -376,6 +376,9 @@ fn oversized_unrelated_actor_is_preserved() -> TestResult {
 #[test]
 fn preservation_progress_cancellation_rolls_back() -> TestResult {
     super::tests::fixture("preserve-cancellation", |_, _, target, path, key| {
+        target
+            .db
+            .execute("INSERT INTO runtime_actor_state VALUES('settings/opaque',x'7b7d')", [])?;
         let before = std::fs::read(path)?;
         let mut calls = 0;
         let result = target.merge_backup_pipeline(path, key,

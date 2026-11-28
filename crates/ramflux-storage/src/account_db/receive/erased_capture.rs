@@ -154,7 +154,7 @@ pub(crate) const NON_SOURCE_TABLES: &[&str] = &[
     "cursor_checkpoint",
     "device_inbox_cursor",
     "event_causal_dependency",
-    // Writers `event_store.rs:176`, `group_pending.rs:294` and `receive/stage.rs:170`: projection
+    // Writers `event_store.rs:176`, `receive/stage.rs:170`: projection
     // name, version, a last event id and a checkpoint hash; no envelope and no tuple fields.
     "projection_checkpoint",
     // Legacy transport stores with no production writer: `raw_envelope_log` keeps

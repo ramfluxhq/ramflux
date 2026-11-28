@@ -1,5 +1,5 @@
 {
-  "census_hash": "duUf7sL8OYaWdaUk10B1l_qDpvn88g-q2b59wnk2KU8",
+  "census_hash": "q4cYXLperIW42IgZcIXWuRcIMsul9DL9dqgcELw3F7s",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -257,6 +257,10 @@
     {
       "hash": "fPvdoO-j03_a4ygs0tMlojAkMlRsSobTVckOLvtpwmw",
       "id": "sql/message_tombstone_projection"
+    },
+    {
+      "hash": "-c1gG1yGSjyc_JJVA_LvY4ZC2I94ZyPzMB1uGnXtw8c",
+      "id": "sql/mls_kv/local"
     },
     {
       "hash": "_Tu6yVbUf1iHv3Hkq7hu1rcTDDZs41q6Ac-OX40Cb_E",

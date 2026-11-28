@@ -33,7 +33,6 @@ crates/ramflux-storage/src/account_db/backup_self_sync.rs | rows | 1 | E | exclu
 crates/ramflux-storage/src/account_db/backup_self_sync.rs | state_pair | 1 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
 crates/ramflux-storage/src/account_db/backup_self_sync.rs | state_pair | 2 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
 crates/ramflux-storage/src/account_db/backup_self_sync.rs | state_pair | 3 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
-crates/ramflux-storage/src/account_db/backup_shared_groups.rs | group_backup_value | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/bot.rs | installed_bots | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/bot.rs | installed_bots | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/device_metadata.rs | client_device_record_by_name | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -120,8 +119,6 @@ crates/ramflux-storage/src/account_db/runtime/control.rs | load_actor_state | 1 
 crates/ramflux-storage/src/account_db/runtime/operations.rs | lookup_operation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/runtime/operations.rs | reserve_operation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/runtime/outbox.rs | pending_outbox | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-storage/src/account_db/shared_group_delivery.rs | next_shared_group_intent | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-storage/src/account_db/shared_group_delivery.rs | prune_shared_group_boundaries | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/surface.rs | surface_export_records | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/surface.rs | surface_history_page | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/surface.rs | surface_recent_records | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
