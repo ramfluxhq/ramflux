@@ -22,6 +22,10 @@ pub(crate) enum FrameKind {
     PrincipalManifest,
     PrekeyPublished,
     Prekey,
+    KeyPackagePublished,
+    KeyPackageStatus,
+    KeyPackages,
+    DmOrder,
     RelayTokenV3Issued,
     Ack,
     Cursor,
@@ -70,6 +74,10 @@ impl FrameKind {
             GatewayServerFrame::PrincipalManifest { .. } => Self::PrincipalManifest,
             GatewayServerFrame::PrekeyPublished { .. } => Self::PrekeyPublished,
             GatewayServerFrame::Prekey { .. } => Self::Prekey,
+            GatewayServerFrame::KeyPackagePublished { .. } => Self::KeyPackagePublished,
+            GatewayServerFrame::KeyPackageStatus { .. } => Self::KeyPackageStatus,
+            GatewayServerFrame::KeyPackages { .. } => Self::KeyPackages,
+            GatewayServerFrame::DmOrder { .. } => Self::DmOrder,
             GatewayServerFrame::RelayTokenV3Issued { .. } => Self::RelayTokenV3Issued,
             GatewayServerFrame::Ack { .. } => Self::Ack,
             GatewayServerFrame::Cursor { .. } => Self::Cursor,
@@ -120,6 +128,10 @@ impl FrameKind {
             | Self::PrincipalManifest
             | Self::PrekeyPublished
             | Self::Prekey
+            | Self::KeyPackagePublished
+            | Self::KeyPackageStatus
+            | Self::KeyPackages
+            | Self::DmOrder
             | Self::RelayTokenV3Issued
             | Self::Ack
             | Self::Cursor
@@ -145,7 +157,10 @@ pub(crate) enum ExpectedReply {
     PublishPrekey,
     Manifest,
     Prekey,
-
+    PublishKeyPackages,
+    KeyPackageStatus,
+    FetchKeyPackages,
+    DmOrder,
     RelayTokenV3,
     VoiceLease,
     Attachment,
@@ -173,7 +188,10 @@ impl ExpectedReply {
             Self::PublishPrekey => matches!(kind, FrameKind::PrekeyPublished),
             Self::Manifest => matches!(kind, FrameKind::PrincipalManifest),
             Self::Prekey => matches!(kind, FrameKind::Prekey),
-
+            Self::PublishKeyPackages => matches!(kind, FrameKind::KeyPackagePublished),
+            Self::KeyPackageStatus => matches!(kind, FrameKind::KeyPackageStatus),
+            Self::FetchKeyPackages => matches!(kind, FrameKind::KeyPackages),
+            Self::DmOrder => matches!(kind, FrameKind::DmOrder),
             Self::RelayTokenV3 => matches!(kind, FrameKind::RelayTokenV3Issued),
             Self::VoiceLease => matches!(kind, FrameKind::VoiceLease),
             Self::Attachment => matches!(kind, FrameKind::Attachment),
