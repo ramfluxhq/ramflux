@@ -43,17 +43,11 @@ pub(super) fn entry(
 
 fn persist_opened(
     target: &Fixture,
-    source: &Fixture,
+    _source: &Fixture,
     packet: &GatewayInboxEntry,
 ) -> TestResult<String> {
     let opened = target.client.open_routed(packet, &target.config.device_id)?;
-    target.client.persist_pair(
-        &target.client.owned_device_identity()?,
-        &source.client.owned_device_identity()?,
-        &opened.bundle_hash,
-        &opened.session,
-    )?;
-    Ok(opened.session.session_id)
+    Ok(ramflux_protocol::encode_base64url(&opened.group_id))
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -112,7 +106,7 @@ async fn device_pair_session_reuses_canonical_scope_and_rejects_replay_and_tampe
         let exact = text(&source, &target, "two")?;
         let second = entry(&source, &target, &exact)?;
         let opened = target.client.open_routed(&second, &target.config.device_id)?;
-        assert_eq!(opened.session.session_id, session);
+        assert_eq!(ramflux_protocol::encode_base64url(&opened.group_id), session);
         assert_eq!(opened.body.as_slice(), exact);
         let mut tampered = second.clone();
         tampered.envelope.envelope_id = "different-envelope".into();
@@ -140,7 +134,7 @@ async fn device_pair_session_supports_reply_direction() -> TestResult {
         let exact = text(&target, &source, "reply body")?;
         let reply = entry(&target, &source, &exact)?;
         let opened = source.client.open_routed(&reply, &source.config.device_id)?;
-        assert_eq!(opened.session.session_id, session);
+        assert_eq!(ramflux_protocol::encode_base64url(&opened.group_id), session);
         assert_eq!(opened.body.as_slice(), exact);
         Ok(())
     })

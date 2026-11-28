@@ -330,12 +330,6 @@ fn reply_pair_admit(sender: &Fixture, receiver: &mut Fixture) -> Result<(), SdkE
     let entry = reset_entry(sender, receiver)?;
     stage_w0(&receiver.client, &entry.target_delivery_id, &entry)?;
     let opened = receiver.client.open_routed(&entry, "bob")?;
-    receiver.client.persist_pair(
-        &opened.local_device,
-        &opened.remote_device,
-        &opened.bundle_hash,
-        &opened.session,
-    )?;
     receiver.client.account_db()?.persist_actor_state(
         &format!(
             "{}/reset-pending",

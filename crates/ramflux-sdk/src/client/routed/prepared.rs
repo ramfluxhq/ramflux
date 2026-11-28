@@ -17,6 +17,7 @@ pub(crate) struct SendMaterialRequest {
 #[derive(Clone)]
 pub(crate) struct SendMaterial {
     pub manifest: Option<(String, SdkDeviceManifestResponse)>,
+    #[allow(dead_code, reason = "MLS: allowance removed in D15")]
     pub bundle: Option<ramflux_crypto::PrekeyBundle>,
 }
 
@@ -59,6 +60,7 @@ impl RamfluxClient {
         })
     }
 
+    #[allow(dead_code, reason = "MLS: allowance removed in D14")]
     pub(super) fn prepared_send_pair(
         &self,
         config: &GatewaySessionConfig,
@@ -85,6 +87,23 @@ impl RamfluxClient {
         Ok(pair)
     }
 
+    /// The gates of a prepared send that are not about a pair: the fetched manifest is accepted,
+    /// the target plan holds and the local device is active.
+    pub(super) fn prepared_send_gate(
+        &self,
+        config: &GatewaySessionConfig,
+        message: &GatewayDirectMessage,
+        material: SendMaterial,
+        kind: ramflux_protocol::message::KindId,
+    ) -> Result<(), SdkError> {
+        if let Some((root, manifest)) = material.manifest {
+            self.accept_fetched_device_manifest(manifest, &root, "background-outbox")?;
+        }
+        let _ = Self::candidate_target_plan(|| self.dm_selection_request(message, kind))?;
+        let local = self.local_device_identity(&config.device_id)?;
+        self.require_pair_device_active(&local)
+    }
+
     pub(crate) fn seal_routed_prepared(
         &self,
         config: &SealingConfig,
@@ -93,8 +112,8 @@ impl RamfluxClient {
         route: Route,
         material: SendMaterial,
     ) -> Result<super::SealedRouted, SdkError> {
-        let (mut session, header, bundle) = self.prepared_send_pair(
-            config,
+        self.prepared_send_gate(
+            config.config(),
             message,
             material,
             crate::client::target_selection::kind_id_for_route(&route.kind),
@@ -106,13 +125,7 @@ impl RamfluxClient {
             message,
             body,
             route,
-            SealPair {
-                local: &config.config().device_id,
-                remote: &recipient,
-                session: &mut session,
-                header,
-                bundle,
-            },
+            SealPair { local: &config.config().device_id, remote: &recipient },
         )
     }
 }
@@ -148,8 +161,8 @@ impl RamfluxClient {
             Self::require_self_sync_floor_bootstrap()?;
         }
         self.account_db()?.write_transaction(|| {
-            let (mut session, header, bundle) = self.prepared_send_pair(
-                config,
+            self.prepared_send_gate(
+                config.config(),
                 message,
                 material,
                 crate::client::target_selection::kind_id_for_route(&route.kind),
@@ -163,13 +176,7 @@ impl RamfluxClient {
                 message,
                 body,
                 route,
-                SealPair {
-                    local: &config.config().device_id,
-                    remote: &recipient,
-                    session: &mut session,
-                    header,
-                    bundle,
-                },
+                SealPair { local: &config.config().device_id, remote: &recipient },
                 Some((g::outer::CANDIDATE_ENVELOPE_SCHEMA, 2)),
             )
         })

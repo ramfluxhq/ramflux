@@ -30,6 +30,7 @@ mod project;
 pub(crate) use committed::{Committed, conversation_watermark, object_watermark};
 #[cfg(test)]
 mod legacy;
+mod mls_channel;
 pub(super) mod native_control;
 mod receive;
 mod refused_pair;
@@ -80,9 +81,10 @@ struct Plaintext {
 pub(crate) struct Opened {
     pub routing: Routing,
     pub body: zeroize::Zeroizing<Vec<u8>>,
-    pub decrypted: zeroize::Zeroizing<ramflux_crypto::DmDecryptionOutput>,
-    pub session: ramflux_crypto::DmSession,
-    pub bundle_hash: [u8; 32],
+    /// The opened plaintext before the report frame is removed (the report opening's carrier).
+    pub framed: zeroize::Zeroizing<Vec<u8>>,
+    /// The MLS group the message was opened in (empty on the typing path until D4b moves it).
+    pub group_id: Vec<u8>,
     pub local_device: ramflux_crypto::RootQualifiedDeviceRef,
     pub remote_device: ramflux_crypto::RootQualifiedDeviceRef,
 }
@@ -218,25 +220,10 @@ fn routing(message: &GatewayDirectMessage, route: Route) -> Routing {
     }
 }
 
+#[derive(Clone, Copy)]
 struct SealPair<'a> {
     local: &'a str,
     remote: &'a str,
-    session: &'a mut ramflux_crypto::DmSession,
-    header: Option<SdkDmX3dhHeader>,
-    bundle: [u8; 32],
-}
-
-struct SealedPairPersist<'a> {
-    inner_len: usize,
-    sealed: &'a ramflux_crypto::DmCiphertext,
-    local: &'a str,
-    remote: &'a str,
-    bundle: &'a [u8; 32],
-    session: &'a ramflux_crypto::DmSession,
-    message: &'a GatewayDirectMessage,
-    header: Option<&'a SdkDmX3dhHeader>,
-    collapse_tag: Option<String>,
-    report_commitment: Option<String>,
 }
 
 struct RoutedSeal<'a> {
@@ -244,89 +231,45 @@ struct RoutedSeal<'a> {
     body: &'a [u8],
     kind: Kind,
     local: &'a str,
-    wire_remote: &'a str,
-    bundle: &'a [u8; 32],
-    session: &'a mut ramflux_crypto::DmSession,
-    header: Option<SdkDmX3dhHeader>,
-    remote: &'a str,
-    report: Option<report::DirectReport>,
-    binding: Option<send_cache::Binding>,
-    inner: zeroize::Zeroizing<Vec<u8>>,
+    recipient: &'a ramflux_crypto::RootQualifiedDeviceRef,
+    shared: send_cache::SealedShared,
+    inner: &'a [u8],
+    outer_profile: Option<(&'static str, u32)>,
 }
 
 fn complete_routed_seal(
     client: &RamfluxClient,
+    channel: &mls_channel::Channel,
     finish: RoutedSeal<'_>,
 ) -> Result<SealedRouted, SdkError> {
-    let RoutedSeal {
-        message,
-        body,
-        kind,
-        local,
-        wire_remote,
-        bundle,
-        session,
-        header,
-        remote,
-        report,
-        binding,
-        inner,
-    } = finish;
-    let plaintext = if let Some(ref assembled) = report {
-        zeroize::Zeroizing::new(assembled.framed.as_bytes().to_vec())
-    } else {
-        inner
+    let RoutedSeal { message, body, kind, local, recipient, shared, inner, outer_profile } = finish;
+    let report = match &shared.opening {
+        Some(opening) => {
+            let kcollapse = channel.collapse_key()?;
+            Some(report::assemble_target_report(
+                client,
+                message,
+                &report::SharedReport { kcollapse: &kcollapse, inner, opening },
+                recipient,
+                &report::ReportPolicy {
+                    local_device_id: local,
+                    mode: "durable",
+                    priority: ramflux_protocol::Priority::Normal,
+                    outer_profile,
+                },
+            )?)
+        }
+        None => None,
     };
-    let aad = if let Some(ref assembled) = report {
-        associated_data_bound(
-            &message.envelope_id,
-            local,
-            wire_remote,
-            bundle,
-            CandidateAadBinding {
-                delivery_mode: "durable",
-                collapse_tag: assembled.collapse_tag,
-                report_commitment: Some(assembled.report_commitment),
-            },
-        )?
-    } else {
-        associated_data(&message.envelope_id, local, wire_remote, bundle)?
-    };
-    let ciphertext = session.encrypt(&plaintext, &aad)?;
     let collapse_tag =
         report.as_ref().map(|assembled| ramflux_protocol::encode_base64url(assembled.collapse_tag));
     let report_commitment = report
         .as_ref()
         .map(|assembled| ramflux_protocol::encode_base64url(assembled.report_commitment));
-    persist_sealed_pair(
-        client,
-        &SealedPairPersist {
-            inner_len: plaintext.len().saturating_sub(report.as_ref().map_or(0, |_| {
-                ramflux_protocol::message::outer::FRAME_PREFIX_BYTES
-                    + ramflux_protocol::message::outer::REPORT_OPENING_BYTES
-            })),
-            sealed: &ciphertext,
-            local,
-            remote,
-            bundle,
-            session,
-            message,
-            header: header.as_ref(),
-            collapse_tag: collapse_tag.clone(),
-            report_commitment: report_commitment.clone(),
-        },
-    )?;
-    client.finish_pair_retirement()?;
+    let packet = mls_channel::packet(client, &shared.message, collapse_tag, report_commitment)?;
+    preflight_sealed_size(client, local, message, &packet, inner.len())?;
     let sealed = SealedRouted {
-        packet: SdkDmEncryptedEnvelope {
-            source_principal_commitment: Some(client.own_account_anchor()?),
-            schema: "ramflux.sdk.dm_x3dh_envelope.v2".to_owned(),
-            version: 2,
-            x3dh: header,
-            ciphertext,
-            collapse_tag,
-            report_commitment,
-        },
+        packet,
         committed_a0: report.map(|assembled| assembled.a0_bytes),
         metadata_commitment: report::message_metadata_commitment(
             body,
@@ -335,39 +278,29 @@ fn complete_routed_seal(
         )?,
         suppress_wake: false,
     };
-    let sealed = wake_stamp::apply(sealed, &kind, body);
-    binding.as_ref().map(|cached| cached.persist(client, &sealed)).transpose()?;
-    Ok(sealed)
+    Ok(wake_stamp::apply(sealed, &kind, body))
 }
 
-fn persist_sealed_pair(
+/// Refuse a sealed message whose real signed envelope is over the size caps.
+fn preflight_sealed_size(
     client: &RamfluxClient,
-    persist: &SealedPairPersist<'_>,
+    local: &str,
+    message: &GatewayDirectMessage,
+    packet: &SdkDmEncryptedEnvelope,
+    inner_len: usize,
 ) -> Result<(), SdkError> {
-    let local_ref = client.local_device_identity(persist.local)?;
-    let remote_id = client.device_identity(persist.remote)?;
-
-    let sizes = measure_wire_sealed_send(client, persist)?;
-    let before = session::persisted_pair_snapshot(client, &local_ref, &remote_id)?;
-    let mut ratchet = ramflux_protocol::message::outer::TemporaryRatchet::wrap_session(before);
-    let advanced = serde_json::to_vec(&persist.session.snapshot())?;
-    ramflux_protocol::message::outer::accept_after_size_preflight(sizes, &mut ratchet, advanced)
-        .map_err(map_size_preflight)?;
-    mark_local_pair_origin(client, persist)?;
-    client.persist_pair(&local_ref, &remote_id, persist.bundle, persist.session)
-}
-
-fn mark_local_pair_origin(
-    client: &RamfluxClient,
-    persist: &SealedPairPersist<'_>,
-) -> Result<(), SdkError> {
-    if persist.header.is_none() {
-        return Ok(());
-    }
-    client
-        .account_db()?
-        .persist_actor_state(&format!("dm-pair/local/{}", persist.session.session_id), &true)?;
-    Ok(())
+    let wire_local = crate::client::identity_authority::device_namespace::wire_device_id(
+        &client.local_device_reference(local)?,
+    )?;
+    let envelope = cryptobox_sender_envelope(client, message, packet, &wire_local)?;
+    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_wire(
+        &envelope,
+        inner_len,
+        &packet.ciphertext.canonical_header_bytes,
+        &[],
+    )
+    .map_err(map_size_preflight)?;
+    ramflux_protocol::message::outer::check_ingress_caps(sizes).map_err(map_size_preflight)
 }
 
 fn map_size_preflight(error: ramflux_protocol::message::outer::OuterProfileError) -> SdkError {
@@ -379,63 +312,38 @@ fn map_size_preflight(error: ramflux_protocol::message::outer::OuterProfileError
     }
 }
 
-fn measure_wire_sealed_send(
-    client: &RamfluxClient,
-    persist: &SealedPairPersist<'_>,
-) -> Result<ramflux_protocol::message::outer::IngressSizes, SdkError> {
-    let wire_local = crate::client::identity_authority::device_namespace::wire_device_id(
-        &client.local_device_reference(persist.local)?,
-    )?;
-    let envelope = cryptobox_sender_envelope(client, persist, &wire_local)?;
-    ramflux_protocol::message::outer::IngressSizes::measure_wire(
-        &envelope,
-        persist.inner_len,
-        &persist.sealed.canonical_header_bytes,
-        &[],
-    )
-    .map_err(map_size_preflight)
-}
-
 fn cryptobox_sender_envelope(
     client: &RamfluxClient,
-    persist: &SealedPairPersist<'_>,
+    message: &GatewayDirectMessage,
+    nested: &SdkDmEncryptedEnvelope,
     wire_device_id: &str,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
-    let nested = SdkDmEncryptedEnvelope {
-        source_principal_commitment: Some(client.own_account_anchor()?),
-        schema: "ramflux.sdk.dm_x3dh_envelope.v2".to_owned(),
-        version: 2,
-        x3dh: persist.header.cloned(),
-        ciphertext: persist.sealed.clone(),
-        collapse_tag: persist.collapse_tag.clone(),
-        report_commitment: persist.report_commitment.clone(),
-    };
     let encrypted_payload =
-        ramflux_protocol::message::outer::wire_encrypted_payload(&serde_json::to_vec(&nested)?)
+        ramflux_protocol::message::outer::wire_encrypted_payload(&serde_json::to_vec(nested)?)
             .map_err(map_size_preflight)?;
     let payload_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::ENVELOPE,
         encrypted_payload.as_bytes(),
     );
-    let source_principal_id = client.device_branch.as_ref().map_or_else(
-        || persist.message.source_principal_id.clone(),
-        |branch| branch.principal_id.clone(),
-    );
+    let source_principal_id = client
+        .device_branch
+        .as_ref()
+        .map_or_else(|| message.source_principal_id.clone(), |branch| branch.principal_id.clone());
     let mut envelope = ramflux_protocol::Envelope {
         schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
         version: 2,
         domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
         ext: ramflux_protocol::Ext::default(),
         signed: crate::gateway::helpers::sdk_device_signed_fields(wire_device_id, ""),
-        envelope_id: persist.message.envelope_id.clone(),
+        envelope_id: message.envelope_id.clone(),
         source_principal_id,
         source_device_id: wire_device_id.to_owned(),
-        target_delivery_id: persist.message.target_delivery_id.clone(),
+        target_delivery_id: message.target_delivery_id.clone(),
         routing_set_id: None,
         delivery_class: ramflux_protocol::DeliveryClass::Message,
         priority: ramflux_protocol::Priority::Normal,
-        ttl: persist.message.ttl,
-        created_at: persist.message.created_at,
+        ttl: message.ttl,
+        created_at: message.created_at,
         encrypted_payload,
         payload_hash,
         delivery_mode: Some("durable".into()),
@@ -444,8 +352,8 @@ fn cryptobox_sender_envelope(
     };
     crate::dm::apply_candidate_named_fields_with(
         &mut envelope,
-        persist.collapse_tag.as_deref(),
-        persist.report_commitment.as_deref(),
+        nested.collapse_tag.as_deref(),
+        nested.report_commitment.as_deref(),
     );
     if let Ok(anchor) = client.own_account_anchor() {
         envelope.ext.ext.insert("source_root_commitment".into(), serde_json::Value::String(anchor));
@@ -481,8 +389,7 @@ impl RamfluxClient {
             return Err(SdkError::InboundRejected("self sync: foreign recipient root".into()));
         }
         self.require_native_operation(&remote, NativeOperation::Sync)?;
-        let (mut session, header, bundle) =
-            self.send_pair_session_for(engine, message, false).await?;
+        self.send_authority_gate(engine, message, false).await?;
         self.account_db()?.write_transaction(|| {
             self.authorize_self_sync(&local, &message.conversation_id)?;
             g::self_sync::validate(&value).map_err(|_| invalid("invalid SelfSync body"))?;
@@ -498,13 +405,7 @@ impl RamfluxClient {
                 &message,
                 &inner,
                 Route::control(),
-                SealPair {
-                    local: &engine.config().device_id,
-                    remote: &recipient,
-                    session: &mut session,
-                    header,
-                    bundle,
-                },
+                SealPair { local: &engine.config().device_id, remote: &recipient },
             )?;
             let envelope = crate::dm::gateway_envelope_from_sealed(
                 &engine.sealing_config()?,
@@ -530,8 +431,7 @@ impl RamfluxClient {
         let recipient = Self::qualified_recipient(message)?;
         // Only user content (a direct send) forces a fresh authority fetch; pair resets and
         // other control sends keep the cached-authority gate of their existing authorization.
-        let (mut session, header, bundle) =
-            self.send_pair_session_for(engine, message, route.kind == Kind::Direct).await?;
+        self.send_authority_gate(engine, message, route.kind == Kind::Direct).await?;
         self.account_db()?.write_transaction(|| {
             if route.kind == Kind::Direct {
                 self.capture_own_authored_direct(message, body)?;
@@ -545,13 +445,7 @@ impl RamfluxClient {
                 message,
                 body,
                 route,
-                SealPair {
-                    local: &engine.config().device_id,
-                    remote: &recipient,
-                    session: &mut session,
-                    header,
-                    bundle,
-                },
+                SealPair { local: &engine.config().device_id, remote: &recipient },
             )
         })
     }
@@ -561,31 +455,18 @@ impl RamfluxClient {
         engine: &impl GatewaySessionAccess,
         message: &GatewayDirectMessage,
         body: &[u8],
-        url: Option<&str>,
+        _url: Option<&str>,
         route: Route,
     ) -> Result<SealedRouted, SdkError> {
         let recipient = Self::qualified_recipient(message)?;
-        let (mut session, header, bundle) = self.send_pair_session_from_url(
-            &self.local_device_identity(&engine.config().device_id)?,
-            message,
-            url,
-        )?;
-        self.bind_outgoing_delivery(
-            &self.local_device_identity(&engine.config().device_id)?,
-            message,
-            &route.kind,
-        )?;
+        let local = self.local_device_identity(&engine.config().device_id)?;
+        self.require_pair_device_active(&local)?;
+        self.bind_outgoing_delivery(&local, message, &route.kind)?;
         self.seal_routed_with_route(
             message,
             body,
             route,
-            SealPair {
-                local: &engine.config().device_id,
-                remote: &recipient,
-                session: &mut session,
-                header,
-                bundle,
-            },
+            SealPair { local: &engine.config().device_id, remote: &recipient },
         )
     }
 
@@ -638,55 +519,30 @@ impl RamfluxClient {
     ) -> Result<SealedRouted, SdkError> {
         self.require_backup_outbound_ready()?;
         self.require_generated_send_layer(message, body)?;
-        let source = self.device_identity(pair.local)?;
-        let recipient = self.device_identity(pair.remote)?;
-        let recipient_epoch = self
-            .trusted_device(HeadUse::NewAuthorization, &recipient)?
+        let SealPair { local, remote } = pair;
+        let recipient = self.device_identity(remote)?;
+        // The recipient must be a trusted device with a live incarnation (unchanged gate).
+        self.trusted_device(HeadUse::NewAuthorization, &recipient)?
             .get("device_epoch")
             .and_then(serde_json::Value::as_u64)
             .filter(|epoch| *epoch != 0)
             .ok_or_else(|| invalid("recipient incarnation missing"))?;
-        let binding =
-            send_cache::Binding::new(message, body, &source, &recipient, recipient_epoch)?;
-        if let Some(binding) = &binding
-            && let Some(cached) = binding.load(self)?
-        {
-            return Ok(wake_stamp::apply(cached, &route.kind, body));
-        }
-        let SealPair { local, remote, session, header, bundle } = pair;
-        let remote = self.device_reference(remote)?;
-        let wire_remote =
-            crate::client::identity_authority::device_namespace::wire_device_id(&remote)?;
         let route = Self::prepare_seal_routing(message, body, route);
         let inner = generated_transport::seal_plaintext(body, &route)?;
-        let report = report::maybe_assemble_report(
-            self,
-            message,
-            session,
-            &inner,
-            &recipient,
-            &report::ReportPolicy {
-                local_device_id: local,
-                mode: "durable",
-                priority: ramflux_protocol::Priority::Normal,
-                outer_profile,
-            },
-        )?;
+        let channel = self.send_channel(&recipient)?;
+        let shared = self.seal_shared(&channel, body, &inner, !report::omit_direct_report())?;
         complete_routed_seal(
             self,
+            &channel,
             RoutedSeal {
                 message,
                 body,
                 kind: route.kind,
                 local,
-                wire_remote: &wire_remote,
-                bundle: &bundle,
-                session,
-                header,
-                remote: &remote,
-                report,
-                binding,
-                inner,
+                recipient: &recipient,
+                shared,
+                inner: &inner,
+                outer_profile,
             },
         )
     }
@@ -708,37 +564,23 @@ impl RamfluxClient {
         report::refuse_payload_outer_mismatch(&entry.envelope, &envelope)?;
         let local_device = self.local_device_identity(local)?;
         let remote_device = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-        let (mut session, bundle) = self.recv_pair_session(
-            &local_device,
-            &remote_device,
-            &entry.envelope.envelope_id,
-            &envelope,
-        )?;
-        let aad = associated_data_from_outer(
-            &entry.envelope,
-            &entry.envelope.source_device_id,
-            local,
-            &bundle,
-        )?;
-        let decrypted = zeroize::Zeroizing::new(
-            session.decrypt_with_franking_keys(&envelope.ciphertext, &aad).inspect_err(
-                |error| {
-                    tracing::warn!(
-                        decrypt_site = "routed_pair",
-                        delivery_class = ?entry.envelope.delivery_class,
-                        %error,
-                        "routed envelope decryption failed"
-                    );
-                },
-            )?,
-        );
-        let inner = report::opened_inner_plaintext(&entry.envelope, &decrypted.plaintext)?;
+        if envelope.x3dh.is_some() {
+            return Err(invalid("a bootstrap header is not part of the MLS channel"));
+        }
+        let opened = self
+            .open_shared(&remote_device, &envelope.ciphertext.ciphertext)
+            .inspect_err(|error| {
+                tracing::warn!(
+                    decrypt_site = "routed_mls",
+                    delivery_class = ?entry.envelope.delivery_class,
+                    %error,
+                    "routed envelope decryption failed"
+                );
+            })?;
+        let framed = opened.plaintext;
+        let inner = report::opened_inner_plaintext(&entry.envelope, &framed)?;
         let plaintext = generated_transport::generated_plaintext(&inner)?;
-        report::refuse_direct_candidate_opening(
-            &entry.envelope,
-            &session,
-            &plaintext.routing.kind,
-        )?;
+        report::require_report_commitment(&entry.envelope)?;
         if plaintext.routing.attachments && plaintext.routing.kind != Kind::Direct {
             return Err(invalid("attachment flag requires a direct route"));
         }
@@ -765,9 +607,8 @@ impl RamfluxClient {
         Ok(Opened {
             routing: plaintext.routing,
             body: zeroize::Zeroizing::new(body),
-            decrypted,
-            session,
-            bundle_hash: bundle,
+            framed,
+            group_id: opened.group_id,
             local_device,
             remote_device,
         })

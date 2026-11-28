@@ -49,12 +49,6 @@ fn retain_original_for_upgrade(a: &Fixture, b: &Fixture, raw: &[u8]) -> Result<S
             &origin,
             None,
         )?;
-        b.client.persist_pair(
-            &opened.local_device,
-            source,
-            &opened.bundle_hash,
-            &opened.session,
-        )?;
         db.persist_message_actor_state(&id, &copy, &receipt)?;
         db.put_unsupported_raw_copy(ramflux_storage::RawInnerCopyWrite {
             owner_id: &id,

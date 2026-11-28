@@ -90,6 +90,7 @@ pub(crate) fn refuse_a0_mismatch(
     Ok(())
 }
 
+#[allow(dead_code, reason = "MLS: allowance removed in D14")]
 pub(super) fn maybe_assemble_report(
     client: &RamfluxClient,
     message: &GatewayDirectMessage,
@@ -135,6 +136,58 @@ pub(super) fn assemble_report_with_policy(
         framed: ramflux_crypto::frame_report_plaintext(inner, &opening)?,
         a0_bytes,
     })
+}
+
+/// The per-target report fields of one message whose report opening was generated once (S-2).
+pub(super) struct TargetReport {
+    pub collapse_tag: [u8; 32],
+    pub report_commitment: [u8; 32],
+    pub a0_bytes: Vec<u8>,
+}
+
+/// What every target of one message shares: the exporter collapse key of the DM group, the exact
+/// Inner and the one report opening.
+pub(super) struct SharedReport<'a> {
+    pub kcollapse: &'a [u8; 32],
+    pub inner: &'a [u8],
+    pub opening: &'a [u8; 32],
+}
+
+/// `report_commitment = C(kf, inner, a0_target)` for one target with the message's one opening;
+/// the collapse tag is keyed from the MLS exporter value of the DM group.
+pub(super) fn assemble_target_report(
+    client: &RamfluxClient,
+    message: &GatewayDirectMessage,
+    shared: &SharedReport<'_>,
+    recipient: &ramflux_crypto::RootQualifiedDeviceRef,
+    policy: &ReportPolicy<'_>,
+) -> Result<TargetReport, SdkError> {
+    let collapse_tag = ramflux_crypto::collapse_tag(
+        shared.kcollapse,
+        message.conversation_id.as_bytes(),
+        recipient.storage_key().as_bytes(),
+    )?;
+    let a0 = candidate_report_a0_from_envelope(&report_a0_envelope(
+        client,
+        message,
+        policy.local_device_id,
+        &ramflux_protocol::encode_base64url(collapse_tag),
+        policy,
+    )?)?;
+    let a0_bytes = encode_candidate_report_a0(&a0)?;
+    let report_commitment =
+        ramflux_crypto::report_commitment(shared.opening, shared.inner, &a0_bytes)?;
+    Ok(TargetReport { collapse_tag, report_commitment, a0_bytes })
+}
+
+/// A direct delivery must carry its report commitment (the receiver's C check needs it).
+pub(super) fn require_report_commitment(
+    envelope: &ramflux_protocol::Envelope,
+) -> Result<(), SdkError> {
+    if envelope.report_commitment.is_none() {
+        return Err(SdkError::Crypto(ramflux_crypto::CryptoError::ReportCommitmentMissing));
+    }
+    Ok(())
 }
 
 pub(super) fn opened_inner_plaintext(

@@ -32,7 +32,7 @@ pub(super) fn fresh(
         .client
         .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
         .bundle;
-    let (mut session, header, bundle) = sender.client.new_send_pair(
+    let (_session, _header, _bundle) = sender.client.new_send_pair(
         &sender.client.local_device_identity(&sender.id)?,
         &msg,
         bundle,
@@ -44,13 +44,7 @@ pub(super) fn fresh(
         &msg,
         &exact,
         Route::direct(),
-        SealPair {
-            local: &sender.id,
-            remote: &receiver.reference()?,
-            session: &mut session,
-            header,
-            bundle,
-        },
+        SealPair { local: &sender.id, remote: &receiver.reference()? },
     )?;
     let envelope = crate::dm::gateway_generated_envelope_from_sealed(
         &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sender.config()?)?,
@@ -308,52 +302,6 @@ async fn a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers
             .iter()
             .any(|event| event.topic == "session.reset")
     );
-    Ok(())
-}
-#[tokio::test(flavor = "current_thread")]
-async fn a_failed_attachment_slot_leaves_the_live_ratchet_unchanged() -> Result<(), SdkError> {
-    crate::client::native_test_support::watchdog::within(
-        a_failed_attachment_slot_leaves_the_live_ratchet_unchanged_body(),
-    )
-    .await
-    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
-}
-
-async fn a_failed_attachment_slot_leaves_the_live_ratchet_unchanged_body() -> Result<(), SdkError> {
-    let alice = Fixture::native("alice", 41).await?;
-    let bob = Fixture::native("bob", 61).await?;
-    let entry = fresh(&alice, &bob, "slot-bootstrap")?;
-    let mut opened = bob.client.open_routed(&entry, "bob")?;
-    let before = opened.session.clone();
-    let (mut send, bundle) = alice
-        .client
-        .active_pair(
-            &alice.client.local_device_identity("alice")?,
-            &alice.client.device_identity(&fixture_peer_reference(&alice.client, "bob")?)?,
-        )?
-        .ok_or_else(|| invalid("pair"))?;
-    for _ in 0..3 {
-        send.encrypt(b"lost", b"discarded")?;
-    }
-    let ciphertext = send.encrypt(&[9; 32], b"wrong-aad")?;
-    let slot = crate::SdkObjectKeySlot {
-        schema: "ramflux.sdk.object_key_slot.dm.v2".to_owned(),
-        version: 2,
-        object_id: "object".to_owned(),
-        conversation_id: "recovery-thread".to_owned(),
-        recipient_device_id: "bob".to_owned(),
-        source_principal_commitment: None,
-        x3dh: decode(&entry.envelope)?.x3dh,
-        ciphertext,
-    };
-    bob.client.persist_pair(
-        &bob.client.local_device_identity("bob")?,
-        &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
-        &bundle,
-        &opened.session,
-    )?;
-    assert!(bob.client.decrypt_pair_object_slot(&slot, Some(&mut opened.session)).is_err());
-    assert_eq!(opened.session, before);
     Ok(())
 }
 

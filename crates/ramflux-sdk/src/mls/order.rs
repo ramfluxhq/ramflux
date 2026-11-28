@@ -20,7 +20,7 @@
 //!
 //! The gateway answers `Nack mls_dm_frames_unsupported` until the node wires the frames; every
 //! driver reports that as `NotYetAvailable`.
-#![allow(dead_code, reason = "MLS: allowance removed in D4a")]
+#![allow(dead_code, reason = "MLS: allowance removed in D5")]
 
 use ramflux_mls::{
     ConversationRole, GroupKind, Mls, MlsError, MlsKv, MlsKvError, ReceivedMessage, RfConversation,

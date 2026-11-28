@@ -86,11 +86,24 @@ impl MlsRuntime {
     /// # Errors
     /// The account database is locked, the provider is not initialised or storage fails.
     pub fn open(client: &RamfluxClient) -> Result<Self, SdkError> {
+        Self::open_for(client, &[])
+    }
+
+    /// As [`Self::open`], with the directory heads of the `peers` accounts copied into the
+    /// snapshot too (the DM facade seals and opens for them). A peer without a verified head stays
+    /// absent: the leaf checks then answer `authority_needed` and the engine refreshes.
+    ///
+    /// # Errors
+    /// As [`Self::open`].
+    pub fn open_for(client: &RamfluxClient, peers: &[&str]) -> Result<Self, SdkError> {
         let kv = SqlMlsKv::new(client.account_db()?.mls_kv());
         let authority = Arc::new(SdkAuthority::default());
-        // Own head first; peers' heads are refreshed by the engine on the card's triggers.
+        // Own head first; further heads are refreshed by the engine on the card's triggers.
         if let Ok(anchor) = client.own_account_anchor() {
             authority.refresh(client, &anchor)?;
+        }
+        for peer in peers {
+            authority.refresh(client, peer)?;
         }
         let mut mls = Mls::new(kv.clone(), process_crypto()?).with_authority(authority);
         if let Some(identity) = client.mls_device_identity()? {

@@ -288,7 +288,7 @@ fn seal_nested(
         &message,
         None,
     );
-    let (mut session, header, hash) = if let Ok(value) = existing {
+    let (_session, _header, _hash) = if let Ok(value) = existing {
         value
     } else {
         let aad = associated_data(&message.envelope_id, &sender.id, &receiver.id, &hash)?;
@@ -305,13 +305,7 @@ fn seal_nested(
         &message,
         body,
         route,
-        SealPair {
-            local: &sender.id,
-            remote: &receiver.reference()?,
-            session: &mut session,
-            header,
-            bundle: hash,
-        },
+        SealPair { local: &sender.id, remote: &receiver.reference()? },
     )?;
     Ok((message, sealed))
 }
@@ -341,7 +335,7 @@ fn seal_native_fixture(
         },
     };
     sender.client.account_db()?.write_transaction(|| {
-        let (mut session, header, bundle) = sender.client.prepared_send_pair(
+        let (_session, _header, _bundle) = sender.client.prepared_send_pair(
             &config,
             &message,
             material,
@@ -351,13 +345,7 @@ fn seal_native_fixture(
             &message,
             body,
             route,
-            SealPair {
-                local: &sender.id,
-                remote: recipient.storage_key(),
-                session: &mut session,
-                header,
-                bundle,
-            },
+            SealPair { local: &sender.id, remote: recipient.storage_key() },
         )?;
         Ok((message, sealed))
     })

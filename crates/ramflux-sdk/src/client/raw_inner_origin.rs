@@ -117,7 +117,7 @@ impl RamfluxClient {
         if entry.envelope.schema != g::outer::CANDIDATE_ENVELOPE_SCHEMA {
             return Ok(None);
         }
-        let parsed = ramflux_crypto::parse_report_plaintext(&opened.decrypted.plaintext)?;
+        let parsed = ramflux_crypto::parse_report_plaintext(&opened.framed)?;
         let authority = self
             .current_custody_evidence(
                 opened.remote_device.root_commitment(),

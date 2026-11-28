@@ -47,7 +47,7 @@ async fn establish(a: &Native, b: &mut Native, id: &str) -> TestResult {
     )?;
     let source = a.client.owned_device_identity()?;
     let remote = b.client.owned_device_identity()?;
-    let (mut session, header, bundle) =
+    let (_session, _header, _bundle) =
         if let Some((session, header, bundle)) = a.client.sendable_pair(&source, &remote)? {
             (session, header, bundle)
         } else {
@@ -61,13 +61,7 @@ async fn establish(a: &Native, b: &mut Native, id: &str) -> TestResult {
         &message,
         &body,
         Route::direct(),
-        SealPair {
-            local: "primary",
-            remote: remote.storage_key(),
-            session: &mut session,
-            header,
-            bundle,
-        },
+        SealPair { local: "primary", remote: remote.storage_key() },
     )?;
     message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
     let mut envelope = gateway_direct_message_envelope_sealed(

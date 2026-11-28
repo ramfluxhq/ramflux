@@ -309,12 +309,6 @@ fn established_pair_resigned_mode_mismatch_fails_aead_and_original_still_opens()
     assert!(
         matches!(content.value, Some(g::content::Value::Message(message)) if message.text == "bind-body")
     );
-    b.client.persist_pair(
-        &b.client.local_device_identity("bob")?,
-        &b.client.device_identity(&fixture_peer_reference(&b.client, "alice")?)?,
-        &opened.bundle_hash,
-        &opened.session,
-    )?;
     let (first_identity, _) = RamfluxClient::decode_generated_inner(&opened.body)?;
     let mut stream = crate::client::generated_content::GeneratedEventStream::new(
         "c",
