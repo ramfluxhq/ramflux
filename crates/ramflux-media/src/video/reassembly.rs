@@ -223,6 +223,13 @@ impl Reassembler {
         removed
     }
 
+    /// Byte length of the next complete unit, after expiry, without removing it.
+    #[must_use]
+    pub fn front_len(&mut self, now: Instant) -> Option<usize> {
+        self.expire(now);
+        self.ready.front().map(|unit| unit.data.len())
+    }
+
     /// The next complete unit in presentation-time order, after expiry.
     pub fn pop_ready(&mut self, now: Instant) -> Option<AccessUnit> {
         self.expire(now);

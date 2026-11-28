@@ -141,8 +141,10 @@ pub struct EngineStats {
     /// The target video bitrate of the rate controller, bits per second (0 without video).
     pub video_target_bps: u32,
     /// The highest keyframe revision the peer asked of this side's video
-    /// (increasing; the host answers it with an IDR and [`Engine::keyframe_applied`]).
+    /// (increasing; an IDR submitted on this side acknowledges it).
     pub keyframe_request_revision: u32,
+    /// The highest peer keyframe request this side has acknowledged by queueing an IDR.
+    pub keyframe_ack_revision: u32,
     /// Complete video access units reassembled (drained by the itest synthetic source only).
     pub video_access_units: u64,
     /// Video datagrams sent.
@@ -375,7 +377,8 @@ impl Engine {
 
     /// Queues one encoded access unit on the video track. Refused (counted
     /// as dropped) while the video gate is closed. A full queue flushes to
-    /// the next keyframe (see [`VideoSender::submit`]).
+    /// the next keyframe (see [`VideoSender::submit`]). An IDR that is queued
+    /// acknowledges the peer's current keyframe request.
     ///
     /// # Errors
     ///
@@ -393,11 +396,31 @@ impl Engine {
         *lock_control(&self.control) = VideoControl::new();
     }
 
+    /// Byte length of the next complete video access unit, after expiry, without removing it.
+    /// A reassembly drop observed here asks the peer for a keyframe.
+    #[must_use]
+    pub fn next_video_access_unit_len(&self) -> Option<usize> {
+        let (len, dropped) = {
+            let mut video = lock_video(&self.video);
+            let len = video.front_len(Instant::now());
+            (len, video.dropped())
+        };
+        let _ = lock_control(&self.control).request_if_dropped(dropped);
+        len
+    }
+
     /// The next complete video access unit, in presentation order (expired
-    /// partial units are dropped first).
+    /// partial units are dropped first). A reassembly drop observed here asks
+    /// the peer for a keyframe.
     #[must_use]
     pub fn take_video_access_unit(&self) -> Option<AccessUnit> {
-        lock_video(&self.video).pop_ready(Instant::now())
+        let (unit, dropped) = {
+            let mut video = lock_video(&self.video);
+            let unit = video.pop_ready(Instant::now());
+            (unit, video.dropped())
+        };
+        let _ = lock_control(&self.control).request_if_dropped(dropped);
+        unit
     }
 
     fn flush_playout(&self) {
@@ -434,9 +457,9 @@ impl Engine {
 
     /// The counters so far.
     pub fn stats(&self) -> EngineStats {
-        let (video_target_bps, keyframe_request_revision) = {
+        let (video_target_bps, keyframe_request_revision, keyframe_ack_revision) = {
             let control = lock_control(&self.control);
-            (control.target_bps(), control.peer_request())
+            (control.target_bps(), control.peer_request(), control.applied())
         };
         let shared = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut stats = shared.stats;
@@ -444,6 +467,7 @@ impl Engine {
             stats.video_target_bps = video_target_bps;
         }
         stats.keyframe_request_revision = keyframe_request_revision;
+        stats.keyframe_ack_revision = keyframe_ack_revision;
         stats.since_last_packet_ms = shared
             .last_packet
             .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX));
@@ -525,7 +549,13 @@ fn submit_video_on(
         if paused {
             Submitted { queued: false, dropped: 1 }
         } else {
-            lock_sender(out).submit(au, Instant::now())?
+            let submitted = lock_sender(out).submit(au, Instant::now())?;
+            if au.idr && submitted.queued {
+                let mut control = lock_control(control);
+                let request = control.peer_request();
+                control.apply_keyframe(request);
+            }
+            submitted
         }
     } else {
         Submitted { queued: false, dropped: 1 }
@@ -556,6 +586,10 @@ fn spawn_synthetic_video(engine: &mut Engine) -> std::io::Result<()> {
 }
 
 #[cfg(not(feature = "itest-synthetic-video"))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the itest build of this function returns the thread spawn error"
+)]
 fn spawn_synthetic_video(_engine: &mut Engine) -> std::io::Result<()> {
     Ok(())
 }
@@ -599,7 +633,9 @@ fn synthetic_feeder(
         }
         if drops > seen_drops {
             seen_drops = drops;
-            if lock_control(feed.control).request_keyframe().is_ok() {
+            // The receive path already asks on a push drop. This covers expiry
+            // from the feeder's own drain, and does not ask a second time.
+            if lock_control(feed.control).request_if_dropped(drops) {
                 lock(shared).stats.video_keyframe_requests += 1;
             }
         }
@@ -889,7 +925,16 @@ fn receive_video(
                 datagram.len(),
                 now,
             );
-            let outcome = lock_video(video).push(&received.fragment, &received.payload, now);
+            let (outcome, dropped) = {
+                let mut video = lock_video(video);
+                let outcome = video.push(&received.fragment, &received.payload, now);
+                // Incomplete units expire here, not only when the host takes.
+                video.expire(now);
+                (outcome, video.dropped())
+            };
+            // A reassembly drop (eviction, expiry pressure, or a broken unit)
+            // asks the peer for an IDR. The itest feeder does not own this.
+            let _ = lock_control(control).request_if_dropped(dropped);
             let mut stats = lock(shared);
             match outcome {
                 Ok(_) => stats.stats.video_authenticated += 1,

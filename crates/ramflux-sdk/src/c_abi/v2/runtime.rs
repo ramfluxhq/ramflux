@@ -44,6 +44,8 @@ pub(super) struct Client {
     pub closing: AtomicBool,
     pub(super) lifecycle_gate: Mutex<()>,
     pub data_root: std::path::PathBuf,
+    /// Same control the supervisor registered. Absent when media ownership is external.
+    pub(super) media: Option<crate::bus::media::InProcessMediaControl>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,6 +145,7 @@ impl Client {
     ) -> Result<Arc<Self>, SdkError> {
         let data_root = config.data_root.clone();
         let username_directory = config.username_directory.clone();
+        let media = config.media_control();
         let (commands, receiver) = mpsc::channel(MAX_OPERATIONS);
         let (lifecycle, lifecycle_rx) = mpsc::channel(4);
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -205,6 +208,7 @@ impl Client {
             done: Mutex::new(CloseCompletion { receiver: done, terminal: None }),
             close_wait,
             closing: AtomicBool::new(false),
+            media,
         }))
     }
 

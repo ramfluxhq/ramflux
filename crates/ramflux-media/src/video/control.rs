@@ -8,8 +8,9 @@
 //!
 //! Keyframes: this side asks for an IDR with `keyframe_request_revision`
 //! (repeated until the peer acknowledges, at most once per second) and
-//! acknowledges the peer's requests with `keyframe_ack_revision`, which only
-//! the host sets after it has produced the IDR ([`VideoControl::apply_keyframe`]).
+//! acknowledges the peer's requests with `keyframe_ack_revision`. The engine
+//! sets that acknowledgement when an IDR access unit is queued
+//! ([`VideoControl::apply_keyframe`]).
 
 use std::time::{Duration, Instant};
 
@@ -88,6 +89,8 @@ pub struct VideoControl {
     requested_on_wire: u32,
     peer_request: u32,
     applied: u32,
+    /// Reassembly drop count already turned into one keyframe request.
+    drops_seen: u64,
 }
 
 impl Default for VideoControl {
@@ -126,6 +129,7 @@ impl VideoControl {
             requested_on_wire: 0,
             peer_request: 0,
             applied: 0,
+            drops_seen: 0,
         }
     }
 
@@ -200,10 +204,32 @@ impl VideoControl {
         self.requests.request()
     }
 
-    /// Records that the host produced the keyframe for the peer's request
+    /// One keyframe request for a newly observed reassembly drop count.
+    /// A count already seen, including from another thread, does not ask again.
+    #[must_use]
+    pub(crate) fn request_if_dropped(&mut self, dropped: u64) -> bool {
+        if dropped <= self.drops_seen {
+            return false;
+        }
+        match self.request_keyframe() {
+            Ok(_) => {
+                self.drops_seen = dropped;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Records that this side queued the IDR for the peer's request
     /// `revision` (never beyond what the peer asked for).
     pub fn apply_keyframe(&mut self, revision: u32) {
         self.applied = self.applied.max(revision.min(self.peer_request));
+    }
+
+    /// The highest peer keyframe request this side has acknowledged.
+    #[must_use]
+    pub fn applied(&self) -> u32 {
+        self.applied
     }
 
     /// The highest keyframe revision the peer asked of this side's outgoing video.
