@@ -1113,6 +1113,84 @@ impl GatewaySessionEngine {
         }
     }
 
+    /// The MLS frames answer `Nack mls_dm_frames_unsupported` until the node wires them; that is
+    /// "not yet available", not a failed session.
+    fn mls_frame_nack(reason: String) -> SdkError {
+        if reason == crate::mls::order::UNSUPPORTED_NACK {
+            crate::mls::order::not_yet_available()
+        } else {
+            SdkError::gateway_nack(reason)
+        }
+    }
+
+    /// # Errors
+    /// Returns an error when the gateway rejects the publish or answers with another frame.
+    #[allow(dead_code, reason = "MLS: allowance removed in D4a")]
+    pub(crate) async fn publish_key_packages(
+        &mut self,
+        request: crate::mls::key_packages::KeyPackagePublishRequest,
+    ) -> Result<crate::mls::key_packages::KeyPackagePublishOutcome, SdkError> {
+        self.write_frame(&GatewayClientFrame::KeyPackagePublish { request }).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::PublishKeyPackages).await? {
+            GatewayServerFrame::KeyPackagePublished { response } => Ok(response),
+            GatewayServerFrame::Nack { reason } => Err(Self::mls_frame_nack(reason)),
+            other => Err(SdkError::GatewaySessionRejected(format!(
+                "expected key_package_published frame, got {other:?}"
+            ))),
+        }
+    }
+
+    /// # Errors
+    /// Returns an error when the gateway rejects the request or answers with another frame.
+    #[allow(dead_code, reason = "MLS: allowance removed in D4a")]
+    pub(crate) async fn key_package_status(
+        &mut self,
+    ) -> Result<crate::mls::key_packages::KeyPackageStatusResponse, SdkError> {
+        self.write_frame(&GatewayClientFrame::KeyPackageStatus {}).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::KeyPackageStatus).await? {
+            GatewayServerFrame::KeyPackageStatus { response } => Ok(response),
+            GatewayServerFrame::Nack { reason } => Err(Self::mls_frame_nack(reason)),
+            other => Err(SdkError::GatewaySessionRejected(format!(
+                "expected key_package_status frame, got {other:?}"
+            ))),
+        }
+    }
+
+    /// # Errors
+    /// Returns an error when the gateway rejects the request or answers with another frame.
+    #[allow(dead_code, reason = "MLS: allowance removed in D4a")]
+    pub(crate) async fn fetch_key_packages(
+        &mut self,
+        anchor: &str,
+    ) -> Result<crate::mls::key_packages::KeyPackageFetchResponse, SdkError> {
+        self.write_frame(&GatewayClientFrame::KeyPackageFetch { anchor: anchor.to_owned() })
+            .await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::FetchKeyPackages).await? {
+            GatewayServerFrame::KeyPackages { response } => Ok(response),
+            GatewayServerFrame::Nack { reason } => Err(Self::mls_frame_nack(reason)),
+            other => Err(SdkError::GatewaySessionRejected(format!(
+                "expected key_packages frame, got {other:?}"
+            ))),
+        }
+    }
+
+    /// # Errors
+    /// Returns an error when the gateway rejects the request or answers with another frame.
+    #[allow(dead_code, reason = "MLS: allowance removed in D4a")]
+    pub(crate) async fn dm_order(
+        &mut self,
+        request: crate::mls::order::DmOrderOp,
+    ) -> Result<crate::mls::order::DmOrderReply, SdkError> {
+        self.write_frame(&GatewayClientFrame::DmOrder { request }).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::DmOrder).await? {
+            GatewayServerFrame::DmOrder { reply } => Ok(reply),
+            GatewayServerFrame::Nack { reason } => Err(Self::mls_frame_nack(reason)),
+            other => Err(SdkError::GatewaySessionRejected(format!(
+                "expected dm_order frame, got {other:?}"
+            ))),
+        }
+    }
+
     /// # Errors
     /// Returns an error when the gateway rejects v3 relay-token issuance or the response frame is
     /// not the expected v3 token frame.

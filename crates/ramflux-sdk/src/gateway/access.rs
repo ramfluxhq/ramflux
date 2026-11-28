@@ -196,6 +196,62 @@ pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
     fn close<'a>(&'a mut self, reason: &'a str) -> GatewayCallFuture<'a, ()>;
 }
 
+/// Crate-private MLS DM frames (`KeyPackage` publication and fetch, `dm_order`). Kept off the
+/// public session trait: the daemon-managed session client gets them when a caller needs them.
+#[allow(dead_code, reason = "MLS: allowance removed in D4a")]
+pub(crate) trait MlsFrameAccess {
+    /// # Errors
+    /// The exchange fails; an unwired node answers with the typed not-yet-available error.
+    fn publish_key_packages(
+        &mut self,
+        request: crate::mls::key_packages::KeyPackagePublishRequest,
+    ) -> GatewayCallFuture<'_, crate::mls::key_packages::KeyPackagePublishOutcome>;
+    /// # Errors
+    /// The exchange fails; an unwired node answers with the typed not-yet-available error.
+    fn key_package_status(
+        &mut self,
+    ) -> GatewayCallFuture<'_, crate::mls::key_packages::KeyPackageStatusResponse>;
+    /// # Errors
+    /// The exchange fails; an unwired node answers with the typed not-yet-available error.
+    fn fetch_key_packages<'a>(
+        &'a mut self,
+        anchor: &'a str,
+    ) -> GatewayCallFuture<'a, crate::mls::key_packages::KeyPackageFetchResponse>;
+    /// # Errors
+    /// The exchange fails; an unwired node answers with the typed not-yet-available error.
+    fn dm_order(
+        &mut self,
+        request: crate::mls::order::DmOrderOp,
+    ) -> GatewayCallFuture<'_, crate::mls::order::DmOrderReply>;
+}
+
+#[allow(private_interfaces, dead_code, reason = "MLS: allowance removed in D4a")]
+impl MlsFrameAccess for GatewaySessionEngine {
+    fn publish_key_packages(
+        &mut self,
+        request: crate::mls::key_packages::KeyPackagePublishRequest,
+    ) -> GatewayCallFuture<'_, crate::mls::key_packages::KeyPackagePublishOutcome> {
+        Box::pin(GatewaySessionEngine::publish_key_packages(self, request))
+    }
+    fn key_package_status(
+        &mut self,
+    ) -> GatewayCallFuture<'_, crate::mls::key_packages::KeyPackageStatusResponse> {
+        Box::pin(GatewaySessionEngine::key_package_status(self))
+    }
+    fn fetch_key_packages<'a>(
+        &'a mut self,
+        anchor: &'a str,
+    ) -> GatewayCallFuture<'a, crate::mls::key_packages::KeyPackageFetchResponse> {
+        Box::pin(GatewaySessionEngine::fetch_key_packages(self, anchor))
+    }
+    fn dm_order(
+        &mut self,
+        request: crate::mls::order::DmOrderOp,
+    ) -> GatewayCallFuture<'_, crate::mls::order::DmOrderReply> {
+        Box::pin(GatewaySessionEngine::dm_order(self, request))
+    }
+}
+
 /// Crate-private Push catch-up: `resume_page` / `fetch_entry` stay off the public trait.
 pub(crate) trait GatewayPushAccess: GatewaySessionAccess {
     /// # Errors

@@ -4,8 +4,12 @@
 //! The MLS runtime of the SDK: one process-wide crypto provider and one `Mls` per account, over
 //! the `SQLCipher` account database. The bus surface (`debug.mls.*`) is MLS-0 part 0c.
 mod authority;
+pub(crate) mod channel;
 mod device_identity;
+pub(crate) mod key_packages;
 mod kv_adapter;
+pub(crate) mod lifecycle;
+pub(crate) mod order;
 
 use std::sync::{Arc, OnceLock};
 
