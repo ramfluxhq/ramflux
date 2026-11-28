@@ -12,6 +12,7 @@
 use crate::prelude::*;
 
 /// Route one `debug.mls.*` request.
+#[cfg_attr(not(feature = "itest-mls-debug"), allow(clippy::unused_async))]
 pub(crate) async fn dispatch(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,

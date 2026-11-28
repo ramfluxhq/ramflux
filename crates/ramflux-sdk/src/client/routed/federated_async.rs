@@ -27,15 +27,13 @@ impl RamfluxClient {
         let SealForward { message, plaintext, federation, route, timeout } = request;
         if !federation.target_node_id.is_empty()
             && let Some(anchor) = message.recipient_principal_commitment.as_deref()
-        {
-            if let Err(error) =
+            && let Err(error) =
                 crate::bus::dispatch::conversation_security::cache_foreign_key_packages(
                     self, anchor, timeout,
                 )
                 .await
-            {
-                tracing::debug!(%error, "foreign key package fetch");
-            }
+        {
+            tracing::debug!(%error, "foreign key package fetch");
         }
         let local = self.local_device_identity(&engine.config().device_id)?;
         self.require_pair_device_active(&local)?;

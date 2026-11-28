@@ -299,11 +299,11 @@ pub(crate) fn apply_identity(
         return Ok(());
     };
     object.insert("identity_state".into(), json!(identity_state_name(pin.as_ref(), verified)));
-    if let Some(pin) = pin.as_ref().filter(|pin| pin.pending_anchor.is_some()) {
-        if let Some(fields) = changed_fields(pin).as_object() {
-            for (key, value) in fields {
-                object.insert(key.clone(), value.clone());
-            }
+    if let Some(pin) = pin.as_ref().filter(|pin| pin.pending_anchor.is_some())
+        && let Some(fields) = changed_fields(pin).as_object()
+    {
+        for (key, value) in fields {
+            object.insert(key.clone(), value.clone());
         }
     }
     Ok(())

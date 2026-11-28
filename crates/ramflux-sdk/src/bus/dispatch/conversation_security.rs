@@ -66,7 +66,7 @@ pub(crate) fn admit_stranger(stored: usize) -> Result<(), ()> {
 }
 
 /// `{state, reason?, epoch, members, warning?}`. `fork_recovered` is set only for a real fork.
-pub(crate) fn security_view(input: ViewInput<'_>) -> Value {
+pub(crate) fn security_view(input: &ViewInput<'_>) -> Value {
     let mut body = json!({
         "state": input.phase,
         "epoch": input.epoch,
@@ -169,7 +169,7 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-fn refused(code: &str, message: &str, details: Value) -> SdkError {
+fn refused(code: &str, message: &str, details: &Value) -> SdkError {
     SdkError::LocalBusRefused {
         code: code.to_owned(),
         message: message.to_owned(),
@@ -181,12 +181,12 @@ fn not_member(conversation_id: &str) -> SdkError {
     refused(
         "not_member",
         "this device was removed from the conversation",
-        json!({ "conversation_id": conversation_id }),
+        &json!({ "conversation_id": conversation_id }),
     )
 }
 
 fn rate_limited(message: &str) -> SdkError {
-    refused("rate_limited", message, json!({}))
+    refused("rate_limited", message, &json!({}))
 }
 
 /// Direct-conversation peer anchor. Groups are left to the caller.
@@ -354,15 +354,12 @@ fn remember_scope(client: &RamfluxClient, scope: &Scope, now: u64) -> Result<(),
 }
 
 fn scope_of_row(row: &ScopeRow) -> Option<Scope> {
-    match row.kind.as_str() {
-        "self" => {
-            row.anchors.first().filter(|anchor| !anchor.is_empty()).map(|anchor| Scope::own(anchor))
-        }
-        _ => {
-            let own = row.anchors.first().filter(|anchor| !anchor.is_empty())?;
-            let peer = row.anchors.get(1).filter(|anchor| !anchor.is_empty())?;
-            Scope::dm(own, peer).ok()
-        }
+    if row.kind.as_str() == "self" {
+        row.anchors.first().filter(|anchor| !anchor.is_empty()).map(|anchor| Scope::own(anchor))
+    } else {
+        let own = row.anchors.first().filter(|anchor| !anchor.is_empty())?;
+        let peer = row.anchors.get(1).filter(|anchor| !anchor.is_empty())?;
+        Scope::dm(own, peer).ok()
     }
 }
 
@@ -416,7 +413,7 @@ fn fork_at(client: &RamfluxClient, scope: &Scope) -> Result<Option<u64>, SdkErro
 }
 
 /// Accept does not send. The pin sync is one self-group application message, or it waits for the tick.
-pub(crate) async fn accept_trust(
+pub(crate) fn accept_trust(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
     account_id: &str,
@@ -549,7 +546,7 @@ pub(crate) fn accept_stranger_welcome(
 ) -> Result<(), SdkError> {
     let key = format!("{STRANGER_PREFIX}{key_suffix}");
     let Some(row) = client.account_db()?.load_actor_state::<StrangerWelcome>(&key)? else {
-        return Err(refused("no_pending_change", "no stranger welcome is stored", json!({})));
+        return Err(refused("no_pending_change", "no stranger welcome is stored", &json!({})));
     };
     let welcome = ramflux_protocol::decode_base64url(&row.welcome_b64)
         .map_err(|_| SdkError::LocalBus("stored welcome is not base64url".into()))?;
@@ -728,7 +725,7 @@ async fn fetch_foreign(
     Ok(packages)
 }
 
-/// Cache a foreign home's KeyPackages. A local peer, or a DM group that already exists, is a no-op.
+/// Cache a foreign home's `KeyPackages`. A local peer, or a DM group that already exists, is a no-op.
 pub(crate) async fn cache_foreign_key_packages(
     client: &RamfluxClient,
     anchor: &str,
@@ -929,7 +926,7 @@ pub(crate) fn view(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Va
         .map(|branch| branch.principal_id.clone())
         .ok_or(SdkError::IdentityRootMissing)?;
     let Some(anchor) = direct_peer_anchor(client, &thread, &principal)? else {
-        return Ok(security_view(ViewInput {
+        return Ok(security_view(&ViewInput {
             phase: "ok",
             reason: None,
             epoch: 0,
@@ -958,7 +955,7 @@ pub(crate) fn view(client: &RamfluxClient, request: &LocalBusFrame) -> Result<Va
     };
     let fork = fork_at(client, &scope)?;
     let reason_str = reason.as_deref().or(if phase == "pending" { Some("creating") } else { None });
-    Ok(security_view(ViewInput {
+    Ok(security_view(&ViewInput {
         phase,
         reason: reason_str,
         epoch,
@@ -1065,7 +1062,7 @@ async fn ensure_self_group(
         {
             Ok(outcome) => outcome,
             Err(error) if order::is_not_yet_available(&error) => return Ok(()),
-            Err(SdkError::Mls { code, .. }) if code == "policy_rejected" => return Ok(()),
+            Err(SdkError::Mls { code: "policy_rejected", .. }) => return Ok(()),
             Err(error) => return Err(error),
         }
     };
@@ -1120,9 +1117,7 @@ async fn tick_scopes(
             let pending = store
                 .get(&scope.conversation_id)?
                 .is_some_and(|state| state.pending_lookup_due(now));
-            if !pending {
-                None
-            } else {
+            if pending {
                 match order::retry_pending(engine, runtime.mls(), &store, &scope, now).await {
                     Ok(Some(CommitOutcome::Accepted { extra: Some(welcome), .. })) => Some(welcome),
                     Ok(Some(CommitOutcome::Forked)) => {
@@ -1131,10 +1126,12 @@ async fn tick_scopes(
                     }
                     _ => None,
                 }
+            } else {
+                None
             }
         };
         if let Some(welcome) = welcome_out {
-            let anchor = scope.anchors.first().map(String::as_str).unwrap_or("");
+            let anchor = scope.anchors.first().map_or("", String::as_str);
             if !anchor.is_empty() {
                 let _ = fan_welcome(&account.client, engine, anchor, &welcome).await;
             }
@@ -1145,7 +1142,7 @@ async fn tick_scopes(
     if daily {
         mark_daily(&account.client, now_unix_timestamp())?;
         drain_device_adds(account, engine).await?;
-        drain_pin_sync(account).await?;
+        drain_pin_sync(account)?;
     }
     Ok(())
 }
@@ -1172,9 +1169,9 @@ async fn drain_device_adds(
     };
     let scope_rows = scopes(&account.client)?;
     for add in due {
-        let packages = match key_packages::fetch(engine, &add.anchor).await {
-            Ok(FetchOutcome::Fetched(packages)) => packages,
-            _ => continue,
+        let Ok(FetchOutcome::Fetched(packages)) = key_packages::fetch(engine, &add.anchor).await
+        else {
+            continue;
         };
         let one: Vec<FetchedKeyPackage> =
             packages.into_iter().filter(|package| package.device_id == add.device_id).collect();
@@ -1228,7 +1225,7 @@ async fn drain_device_adds(
     Ok(())
 }
 
-async fn drain_pin_sync(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
+fn drain_pin_sync(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
     let Some(pending) = account.client.account_db()?.load_actor_state::<PinSync>(PIN_SYNC_KEY)?
     else {
         return Ok(());
@@ -1244,12 +1241,7 @@ async fn drain_pin_sync(account: &mut LocalBusAccountState) -> Result<(), SdkErr
     };
     {
         let mut cache = account.client.seal_cache.borrow_mut();
-        crate::mls::channel::seal_once(
-            runtime.mls(),
-            &mut *cache,
-            &state.group_id,
-            &pending.bytes,
-        )?;
+        crate::mls::channel::seal_once(runtime.mls(), &mut cache, &state.group_id, &pending.bytes)?;
     }
     account.client.account_db()?.remove_actor_state(PIN_SYNC_KEY)?;
     Ok(())
@@ -1313,19 +1305,20 @@ pub(crate) async fn on_unlock(account: &mut LocalBusAccountState) -> Result<(), 
     let daily = daily_due(&account.client, now_unix_timestamp()).unwrap_or(false);
     let tick = async {
         let now = now_u64();
-        match {
+        let topped_up = {
             let mut slot = None;
             let runtime = account.client.mls_runtime(&mut slot)?;
             key_packages::top_up(&mut engine, runtime.mls(), now).await
-        } {
+        };
+        match topped_up {
             Ok(_) => {}
             Err(error) if order::is_not_yet_available(&error) => {}
             Err(error) => tracing::warn!(%error, "mls key package top-up"),
         }
-        if let Err(error) = ensure_self_group(account, &mut engine).await {
-            if !order::is_not_yet_available(&error) {
-                tracing::warn!(%error, "mls self group");
-            }
+        if let Err(error) = ensure_self_group(account, &mut engine).await
+            && !order::is_not_yet_available(&error)
+        {
+            tracing::warn!(%error, "mls self group");
         }
         tick_scopes(account, &mut engine, daily).await
     }
@@ -1344,7 +1337,7 @@ mod tests {
     #[test]
     fn security_view_refuses_the_257th_and_the_101st_stranger() {
         let members = Vec::new();
-        let view = security_view(ViewInput {
+        let view = security_view(&ViewInput {
             phase: "pending",
             reason: Some("creating"),
             epoch: 1,
@@ -1358,7 +1351,7 @@ mod tests {
         assert!(admit_pending(PENDING_CAP - 1).is_ok(), "256 pending sends fit");
         assert!(admit_stranger(STRANGER_CAP).is_err(), "the 101st stranger welcome is not stored");
         assert!(admit_stranger(STRANGER_CAP - 1).is_ok(), "100 stranger welcomes fit");
-        let forked = security_view(ViewInput {
+        let forked = security_view(&ViewInput {
             phase: "re_established",
             reason: None,
             epoch: 2,

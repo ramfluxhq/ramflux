@@ -196,16 +196,14 @@ async fn dispatch_routed_request(
         }
         method if method.starts_with("account.") => {
             let result = dispatch_account_bus_request(request, state).await;
-            if request.method == "account.unlock" && result.is_ok() {
-                if let Ok(account_id) = request_account_id(request) {
-                    if let Ok(account) = local_bus_account_mut(state, account_id) {
-                        if let Err(error) =
-                            crate::bus::dispatch::conversation_security::on_unlock(account).await
-                        {
-                            tracing::warn!(%error, "mls unlock tick");
-                        }
-                    }
-                }
+            if request.method == "account.unlock"
+                && result.is_ok()
+                && let Ok(account_id) = request_account_id(request)
+                && let Ok(account) = local_bus_account_mut(state, account_id)
+                && let Err(error) =
+                    crate::bus::dispatch::conversation_security::on_unlock(account).await
+            {
+                tracing::warn!(%error, "mls unlock tick");
             }
             result
         }

@@ -109,6 +109,17 @@ async fn send_content(
     }
 }
 
+fn held_delivery(message_id: &str, conversation_id: &str, reason: &str) -> LocalBusDispatchResult {
+    local_bus_ok(json!({
+        "message_id": Value::Null,
+        "client_message_id": message_id,
+        "conversation_id": conversation_id,
+        "delivery_state": "pending",
+        "reason": reason,
+        "deliveries": []
+    }))
+}
+
 pub(in crate::bus) async fn send_account(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
@@ -146,14 +157,7 @@ pub(in crate::bus) async fn send_account(
     {
         super::conversation_security::PreparedSend::Ready => {}
         super::conversation_security::PreparedSend::Held { reason } => {
-            return Ok(local_bus_ok(json!({
-                "message_id": Value::Null,
-                "client_message_id": message_id,
-                "conversation_id": intent.conversation_id,
-                "delivery_state": "pending",
-                "reason": reason,
-                "deliveries": []
-            })));
+            return Ok(held_delivery(&message_id, &intent.conversation_id, reason));
         }
     }
     reserve_intent(&account.client, operation, &request.body)?;

@@ -3,6 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
+use super::conversation_security::accept_trust;
 use crate::prelude::*;
 
 pub(crate) async fn dispatch_contact_bus_request(
@@ -70,9 +71,7 @@ pub(crate) async fn dispatch_contact_bus_request(
         "contact.list" => contact_list(state, account_id),
         "contact.safety_number" => dispatch_contact_safety_number(request, state, account_id).await,
         "contact.verify" => dispatch_contact_verify(request, state, account_id),
-        "contact.trust.accept_change" => {
-            Box::pin(super::conversation_security::accept_trust(request, state, account_id)).await
-        }
+        "contact.trust.accept_change" => accept_trust(request, state, account_id),
         "contact.verification.status" => {
             dispatch_contact_verification_status(request, state, account_id).await
         }
