@@ -2,40 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 //! Group authorization and additive conversation-link projection after authentication.
-use super::{GatewayInboxEntry, RamfluxClient, SdkError, invalid};
-use crate::client::identity_authority::HeadUse;
+use super::{RamfluxClient, SdkError, invalid};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 impl RamfluxClient {
-    #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-    pub(crate) fn require_routed_group_member(
-        &self,
-        group: &str,
-        entry: &GatewayInboxEntry,
-    ) -> Result<(), SdkError> {
-        if !self
-            .local_is_group_member(group)
-            .map_err(|error| SdkError::InboundPending(error.to_string()))?
-        {
-            return Err(SdkError::InboundPending(
-                "local group membership not yet available".to_owned(),
-            ));
-        }
-        if let Some(state) = self.account_db()?.shared_group_state(group)? {
-            self.ensure_shared_group_device(
-                &state,
-                &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
-            )?;
-            self.ensure_shared_group_device(&state, &self.owned_device_identity()?)?;
-        }
-        self.pin_local_group_member(group)?;
-        self.require_group_sender_pin(
-            group,
-            &entry.envelope.source_principal_id,
-            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
-        )?;
-        Ok(())
-    }
     pub(crate) fn merge_routed_group_link(
         &self,
         group: &str,

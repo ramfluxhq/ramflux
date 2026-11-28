@@ -16,8 +16,6 @@ pub(crate) struct PreparedInbound {
     pub manifest: Option<crate::prekey::SdkDeviceManifestResponse>,
     pub native_prepared: bool,
 
-    #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-    pub group_directory: Option<super::ReceiveGroupDirectory>,
     pub candidate: Option<crate::prekey::SdkDeviceManifestResponse>,
 }
 
@@ -189,8 +187,7 @@ impl RamfluxClient {
             )?;
         }
         #[cfg(not(test))]
-        let _ = observation;
-        self.finish_lazy_own_group_pins(&entry.envelope.source_principal_id, &commitment, remote)?;
+        let _ = (observation, commitment);
         Ok(())
     }
 

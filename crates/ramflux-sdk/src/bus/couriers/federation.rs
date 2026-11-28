@@ -76,30 +76,19 @@ fn unclassified(outcome: Result<Result<(), SubmitRefusal>, SdkError>) -> Result<
     }
 }
 
-/// The unclassified form; production sites use [`submit_classified`], tests keep this one.
+/// The unclassified form, kept for tests; production sites use [`submit_classified_until`].
 #[cfg(test)]
 pub(crate) async fn submit(
     context: &SessionContext,
     envelope: ramflux_protocol::Envelope,
     route: Option<LocalBusFederationRoute>,
 ) -> Result<(), SdkError> {
-    unclassified(submit_classified(context, envelope, route).await)
-}
-
-/// Like [`submit`], but a gateway refusal that is certain to be a refusal (decoded from a
-/// legacy `nack` with an exact outcome reason) is returned in the inner `Err`. Every other
-/// failure, including all federation-routed failures, is uncertain and stays in the outer one.
-pub(crate) async fn submit_classified(
-    context: &SessionContext,
-    envelope: ramflux_protocol::Envelope,
-    route: Option<LocalBusFederationRoute>,
-) -> Result<Result<(), SubmitRefusal>, SdkError> {
     let deadline = if route.is_some() {
         tokio::time::Instant::now() + context.network_wait()
     } else {
         context.call_deadline()
     };
-    submit_inner(context, envelope, route, deadline, false, false).await
+    unclassified(submit_inner(context, envelope, route, deadline, false, false).await)
 }
 
 /// Submit one envelope on the local gateway, optionally with a caller-signed call intent.

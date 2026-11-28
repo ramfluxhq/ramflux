@@ -22,8 +22,6 @@ pub(crate) mod debug_mls;
 pub(crate) mod deferred_attachment;
 pub mod device;
 pub mod grant_mcp;
-#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-pub mod group;
 #[cfg(all(
     feature = "itest-memory-vault",
     ramflux_itest,
@@ -64,6 +62,4 @@ pub(crate) mod surface_transport;
 pub(crate) mod task;
 pub(crate) mod task_approval;
 pub(in crate::bus) mod task_approval_transport;
-#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-mod task_group;
 pub(crate) mod task_transport;

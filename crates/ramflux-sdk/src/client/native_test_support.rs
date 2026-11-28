@@ -249,8 +249,6 @@ mod authored_edit;
 
 mod authored_epoch;
 
-mod authored_group;
-
 mod authored_edit_erasure;
 
 pub(crate) mod live_own_copy;
@@ -276,8 +274,6 @@ pub(crate) mod directory;
 mod named;
 
 pub(crate) mod sibling_erasure;
-
-mod group_history;
 
 pub(crate) mod bus;
 pub(crate) mod pairing_history;

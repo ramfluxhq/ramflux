@@ -106,13 +106,6 @@ crates/ramflux-sdk/src/bus/dispatch/grant_mcp.rs | dispatch_mcp_bus_request | 1 
 crates/ramflux-sdk/src/bus/dispatch/grant_mcp.rs | dispatch_mcp_bus_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/grant_mcp.rs | hydrate_local_mcp_state | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/grant_mcp.rs | mcp_grant_signing_body | 1 | E | excluded=local MCP task-binding value; outside the signed-envelope closure
-crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_bus_request_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_bus_request_inner | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_bus_request_inner | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_receive_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_send_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_sender_key_distribution | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/dispatch/group/history.rs | read | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/itest_agent.rs | approve_once | 1 | E | excluded=itest hook body {plan_hash} (AGENT-IDENTITY-01 C3c); compiled only with the itest opt-in; no signed envelope
 crates/ramflux-sdk/src/bus/dispatch/itest_migration.rs | approve_once | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/message.rs | dispatch_conversation_disappearing_expire | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -167,11 +160,8 @@ crates/ramflux-sdk/src/bus/dispatch/task.rs | build_event | 7 | E | excluded=tar
 crates/ramflux-sdk/src/bus/dispatch/task.rs | prove_decision | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/task_approval_apply.rs | apply_using | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/dispatch/task_approval_cleanup.rs | cleanup | 1 | D | admitted-before-persist; stored row is not an ingress decoder
-crates/ramflux-sdk/src/bus/dispatch/task_group.rs | plan | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/dispatch/task_group.rs | prepared_plan | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/task_transport.rs | direct_target_input | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/generated_typing.rs | execute | 1 | E | excluded=local typed binding or reader selector; signed envelope bytes are not decoded here
-crates/ramflux-sdk/src/bus/group_delivery.rs | resolve | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/io.rs | read_json_after_discriminator | 1 | A | strict=parse_i_json_secret; admission=bounded original JSON frame after connection-private binary demultiplexing
 crates/ramflux-sdk/src/bus/io.rs | read_local_bus_frame | 1 | A | strict=parse_i_json_secret; admission=original local bus frame before nested typed pairing admission
 crates/ramflux-sdk/src/bus/lifecycle.rs | import_account_id | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -201,9 +191,6 @@ crates/ramflux-sdk/src/bus/recovery.rs | apply | 2 | E | excluded=target type is
 crates/ramflux-sdk/src/bus/search_dispatch.rs | search_request | 1 | E | excluded=bounded local search query arguments; outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/search_dispatch.rs | search_request | 2 | E | excluded=local search cancellation and cursor controls; outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/search_dispatch.rs | search_request | 3 | E | excluded=local index maintenance controls; outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/shared_group_sync/mod.rs | federation_route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/shared_group_sync/mod.rs | ownership_transfer | 1 | E | excluded=local group actor value; outside the signed-envelope closure
-crates/ramflux-sdk/src/bus/shared_group_sync/mod.rs | verified_member | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/state.rs | restore_gateway_resume_checkpoint | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/subscription.rs | prepare_follow | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/subscription.rs | prepare_follow | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -244,14 +231,6 @@ crates/ramflux-sdk/src/client/generated_history.rs | verify_edit_origin | 1 | A 
 crates/ramflux-sdk/src/client/generated_history.rs | verify_edit_origin | 2 | C | admission=crates/ramflux-sdk/src/client/generated_history.rs#verify_edit_origin#1
 crates/ramflux-sdk/src/client/generated_history/bootstrap.rs | bootstrap_generated_edited_target | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary
 crates/ramflux-sdk/src/client/generated_history/bootstrap.rs | bootstrap_generated_edited_target | 2 | C | admission=crates/ramflux-sdk/src/client/generated_history/bootstrap.rs#bootstrap_generated_edited_target#1
-crates/ramflux-sdk/src/client/group.rs | group_member_routes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/group.rs | persist_group_member_route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/group_identity.rs | legacy_group_member_route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/group_session.rs | decrypt_group_envelope_with_opening | 1 | E | excluded=typed application, media or own-copy adapter outside Envelope/Ack/Nack containment; native evidence is validated by its dedicated strict verifier
-crates/ramflux-sdk/src/client/group_session.rs | import_group_key_with_source | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/group_session.rs | knows_identical_group_chain | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/group_session.rs | load_group_key_at_head | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/group_session.rs | persist_group_chain | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/home_migration.rs | decode | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/identity_authority/custody_directory.rs | require_custody_device | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/identity_authority/custody_lifecycle.rs | keys_differ | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -291,13 +270,6 @@ crates/ramflux-sdk/src/client/routed/native_control/a2i.rs | to_native | 1 | E |
 crates/ramflux-sdk/src/client/routed/reset_work.rs | pair_control_refused | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/self_sync/delivery.rs | prepare_self_sync_repair | 1 | D | admitted-before-persist; private provenance, repair fingerprint or retirement metadata is read without granting fresh authority
 crates/ramflux-sdk/src/client/self_sync/delivery.rs | self_sync_repair_current | 1 | D | admitted-before-persist; private provenance, repair fingerprint or retirement metadata is read without granting fresh authority
-crates/ramflux-sdk/src/client/shared_group/bootstrap.rs | apply_prepared_shared_group | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/shared_group/bootstrap.rs | prepare_shared_group_payload | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/shared_group/generated.rs | leaf | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary
-crates/ramflux-sdk/src/client/shared_group/mod.rs | shared_group_local_target | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/shared_group/own_consent.rs | canonical_leaf | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary
-crates/ramflux-sdk/src/client/shared_group/routes.rs | shared_group_member_routes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/shared_group/snapshot_generated.rs | generated_snapshot_packet | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary
 crates/ramflux-sdk/src/client/surface/authored.rs | reuse_authored_surface | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/surface/own_history.rs | surface_export_decisions | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/surface/snapshot.rs | prepare_surface_resync | 1 | D | admitted-before-persist; stored row is not an ingress decoder

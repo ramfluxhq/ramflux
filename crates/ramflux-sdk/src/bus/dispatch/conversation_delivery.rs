@@ -67,7 +67,7 @@ pub(super) async fn send(
 async fn routes(
     account: &mut LocalBusAccountState,
     prepared: &Prepared,
-) -> Result<Vec<LocalBusGroupMemberRoute>, SdkError> {
+) -> Result<Vec<LocalBusMemberRoute>, SdkError> {
     let identity = &prepared.identity;
     if identity.group_id.is_some() {
         return Err(SdkError::GeneratedRefused {
@@ -103,7 +103,7 @@ async fn routes(
     Ok(manifest
         .devices
         .into_iter()
-        .map(|device| LocalBusGroupMemberRoute {
+        .map(|device| LocalBusMemberRoute {
             member_id: device.device_id,
             member_principal_commitment: Some(root.clone()),
             device_signing_public_key: None,
@@ -118,7 +118,7 @@ async fn submit(
     prepared: &Prepared,
     event: &str,
     recipients: &[String],
-    route: LocalBusGroupMemberRoute,
+    route: LocalBusMemberRoute,
 ) -> Result<(), SdkError> {
     if route.federation.is_some() {
         return Err(AdapterError::new(
@@ -166,7 +166,7 @@ async fn submit(
     outcome.map(|_| ())
 }
 
-fn route_key(route: &LocalBusGroupMemberRoute) -> Result<String, SdkError> {
+fn route_key(route: &LocalBusMemberRoute) -> Result<String, SdkError> {
     Ok(ramflux_crypto::blake3_256_base64url(
         "ramflux.conversation.delivery.v1",
         &ramflux_protocol::canonical_json_bytes(&(

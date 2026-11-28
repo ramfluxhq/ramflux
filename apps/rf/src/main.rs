@@ -92,7 +92,6 @@ async fn run() -> Result<(), RfError> {
         Command::Transfer(command) => handlers::pairing::handle_transfer(socket, command).await,
         Command::Dm(command) => handlers::dm::handle_dm(socket, command).await,
         Command::Conversation(command) => handlers::conversation_ops::handle(socket, command).await,
-        Command::Group(command) => handlers::group::handle_group(socket, command).await,
         Command::Object(command) => handlers::object::handle_object(socket, command).await,
         Command::Call(command) => handlers::call::handle_call(socket, command).await,
         Command::Bot(command) => handlers::bot::handle_bot(socket, command).await,

@@ -77,7 +77,7 @@ fn run(
     let mut state = initialized_at_scale(
         source_root.path(),
         source_index,
-        Scale { messages: 1, contacts: 0, groups: 0, file_bytes: None },
+        Scale { messages: 1, contacts: 0, file_bytes: None },
     )?;
     producers(&mut state.client)?;
     if matches!(kind, PathKind::Fresh) {
@@ -468,7 +468,7 @@ fn initialize_local(root: &Path, index: &AccountIndex) -> TestResult {
     drop(initialized_at_scale(
         root,
         index.clone(),
-        Scale { messages: 1, contacts: 0, groups: 0, file_bytes: None },
+        Scale { messages: 1, contacts: 0, file_bytes: None },
     )?);
     // Each independent fixture encrypted `file` randomly; it is not a shared identity.
     let key = crate::bus::backup_jobs::install::existing_key(

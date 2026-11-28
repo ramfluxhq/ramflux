@@ -77,10 +77,9 @@ fn account_busy_is_retryable_and_typed_for_restore_check_and_install() -> TestRe
 struct Scale {
     messages: usize,
     contacts: usize,
-    groups: usize,
     file_bytes: Option<usize>,
 }
-const SMALL: Scale = Scale { messages: 6, contacts: 1, groups: 1, file_bytes: None };
+const SMALL: Scale = Scale { messages: 6, contacts: 1, file_bytes: None };
 fn initialized_at_scale(
     root: &Path,
     index: AccountIndex,
@@ -113,9 +112,6 @@ fn initialized_at_scale(
             &format!("m{n}"),
             format!("message {n}").as_bytes(),
         )?;
-    }
-    for n in 0..scale.groups {
-        client.create_group(&format!("group-{n}"), device)?;
     }
     if let Some(size) = scale.file_bytes {
         for n in 0..2 {
@@ -238,13 +234,12 @@ pub(super) async fn finished(
     .map_err(|_| SdkError::LocalBus("job deadline".into()))?
 }
 #[tokio::test(flavor = "current_thread")]
-async fn full_archive_verifies_before_install_and_restores_history_groups_and_files() -> TestResult
-{
+async fn full_archive_verifies_before_install_and_restores_history_and_files() -> TestResult {
     Box::pin(round_trip(SMALL)).await
 }
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "dedicated large-data QA; requires 12 GiB disk and 4 GiB memory; never run on developer machines"]
-async fn large_backup_restores_ten_thousand_messages_one_thousand_contacts_two_hundred_groups_and_gibibyte_files()
+async fn large_backup_restores_ten_thousand_messages_one_thousand_contacts_and_gibibyte_files()
 -> TestResult {
     if cfg!(target_os = "macos") {
         return Err("large backup acceptance runs on QA only".into());
@@ -252,7 +247,6 @@ async fn large_backup_restores_ten_thousand_messages_one_thousand_contacts_two_h
     Box::pin(round_trip(Scale {
         messages: 10_000,
         contacts: 1_100,
-        groups: 200,
         file_bytes: Some(512 * 1024 * 1024),
     }))
     .await
@@ -308,7 +302,6 @@ async fn round_trip(scale: Scale) -> TestResult {
                 Some(if scale.file_bytes.is_some() { 3 } else { 1 })
             );
             assert_eq!(verified.counts.as_ref().map(|c| c.contacts), Some(scale.contacts as u64));
-            assert_eq!(verified.counts.as_ref().map(|c| c.groups), Some(scale.groups as u64));
             assert!(
                 target.index.known_account_ids()?.is_empty(),
                 "verification must not install an account"
@@ -358,7 +351,6 @@ fn check_restored(restored_root: &Path, scale: Scale) -> Result<RamfluxClient, S
     restored.unlock_account("alice", b"account-test-secret")?;
     assert_eq!(restored.direct_messages("thread")?.len(), scale.messages);
     assert_eq!(restored.account_db()?.friend_links()?.len(), scale.contacts);
-    assert_eq!(restored.groups()?.len(), scale.groups);
     assert_eq!(restored.decrypt_object("file")?, b"complete attachment bytes");
     assert_eq!(
         restored.account_db()?.load_actor_state::<bool>("backup/reestablishing")?,
@@ -811,11 +803,8 @@ mod r3;
 fn r8_backup_actor_uses_the_manifests_current_branch_epoch() -> TestResult {
     let root = crate::bus::runtime_tests::root("backup-actor-epoch");
     let index = AccountIndex::open(&root)?;
-    let account = initialized_at_scale(
-        &root,
-        index,
-        Scale { messages: 0, contacts: 0, groups: 0, file_bytes: None },
-    )?;
+    let account =
+        initialized_at_scale(&root, index, Scale { messages: 0, contacts: 0, file_bytes: None })?;
     let mut local =
         read_local_bus_account_manifest(&local_bus_account_manifest_path(&root, "alice"))?;
     local.devices[0].device_epoch = 7;
@@ -882,10 +871,8 @@ async fn backup_create_refuses_short_and_blocklisted_passphrases() -> TestResult
     LocalSet::new()
         .run_until(async {
             let root = crate::bus::runtime_tests::root("backup-create-refused");
-            let supervisor = source_supervisor(
-                &root,
-                Scale { messages: 0, contacts: 0, groups: 0, file_bytes: None },
-            )?;
+            let supervisor =
+                source_supervisor(&root, Scale { messages: 0, contacts: 0, file_bytes: None })?;
             let archive = root.join("refused.rfb");
             for (passphrase, code) in
                 [("aaaaaaaaaaaaaa", "too_short"), ("films+pic+galeries", "too_common")]

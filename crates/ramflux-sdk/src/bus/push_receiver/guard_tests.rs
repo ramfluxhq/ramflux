@@ -778,7 +778,7 @@ async fn all_receive_writers_guard() -> Result<(), SdkError> {
     assert_held_never_acked_and_authorized_delete(&exec, &harness.db)?;
     assert_token_binding(&exec, &harness.db)?;
     assert_settle_outcomes(&exec, &harness.db)?;
-    Box::pin(crate::bus::runtime_tests::assert_activated_group_unrouted_replay_refused()).await
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

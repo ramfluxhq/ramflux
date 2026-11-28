@@ -206,9 +206,6 @@ impl RamfluxClient {
     ) -> Result<String, SdkError> {
         let own = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if let Some(thread) = self.account_db()?.client_record("conversation", conversation)? {
-            if let Some(group) = thread["group_id"].as_str() {
-                return self.device_root(&self.group_device_reference(group, device)?);
-            }
             if thread["kind"] == "direct"
                 && let Some(ids) = thread["participants"].as_array()
             {

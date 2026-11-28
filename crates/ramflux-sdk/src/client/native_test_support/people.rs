@@ -3,9 +3,9 @@
 
 //! Generic native account fixtures: one person, a sibling device, and the directory exchange.
 use super::{Fixture, bus};
+use crate::SdkError;
 use crate::bus::state::LocalBusAccountState;
 use crate::prekey::SdkDeviceManifestResponse;
-use crate::{RamfluxClient, SdkError};
 
 /// Runs one native fixture future to completion on a fresh current-thread runtime.
 fn native_block_on<T>(
@@ -56,11 +56,6 @@ pub(crate) fn manifest_of(
         .as_ref()
         .map(|material| material.manifest.clone())
         .ok_or(SdkError::CustodySetupInvalid)
-}
-
-/// Device storage key that the raw group entry points expect as their target.
-pub(crate) fn native_target(client: &RamfluxClient) -> Result<String, SdkError> {
-    Ok(client.owned_device_identity()?.storage_key().into())
 }
 
 /// Publishes each listed account's native manifest into every listed account's directory.

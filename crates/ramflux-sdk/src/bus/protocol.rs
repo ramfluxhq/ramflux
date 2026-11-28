@@ -544,87 +544,7 @@ pub struct LocalBusContactFederatedRequest {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupCreateRequest {
-    pub group_id: String,
-    pub creator_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub creator_signing_public_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub creator_target_delivery_id: Option<String>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupRequest {
-    pub group_id: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupNameSetRequest {
-    pub group_id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupMemberAddRequest {
-    pub group_id: String,
-    pub member_id: String,
-    pub role: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub member_signing_public_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub member_principal_commitment: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_delivery_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub federation: Option<LocalBusFederationRoute>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupMemberRemoveRequest {
-    pub group_id: String,
-    pub actor_id: String,
-    pub member_id: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupRoleSetRequest {
-    pub group_id: String,
-    pub actor_id: String,
-    pub member_id: String,
-    pub role: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupMemberKickRequest {
-    pub group_id: String,
-    pub actor_id: String,
-    pub member_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupSendRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<ramflux_protocol::message::Content>,
-    pub group_id: String,
-    pub conversation_id: String,
-    pub message_id: String,
-    pub sender_id: String,
-    pub encrypted_body_base64: String,
-    pub plaintext_body_base64: Option<String>,
-    pub envelope_id: Option<String>,
-    pub source_principal_id: Option<String>,
-    pub target_delivery_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub federation: Option<LocalBusFederationRoute>,
-    pub ttl: Option<u32>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupMemberRoute {
+pub struct LocalBusMemberRoute {
     pub member_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_principal_commitment: Option<String>,
@@ -634,24 +554,6 @@ pub struct LocalBusGroupMemberRoute {
     pub target_delivery_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub federation: Option<LocalBusFederationRoute>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupReceiveRequest {
-    pub group_id: String,
-    pub conversation_id: String,
-    pub limit: usize,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupSenderKeyImportRequest {
-    pub distribution_base64: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupSenderKeyExportRequest {
-    pub group_id: String,
-    pub sender_id: String,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

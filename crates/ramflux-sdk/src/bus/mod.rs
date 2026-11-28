@@ -48,8 +48,6 @@ mod events;
 #[expect(dead_code, reason = "resume fence port follows in the next integration round")]
 mod gateway_resume;
 mod generated_typing;
-pub(crate) mod group_conversation;
-mod group_delivery;
 mod host_branch;
 mod host_manage;
 pub mod io;
@@ -70,20 +68,18 @@ mod readers;
 mod requests;
 pub(crate) mod secrets;
 mod session_lease;
-mod shared_group_sync;
 pub use session_lease::SessionLeasePriority;
-pub mod shared_snapshot;
-mod username_directory;
-#[cfg(feature = "c-abi")]
-pub(crate) mod wake_fetch;
-pub(crate) use shared_group_sync::enqueue as enqueue_shared_group;
 pub(crate) mod push_receiver;
+pub mod shared_snapshot;
 mod socket;
 pub mod state;
 mod subscription;
 mod supervisor;
 pub(crate) mod sync_driver;
 mod sync_status;
+mod username_directory;
+#[cfg(feature = "c-abi")]
+pub(crate) mod wake_fetch;
 
 pub use client::*;
 pub use daemon::*;

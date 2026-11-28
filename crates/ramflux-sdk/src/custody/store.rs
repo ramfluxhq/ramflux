@@ -424,28 +424,7 @@ impl BornAccount {
     ) -> Result<super::PrimarySigningLease, SdkError> {
         self.primary_lease(vault, false)
     }
-    /// Signer for group create, invite, membership and settings changes. A human signs
-    /// on the device named by the master certificate. A hosted agent signs with its own
-    /// self-signing key on the device that hosts it. A retired agent, or one whose
-    /// approving primary or host desktop is no longer active, is refused.
-    ///
-    /// `host` is the custodian's current directory record. A hosted agent with `None`
-    /// is refused before a lease exists. A human passes `None`.
-    ///
-    /// # Errors
-    /// `PairingCode("PrimaryRequired")` when a human is not on its primary device.
-    /// `AgentCreationRefused("agent_retired")` when the hosted agent or its host is no
-    /// longer operable. Other failures match the custody lease.
-    pub(crate) fn group_operation_signer(
-        &self,
-        vault: &dyn PrimaryVault,
-        host: Option<&VerifiedRecord>,
-    ) -> Result<super::PrimarySigningLease, SdkError> {
-        self.refuse_hosted_agent(host)?;
-        self.primary_lease(vault, self.hosts_agent_locally()?)
-    }
-    /// Same hosted-agent admission as [`Self::group_operation_signer`], without a
-    /// signing lease. Call invites use it so a retired agent, or a host desktop the
+    /// Hosted-agent admission without a signing lease. Call invites use it so a retired agent, or a host desktop the
     /// directory no longer lists as active, is refused before a call row exists.
     ///
     /// # Errors

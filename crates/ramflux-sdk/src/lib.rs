@@ -101,8 +101,6 @@ mod gateway;
 mod push_keyset;
 mod sealing;
 pub(crate) use sealing::SealingConfig;
-#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-mod group;
 #[cfg(feature = "itest-bus-fault")]
 mod itest_bus_fault;
 #[cfg(feature = "object-ipc-crash-seam")]
@@ -115,7 +113,6 @@ pub mod search;
 pub use node::{
     GatewayProbe, NodeGateway, NodePinSource, NodeProfile, NodeRelay, probe_gateway_pre_account,
 };
-mod own_device_sync;
 mod prekey;
 mod prelude;
 mod records;
@@ -146,13 +143,9 @@ pub use bus::{
     LocalBusDeviceRecord, LocalBusDeviceRevokeRequest, LocalBusDeviceSyncExportRequest,
     LocalBusErrorBody, LocalBusFederationRoute, LocalBusFrame, LocalBusFrameKind,
     LocalBusGrantRequest, LocalBusGrantRevokeRequest, LocalBusGrantStandingApprovalCreateRequest,
-    LocalBusGrantStandingApprovalRevokeRequest, LocalBusGroupCreateRequest,
-    LocalBusGroupMemberAddRequest, LocalBusGroupMemberKickRequest,
-    LocalBusGroupMemberRemoveRequest, LocalBusGroupMemberRoute, LocalBusGroupNameSetRequest,
-    LocalBusGroupReceiveRequest, LocalBusGroupRequest, LocalBusGroupRoleSetRequest,
-    LocalBusGroupSendRequest, LocalBusGroupSenderKeyExportRequest,
-    LocalBusGroupSenderKeyImportRequest, LocalBusIoCause, LocalBusMcpApprovalDecisionRequest,
-    LocalBusMcpApprovalGrantRequest, LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest,
+    LocalBusGrantStandingApprovalRevokeRequest, LocalBusIoCause,
+    LocalBusMcpApprovalDecisionRequest, LocalBusMcpApprovalGrantRequest,
+    LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest, LocalBusMemberRoute,
     LocalBusMessageAckRequest, LocalBusMessageAttachmentInput, LocalBusMessageDeleteRequest,
     LocalBusMessageFrankingEvidenceRequest, LocalBusMessageReceiptDeliveredRequest,
     LocalBusMessageReceiptReadRequest, LocalBusMessageReceiveRequest, LocalBusMessageSubmitRequest,
@@ -202,8 +195,7 @@ pub use ephemeral::{
     echo_holds_ephemeral_send, encode_ephemeral_submit, send_ephemeral, ttl_seconds,
 };
 pub use error::{
-    CustodyConfirmReason, GeneratedRefusalCode, GroupOperation, ReceiveEpochReconcileFailure,
-    SdkError,
+    CustodyConfirmReason, GeneratedRefusalCode, ReceiveEpochReconcileFailure, SdkError,
 };
 mod surface_refusal;
 pub use federation::{
@@ -221,7 +213,6 @@ pub use gateway::{
     GatewaySessionEngine, GatewaySessionEstablishedFrame, GatewaySessionState,
     GatewaySessionTransportKind, GatewaySubmitFrame, GatewayTcpTlsEndpointConfig, PushRouteRetry,
 };
-pub use group::SdkGroupSenderKeyDistribution;
 pub use object::{OBJECT_PUT_PROTOCOL_VERSION, SdkObjectKeySlot, SdkObjectSharePackage};
 pub use prekey::{
     SdkIdentityRegisterRequest, SdkIdentityRegistrationResponse, SdkPrekeyPublishRequest,

@@ -931,7 +931,6 @@ macro_rules! sdk_invalid_argument {
             | SdkError::CustodyPublicationFailed
             | SdkError::SurfaceRefused { .. }
             | SdkError::SurfaceProtocol(_)
-            | SdkError::GroupRefused { .. }
             | SdkError::TaskRefused { .. }
             | SdkError::TaskDeliveryTooLarge { .. }
             | SdkError::SurfaceDeliveryTooLarge { .. }
@@ -1184,9 +1183,6 @@ impl CAbiError {
 #[cfg(test)]
 #[path = "transport_error_tests.rs"]
 mod transport_error_tests;
-
-#[cfg(test)]
-mod group_error_tests;
 
 #[cfg(test)]
 #[test]

@@ -24,7 +24,6 @@ mod projection;
 mod quota;
 mod read;
 mod rejected_task;
-mod roster;
 use crate::SdkError;
 pub(crate) use projection::Delivery;
 use serde::{Deserialize, Serialize};

@@ -129,7 +129,7 @@ impl RamfluxClient {
                     entry,
                     &source,
                     &context.conversation_id,
-                    context.group.as_ref().map(|g| g.group_id.as_str()),
+                    None,
                     &control.bytes()?,
                 )? {
                     return Err(invalid("surface history delivery was not admitted"));

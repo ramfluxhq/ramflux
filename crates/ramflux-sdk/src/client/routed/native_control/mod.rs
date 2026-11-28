@@ -5,8 +5,6 @@
 //! ledger shared by the four native executors. Each executor lives in its own module.
 pub(super) mod a2i;
 mod delivery;
-#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-mod group_key;
 pub(in crate::client) mod guardian;
 mod object_revoke;
 mod produce;

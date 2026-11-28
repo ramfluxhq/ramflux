@@ -338,7 +338,3 @@ fn task_export_pages_advance_independently_for_each_target_device() -> TestResul
     assert_ne!(serde_json::to_value(&first_a[0])?, serde_json::to_value(&second_a[0])?);
     Ok(())
 }
-
-#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-#[path = "own_group_fixture.rs"]
-mod native_group;

@@ -8,9 +8,6 @@ use ramflux_protocol::{
     TaskAccept, TaskEvent, TaskEventBody, TaskProposal, TaskStart, TaskStatus, TaskStep, TaskUpdate,
 };
 use serde_json::json;
-#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-#[path = "group_fixture.rs"]
-mod native_group;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 struct Fixture {

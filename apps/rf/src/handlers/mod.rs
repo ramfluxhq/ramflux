@@ -23,7 +23,6 @@ pub(crate) mod device;
 pub(crate) mod diag;
 pub(crate) mod dm;
 pub(crate) mod grant;
-pub(crate) mod group;
 pub(crate) mod keychain;
 pub(crate) mod mcp;
 pub(crate) mod node;
@@ -75,12 +74,9 @@ pub(crate) use ramflux_sdk::{
     LocalBusContactSafetyRequest, LocalBusConversationDisappearingExpireRequest,
     LocalBusConversationDisappearingSetRequest, LocalBusConversationMuteRequest,
     LocalBusConversationRequest, LocalBusDeviceRevokeRequest, LocalBusFederationRoute,
-    LocalBusGrantRequest, LocalBusGrantRevokeRequest, LocalBusGroupCreateRequest,
-    LocalBusGroupMemberAddRequest, LocalBusGroupMemberKickRequest,
-    LocalBusGroupMemberRemoveRequest, LocalBusGroupNameSetRequest, LocalBusGroupReceiveRequest,
-    LocalBusGroupRequest, LocalBusGroupRoleSetRequest, LocalBusGroupSendRequest,
-    LocalBusMcpApprovalDecisionRequest, LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest,
-    LocalBusMessageAckRequest, LocalBusMessageAttachmentInput, LocalBusMessageDeleteRequest,
+    LocalBusGrantRequest, LocalBusGrantRevokeRequest, LocalBusMcpApprovalDecisionRequest,
+    LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest, LocalBusMessageAckRequest,
+    LocalBusMessageAttachmentInput, LocalBusMessageDeleteRequest,
     LocalBusMessageReceiptDeliveredRequest, LocalBusMessageReceiptReadRequest,
     LocalBusMessageSubmitRequest, LocalBusObjectDeleteRequest, LocalBusObjectGetBeginRequest,
     LocalBusObjectGetFinishRequest, LocalBusObjectGetReadRequest, LocalBusObjectGetRequest,

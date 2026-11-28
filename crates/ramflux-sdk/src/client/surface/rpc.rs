@@ -510,17 +510,6 @@ impl RamfluxClient {
         else {
             return Ok(false);
         };
-        if let Some(group) =
-            thread.get("group_id").and_then(Value::as_str).filter(|id| !id.is_empty())
-        {
-            return self.surface_group_device_allowed(
-                group,
-                &self.peer_device_identity(
-                    &carrier.sender_principal_id,
-                    &carrier.sender_device_id,
-                )?,
-            );
-        }
         let sender = carrier.sender_principal_id.as_str();
         Ok(thread
             .get("participants")

@@ -12,7 +12,6 @@ use ramflux_protocol::custody::{
     CustodyManifest, CustodyManifestDevice, DeviceRef, LayerDeclaration,
     MAX_LAYER_DECLARATION_VALIDITY_SECONDS, MESSAGE_LAYER_FLOOR, SignedLayerDeclaration,
 };
-use ramflux_protocol::group_state::{GroupStateChange, SharedGroupRole};
 use ramflux_protocol::message::KindId;
 use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR};
 use ramflux_protocol::schema_profile::{ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION};
@@ -31,18 +30,6 @@ fn representation<'a>(
 
 fn assert_typed(encoding: Encoding, kind: KindId, layer: u32) {
     assert_eq!(encoding, Encoding::Typed { kind, layer });
-}
-
-fn assert_peer_upgrade(error: &SdkError) -> TestResult {
-    match error {
-        SdkError::LocalBusRefused { code, message, .. }
-            if code == "PeerUpgradeRequired"
-                && message == "admitted clients must support the profile floor" =>
-        {
-            Ok(())
-        }
-        other => Err(format!("expected PeerUpgradeRequired, got {other}").into()),
-    }
 }
 
 fn wall_now() -> TestResult<u64> {
@@ -297,71 +284,8 @@ fn own_roster(
     Ok(SdkDeviceManifestResponse::from_native(native)?)
 }
 
-fn shared_group(
-    owner: &Fixture,
-    owner_manifest: &SdkDeviceManifestResponse,
-    members: &[(&Fixture, &SdkDeviceManifestResponse)],
-    group_id: &str,
-) -> TestResult {
-    persist_declared(owner, owner_manifest)?;
-    let current =
-        load_account(&owner.root.0, &owner.client.account_db()?.local_account_id, wall_now()?)?;
-    let primary = current.group_primary(owner.vault.as_ref())?;
-    owner.client.shared_group_create_with_primary(
-        group_id,
-        "thread",
-        Some("group".into()),
-        &owner.config.target_delivery_id,
-        Some(&primary),
-    )?;
-    for (member, manifest) in members {
-        persist_declared(owner, manifest)?;
-        let actor = member.client.owned_group_actor(&member.config.target_delivery_id)?;
-        owner.client.shared_group_change_with_primary(
-            group_id,
-            &owner.config.target_delivery_id,
-            GroupStateChange::Add { member: actor.identity, role: SharedGroupRole::Member },
-            Some(&primary),
-        )?;
-    }
-    Ok(())
-}
-
 fn plan_of(request: &SelectionRequest) -> TestResult<SelectionPlan> {
     Ok(select(request)?)
-}
-
-#[tokio::test]
-async fn group_fresh_cohort_minimum() -> TestResult {
-    let alice = Fixture::with_device("p05-group-alice", "alice").await?;
-    let bob = Fixture::with_device("p05-group-bob", "bob").await?;
-    let carol = Fixture::with_device("p05-group-carol", "carol").await?;
-    let issued = wall_now()? + 1;
-    let alice_m = publish_primary(&alice, issued, issued + 3_600)?;
-    let bob_m = publish_primary(&bob, issued, issued + 3_600)?;
-    let carol_m = publish_primary(&carol, issued, issued + 10)?;
-    persist_declared(&alice, &alice_m)?;
-    shared_group(&alice, &alice_m, &[(&bob, &bob_m), (&carol, &carol_m)], "g1")?;
-    let _clock = FixedClock::set(i64::try_from(issued + 20)?);
-    let request =
-        alice.client.group_selection_request("g1", "alice", "event-1", KindId::KindMessage)?;
-    assert_eq!(request.source_compiled_support, COMPILED_LAYER);
-    let plan = plan_of(&request)?;
-    assert_eq!(plan.logical_event_id, "event-1");
-    assert_eq!(plan.fresh_cohort_layer, Some(PROFILE_FLOOR));
-    assert_eq!(plan.representations.len(), 2);
-    let fresh = representation(&plan, "bob")?;
-    let floor = representation(&plan, "carol")?;
-    assert_eq!(fresh.variant_counter, 1);
-    assert_eq!(floor.variant_counter, 2);
-    assert_eq!(fresh.selected_layer, PROFILE_FLOOR);
-    assert_eq!(floor.selected_layer, PROFILE_FLOOR);
-    assert!(!fresh.targets.iter().any(|target| target.device_id == "carol"));
-    assert!(!fresh.targets.iter().any(|target| target.device_id == "alice"));
-    assert_eq!(floor.targets.len(), 1);
-    assert_typed(fresh.encoding, KindId::KindMessage, PROFILE_FLOOR);
-    assert_typed(floor.encoding, KindId::KindMessage, PROFILE_FLOOR);
-    Ok(())
 }
 
 #[tokio::test]
@@ -426,94 +350,7 @@ async fn own_and_dm_fresh_minimum() -> TestResult {
 }
 
 #[tokio::test]
-async fn membership_change_rebuilds_unsubmitted_representation() -> TestResult {
-    let owner = Fixture::with_device("p05-recheck-owner", "owner").await?;
-    let alice = Fixture::with_device("p05-recheck-alice", "alice").await?;
-    let bob = Fixture::with_device("p05-recheck-bob", "bob").await?;
-    let issued = wall_now()? + 1;
-    let owner_m = publish_primary(&owner, issued, issued + 3_600)?;
-    let alice_m = publish_primary(&alice, issued, issued + 3_600)?;
-    let bob_m = publish_primary(&bob, issued, issued + 3_600)?;
-    persist_declared(&owner, &owner_m)?;
-    shared_group(&owner, &owner_m, &[(&alice, &alice_m), (&bob, &bob_m)], "g-recheck")?;
-    let _clock = FixedClock::set(i64::try_from(issued)?);
-    let first = owner.client.group_selection_request(
-        "g-recheck",
-        "owner",
-        "event-1",
-        KindId::KindMessage,
-    )?;
-    let plan = select(&first)?;
-    let unchanged = recheck(&plan, &first)?;
-    assert_eq!(unchanged.variant_counter_high_water, 1);
-    assert_eq!(plan.representations[0].variant_counter, 1);
-    assert_eq!(unchanged.representations[0].variant_counter, 1);
-    let current =
-        load_account(&owner.root.0, &owner.client.account_db()?.local_account_id, wall_now()?)?;
-    let primary = current.group_primary(owner.vault.as_ref())?;
-    let bob_id = bob.client.owned_device_identity()?;
-    let reads = Cell::new(0);
-    let rebuilt = select_with_current_membership(|| {
-        reads.set(reads.get() + 1);
-        if reads.get() == 2 {
-            owner.client.shared_group_change_with_primary(
-                "g-recheck",
-                &owner.config.target_delivery_id,
-                GroupStateChange::Remove {
-                    root_commitment: bob_id.root_commitment().into(),
-                    device_id: bob_id.device_id().into(),
-                },
-                Some(&primary),
-            )?;
-        }
-        owner.client.group_selection_request("g-recheck", "owner", "event-1", KindId::KindMessage)
-    })?;
-    assert_eq!(reads.get(), 2);
-    assert_eq!(rebuilt.logical_event_id, "event-1");
-    assert_eq!(rebuilt.variant_counter_high_water, 2);
-    assert!(
-        !rebuilt
-            .representations
-            .iter()
-            .any(|row| { row.targets.iter().any(|target| target.device_id == "bob") })
-    );
-    assert!(rebuilt.representations.iter().all(|row| {
-        !plan.representations.iter().any(|old| old.variant_counter == row.variant_counter)
-    }));
-    Ok(())
-}
-
-#[tokio::test]
-async fn downgrade_does_not_execute_structural_control() -> TestResult {
-    let owner = Fixture::with_device("p05-down-owner", "owner").await?;
-    let alice = Fixture::with_device("p05-down-alice", "alice").await?;
-    let issued = wall_now()? + 1;
-    let owner_m = publish_primary(&owner, issued, issued + 3_600)?;
-    let alice_m = publish_primary(&alice, issued, issued + 3_600)?;
-    persist_declared(&owner, &owner_m)?;
-    shared_group(&owner, &owner_m, &[(&alice, &alice_m)], "g-down")?;
-    let _clock = FixedClock::set(i64::try_from(issued)?);
-    for kind in [KindId::KindDelete, KindId::KindEdit, KindId::KindReaction, KindId::KindControl] {
-        assert_typed(encoding_for(kind, PROFILE_FLOOR)?, kind, PROFILE_FLOOR);
-        assert_eq!(encoding_for(kind, PROFILE_FLOOR - 1)?, Encoding::PeerUpgradeRequired);
-        let request = owner.client.group_selection_request("g-down", "owner", "event-1", kind)?;
-        let plan = plan_of(&request)?;
-        for row in &plan.representations {
-            assert_typed(row.encoding, kind, PROFILE_FLOOR);
-        }
-    }
-    let mut refused =
-        owner.client.group_selection_request("g-down", "owner", "event-1", KindId::KindDelete)?;
-    refused.source_compiled_support = PROFILE_FLOOR - 1;
-    match select(&refused) {
-        Err(error) => assert_peer_upgrade(&error)?,
-        Ok(_) => return Err("layer-1-only client must fail admission".into()),
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn offline_over_24h_still_receives_floor_in_dm_group_and_own_copy() -> TestResult {
+async fn offline_over_24h_still_receives_floor_in_dm_and_own_copy() -> TestResult {
     let owner = Fixture::with_device("p05-off-owner", "owner").await?;
     let fresh = Fixture::with_device("p05-off-fresh", "fresh").await?;
     let stale = Fixture::with_device("p05-off-stale", "stale").await?;
@@ -529,19 +366,12 @@ async fn offline_over_24h_still_receives_floor_in_dm_group_and_own_copy() -> Tes
     persist_declared(&owner, &stale_m)?;
     persist_declared(&fresh, &fresh_m)?;
     persist_declared(&stale, &stale_m)?;
-    shared_group(&owner, &owner_m, &[(&fresh, &fresh_m), (&stale, &stale_m)], "g-off")?;
     let own_m = own_roster(
         &owner,
         &[("watch", fresh_issued, fresh_exp), ("stale", issued, stale_exp)],
         fresh_issued,
     )?;
     let _clock = FixedClock::set(i64::try_from(stale_exp + 5)?);
-    let group = plan_of(&owner.client.group_selection_request(
-        "g-off",
-        "owner",
-        "event-1",
-        KindId::KindDelete,
-    )?)?;
     let dm = plan_of(
         &owner
             .client
@@ -553,11 +383,9 @@ async fn offline_over_24h_still_receives_floor_in_dm_group_and_own_copy() -> Tes
         &own_m,
         KindId::KindDelete,
     )?)?;
-    for (plan, stale_id, fresh_id) in [
-        (&group, "stale", Some("fresh")),
-        (&dm, stale.config.device_id.as_str(), None),
-        (&own, "stale", Some("watch")),
-    ] {
+    for (plan, stale_id, fresh_id) in
+        [(&dm, stale.config.device_id.as_str(), None), (&own, "stale", Some("watch"))]
+    {
         let floor = representation(plan, stale_id)?;
         assert_eq!(floor.selected_layer, PROFILE_FLOOR);
         assert_typed(floor.encoding, KindId::KindDelete, PROFILE_FLOOR);
@@ -867,49 +695,6 @@ async fn one_hour_declaration_on_the_same_record_is_fresh() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn bad_cached_authority_isolates_that_member_as_stale() -> TestResult {
-    let owner = Fixture::with_device("p05-iso-owner", "owner").await?;
-    let alice = Fixture::with_device("p05-iso-alice", "alice").await?;
-    let bob = Fixture::with_device("p05-iso-bob", "bob").await?;
-    let issued = wall_now()? + 1;
-    let owner_m = publish_primary(&owner, issued, issued + 3_600)?;
-    let alice_m = publish_primary(&alice, issued, issued + 3_600)?;
-    let bob_m = publish_primary(&bob, issued, issued + 3_600)?;
-    persist_declared(&owner, &owner_m)?;
-    shared_group(&owner, &owner_m, &[(&alice, &alice_m), (&bob, &bob_m)], "g-iso")?;
-    owner.client.retire_custody_directory_payload(&bob.manifest.principal_commitment)?;
-    let _clock = FixedClock::set(i64::try_from(issued)?);
-    let group = plan_of(&owner.client.group_selection_request(
-        "g-iso",
-        "owner",
-        "event-1",
-        KindId::KindMessage,
-    )?)?;
-    let dm = plan_of(
-        &owner
-            .client
-            .dm_selection_request(&dm_message(&owner, &bob, "dm-iso"), KindId::KindMessage)?,
-    )?;
-    let alice_row = representation(&group, "alice")?;
-    let bob_row = representation(&group, "bob")?;
-    assert_eq!(alice_row.variant_counter, 1);
-    assert_eq!(bob_row.variant_counter, 2);
-    assert_eq!(bob_row.selected_layer, PROFILE_FLOOR);
-    assert!(
-        bob_row.targets.iter().all(|target| target.device_epoch == 0),
-        "stale planning metadata cannot borrow another root's device authority"
-    );
-    let state = owner.client.account_db()?.shared_group_state("g-iso")?.ok_or("signed group")?;
-    assert!(
-        owner.client.shared_group_selected_devices(&state).is_err(),
-        "layer planning must not relax live roster authorization"
-    );
-    assert!(!alice_row.targets.iter().any(|target| target.device_id == "bob"));
-    assert_target_stale(&dm, bob.config.device_id.as_str())?;
-    Ok(())
-}
-
 #[test]
 fn storage_errors_in_cached_roster_are_not_classified_stale() -> TestResult {
     match roster_from_authority_result(Err(SdkError::AccountDbNotUnlocked)) {
@@ -931,20 +716,6 @@ fn control_route_selects_control_kind() {
     assert_eq!(kind_id_for_route(&crate::client::routed::Kind::Direct), KindId::KindMessage);
 }
 
-#[test]
-fn group_logical_event_id_is_message_id_not_group_id() -> TestResult {
-    assert!(
-        group_logical_event_id("g1", Some("g1")).is_err(),
-        "using group_id as the event id must fail"
-    );
-    assert_eq!(group_logical_event_id("g1", Some("msg-1"))?, "msg-1");
-    let generated = group_logical_event_id("g1", None)?;
-    assert_ne!(generated, "g1");
-    assert_ne!(generated, "");
-    Ok(())
-}
-
-/// Primary declares layer 4; the enrolled secondary has never published a declaration.
 fn layer4_roster(
     fixture: &Fixture,
     secondary: Option<&str>,
@@ -1026,14 +797,11 @@ async fn undeclared_device_is_not_a_layer_four_target_in_any_scope() -> TestResu
 async fn undeclared_device_scopes() -> TestResult {
     let owner = Fixture::with_device("m4-owner", "owner").await?;
     let sender = Fixture::with_device("m4-sender", "sender").await?;
-    let member = Fixture::with_device("m4-member", "member").await?;
     let undeclared = Fixture::with_device("m4-undeclared", "undeclared").await?;
     let issued = wall_now()? + 1;
     let owner_m = undeclared_secondary_roster(&owner, "phone", issued)?;
     let owner_primary_only = layer4_roster(&owner, None, issued)?;
-    let member_m = layer4_roster(&member, None, issued)?;
     persist_declared(&sender, &owner_primary_only)?;
-    persist_declared(&sender, &member_m)?;
     persist_declared(&sender, &undeclared.manifest)?;
     let _clock = FixedClock::set(i64::try_from(issued + 20)?);
 
@@ -1093,32 +861,6 @@ async fn undeclared_device_scopes() -> TestResult {
         "an undeclared secondary may send layer 4 to a declared target"
     );
     require_layer(Some(from_phone), COMPILED_LAYER)?;
-
-    // Group scope: one undeclared member device refuses layer-4 content for the whole send.
-    let sender_m = sender.manifest.clone();
-    shared_group(
-        &sender,
-        &sender_m,
-        &[(&member, &member_m), (&undeclared, &undeclared.manifest)],
-        "g-media",
-    )?;
-    let group = plan_of(&sender.client.group_selection_request(
-        "g-media",
-        "sender",
-        "group-media",
-        KindId::KindMessage,
-    )?)?;
-    assert_eq!(
-        representation(&group, "member")?.selected_layer,
-        COMPILED_LAYER,
-        "group: the declared member keeps layer 4"
-    );
-    assert_eq!(
-        representation(&group, "undeclared")?.selected_layer,
-        PROFILE_FLOOR,
-        "group: the undeclared member is isolated at the floor"
-    );
-    assert_layer_refusal(require_layer(Some(group), COMPILED_LAYER), COMPILED_LAYER)?;
     Ok(())
 }
 

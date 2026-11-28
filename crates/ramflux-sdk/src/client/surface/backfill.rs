@@ -26,27 +26,6 @@ impl RamfluxClient {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let origin = if let Some(origin) = db.load_actor_state::<Origin>(&key("origin", message))? {
             origin
-        } else if let Some(group) = db
-            .client_record("conversation", conversation)?
-            .and_then(|thread| thread["group_id"].as_str().map(str::to_owned))
-        {
-            let source = self
-                .group_route_identity(&group, device)?
-                .ok_or_else(|| invalid("surface sender root binding unavailable"))?;
-            let record = db
-                .client_device_record(&source)?
-                .ok_or_else(|| invalid("surface sender device unavailable"))?;
-            let principal = record["principal_id"]
-                .as_str()
-                .ok_or_else(|| invalid("surface sender principal unavailable"))?
-                .to_owned();
-            Origin {
-                principal,
-                device: device.into(),
-                envelope_id: message.into(),
-                expires_at: i64::MAX,
-                group_epoch: None,
-            }
         } else {
             let carrier =
                 Carrier::decode(&bytes)?.ok_or_else(|| invalid("surface origin unavailable"))?;

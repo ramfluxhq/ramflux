@@ -5,7 +5,7 @@ use super::*;
 use crate::RamfluxClient;
 use crate::SdkError;
 use crate::client::generated_content::GeneratedEventStream;
-use crate::client::target_selection::{Encoding, FanoutScope};
+use crate::client::target_selection::Encoding;
 use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR};
 use ramflux_protocol::message::{
     Delete, DeleteScope, Edit, KindId, Message, MessageRef, QualifiedDevice, Reaction, content,
@@ -25,11 +25,8 @@ fn stored(conversation: ConversationKind, tombstoned: bool) -> StoredTarget {
     StoredTarget { author_root: "root-a".into(), revision: 2, tombstoned, conversation }
 }
 
-fn encode_edit_delete(scope: FanoutScope) -> TestResult {
-    let mut stream = match scope {
-        FanoutScope::Group => GeneratedEventStream::new("c", author()).with_group("g1", 1),
-        FanoutScope::Dm | FanoutScope::OwnCopy => GeneratedEventStream::new("c", author()),
-    };
+fn encode_edit_delete() -> TestResult {
+    let mut stream = GeneratedEventStream::new("c", author());
     let edit = RamfluxClient::encode_generated_edit(
         &mut stream,
         b"edit-1".to_vec(),
@@ -132,9 +129,7 @@ fn stale_declaration_target_receives_and_executes_delete_and_edit() -> TestResul
             "receive maximum must not follow own declaration expiry"
         );
     }
-    for scope in [FanoutScope::Dm, FanoutScope::Group, FanoutScope::OwnCopy] {
-        encode_edit_delete(scope)?;
-    }
+    encode_edit_delete()?;
     assert_eq!(
         mutation_encoding(KindId::KindEdit, 1)?,
         Encoding::PeerUpgradeRequired,

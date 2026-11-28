@@ -223,7 +223,6 @@ impl RamfluxClient {
             context: OwnContext {
                 conversation_id: carrier.conversation_id.clone(),
                 participants,
-                group: None,
                 friend,
             },
             history,
@@ -255,7 +254,6 @@ impl RamfluxClient {
         }
         self.authorize_owned_surface_source(&source)?;
         if packet.context.conversation_id != conversation
-            || packet.context.group.is_some()
             || group.is_some()
             || packet.history.events.len() > 289
             || packet.manifests.len() > 64

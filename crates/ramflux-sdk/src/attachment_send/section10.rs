@@ -16,7 +16,7 @@ use super::budget;
 use super::codes::Refusal;
 use super::codes::{
     CODE_DIGEST_MISMATCH, CODE_EXPIRED, CODE_LAYOUT_INVALID, CODE_MANIFEST_TOO_LARGE,
-    CODE_NOT_GRANTEE, CODE_PEER_UPGRADE, CODE_RECIPIENT_EMPTY, CODE_RECIPIENT_LIMIT,
+    CODE_NOT_GRANTEE, CODE_RECIPIENT_EMPTY, CODE_RECIPIENT_LIMIT,
 };
 use super::import_job::{self, Importer, SourcePin};
 use super::listener::{Listener, NOW};
@@ -198,17 +198,13 @@ fn repeated_target_key_is_layout_invalid_and_does_not_reserve() {
 }
 
 #[test]
-fn roster_rules_refuse_empty_group_downgrade_and_direct_upgrade() {
+fn roster_rules_refuse_empty_and_direct_upgrade() {
     assert_eq!(
         targets::choose_targets(MediaScope::Dm, &[]).unwrap_err().code,
         CODE_RECIPIENT_EMPTY
     );
     let low = device("peer-anchor", "old", 1, 3, 5);
     let high = device("peer-anchor", "new", 1, 4, 6);
-    assert_eq!(
-        targets::choose_targets(MediaScope::Group, &[low.clone(), high.clone()]).unwrap_err().code,
-        CODE_PEER_UPGRADE
-    );
     assert_eq!(targets::choose_targets(MediaScope::Dm, &[low, high]).unwrap().len(), 1);
     assert!(preflight::manifest_capability(&[1]).is_err());
     assert!(preflight::manifest_capability(&[]).is_ok());

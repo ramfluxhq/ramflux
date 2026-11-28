@@ -714,26 +714,3 @@ pub(crate) async fn run_without_timer(
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-pub(crate) fn test_apply(
-    account: &mut LocalBusAccountState,
-    root: &str,
-    at: Instant,
-    outcome: Result<SdkDeviceManifestResponse, SdkError>,
-) -> Result<bool, SdkError> {
-    let snapshot = account.connection.as_ref().ok_or(SdkError::NetworkingPending)?.snapshot();
-    // This hook injects a completed fetch for Apply/admission tests. Scheduling
-    // backoff is exercised through Prepare by the scheduler regressions.
-    account.head_refresh.failures.remove(root);
-    account.head_refresh.enqueue(root.to_owned());
-    let plan = prepare(
-        account,
-        Fence {
-            generation: snapshot.generation,
-            session_id: snapshot.session_id.ok_or(SdkError::NetworkingPending)?,
-        },
-    )?
-    .ok_or(SdkError::NetworkingPending)?;
-    apply(account, &plan, root, at, outcome)
-}

@@ -233,9 +233,7 @@ impl AccountRuntime {
             method = %method,
             "account command phase"
         );
-        let stop = super::head_refresh::RECEIVE_PREPARED
-            .scope(std::cell::Cell::new(false), Box::pin(self.apply_command(command)))
-            .await;
+        let stop = Box::pin(self.apply_command(command)).await;
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::debug!(
             phase = "actor_hold",

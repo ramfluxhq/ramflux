@@ -11,7 +11,7 @@
 //! `source_prepare_preserves_w0` and the first leg of `staging_survives_router_expiry`: the
 //! REAL source-preparation effects (`prepare_inbound_device_manifest` /
 //! `apply_inbound_device_manifest`, `accept_fetched_device_manifest`,
-//! `accept_group_actor_manifest`, and the own-history chunk, cipher, slot and import commits)
+//! and the own-history chunk, cipher, slot and import commits)
 //! each run through the dormant W0 adapter, with a real account DB reopen. P12 is dormant at
 //! the SDK level: P20 wires the adapter into the actor.
 use super::fixture::{Case, Fixture};
@@ -244,23 +244,6 @@ async fn case() -> Case {
             Ok(())
         },
         Some(&|client| Ok(directory_source(client, &peer)?.as_deref() == Some("w0-contact"))),
-    )?;
-
-    // Row 3: group.rs `accept_group_actor_manifest` for a received shared-group packet.
-    let group_entry = super::receive_group::group_entry(&mut fixture)?;
-    let local = fixture.source.gateway_config.device_id.clone();
-    let (route, body) =
-        fixture.source.client.preview_inbound_route(&group_entry, &local)?.ok_or("group route")?;
-    let plan = fixture
-        .source
-        .client
-        .group_receive_directory_plan(&group_entry, &route, &body)?
-        .ok_or("group directory plan")?;
-    cells(
-        &mut fixture.source,
-        3,
-        &|client| client.accept_group_actor_manifest(&plan.actor, &group_entry, &peer_manifest),
-        None,
     )?;
 
     let root = fixture.root.clone();

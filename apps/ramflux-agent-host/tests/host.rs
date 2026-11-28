@@ -4,7 +4,6 @@ mod host {
     mod auth_startup;
     mod generation_one;
     mod malformed_events;
-    mod native_groups;
     mod poll_identity;
     mod principal_routing;
     mod recovery;

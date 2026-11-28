@@ -38,7 +38,7 @@ impl SentMessage {
         conversation: &str,
         group: Option<&str>,
     ) -> Result<(), SdkError> {
-        if self.context.group.is_some() || group.is_some() {
+        if group.is_some() {
             return Err(invalid("own sent message group scope is unavailable"));
         }
         if self.envelope_id.is_empty()
@@ -245,7 +245,6 @@ impl RamfluxClient {
             context: OwnContext {
                 conversation_id: input.conversation.into(),
                 participants,
-                group: None,
                 friend,
             },
             body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(input.body)),

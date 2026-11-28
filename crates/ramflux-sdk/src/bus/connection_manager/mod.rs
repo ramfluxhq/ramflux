@@ -350,9 +350,6 @@ impl SessionContext {
     pub(crate) fn call_deadline(&self) -> Instant {
         Instant::now() + self.connection.shared.timeouts.call
     }
-    pub(crate) fn receipt_deadline(&self) -> Instant {
-        Instant::now() + self.receipt_timeout()
-    }
     pub(crate) fn receipt_timeout(&self) -> std::time::Duration {
         self.connection.shared.timeouts.receipt
     }

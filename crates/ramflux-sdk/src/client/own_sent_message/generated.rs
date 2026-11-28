@@ -48,11 +48,7 @@ impl RamfluxClient {
         self.require_native_operation(source, NativeOperation::Sync)?;
         self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
         let packet = SentMessage::from_generated(sent)?;
-        let group = packet.context.group.as_ref().map(|group| group.group_id.as_str());
-        if group.is_some() {
-            return Err(invalid("own sent group copies are unavailable"));
-        }
-        packet.validate_route(&sent.envelope_id, conversation, group)?;
+        packet.validate_route(&sent.envelope_id, conversation, None)?;
         self.validate_own_context_namespace(&packet.context)?;
         let scanned = g::validation::scan_inner(&sent.exact_inner)
             .map_err(|_| invalid("own sent Inner malformed"))?;
@@ -64,7 +60,7 @@ impl RamfluxClient {
         if author.account_anchor != source.root_commitment()
             || identity.device_sequence & (1 << 63) != 0
             || identity.conversation_id != conversation
-            || identity.group_id.as_deref() != group
+            || identity.group_id.is_some()
             || ramflux_protocol::encode_base64url(&identity.id) != sent.message_id
             || !matches!(scanned.kind, 1 | 3 | 4 | 5)
         {

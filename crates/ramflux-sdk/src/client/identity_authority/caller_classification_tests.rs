@@ -52,27 +52,9 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
         [1, 0, 0, 0],
     ),
     (
-        "bus/dispatch/group/history.rs",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bus/dispatch/group/history.rs")),
-        [0, 0, 0, 0],
-    ),
-    (
-        "bus/dispatch/shared_group_transfer_tests.rs",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/bus/dispatch/shared_group_transfer_tests.rs"
-        )),
-        [0, 0, 0, 0],
-    ),
-    (
         "bus/dispatch/surface_own_tests.rs",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bus/dispatch/surface_own_tests.rs")),
         [0, 1, 0, 0],
-    ),
-    (
-        "bus/group_delivery.rs",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bus/group_delivery.rs")),
-        [3, 0, 0, 0],
     ),
     (
         "bus/native_account.rs",
@@ -108,26 +90,6 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
         [1, 0, 0, 0],
     ),
     (
-        "client/group.rs",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/group.rs")),
-        [1, 0, 0, 0],
-    ),
-    (
-        "client/group_control_roots.rs",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/group_control_roots.rs")),
-        [1, 0, 0, 0],
-    ),
-    (
-        "client/group_identity.rs",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/group_identity.rs")),
-        [3, 0, 0, 0],
-    ),
-    (
-        "client/group_session.rs",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/group_session.rs")),
-        [0, 1, 0, 0],
-    ),
-    (
         "client/identity_authority/custody_directory.rs",
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -158,14 +120,6 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
             "/src/client/identity_authority/gateway_tests.rs"
         )),
         [0, 0, 0, 0],
-    ),
-    (
-        "client/identity_authority/group_review_r3_tests.rs",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/client/identity_authority/group_review_r3_tests.rs"
-        )),
-        [0, 1, 0, 0],
     ),
     (
         "client/identity_authority/mod.rs",
@@ -208,14 +162,6 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
         "client/own_device_sync.rs",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/own_device_sync.rs")),
         [0, 0, 0, 0],
-    ),
-    (
-        "client/own_group_lazy_authority.rs",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/client/own_group_lazy_authority.rs"
-        )),
-        [1, 0, 0, 0],
     ),
     (
         "client/own_sent_delivery.rs",
@@ -282,47 +228,6 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
         "client/routed/session.rs",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/routed/session.rs")),
         [0, 1, 0, 0],
-    ),
-    (
-        "client/shared_group/bootstrap.rs",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/shared_group/bootstrap.rs")),
-        [1, 0, 0, 0],
-    ),
-    (
-        "client/shared_group/controls.rs",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/shared_group/controls.rs")),
-        [1, 0, 0, 0],
-    ),
-    (
-        "client/shared_group/invitations.rs",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/client/shared_group/invitations.rs"
-        )),
-        [1, 0, 0, 0],
-    ),
-    (
-        "client/shared_group/own_consent.rs",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/client/shared_group/own_consent.rs"
-        )),
-        [1, 1, 0, 0],
-    ),
-    (
-        "client/shared_group/requests.rs",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/shared_group/requests.rs")),
-        [1, 1, 0, 0],
-    ),
-    (
-        "client/shared_group/routes.rs",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/shared_group/routes.rs")),
-        [1, 0, 0, 0],
-    ),
-    (
-        "client/shared_group/transfer.rs",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/shared_group/transfer.rs")),
-        [2, 1, 0, 0],
     ),
     (
         "client/surface/resync_request.rs",

@@ -73,7 +73,6 @@ pub(crate) use crate::gateway::{
     gateway_auth_frame, gateway_fresh_open_frame, gateway_heartbeat_now, gateway_session_state,
     gateway_session_timeout, gateway_stream_nonce, sdk_device_signed_fields, sdk_signed_fields,
 };
-pub(crate) use crate::group::*;
 pub(crate) use crate::object::{
     OBJECT_OPERATION_COMMITTED, OBJECT_OPERATION_FAILED, OBJECT_OPERATION_LOCAL_COMMITTED,
     OBJECT_OPERATION_PENDING, OBJECT_OPERATION_UNKNOWN, OBJECT_PUT_PROTOCOL_VERSION,
@@ -88,9 +87,6 @@ pub(crate) use crate::object::{
     verify_recipient_object_access_grant,
 };
 
-pub(crate) use crate::own_device_sync::{
-    SdkOwnDeviceGroupMemberSnapshot, SdkOwnDeviceGroupSnapshot,
-};
 pub(crate) use crate::prekey::{
     SdkDeviceManifestResponse, identity_root_public_key_commitment, sdk_fetch_prekey_bundle,
     sdk_gateway_get_json, sdk_gateway_post_json, sdk_http_get_json, sdk_http_host_port,

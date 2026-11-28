@@ -422,9 +422,6 @@ mod review_r2;
 #[path = "review_r3_tests.rs"]
 mod review_r3;
 
-#[path = "group_review_r3_tests.rs"]
-mod group_review_r3;
-
 #[test]
 fn verify_manifest_json_rejects_swapped_branch_and_agreement_keys() -> TestResult {
     let bob = Actor::new("bob", "bob-device", 31, 32, 1)?;

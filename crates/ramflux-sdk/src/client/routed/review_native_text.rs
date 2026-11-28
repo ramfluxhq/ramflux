@@ -91,7 +91,6 @@ async fn roundtrip_body(text: &[u8], probe_wrapper: bool) -> TestResult {
         friends,
         "text must not create, accept, or modify another contact"
     );
-    assert!(target.client.groups()?.is_empty(), "text must not create a group");
     if probe_wrapper {
         assert_wrapper_refused(&source, &target, &message, text)?;
     }

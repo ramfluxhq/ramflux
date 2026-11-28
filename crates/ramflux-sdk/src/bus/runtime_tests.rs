@@ -1395,15 +1395,9 @@ async fn gateway_live_without_native_root_is_identity_root_missing() -> Result<(
     .expect("scenario deadline")
 }
 mod contact_state;
-mod group_generation;
-
-pub(crate) async fn assert_activated_group_unrouted_replay_refused() -> Result<(), SdkError> {
-    Box::pin(group_generation::activated_group_unrouted_replay_refused()).await
-}
 
 mod status_snapshot;
 
-mod group_actor;
 mod native_actor;
 
 #[path = "runtime_tests/native_busy.rs"]

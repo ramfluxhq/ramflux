@@ -11,9 +11,7 @@ use ramflux_sdk::{LocalBusClient, LocalBusFrame, PlaintextDigester, SdkError};
 use serde_json::{Value, json};
 
 use crate::RfError;
-use crate::cli::{
-    AttachmentAction, AttachmentCommand, AttachmentEnable, AttachmentImport, DmSend, GroupSend,
-};
+use crate::cli::{AttachmentAction, AttachmentCommand, AttachmentEnable, AttachmentImport, DmSend};
 use crate::utils::print_json;
 
 const CHUNK: usize = 524_288;
@@ -78,24 +76,8 @@ pub(crate) async fn send_dm(bus: &mut LocalBusClient, send: DmSend) -> Result<()
     .await
 }
 
-/// # Errors
-/// Returns a stable refusal code. A partial import file is removed.
-pub(crate) async fn send_group(bus: &mut LocalBusClient, send: GroupSend) -> Result<(), RfError> {
-    send_files(Outgoing {
-        bus,
-        account: &send.account,
-        message: &send.message,
-        conversation: &send.conversation,
-        caption: &send.body,
-        files: &send.attach,
-        kind: Kind::Group { group: &send.group },
-    })
-    .await
-}
-
 enum Kind<'a> {
     Dm { conversation: &'a str },
-    Group { group: &'a str },
 }
 
 struct Outgoing<'a> {
@@ -126,7 +108,6 @@ async fn send_files(outgoing: Outgoing<'_>) -> Result<(), RfError> {
         Route { api: "conversation", method: "conversation.send", operation: message },
         json!({
             "conversation_id": conversation,
-            "group_id": match &kind { Kind::Group { group } => Some(*group), Kind::Dm { .. } => None },
             "text": caption,
             "prepares": prepares.iter().map(|id| json!({"prepare_id": id})).collect::<Vec<_>>(),
         }),
@@ -155,16 +136,9 @@ async fn prepare_one(
         "file_name": file_name,
         "mime": media_type(path)?,
     });
-    match kind {
-        Kind::Dm { conversation } => {
-            body["kind"] = json!("dm");
-            body["peer"] = json!(conversation);
-        }
-        Kind::Group { group } => {
-            body["kind"] = json!("group");
-            body["group_id"] = json!(group);
-        }
-    }
+    let Kind::Dm { conversation } = kind;
+    body["kind"] = json!("dm");
+    body["peer"] = json!(conversation);
     let begun = ask(
         bus,
         account,

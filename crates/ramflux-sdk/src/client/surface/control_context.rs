@@ -12,9 +12,6 @@ impl RamfluxClient {
         context: &OwnContext,
     ) -> Result<(), SdkError> {
         use ramflux_protocol::message::dm_scope;
-        if context.group.is_some() {
-            return Err(invalid("own surface group context is unavailable"));
-        }
         if !context.conversation_id.starts_with(dm_scope::PREFIX) {
             return Ok(());
         }

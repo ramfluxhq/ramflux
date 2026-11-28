@@ -13,16 +13,9 @@ use crate::RamfluxClient;
 use crate::SdkError;
 use crate::attachment_send::{CODE_AUTHORITY_UNAVAILABLE, MediaDevice, MediaScope, choose_targets};
 
-/// What the roster is for. Group members are `(root commitment, device id)` pairs taken from
-/// the verified group state.
+/// What the roster is for.
 pub(crate) enum RosterScope<'a> {
-    Dm {
-        peer_root: &'a str,
-    },
-    #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-    Group {
-        members: &'a [(String, String)],
-    },
+    Dm { peer_root: &'a str },
 }
 
 /// A frozen set of media targets plus the membership generation it was read at.
@@ -72,16 +65,9 @@ impl RamfluxClient {
         let mut devices = Vec::new();
         let media_scope = match scope {
             RosterScope::Dm { peer_root } => {
-                self.collect((peer_root, None, false), homes, now, &mut devices)?;
-                self.collect((&own_root, None, true), homes, now, &mut devices)?;
+                self.collect((peer_root, false), homes, now, &mut devices)?;
+                self.collect((&own_root, true), homes, now, &mut devices)?;
                 MediaScope::Dm
-            }
-            RosterScope::Group { members } => {
-                for (root, device) in *members {
-                    let own = root == &own_root;
-                    self.collect((root, Some(device), own), homes, now, &mut devices)?;
-                }
-                MediaScope::Group
             }
         };
         devices.retain(|device| {
@@ -95,7 +81,7 @@ impl RamfluxClient {
 
     fn collect(
         &self,
-        (root, only, own): (&str, Option<&String>, bool),
+        (root, own): (&str, bool),
         homes: &BTreeMap<String, String>,
         now: u64,
         out: &mut Vec<MediaDevice>,
@@ -113,9 +99,6 @@ impl RamfluxClient {
             )
         })?;
         for device in roster.media_devices(now) {
-            if only.is_some_and(|wanted| wanted != &device.device_id) {
-                continue;
-            }
             out.push(MediaDevice {
                 account_anchor: device.account_anchor,
                 device_id: device.device_id,

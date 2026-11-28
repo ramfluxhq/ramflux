@@ -18,7 +18,7 @@ struct HeadWatch {
 
 #[derive(Default)]
 pub(super) struct Inbound {
-    entries: BTreeMap<String, (GatewayInboxEntry, BTreeSet<String>, Option<String>)>,
+    entries: BTreeMap<String, (GatewayInboxEntry, BTreeSet<String>)>,
     ready: BTreeSet<String>,
     /// Envelopes refused with `HeadChanged`, keyed by the inbox admission key.
     heads: std::sync::Mutex<BTreeMap<String, HeadWatch>>,
@@ -165,22 +165,7 @@ pub(crate) fn retain(
     for root in &roots {
         account.head_refresh.enqueue(root.clone());
     }
-    // Routing is encrypted. An unavailable authority may prevent decoding it;
-    // such an opaque retry still refreshes/redrives in the background, but must
-    // never hold an RPC for an assumed group or a DM from a shared member.
-    let group = account
-        .client
-        .open_routed(entry, &account.gateway_config.device_id)
-        .ok()
-        .filter(|opened| {
-            matches!(
-                opened.routing.kind,
-                crate::client::routed::Kind::GroupMessage
-                    | crate::client::routed::Kind::GroupControl
-            )
-        })
-        .and_then(|opened| opened.routing.group_id);
-    account.head_refresh.inbound.entries.insert(key.to_owned(), (entry.clone(), roots, group));
+    account.head_refresh.inbound.entries.insert(key.to_owned(), (entry.clone(), roots));
     Ok(())
 }
 
@@ -188,7 +173,7 @@ pub(crate) fn refreshed(account: &mut LocalBusAccountState, root: &str) -> Resul
     mark_refresh_done(account, root);
     let mut ready = Vec::new();
     let mut gone = Vec::new();
-    for (key, (_, roots, _)) in &mut account.head_refresh.inbound.entries {
+    for (key, (_, roots)) in &mut account.head_refresh.inbound.entries {
         if !account.client.account_db()?.has_inbox_retry(key)? {
             gone.push(key.clone());
             continue;
@@ -233,23 +218,7 @@ pub(crate) fn entries(
         .entries
         .iter()
         .filter(|(key, _)| eligible(account, key))
-        .map(|(key, (entry, _, _))| (key, entry))
-}
-
-pub(crate) fn blocked_roots(
-    account: &LocalBusAccountState,
-    group_id: &str,
-) -> Result<BTreeSet<String>, SdkError> {
-    let mut roots = BTreeSet::new();
-    for (key, (_, dependencies, group)) in &account.head_refresh.inbound.entries {
-        if group.as_deref() != Some(group_id) {
-            continue;
-        }
-        if account.client.account_db()?.has_inbox_retry(key)? && !eligible(account, key) {
-            roots.extend(dependencies.iter().cloned());
-        }
-    }
-    Ok(roots)
+        .map(|(key, (entry, _))| (key, entry))
 }
 
 pub(crate) fn consume(account: &mut LocalBusAccountState, key: &str) {

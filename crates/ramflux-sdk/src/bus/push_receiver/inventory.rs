@@ -277,14 +277,6 @@ pub(crate) const SITES: &[WriterSite] = &[
         count: 2,
     },
     WriterSite {
-        file: "src/client/group_session.rs",
-        symbol: "set_projection_checkpoint",
-        class: WriterClass::ProductionLegacy,
-        executor: "non-receive group-session checkpoint",
-        hook: "none (not receive-cursor)",
-        count: 3,
-    },
-    WriterSite {
         file: "src/client/private_prekeys.rs",
         symbol: "set_projection_checkpoint",
         class: WriterClass::ProductionLegacy,

@@ -11,7 +11,7 @@ pub(super) fn assert_observation_refused(change: &str) -> TestResult {
     let client = initialized_at_scale(
         source.path(),
         AccountIndex::open(source.path())?,
-        Scale { messages: 1, contacts: 0, groups: 0, file_bytes: None },
+        Scale { messages: 1, contacts: 0, file_bytes: None },
     )?
     .client;
     let identity = crate::bus::backup_jobs::capture_identity(&client, source.path(), "alice")?;

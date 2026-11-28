@@ -105,25 +105,6 @@ impl RamfluxClient {
         )
         .await
     }
-
-    pub(crate) async fn forward_federated_sealed_async(
-        &self,
-        engine: &mut impl GatewaySessionAccess,
-        message: &mut GatewayDirectMessage,
-        sealed: crate::client::routed::SealedRouted,
-        federation: &LocalBusFederationRoute,
-        timeout: Duration,
-    ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        let envelope =
-            gateway_envelope_from_sealed(&engine.sealing_config()?, message, sealed, None)?;
-        trace_forward(federation, &envelope);
-        let home = crate::client::recipient_home::pin_choice(
-            self,
-            message.recipient_principal_commitment.as_deref().unwrap_or(""),
-            Some(federation.target_node_id.as_str()),
-        )?;
-        bounded_submit(engine, federation, home.as_deref(), envelope, timeout).await
-    }
 }
 
 async fn bounded_submit(

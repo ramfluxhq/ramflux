@@ -52,15 +52,9 @@ impl RamfluxClient {
             g::surface::Payload::Delivery(delivery) => {
                 let native = crate::client::surface::SurfaceControl::from_generated(delivery)?;
                 let own_group = if native.kind == crate::client::surface::ControlKind::Own {
-                    native
-                        .context
-                        .as_ref()
-                        .and_then(|context| context.group.as_ref())
-                        .map(|group| group.group_id.clone())
-                        .or(self
-                            .account_db()?
-                            .client_record("conversation", &routing.conversation_id)?
-                            .and_then(|value| value["group_id"].as_str().map(str::to_owned)))
+                    self.account_db()?
+                        .client_record("conversation", &routing.conversation_id)?
+                        .and_then(|value| value["group_id"].as_str().map(str::to_owned))
                 } else {
                     routing.group_id.clone()
                 };

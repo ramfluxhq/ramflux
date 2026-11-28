@@ -17,7 +17,6 @@ pub(crate) struct Directory {
     root: tempfile::TempDir,
     address: SocketAddr,
     requests: Arc<AtomicUsize>,
-    paths: Arc<std::sync::Mutex<Vec<String>>>,
     server: tokio::task::JoinHandle<Result<(), crate::SdkError>>,
 }
 impl Drop for Directory {
@@ -27,17 +26,6 @@ impl Drop for Directory {
 }
 impl Directory {
     pub(crate) async fn new(manifests: Vec<SdkDeviceManifestResponse>) -> TestResult<Self> {
-        Self::with_malformed_first(manifests, false).await
-    }
-    pub(crate) async fn malformed_once(
-        manifests: Vec<SdkDeviceManifestResponse>,
-    ) -> TestResult<Self> {
-        Self::with_malformed_first(manifests, true).await
-    }
-    async fn with_malformed_first(
-        manifests: Vec<SdkDeviceManifestResponse>,
-        malformed_first: bool,
-    ) -> TestResult<Self> {
         assert!(
             manifests.len() <= MAX_PUBLICATIONS,
             "native directory fixture exceeds its publication budget"
@@ -54,8 +42,6 @@ impl Directory {
         let address = listener.local_addr()?;
         let requests = Arc::new(AtomicUsize::new(0));
         let observed = requests.clone();
-        let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let requested = paths.clone();
         let server = tokio::spawn(async move {
             let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
             for _ in 0..MAX_REQUESTS {
@@ -65,25 +51,17 @@ impl Directory {
                 let (mut receive, mut send) = tokio::io::split(stream);
                 let request: ramflux_transport::GatewayQuicRequest =
                     bounded(ramflux_transport::read_gateway_session_json(&mut receive)).await??;
-                requested
-                    .lock()
-                    .map_err(|_| crate::SdkError::LocalBus("test: directory paths mutex".into()))?
-                    .push(request.path.clone());
                 let root = request.path.strip_prefix("/mvp1/device-manifest/");
                 let manifest =
                     manifests.iter().find(|row| Some(row.principal_commitment.as_str()) == root);
-                let first = observed.fetch_add(1, Ordering::SeqCst) == 0;
+                observed.fetch_add(1, Ordering::SeqCst);
                 let response = if request.method == "GET" {
                     ramflux_transport::GatewayQuicResponse {
                         status: if manifest.is_some() { 200 } else { 404 },
-                        body: if first && malformed_first {
-                            serde_json::json!({"malformed": true})
-                        } else {
-                            manifest
-                                .map(serde_json::to_value)
-                                .transpose()?
-                                .unwrap_or(serde_json::Value::Null)
-                        },
+                        body: manifest
+                            .map(serde_json::to_value)
+                            .transpose()?
+                            .unwrap_or(serde_json::Value::Null),
                     }
                 } else {
                     return Err(crate::SdkError::LocalBus(
@@ -95,7 +73,7 @@ impl Directory {
             }
             Ok(())
         });
-        Ok(Self { root, address, requests, paths, server })
+        Ok(Self { root, address, requests, server })
     }
     pub(crate) fn configure(&self, fixture: &mut Fixture) {
         self.configure_session(&mut fixture.config);
@@ -106,15 +84,6 @@ impl Directory {
         config.tcp_gateway_addr = Some(self.address);
         config.server_name = "native-directory.example".into();
         config.ca_cert = self.root.path().join("ca.pem");
-    }
-    pub(crate) fn requests_for(&self, root: &str) -> Result<usize, crate::SdkError> {
-        Ok(self
-            .paths
-            .lock()
-            .map_err(|_| crate::SdkError::LocalBus("test: directory paths mutex".into()))?
-            .iter()
-            .filter(|path| path.strip_prefix("/mvp1/device-manifest/") == Some(root))
-            .count())
     }
     pub(crate) fn requests(&self) -> usize {
         self.requests.load(Ordering::SeqCst)

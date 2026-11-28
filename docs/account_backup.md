@@ -200,14 +200,14 @@ page's byte budget fails explicitly rather than truncating the account.
 ## Dedicated large-data acceptance
 
 The ignored SDK test
-`bus::backup_jobs::tests::large_backup_restores_ten_thousand_messages_one_thousand_contacts_two_hundred_groups_and_gibibyte_files`
-creates 10,000 messages, 1,100 contacts, 200 groups, two 512 MiB attachments and a
+`bus::backup_jobs::tests::large_backup_restores_ten_thousand_messages_one_thousand_contacts_and_gibibyte_files`
+creates 10,000 messages, 1,100 contacts, two 512 MiB attachments and a
 small attachment. It runs the production create/verify/install job workflow,
 checks exact counts, and authenticates every file on verify and install. Run it
 on a suitably provisioned QA Linux host only; it explicitly refuses macOS:
 
 ```sh
-cargo test --release -p ramflux-sdk bus::backup_jobs::tests::large_backup_restores_ten_thousand_messages_one_thousand_contacts_two_hundred_groups_and_gibibyte_files -- --ignored --exact --nocapture --test-threads=1
+cargo test --release -p ramflux-sdk bus::backup_jobs::tests::large_backup_restores_ten_thousand_messages_one_thousand_contacts_and_gibibyte_files -- --ignored --exact --nocapture --test-threads=1
 ```
 
 The large fixture generator uses ordinary object creation and needs at least

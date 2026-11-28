@@ -763,9 +763,6 @@ mod retirement_guard;
 #[path = "r9_tests.rs"]
 mod r9;
 
-#[path = "legacy_group_auth_tests.rs"]
-mod legacy_group_auth;
-
 #[path = "contact_resolution_tests.rs"]
 mod contact_resolution;
 #[path = "discovery_tests.rs"]
@@ -808,9 +805,6 @@ mod candidate_binding;
 
 #[path = "candidate_report_tests.rs"]
 mod candidate_report;
-
-#[path = "native_group_conversation_tests.rs"]
-mod native_group_conversation;
 
 #[path = "revocation_receive_tests.rs"]
 mod revocation_receive_tests;

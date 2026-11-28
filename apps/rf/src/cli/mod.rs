@@ -28,7 +28,6 @@ mod device;
 mod diag;
 mod dm;
 mod grant;
-mod group;
 mod keychain;
 mod prx;
 mod root;
@@ -61,7 +60,6 @@ mod pairing;
 mod transfer;
 pub(crate) use dm::*;
 pub(crate) use grant::*;
-pub(crate) use group::*;
 pub(crate) use keychain::*;
 pub(crate) use mcp::*;
 pub(crate) use object::*;
@@ -106,7 +104,6 @@ pub(crate) enum Command {
     Transfer(TransferCommand),
     Dm(DmCommand),
     Conversation(ConversationCommand),
-    Group(GroupCommand),
     Object(ObjectCommand),
     Call(CallCommand),
     Bot(BotCommand),

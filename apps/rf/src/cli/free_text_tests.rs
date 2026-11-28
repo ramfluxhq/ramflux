@@ -16,52 +16,27 @@ struct Case {
 
 #[test]
 fn free_text_hyphen_values_are_preserved_in_split_and_equals_forms() -> TestResult {
-    let cases = [
-        Case {
-            path: &["dm", "send"],
-            selectors: &[
-                "--account",
-                "alice",
-                "--conversation",
-                "thread",
-                "--message",
-                "message",
-                "--envelope",
-                "envelope",
-                "--source-principal",
-                "alice",
-                "--sender",
-                "alice",
-                "--target",
-                "bob",
-            ],
-            flag: "body",
-            text: "-1",
-        },
-        Case {
-            path: &["group", "send"],
-            selectors: &[
-                "--account",
-                "alice",
-                "--group",
-                "group",
-                "--conversation",
-                "thread",
-                "--message",
-                "message",
-                "--sender",
-                "alice",
-            ],
-            flag: "body",
-            text: "--message-starts-with-hyphens",
-        },
-        Case {
-            path: &["group", "rename"],
-            selectors: &["--account", "alice", "--group", "group"],
-            flag: "name",
-            text: "-team",
-        },
-    ];
+    let cases = [Case {
+        path: &["dm", "send"],
+        selectors: &[
+            "--account",
+            "alice",
+            "--conversation",
+            "thread",
+            "--message",
+            "message",
+            "--envelope",
+            "envelope",
+            "--source-principal",
+            "alice",
+            "--sender",
+            "alice",
+            "--target",
+            "bob",
+        ],
+        flag: "body",
+        text: "-1",
+    }];
     for case in cases {
         for equals in [false, true] {
             let mut args = vec!["rf".to_owned()];

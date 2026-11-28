@@ -658,9 +658,7 @@ jobs:
           # Keep f2 here; the b7_* matrix runs in parallel below.
           python3 -B scripts/ci/run-nextest.py --label e2e_resume -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1 -E 'not test(b7_)'
           python3 -B scripts/ci/run-nextest.py --label e2e_push_restart -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_push_restart --run-ignored ignored-only --test-threads=1
-          python3 -B scripts/ci/run-nextest.py --label e2e_group -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group --run-ignored ignored-only --test-threads=1
           python3 -B scripts/ci/run-nextest.py --label e2e_contact_verify -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_contact_verify --run-ignored ignored-only --test-threads=1
-          python3 -B scripts/ci/run-nextest.py --label e2e_group_service -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group_service --run-ignored ignored-only --test-threads=1
           python3 -B scripts/ci/run-nextest.py --label e2e_media_dm -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_media_dm --run-ignored ignored-only --test-threads=1
           python3 -B scripts/ci/run-nextest.py --label e2e_attach -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_attach --run-ignored ignored-only --test-threads=1
           # Unified rows explicitly report dormancy until the separately audited activation.

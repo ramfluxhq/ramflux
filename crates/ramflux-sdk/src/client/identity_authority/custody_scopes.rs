@@ -8,14 +8,12 @@ use ramflux_crypto::RootQualifiedDeviceRef;
 #[derive(Clone, Copy)]
 pub(crate) enum NativeOperation {
     Call,
-    Group,
     Sync,
 }
 impl NativeOperation {
     const fn scope(self) -> &'static str {
         match self {
             Self::Call => "call",
-            Self::Group => "group",
             Self::Sync => "sync",
         }
     }
@@ -91,7 +89,7 @@ mod tests {
                 .body
                 .self_signing_public_key,
         )?;
-        for operation in [NativeOperation::Call, NativeOperation::Group, NativeOperation::Sync] {
+        for operation in [NativeOperation::Call, NativeOperation::Sync] {
             fixture.client.require_native_operation(&identity, operation)?;
             let native = manifest.custody.as_mut().ok_or("native")?;
             let mut body = native.publication.record.body.clone();
@@ -110,7 +108,7 @@ mod tests {
             assert!(fixture.client.require_native_operation(&identity, operation).is_err());
             match operation {
                 NativeOperation::Call => assert!(fixture.client.call_local_endpoint().is_err()),
-                NativeOperation::Group | NativeOperation::Sync => {}
+                NativeOperation::Sync => {}
             }
         }
         Ok(())

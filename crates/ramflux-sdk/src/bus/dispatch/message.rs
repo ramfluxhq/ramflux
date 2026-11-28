@@ -654,55 +654,48 @@ fn receipt_gateway_message(
             .ok_or_else(|| {
             SdkError::InboundPending("receipt conversation root unavailable".into())
         })?;
-        if let Some(group) = thread["group_id"].as_str() {
-            account.client.group_device_reference(group, recipient_device_id)?
-        } else {
-            let local =
-                account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-            let root = thread
-                .pointer("/direct_route/recipient_principal_commitment")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned);
-            let own_conversation = thread["participants"].as_array().is_some_and(|ids| {
-                !ids.is_empty() && ids.iter().all(|id| id == &local.principal_id)
-            });
-            let root = if own_conversation {
-                ramflux_crypto::identity_root_commitment(
-                    &account
-                        .client
-                        .identity_root
-                        .as_ref()
-                        .ok_or(SdkError::IdentityRootMissing)?
-                        .signing_key
-                        .verifying_key(),
-                )
-            } else if let Some(root) = root {
-                root
-            } else {
-                let participants = thread["participants"].as_array().ok_or_else(|| {
-                    SdkError::InboundPending("receipt peer root unavailable".into())
-                })?;
-                let peers: Vec<_> = participants
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .filter(|id| *id != local.principal_id)
-                    .collect();
-                if peers.len() != 1 {
-                    return Err(SdkError::InboundPending("receipt peer root is ambiguous".into()));
-                }
-                account
+        let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let root = thread
+            .pointer("/direct_route/recipient_principal_commitment")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let own_conversation = thread["participants"]
+            .as_array()
+            .is_some_and(|ids| !ids.is_empty() && ids.iter().all(|id| id == &local.principal_id));
+        let root = if own_conversation {
+            ramflux_crypto::identity_root_commitment(
+                &account
                     .client
-                    .account_db()?
-                    .client_record("identity", peers[0])?
-                    .and_then(|identity| {
-                        identity["contact_identity_commitment"].as_str().map(str::to_owned)
-                    })
-                    .ok_or_else(|| {
-                        SdkError::InboundPending("receipt peer root unavailable".into())
-                    })?
-            };
-            ramflux_protocol::qualified_device_id(&root, recipient_device_id)?
-        }
+                    .identity_root
+                    .as_ref()
+                    .ok_or(SdkError::IdentityRootMissing)?
+                    .signing_key
+                    .verifying_key(),
+            )
+        } else if let Some(root) = root {
+            root
+        } else {
+            let participants = thread["participants"]
+                .as_array()
+                .ok_or_else(|| SdkError::InboundPending("receipt peer root unavailable".into()))?;
+            let peers: Vec<_> = participants
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|id| *id != local.principal_id)
+                .collect();
+            if peers.len() != 1 {
+                return Err(SdkError::InboundPending("receipt peer root is ambiguous".into()));
+            }
+            account
+                .client
+                .account_db()?
+                .client_record("identity", peers[0])?
+                .and_then(|identity| {
+                    identity["contact_identity_commitment"].as_str().map(str::to_owned)
+                })
+                .ok_or_else(|| SdkError::InboundPending("receipt peer root unavailable".into()))?
+        };
+        ramflux_protocol::qualified_device_id(&root, recipient_device_id)?
     };
     let root = account.client.device_root(&reference)?;
     let raw = crate::client::identity_authority::device_namespace::wire_device_id(&reference)?;

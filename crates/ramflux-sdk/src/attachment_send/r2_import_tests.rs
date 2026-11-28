@@ -12,14 +12,14 @@ use ramflux_crypto::X25519KeyPair;
 use ramflux_protocol::large_attachment::{MediaRef, QualifiedOwner};
 
 use super::budget;
-use super::codes::{CODE_LAYOUT_INVALID, CODE_NOT_GRANTEE, CODE_SEAL_FAILED, Refusal};
+use super::codes::{CODE_LAYOUT_INVALID, CODE_SEAL_FAILED, Refusal};
 use super::import_job::{self, Importer, SourcePin};
 use super::listener::{Listener, NOW};
 use super::plane::{OwnerCall, Plane, ReadCall, RegisterCall, RetireCall};
 use super::publish;
 use super::section10::{accept, import_all, owner_pair, publish_input};
 use super::store::Store;
-use super::targets::{self, MediaDevice, MediaScope};
+use super::targets::MediaDevice;
 
 fn member(index: u64) -> (MediaDevice, [u8; 32], QualifiedOwner) {
     let mut seed = [11_u8; 32];
@@ -96,53 +96,6 @@ fn sent(
     .unwrap();
     let row = store.load(&row.prepare_id).unwrap();
     (listener, store, wrapped[0].media.clone(), row)
-}
-
-#[test]
-fn a_group_of_three_each_member_imports_only_its_own_entry() {
-    let dir = tempfile::tempdir().unwrap();
-    let members: Vec<_> = (1..=3).map(member).collect();
-    let devices: Vec<_> = members.iter().map(|(device, _, _)| device.clone()).collect();
-    let chosen = targets::choose_targets(MediaScope::Group, &devices).unwrap();
-    assert_eq!(chosen.len(), 3);
-    let body = b"group file for three";
-    let (listener, _store, media, _) = sent(dir.path(), body, &chosen);
-    assert_eq!(media.key_slots.len(), 3, "one entry per member device");
-    let (authority, generation) = pin();
-    let source = SourcePin { source: "node-a", generation, public_key: &authority, now: NOW };
-    for (device, seed, reader) in &members {
-        listener.set_reader(reader.clone());
-        let plain = import_all(
-            &listener,
-            &media,
-            &Importer {
-                account_anchor: &device.account_anchor,
-                device_id: &device.device_id,
-                device_epoch: 1,
-                secret: seed,
-            },
-            &source,
-        )
-        .unwrap();
-        assert_eq!(plain, body, "{} reads the file", device.device_id);
-    }
-    assert_eq!(listener.reads(), 3, "exactly one ranged read per member");
-
-    // A former member has no entry: the message shows, the body is refused, no GET is sent.
-    let outsider = import_all(
-        &listener,
-        &media,
-        &Importer {
-            account_anchor: "member-9",
-            device_id: "phone-9",
-            device_epoch: 1,
-            secret: &[1; 32],
-        },
-        &source,
-    )
-    .unwrap_err();
-    assert_eq!(outsider.code, CODE_NOT_GRANTEE);
-    assert_eq!(listener.reads(), 3, "a missing entry sends no relay read");
 }
 
 #[test]

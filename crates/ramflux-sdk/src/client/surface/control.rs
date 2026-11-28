@@ -5,7 +5,6 @@
 use super::{Carrier, Payload, PayloadKind, SurfaceSender, invalid};
 #[cfg(test)]
 use crate::client::identity_authority::HeadUse;
-use crate::own_device_sync::SdkOwnDeviceGroupSnapshot;
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use prost::Message as _;
@@ -32,7 +31,6 @@ pub(crate) struct SurfaceControl {
 pub(crate) struct OwnContext {
     pub(crate) conversation_id: String,
     pub(crate) participants: Vec<String>,
-    pub(crate) group: Option<SdkOwnDeviceGroupSnapshot>,
     pub(crate) friend: Option<ramflux_storage::FriendLinkRecord>,
 }
 impl SurfaceControl {
@@ -124,7 +122,6 @@ impl RamfluxClient {
             Some(OwnContext {
                 conversation_id: carrier.conversation_id.clone(),
                 participants,
-                group: None,
                 friend,
             })
         } else {
@@ -249,10 +246,7 @@ impl RamfluxClient {
         self.verify_surface_carrier(&carrier, &signer, &carrier.sender_device_id)?;
         if control.kind == ControlKind::Own {
             if let Some(context) = &control.context {
-                if context.conversation_id != conversation
-                    || context.group.is_some()
-                    || group.is_some()
-                {
+                if context.conversation_id != conversation || group.is_some() {
                     return Err(invalid("own surface routing context mismatch"));
                 }
                 self.import_surface_context(context)?;

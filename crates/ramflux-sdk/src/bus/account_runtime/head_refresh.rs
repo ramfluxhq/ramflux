@@ -8,29 +8,9 @@ use super::AccountRuntime;
 use crate::SdkError;
 use crate::bus::{actor::AccountCommand, state::LocalBusAccountState};
 use crate::client::identity_authority::HeadUse;
-use std::cell::Cell;
 use std::collections::BTreeSet;
 #[cfg(test)]
 use tokio::time::Instant;
-
-// The account command owns this scope, never the account or connection. Dropping
-// its future on cancellation/preemption also drops any completed preparation.
-tokio::task_local! {
-    pub(super) static RECEIVE_PREPARED: Cell<bool>;
-}
-
-/// `None` outside an actor command (direct dispatch). `Some(true)` means prepare
-/// already ran receive; `Some(false)` means a refresh cleared that and dispatch
-/// must replay under the actor bind.
-pub(crate) fn take_receive_preparation() -> Option<bool> {
-    RECEIVE_PREPARED.try_with(|prepared| prepared.replace(false)).ok()
-}
-
-/// Test fixture: the account actor sets this after a successful receive prepare.
-#[cfg(test)]
-pub(crate) async fn with_receive_prepared<T>(fut: impl std::future::Future<Output = T>) -> T {
-    RECEIVE_PREPARED.scope(std::cell::Cell::new(true), fut).await
-}
 
 pub(crate) fn is_freshness_refusal(error: &SdkError) -> bool {
     matches!(error, SdkError::FreshHeadRequired { .. })
@@ -43,14 +23,6 @@ pub(crate) fn pending(account: &LocalBusAccountState) -> SdkError {
         retry_after_ms: Some(1_000),
         networking: Box::new(serde_json::json!(networking)),
     }
-}
-
-#[cfg(test)]
-pub(crate) fn stale_roots(
-    account: &LocalBusAccountState,
-    request: &crate::LocalBusFrame,
-) -> Result<BTreeSet<String>, SdkError> {
-    stale_roots_since(account, request, None)
 }
 
 /// Roots whose authority a NEW send authorization must fetch afresh: the DM recipient.
@@ -145,7 +117,6 @@ impl AccountRuntime {
                 stale_roots_since(account, &command.request, Some(since))?
             };
             if roots.is_empty() {
-                let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(false));
                 return Ok(());
             }
             if let Some(error) = self.demanded_foreign(&roots, since) {
@@ -204,7 +175,6 @@ impl AccountRuntime {
             return Err(error);
         }
         if roots.is_empty() {
-            let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(false));
             return Ok(());
         }
         Err(pending(account))

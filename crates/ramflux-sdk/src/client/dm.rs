@@ -17,6 +17,19 @@ pub(crate) struct LegacyReceive<'a> {
 }
 
 impl RamfluxClient {
+    pub fn append_gateway_delivery(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
+        crate::client::routed::validate_routed_ciphertext(entry)?;
+        if self.routed_seen_marker(entry)?.is_some() {
+            return Ok(());
+        }
+        let event = format!("gateway/delivery/v2/{}", self.inbox_admission_key(entry)?);
+        if self.event_body(&event)?.is_some() {
+            return Ok(());
+        }
+        let body = ramflux_protocol::canonical_json_bytes(&entry.envelope)?;
+        self.append_event(&event, "gateway.deliver.opaque", &body)
+    }
+
     pub fn send_direct_message(
         &self,
         conversation_id: &str,

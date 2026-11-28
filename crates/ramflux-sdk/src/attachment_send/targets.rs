@@ -22,11 +22,9 @@ pub(crate) struct MediaDevice {
 }
 
 /// Direct messages keep caption delivery for peers below layer 4.
-/// A group with any member below layer 4 does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MediaScope {
     Dm,
-    Group,
 }
 
 /// # Errors
@@ -43,11 +41,6 @@ pub(crate) fn choose_targets(
     match scope {
         MediaScope::Dm => {
             if !fresh.iter().any(|device| !device.own) {
-                return Err(Refusal::new(CODE_PEER_UPGRADE));
-            }
-        }
-        MediaScope::Group => {
-            if fresh.len() != devices.len() {
                 return Err(Refusal::new(CODE_PEER_UPGRADE));
             }
         }

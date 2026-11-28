@@ -1,51 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Owned primary-vault inputs for group signing outside the account writer.
+//! Custodian directory fetch and the hosted-agent fence for call invites.
 
 use crate::prelude::LocalBusAccountState;
-use crate::{
-    GatewaySessionConfig, SdkError,
-    custody::{BornAccount, PrimaryVault},
-};
+use crate::{GatewaySessionConfig, SdkError, custody::BornAccount};
 use ramflux_crypto::custody::VerifiedRecord;
 use ramflux_protocol::custody::CustodyAuthority;
-use std::sync::Arc;
 
-pub(crate) struct PrimarySnapshot {
-    native: BornAccount,
-    vault: Arc<dyn PrimaryVault>,
-    retired: bool,
-    gateway: GatewaySessionConfig,
-}
-impl PrimarySnapshot {
-    pub(crate) fn prepare(account: &LocalBusAccountState) -> Result<Option<Self>, SdkError> {
-        let Some(native) = account.client.born_v3_account.as_deref().cloned() else {
-            return Ok(None);
-        };
-        let setup = account.native_setup.as_ref().ok_or(SdkError::CustodyVaultUnavailable)?;
-        Ok(Some(Self {
-            native,
-            vault: crate::bus::custody_setup::primary_provider(setup),
-            retired: session_agent_retired(account),
-            gateway: account.gateway_config.clone(),
-        }))
-    }
-    pub(crate) async fn load(self) -> Result<crate::custody::PrimarySigningLease, SdkError> {
-        if self.retired {
-            return Err(SdkError::AgentCreationRefused("agent_retired"));
-        }
-        let host = custodian_directory(&self.native, &self.gateway).await?;
-        let Self { native, vault, .. } = self;
-        tokio::task::spawn_blocking(move || {
-            native.group_operation_signer(vault.as_ref(), host.as_ref())
-        })
-        .await
-        .map_err(|_| SdkError::CustodyVaultUnavailable)?
-    }
-}
-
-/// Directory record of the custodian, for [`BornAccount::group_operation_signer`].
+/// Directory record of the custodian.
 ///
 /// [`crate::custody::agent_creation::require_agent_operable`] runs first. Call invites
 /// enter through [`call_agent_fence`], which starts here: a retirement row or a stored
@@ -80,7 +43,7 @@ pub(crate) async fn custodian_directory(
 /// Refuse a call invite from a retired agent or a revoked host desktop.
 ///
 /// The session cause is checked first. [`custodian_directory`] then applies the same
-/// local fence and custodian fetch as a group operation, and
+/// local fence and custodian fetch, and
 /// [`BornAccount::refuse_hosted_agent`] applies that record. A hosted agent whose own
 /// directory says `agent_lifecycle = retired` is refused even when the custodian's
 /// devices are still active. Nothing is written.

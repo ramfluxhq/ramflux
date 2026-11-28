@@ -165,7 +165,6 @@ async fn two_terminals_per_identity_share_one_action_executor_and_decision_body(
         context: Some(super::super::control::OwnContext {
             conversation_id: "thread".into(),
             participants: vec!["author".into(), "human".into()],
-            group: None,
             friend: None,
         }),
         manifests: Vec::new(),

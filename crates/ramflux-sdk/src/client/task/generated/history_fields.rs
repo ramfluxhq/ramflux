@@ -54,9 +54,6 @@ impl From<&g::TaskExportMetadata> for TaskExportMetadata {
 impl TryFrom<&OwnContext> for g::OwnContext {
     type Error = SdkError;
     fn try_from(value: &OwnContext) -> Result<Self, Self::Error> {
-        if value.group.is_some() {
-            return Err(invalid("task group context is not accepted"));
-        }
         Ok(Self {
             conversation_id: value.conversation_id.clone(),
             participants: value.participants.clone(),
@@ -86,7 +83,6 @@ impl TryFrom<&g::OwnContext> for OwnContext {
         Ok(Self {
             conversation_id: value.conversation_id.clone(),
             participants: value.participants.clone(),
-            group: None,
             friend,
         })
     }

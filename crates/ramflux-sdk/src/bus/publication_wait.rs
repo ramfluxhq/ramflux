@@ -157,8 +157,7 @@ fn publication_pending(error: &SdkError) -> bool {
     for _ in 0..4 {
         match current {
             SdkError::PairingCode("PublicationPending") => return true,
-            SdkError::GroupRefused { source, .. }
-            | SdkError::ContactUnavailable(source)
+            SdkError::ContactUnavailable(source)
             | SdkError::DirectoryAuthorityUnavailable { source, .. } => current = source,
             _ => return false,
         }

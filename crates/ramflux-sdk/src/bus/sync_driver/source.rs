@@ -8,7 +8,6 @@ use crate::bus::{
 };
 use crate::client::routed::PreparedInbound;
 pub(crate) mod failure;
-mod group;
 
 pub(crate) mod hold;
 mod native;

@@ -266,20 +266,10 @@ impl RamfluxClient {
         else {
             return Ok(false);
         };
-        if let Some(group) = thread["group_id"].as_str() {
-            Ok(self.surface_group_device_allowed(
-                group,
-                &self.peer_device_identity(
-                    &carrier.sender_principal_id,
-                    &carrier.sender_device_id,
-                )?,
-            )? && self.surface_group_device_allowed(group, &self.owned_device_identity()?)?)
-        } else {
-            let peers = thread["participants"]
-                .as_array()
-                .ok_or_else(|| invalid("surface pending conversation participants missing"))?;
-            Ok(peers.iter().any(|p| p == &carrier.sender_principal_id)
-                && peers.iter().any(|p| p == &local.principal_id))
-        }
+        let peers = thread["participants"]
+            .as_array()
+            .ok_or_else(|| invalid("surface pending conversation participants missing"))?;
+        Ok(peers.iter().any(|p| p == &carrier.sender_principal_id)
+            && peers.iter().any(|p| p == &local.principal_id))
     }
 }

@@ -6,7 +6,7 @@
 //! The active transport callers send these retained bytes through the shared pair sealer.
 use super::{a2i, content, guardian};
 use crate::client::recovery::{SdkGuardianAcceptMessage, SdkGuardianInviteMessage};
-use crate::{RamfluxClient, SdkError, SdkGroupSenderKeyDistribution};
+use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::message as g;
 use zeroize::Zeroizing;
@@ -99,21 +99,6 @@ impl RamfluxClient {
     fn peer_scope(&self, peer_root: &str) -> Result<String, SdkError> {
         g::dm_scope::derive(&self.own_account_anchor()?, peer_root)
             .map_err(|_| content("peer control scope"))
-    }
-
-    /// `CONTROL_GROUP_KEY` for one recipient device of `conversation` (the group conversation).
-    /// `group_epoch` is the verified group state epoch, as in the Snapshot producer.
-    /// Additive candidate API; does not send.
-    /// # Errors
-    /// Refuses a distribution this device did not author or a failed native check.
-    pub fn generated_group_key_inner(
-        &self,
-        _conversation: &str,
-        _group_epoch: u64,
-        _distribution: &SdkGroupSenderKeyDistribution,
-        _recipient_device: &ramflux_crypto::RootQualifiedDeviceRef,
-    ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-        Err(content("group key control is unavailable"))
     }
 
     /// `CONTROL_RECOVERY` invite. Records the issued invite so a later accept can be bound.

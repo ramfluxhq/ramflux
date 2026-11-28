@@ -40,13 +40,10 @@ pub(super) async fn prepare(
             return Err(error);
         }
     };
-    let group_directory = if let Some(preview) = preview {
-        resolve(writer, config, entry, preview.clone(), None).await?;
-        super::group::prepare(writer, config, entry, preview.route, preview.body).await?
-    } else {
-        None
-    };
-    Ok(PreparedInbound { manifest, native_prepared: true, group_directory, candidate: None })
+    if let Some(preview) = preview {
+        resolve(writer, config, entry, preview, None).await?;
+    }
+    Ok(PreparedInbound { manifest, native_prepared: true, candidate: None })
 }
 
 async fn resolve(
@@ -135,10 +132,5 @@ pub(super) async fn contact(
     if let Some(preview) = preview {
         resolve(writer, config, &entry, preview, Some(manifest.clone())).await?;
     }
-    Ok(PreparedInbound {
-        manifest: None,
-        candidate: Some(manifest),
-        native_prepared: true,
-        group_directory: None,
-    })
+    Ok(PreparedInbound { manifest: None, candidate: Some(manifest), native_prepared: true })
 }

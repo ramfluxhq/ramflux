@@ -12,7 +12,7 @@ use ramflux_protocol::custody::SignedLayerDeclaration;
 use ramflux_protocol::message::KindId;
 use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR, kind_binding};
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 /// Fixed local retry hint for a layer refusal. It reveals nothing about the peer and promises
 /// no completion deadline.
@@ -22,7 +22,6 @@ pub(crate) const RETRY_AFTER_MS: u64 = 1000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FanoutScope {
     Dm,
-    Group,
     OwnCopy,
 }
 
@@ -360,25 +359,6 @@ fn select_with_current_membership(
     recheck(&plan, &build()?)
 }
 
-/// Source-qualified group event id (OV-P05-L1). Never `group_id`: that key collapses
-/// every message in the group onto one fresh-cohort event.
-#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-pub(crate) fn group_logical_event_id(
-    group_id: &str,
-    message_id: Option<&str>,
-) -> Result<String, SdkError> {
-    let id = match message_id {
-        Some(id) if !id.is_empty() => id.to_owned(),
-        _ => crate::new_surface_message_id()?,
-    };
-    if id == group_id {
-        return Err(SdkError::LocalBus(
-            "group logical_event_id must be the message id, not group_id".into(),
-        ));
-    }
-    Ok(id)
-}
-
 impl RamfluxClient {
     /// Run candidate selection only when the live profile is message schema v1.
     ///
@@ -464,23 +444,6 @@ impl RamfluxClient {
         })
     }
 
-    #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-    pub(crate) fn group_selection_request(
-        &self,
-        group_id: &str,
-        sender_id: &str,
-        logical_event_id: &str,
-        kind: KindId,
-    ) -> Result<SelectionRequest, SdkError> {
-        let state = self.account_db()?.shared_group_state(group_id)?.ok_or_else(|| {
-            SdkError::GeneratedRefused {
-                code: crate::GeneratedRefusalCode::Authority,
-                reason: "verified native group state required for selection".into(),
-            }
-        })?;
-        self.shared_group_selection_request(group_id, sender_id, logical_event_id, kind, &state)
-    }
-
     fn pair_selection_request(
         &self,
         scope: FanoutScope,
@@ -518,74 +481,6 @@ impl RamfluxClient {
     ) -> Result<Option<VerifiedLayerRoster>, SdkError> {
         roster_from_authority_result(self.current_custody_authority(root, unix_now()?))
     }
-
-    #[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-    fn shared_group_selection_request(
-        &self,
-        _group_id: &str,
-        sender_id: &str,
-        logical_event_id: &str,
-        kind: KindId,
-        state: &ramflux_crypto::VerifiedGroupState,
-    ) -> Result<SelectionRequest, SdkError> {
-        let sender = self.local_device_identity(sender_id)?;
-        let now = unix_now()?;
-        let mut rosters = BTreeMap::new();
-        let mut manifests = BTreeMap::new();
-        for root in state
-            .view()
-            .members
-            .iter()
-            .map(|member| member.identity.root_commitment.as_str())
-            .collect::<BTreeSet<_>>()
-        {
-            let roster = self.cached_roster(root)?;
-            if let Some(roster) = roster.as_ref() {
-                manifests.insert(root.to_owned(), roster.group_devices(now));
-            }
-            rosters.insert(root.to_owned(), roster);
-        }
-        // A refused cache retains only explicit signed members as stale layer targets.
-        // Native routing and sealing keep their independent current-authority checks.
-        let selected = crate::client::shared_group::select_layer_devices(state.view(), &manifests);
-        let mut targets = Vec::new();
-        for (root, devices) in selected {
-            let roster = rosters.get(&root).and_then(Option::as_ref);
-            for device_id in devices {
-                if root == sender.root_commitment() && device_id == sender.device_id() {
-                    continue;
-                }
-                targets.push(TargetDevice::from_verified_roster(&root, &device_id, roster));
-            }
-        }
-        let source = self.cached_target(sender.root_commitment(), sender.device_id())?;
-        finish_group_request(logical_event_id, kind, state.snapshot().epoch, source, targets)
-    }
-}
-
-#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-fn finish_group_request(
-    logical_event_id: &str,
-    kind: KindId,
-    epoch: u64,
-    source: TargetDevice,
-    mut targets: Vec<TargetDevice>,
-) -> Result<SelectionRequest, SdkError> {
-    let source_key = source.key();
-    targets.retain(|target| target.key() != source_key);
-    let mut devices = BTreeSet::from([source_key]);
-    devices.extend(targets.iter().map(TargetDevice::key));
-    Ok(SelectionRequest {
-        scope: FanoutScope::Group,
-        kind,
-        logical_event_id: logical_event_id.to_owned(),
-        now_unix: unix_now()?,
-        source_compiled_support: COMPILED_LAYER,
-        source,
-        targets,
-        membership: MembershipSnapshot { epoch, devices },
-        variant_counter_high_water: 0,
-    })
 }
 
 fn is_storage_or_io(error: &SdkError) -> bool {

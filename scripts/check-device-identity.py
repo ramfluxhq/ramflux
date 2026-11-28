@@ -40,7 +40,6 @@ def violations(source, path):
     found = []
     inbound = path.startswith("crates/ramflux-sdk/src/client/surface/") or path in {
         "crates/ramflux-sdk/src/client/inbox_failure.rs",
-        "crates/ramflux-sdk/src/client/group_quarantine.rs",
         "crates/ramflux-sdk/src/bus/dispatch/task_approval_transport.rs",
     }
     if inbound and re.search(r'\.client_record\(\s*"device"\s*,|\.client_device_record_by_name\(', source):

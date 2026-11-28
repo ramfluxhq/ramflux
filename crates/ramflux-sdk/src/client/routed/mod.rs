@@ -28,12 +28,9 @@ mod session_fresh_tests;
 
 mod project;
 pub(crate) use committed::{Committed, conversation_watermark, object_watermark};
-#[allow(dead_code, reason = "MLS: allowance removed in P1-g")]
-pub(crate) mod group_directory;
 #[cfg(test)]
 mod legacy;
 pub(super) mod native_control;
-pub(crate) use group_directory::ReceiveGroupDirectory;
 mod receive;
 mod refused_pair;
 mod report;
@@ -220,12 +217,6 @@ impl Route {
     }
     pub fn receipt() -> Self {
         Self { kind: Kind::Receipt, group_id: None, attachments: false }
-    }
-    pub fn group_message(id: &str) -> Self {
-        Self { kind: Kind::GroupMessage, group_id: Some(id.to_owned()), attachments: false }
-    }
-    pub fn group_control(id: &str) -> Self {
-        Self { kind: Kind::GroupControl, group_id: Some(id.to_owned()), attachments: false }
     }
 }
 fn routing(message: &GatewayDirectMessage, route: Route) -> Routing {

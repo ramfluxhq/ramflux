@@ -1145,9 +1145,6 @@ mod receive_own_copy;
 #[path = "own_copy_ack_binding.rs"]
 mod own_copy_ack_binding;
 
-#[path = "receive_group.rs"]
-mod receive_group;
-
 #[path = "receive_reset.rs"]
 mod receive_reset;
 

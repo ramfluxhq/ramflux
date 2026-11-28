@@ -179,15 +179,6 @@ impl Side {
     }
 }
 
-/// A second client on the same account database, as another process or thread would hold it.
-pub(super) fn second_client(data_root: &Path, side: &Side) -> Result<RamfluxClient, SdkError> {
-    let mut client = RamfluxClient::new();
-    client.open_account_index(data_root)?;
-    client.unlock_account(side.id, PASSPHRASE)?;
-    client.initialize_born_v3_branch_for_fixture(&side.device, side.vault.as_ref())?;
-    Ok(client)
-}
-
 pub(super) fn gateway(
     blocked: Option<GatewayBlock>,
     cancelled: Arc<AtomicBool>,

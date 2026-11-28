@@ -13,7 +13,7 @@ fn client(root: &Path, native: bool) -> TestResult<RamfluxClient> {
         return Ok(initialized_at_scale(
             root,
             AccountIndex::open(root)?,
-            Scale { messages: 1, contacts: 0, groups: 0, file_bytes: None },
+            Scale { messages: 1, contacts: 0, file_bytes: None },
         )?
         .client);
     }

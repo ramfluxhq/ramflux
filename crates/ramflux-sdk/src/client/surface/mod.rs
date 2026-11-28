@@ -10,7 +10,6 @@ mod control;
 mod control_context;
 mod decision;
 pub(crate) mod generated;
-mod group;
 mod history_generated;
 mod outgoing;
 mod own_checkpoint;

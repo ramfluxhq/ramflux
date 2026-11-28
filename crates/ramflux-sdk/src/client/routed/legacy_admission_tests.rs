@@ -5,6 +5,25 @@
 use super::*;
 use crate::client::identity_authority::HeadUse;
 use crate::client::native_test_support::{Fixture as Native, TestResult, watchdog};
+
+fn legacy_key(entry: &GatewayInboxEntry) -> Result<String, SdkError> {
+    // Match sender authentication: gateway-added receipt fields do not identify a new message.
+    let mut envelope = entry.envelope.clone();
+    if let Some(receipt) =
+        envelope.ext.ext.get_mut("franking").and_then(serde_json::Value::as_object_mut)
+    {
+        for field in ["franking_tag", "node_id", "accepted_at"] {
+            receipt.remove(field);
+        }
+    }
+    Ok(format!(
+        "legacy:{}",
+        ramflux_protocol::hash_base64url(
+            "ramflux.legacy.inbox.v1",
+            &ramflux_protocol::canonical_json_bytes(&envelope)?,
+        )
+    ))
+}
 #[tokio::test(flavor = "current_thread")]
 async fn retained_quarantine_holds_leave_admission_for_a_genuine_native_first_contact() -> TestResult
 {
@@ -36,7 +55,7 @@ async fn retained_quarantine_holds_leave_admission_for_a_genuine_native_first_co
                 forged.envelope.envelope_id = format!("forged-{index}");
                 forged.envelope.source_device_id = format!("uncached-{index}");
                 forged.envelope.signed.signature = ramflux_protocol::encode_base64url([0; 64]);
-                let key = crate::client::group_quarantine::legacy_key(&forged)?;
+                let key = legacy_key(&forged)?;
                 db.hold_unrouted(&key, forged.inbox_seq, &serde_json::to_vec(&forged)?, now)?;
                 db.retain_legacy_inbox(&key)?;
                 if !expired {

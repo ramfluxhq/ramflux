@@ -159,12 +159,4 @@ impl RamfluxClient {
             at: message.created_at,
         })
     }
-    pub(crate) fn capture_own_authored_group(
-        &self,
-        _group: &str,
-        _sender: &str,
-        _exact: &[u8],
-    ) -> Result<(), SdkError> {
-        Err(invalid("group own-sent capture is unavailable"))
-    }
 }
