@@ -4770,6 +4770,7 @@ dependencies = [
  "getrandom 0.3.4",
  "keyring",
  "mime",
+ "openmls_traits",
  "poly1305 0.8.0",
  "prost",
  "prost-reflect",
