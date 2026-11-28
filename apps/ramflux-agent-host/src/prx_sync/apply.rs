@@ -70,8 +70,11 @@ impl Mirror {
                 )?;
                 Ok(None)
             }
-            MirrorOp::DeleteMessage { message_id } => {
+            MirrorOp::DeleteMessage { message_id, run_id } => {
                 self.turns.remove(message_id);
+                if let Some(run_id) = run_id {
+                    self.drop_run(run_id);
+                }
                 Ok(None)
             }
             MirrorOp::Erase(erase) => {
@@ -84,6 +87,26 @@ impl Mirror {
             }
             MirrorOp::Skip => Ok(None),
         }
+    }
+
+    /// Drops every mirror row that carries `run_id`: turns, session rows and those
+    /// sessions' turns, run rows, and approvals. A `child-segment:` id is a run id.
+    fn drop_run(&mut self, run_id: &str) {
+        let sessions: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, row)| row.run_id.as_deref() == Some(run_id))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &sessions {
+            self.sessions.remove(key);
+        }
+        self.turns.retain(|_, turn| {
+            turn.run_id.as_deref() != Some(run_id) && !sessions.contains(&turn.session)
+        });
+        self.runs.remove(run_id);
+        self.run_order.retain(|key| key != run_id);
+        self.approvals.retain(|_, row| row.run_id.as_deref() != Some(run_id));
     }
 
     fn apply_session(

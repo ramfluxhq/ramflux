@@ -50,8 +50,8 @@ pub enum MirrorOp {
     },
     /// `turn.cancelled`.
     Cancelled { run_id: Option<String>, session: String, agent: String },
-    /// A tombstoned message. The host deletes its local copy.
-    DeleteMessage { message_id: String },
+    /// `turn.deleted`. The host deletes `message_id` and every mirror row of `run_id`.
+    DeleteMessage { message_id: String, run_id: Option<String> },
     /// A history erase or an agent purge. The host deletes matching local copies.
     Erase(EraseCopy),
     /// A run-approval row. Pending and decided share one shape.
@@ -177,7 +177,7 @@ pub(super) fn op_from_kind(
         "agent.config_changed" => agent_op(agent, payload),
         "history.erased" => erase_op(payload),
         "turn.appended" => turn_op(payload, session, agent, incarnation, run_id),
-        "turn.deleted" => deleted_message(payload),
+        "turn.deleted" => deleted_message(payload, run_id),
         "turn.started" => started_op(payload, session, agent, run_id),
         "turn.failed" => failed_op(payload, session, agent, run_id),
         "turn.cancelled" => cancelled_op(session, agent, run_id, payload),
@@ -366,7 +366,7 @@ fn turn_op(
     run_id: Option<String>,
 ) -> Result<MirrorOp, PrxError> {
     if flag(payload, "deleted")? == Some(true) {
-        return deleted_message(payload);
+        return deleted_message(payload, run_id);
     }
     let message_id = req_id(payload, "message_id")?;
     let session = required_label(payload, "session_key", session)?;
@@ -435,8 +435,13 @@ fn turn_origin(payload: &Value) -> Result<Option<TurnOrigin>, PrxError> {
     }))
 }
 
-fn deleted_message(payload: &Value) -> Result<MirrorOp, PrxError> {
-    Ok(MirrorOp::DeleteMessage { message_id: req_id(payload, "message_id")? })
+fn deleted_message(payload: &Value, run_id: Option<String>) -> Result<MirrorOp, PrxError> {
+    // `message_id` is the anchor event id inside the deleted session. It is required.
+    // Rows of the run are found by `run_id` (the task run, or `child-segment:<authority>:<n>`).
+    Ok(MirrorOp::DeleteMessage {
+        message_id: req_id(payload, "message_id")?,
+        run_id: opt_id(payload, "run_id")?.or(run_id),
+    })
 }
 
 fn started_op(
