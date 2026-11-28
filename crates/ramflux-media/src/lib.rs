@@ -14,6 +14,7 @@
 //!
 //! - [`sframe`]: RFC 9605 (header, cipher suites, sender and receiver with
 //!   replay protection).
+//! - [`mls_kid`]: the `SFrame` KID of an MLS call (stream, leaf, epoch).
 //! - [`rtp`]: the minimal RTP header (RFC 3550).
 //! - [`codec`]: Opus through the reference libopus (RFC 6716, RFC 7587).
 //! - [`jitter`]: the adaptive jitter buffer.
@@ -33,6 +34,7 @@ pub mod authorization;
 pub mod codec;
 pub mod engine;
 pub mod jitter;
+pub mod mls_kid;
 pub mod pipeline;
 pub mod rebind;
 pub mod relay;

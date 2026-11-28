@@ -253,6 +253,35 @@ pub fn election_delay_ms(position: usize) -> u64 {
     window.saturating_mul(ELECT_WINDOW_MS)
 }
 
+/// Largest attachment ciphertext (spec 2.7).
+pub const ATTACH_MAX_BYTES: u64 = 16 * 1024 * 1024;
+/// Attachment ciphertext is a multiple of this (the client pads; the host refuses others).
+pub const ATTACH_PAD: u64 = 64 * 1024;
+/// Attachments one post carries (a client rule; the host cannot see posts).
+pub const ATTACH_PER_POST_MAX: usize = 10;
+/// Largest inline thumbnail. One thumbnail rule: each thumbnail is at most this, and the client
+/// shrinks or drops thumbnails until the whole post body fits [`CARD_JSON_MAX`] (the top post
+/// class), so no extra size class exists.
+pub const ATTACH_THUMB_MAX: usize = 16 * 1024;
+/// Largest inline `card_json`, and the largest post body (the top padding class).
+pub const CARD_JSON_MAX: usize = 64 * 1024;
+/// Post plaintext padding classes (the client pads inside the MLS ciphertext; the host sees only
+/// the class).
+pub const POST_PAD_CLASSES: [usize; 5] = [256, 1024, 4 * 1024, 16 * 1024, 64 * 1024];
+
+/// The padded length of a post body of `len` bytes: the smallest class that holds it, `None` above
+/// 64 KiB (then the content must be an attachment).
+#[must_use]
+pub fn post_padded_len(len: usize) -> Option<usize> {
+    POST_PAD_CLASSES.iter().copied().find(|class| *class >= len)
+}
+
+/// Structural size check of an attachment ciphertext: 1 byte to 16 MiB and a multiple of 64 KiB.
+#[must_use]
+pub fn attach_size_ok(total_bytes: u64) -> bool {
+    (1..=ATTACH_MAX_BYTES).contains(&total_bytes) && total_bytes.is_multiple_of(ATTACH_PAD)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +337,25 @@ mod tests {
         let mut bad = revoke(RollKind::RevokeLeave, 10 * DAY_MS);
         bad.refs_valid = false;
         assert_eq!(window.accept(bad), Err(RollRefusal::BadReferences), "bad references");
+    }
+
+    #[test]
+    fn post_bodies_pad_to_the_smallest_class() {
+        assert_eq!(post_padded_len(0), Some(256), "empty body");
+        assert_eq!(post_padded_len(256), Some(256), "exactly the first class");
+        assert_eq!(post_padded_len(257), Some(1024), "one over");
+        assert_eq!(post_padded_len(16 * 1024), Some(16 * 1024), "16 KiB");
+        assert_eq!(post_padded_len(16 * 1024 + 1), Some(64 * 1024), "just over 16 KiB");
+        assert_eq!(post_padded_len(64 * 1024), Some(64 * 1024), "64 KiB");
+        assert_eq!(post_padded_len(64 * 1024 + 1), None, "over 64 KiB is not a post");
+    }
+
+    #[test]
+    fn attachment_sizes_are_whole_64_kib_steps_up_to_16_mib() {
+        assert!(attach_size_ok(64 * 1024), "one step");
+        assert!(attach_size_ok(ATTACH_MAX_BYTES), "16 MiB");
+        assert!(!attach_size_ok(ATTACH_MAX_BYTES + ATTACH_PAD), "16 MiB + 64 KiB");
+        assert!(!attach_size_ok(100_000), "not a multiple of 64 KiB");
+        assert!(!attach_size_ok(0), "empty");
     }
 }

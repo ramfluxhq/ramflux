@@ -3,7 +3,8 @@
 
 //! Retention (MLS-SPEC r1.1 2.5): entries 30 days (posts also at most 1 M), pending joins 24 h,
 //! Welcomes 7 days or shortly after the last joiner fetched, unreferenced uploads 15 minutes,
-//! routes 7 to 8 days, spent sets two epochs after their epoch ends. Genesis, the admin chain, the
+//! attachments 30 to 31 days from completion (or oldest first over the per-group store), routes
+//! 7 to 8 days, spent sets two epochs after their epoch ends. Genesis, the admin chain, the
 //! token root and invites are kept. One sweep call works on a bounded number of groups and each
 //! group's pass is bounded, so a backlog is worked off over several calls.
 
@@ -70,6 +71,7 @@ impl Cx<'_> {
         self.expire_joins(gid, &mut head, QUEUE_OUTSIDER)?;
         self.sweep_welcomes(gid)?;
         self.sweep_blobs(gid)?;
+        self.sweep_attach(gid, self.host.attach_cap())?;
         self.sweep_routes(gid, &mut head)?;
         self.sweep_spent(gid, &head)?;
         self.put_head(gid, &head)

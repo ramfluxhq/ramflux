@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Posting tokens (MLS-SPEC r1.2 2.6; from 6ed `issue.rs`): batched issuance of at most 20 under
-//! per-pseudonym token quotas in three buckets (`post`, `commit`, `open`), redemption and the
+//! per-pseudonym token quotas in four buckets (`post`, `commit`, `open`, `attach`), redemption and the
 //! one-time spend, and the `open` session token. A paid batch never exceeds the quota left in the
 //! last 24 h (first-day commit quota 16: one batch of 16, four commits). The host counts the
 //! evaluations of each token root and refuses issuance at 2^30.
@@ -20,7 +20,6 @@ use super::rows::{HeadRow, IssueRow, key};
 use crate::RouterRedbStore;
 use crate::router_store::lg_store::LgTable;
 
-const OP_DOMAIN: &[u8] = b"rf-lg-op-v1";
 /// After a `daily` or `spent_full` roll the host still takes the previous epoch's tokens (10 min);
 /// after a `revoke` roll it does not.
 const GRACE_MS: u64 = 10 * 60 * 1_000;
@@ -28,7 +27,6 @@ const GRACE_MS: u64 = 10 * 60 * 1_000;
 const FREE_BATCHES_PER_DAY: usize = 10;
 const ISSUE_ROW: u8 = 1;
 const REPLY_CACHE: u8 = 2;
-const BATCH: u32 = 20;
 /// Evaluations one token root may perform before issuance is refused (spec 2.6, ruling 8): the
 /// root is fixed in the beta; rotation is the post-beta card `TOKEN-ROOT-ROTATE`.
 pub const ROOT_EVALUATIONS_MAX: u64 = 1 << 30;
@@ -43,16 +41,6 @@ pub(super) const fn paid_batch_fits(day_quota: u32, issued_24h: u32, count: u32)
 #[must_use]
 pub(super) fn root_may_issue(evaluations: u64, count: u32) -> bool {
     evaluations.saturating_add(u64::from(count)) <= ROOT_EVALUATIONS_MAX
-}
-
-/// What an operation's token is bound to: `BLAKE3(rf-lg-op-v1 ‖ op ‖ group_id ‖ body)`. Used by
-/// `invite.put/revoke` and `blob.put` (the entry kinds bind to the envelope instead,
-/// the `open` token to [`open_bind`]).
-#[must_use]
-pub fn op_bind(op: &str, gid: &[u8; 32], body: &[u8]) -> [u8; 32] {
-    let mut enc = Enc::new(OP_DOMAIN);
-    enc.var(op.as_bytes()).fixed(gid).var(body);
-    *blake3::hash(&enc.finish()).as_bytes()
 }
 
 /// What an `open` token is bound to: `BLAKE3(rf-lg-open-v1 ‖ group_id ‖ session nonce)`.
@@ -161,10 +149,11 @@ impl LargeGroupHost {
         })
     }
 
-    /// Issue one batch of 1 to 20 tokens (`req` is P-signed, op `tokens`; body: `te`, bucket code,
+    /// Issue one batch of 1 to 20 tokens (`attach`: 10) (`req` is P-signed, op `tokens`; body: `te`, bucket code,
     /// request id, count, `count` blinded elements). A leaf gets at most `quota` tokens per 24 h
     /// (first day: `first_day`) in paid batches that never exceed what is left, and one free
-    /// refill batch per token epoch (at most 10 a day, at most the day's quota). A retry of the
+    /// refill batch per token epoch (at most 10 a day, at most the day's quota; the `attach` bucket
+    /// has no free refill). A retry of the
     /// same request returns the cached reply at no cost.
     ///
     /// # Errors
@@ -183,7 +172,8 @@ impl LargeGroupHost {
         let bucket = TokenBucket::from_code(dec.u8().map_err(bad)?)?;
         let _request_id: [u8; 16] = dec.fixed().map_err(bad)?;
         let count = dec.u32().map_err(bad)?;
-        if count == 0 || count > BATCH {
+        let batch_max = u32::try_from(bucket.batch_max()).unwrap_or(u32::MAX);
+        if count == 0 || count > batch_max {
             return Err(LgRefusal::BadRequest);
         }
         let mut blinded = Vec::with_capacity(BATCH_SIZE);
@@ -219,9 +209,10 @@ impl LargeGroupHost {
             let quota = bucket.quota(cx.host.config.open_per_day);
             let first_day = cx.now.saturating_sub(leaf.joined_ms) < DAY_MS;
             let day = if first_day { quota.first_day } else { quota.per_day };
-            if row.last_free_te < head.te
+            if bucket.free_refill()
+                && row.last_free_te < head.te
                 && row.free.len() < FREE_BATCHES_PER_DAY
-                && count <= day.min(BATCH)
+                && count <= day.min(batch_max)
             {
                 row.last_free_te = head.te;
                 row.free.push(cx.now);
