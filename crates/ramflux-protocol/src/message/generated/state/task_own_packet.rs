@@ -13,8 +13,6 @@ pub struct TaskOwnPacket {
     pub history: ::core::option::Option<TaskHistory>,
     #[prost(message, repeated, tag = "3")]
     pub manifests: ::prost::alloc::vec::Vec<NativeDeviceManifest>,
-    #[prost(message, repeated, tag = "4")]
-    pub pins: ::prost::alloc::vec::Vec<SdkOwnDeviceGroupMemberPin>,
     #[prost(uint64, tag = "5")]
     pub base: u64,
     #[prost(string, tag = "6")]
@@ -37,9 +35,6 @@ impl serde::Serialize for TaskOwnPacket {
         if !self.manifests.is_empty() {
             len += 1;
         }
-        if !self.pins.is_empty() {
-            len += 1;
-        }
         if self.base != 0 {
             len += 1;
         }
@@ -56,9 +51,6 @@ impl serde::Serialize for TaskOwnPacket {
         }
         if !self.manifests.is_empty() {
             struct_ser.serialize_field("manifests", &self.manifests)?;
-        }
-        if !self.pins.is_empty() {
-            struct_ser.serialize_field("pins", &self.pins)?;
         }
         if self.base != 0 {
             #[allow(clippy::needless_borrow)]
@@ -78,13 +70,12 @@ impl<'de> serde::Deserialize<'de> for TaskOwnPacket {
         D: serde::Deserializer<'de>,
     {
         const FIELDS: &[&str] =
-            &["context", "history", "manifests", "pins", "base", "prefix_hash", "prefixHash"];
+            &["context", "history", "manifests", "base", "prefix_hash", "prefixHash"];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             Context,
             History,
             Manifests,
-            Pins,
             Base,
             PrefixHash,
         }
@@ -111,7 +102,6 @@ impl<'de> serde::Deserialize<'de> for TaskOwnPacket {
                             "context" => Ok(GeneratedField::Context),
                             "history" => Ok(GeneratedField::History),
                             "manifests" => Ok(GeneratedField::Manifests),
-                            "pins" => Ok(GeneratedField::Pins),
                             "base" => Ok(GeneratedField::Base),
                             "prefixHash" | "prefix_hash" => Ok(GeneratedField::PrefixHash),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
@@ -134,7 +124,6 @@ impl<'de> serde::Deserialize<'de> for TaskOwnPacket {
                 let mut context__ = None;
                 let mut history__ = None;
                 let mut manifests__ = None;
-                let mut pins__ = None;
                 let mut base__ = None;
                 let mut prefix_hash__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
@@ -161,12 +150,6 @@ impl<'de> serde::Deserialize<'de> for TaskOwnPacket {
                             }
                             manifests__ = Some(map_.next_value()?);
                         }
-                        GeneratedField::Pins => {
-                            if pins__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("pins"));
-                            }
-                            pins__ = Some(map_.next_value()?);
-                        }
                         GeneratedField::Base => {
                             if base__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("base"));
@@ -187,7 +170,6 @@ impl<'de> serde::Deserialize<'de> for TaskOwnPacket {
                     context: context__,
                     history: history__,
                     manifests: manifests__.unwrap_or_default(),
-                    pins: pins__.unwrap_or_default(),
                     base: base__.unwrap_or_default(),
                     prefix_hash: prefix_hash__.unwrap_or_default(),
                 })

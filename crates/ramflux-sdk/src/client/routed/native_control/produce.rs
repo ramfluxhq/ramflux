@@ -25,7 +25,6 @@ impl RamfluxClient {
     fn produce_generated_peer_control(
         &self,
         conversation: &str,
-        group: Option<(&str, u64)>,
         payload: g::control::Payload,
         operation_key: &str,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
@@ -54,10 +53,8 @@ impl RamfluxClient {
                 let identity = inner.identity.as_ref().ok_or(SdkError::ReplayMismatch)?;
                 if inner.kind != 8
                     || inner.layer != layer
-                    || identity.group_epoch != group.map(|(_, epoch)| epoch)
                     || inner.body != *body
                     || identity.conversation_id != conversation
-                    || identity.group_id.as_deref() != group.map(|(id, _)| id)
                     || g::identity::verify(identity).is_err()
                     || identity.author.as_ref().is_none_or(|author| {
                         author.account_anchor != own.root_commitment()
@@ -69,16 +66,11 @@ impl RamfluxClient {
                 }
                 return Ok(bytes);
             }
-            let mut identity = self.allocate_generated_identity(
+            let identity = self.allocate_generated_identity(
                 conversation,
                 crate::client::generated_identity::now_ms(),
                 false,
             )?;
-            if let Some((group_id, epoch)) = group {
-                // Same binding as the Snapshot producer: group scope and verified state epoch.
-                identity.group_id = Some(group_id.to_owned());
-                identity.group_epoch = Some(epoch);
-            }
             let bytes = Zeroizing::new(Self::encode_generated_inner(
                 identity,
                 &g::Content { value: Some(g::content::Value::Control(control.clone())) },
@@ -136,7 +128,6 @@ impl RamfluxClient {
             }
             self.produce_generated_peer_control(
                 &self.peer_scope(guardian_root)?,
-                None,
                 payload,
                 &format!("guardian-invite/{}", invite.invite_id),
             )
@@ -160,7 +151,6 @@ impl RamfluxClient {
         }
         self.produce_generated_peer_control(
             &self.peer_scope(owner_root)?,
-            None,
             g::control::Payload::RecoveryControl(g::RecoveryControl {
                 payload: Some(g::recovery_control::Payload::Accept(guardian::accept_to_generated(
                     accept,
@@ -184,7 +174,6 @@ impl RamfluxClient {
         }
         self.produce_generated_peer_control(
             &self.peer_scope(target_root)?,
-            None,
             g::control::Payload::A2i(a2i::to_generated(event)?),
             &format!("a2i/{}/{}", event.target_device_id, event.correlation_id),
         )
@@ -205,7 +194,6 @@ impl RamfluxClient {
         );
         self.produce_generated_peer_control(
             &self.peer_scope(recipient_root)?,
-            None,
             g::control::Payload::ObjectRevoke(revoke),
             &operation_key,
         )

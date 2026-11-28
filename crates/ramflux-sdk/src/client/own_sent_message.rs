@@ -32,15 +32,7 @@ struct SentMessage {
     body_base64: zeroize::Zeroizing<String>,
 }
 impl SentMessage {
-    fn validate_route(
-        &self,
-        envelope: &str,
-        conversation: &str,
-        group: Option<&str>,
-    ) -> Result<(), SdkError> {
-        if group.is_some() {
-            return Err(invalid("own sent message group scope is unavailable"));
-        }
+    fn validate_route(&self, envelope: &str, conversation: &str) -> Result<(), SdkError> {
         if self.envelope_id.is_empty()
             || self.envelope_id.len() > 256
             || self.envelope_id != envelope
@@ -125,7 +117,6 @@ pub(crate) struct OwnSentInput<'a> {
     pub message: &'a str,
     pub sender: &'a str,
     pub original_recipients: &'a [String],
-    pub group: Option<&'a str>,
     pub peer: Option<&'a str>,
     pub body: &'a [u8],
     pub ciphertext: &'a [u8],
@@ -162,7 +153,6 @@ impl RamfluxClient {
                 id: input.envelope,
                 created_at: now_unix_timestamp(),
                 conversation: input.conversation,
-                group: input.group,
                 body: &bytes,
             },
             Some(("message", owner.as_str())),
@@ -190,7 +180,6 @@ impl RamfluxClient {
                 id: input.envelope,
                 created_at: now_unix_timestamp(),
                 conversation: input.conversation,
-                group: input.group,
                 body: &bytes,
             },
             input.message,
@@ -206,9 +195,6 @@ impl RamfluxClient {
     fn own_sent_packet(&self, input: OwnSentInput<'_>) -> Result<SentMessage, SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let db = self.account_db()?;
-        if input.group.is_some() {
-            return Err(invalid("own-device group access unavailable"));
-        }
         let participants = if let Some(peer) = input.peer {
             vec![local.principal_id.clone(), peer.to_owned()]
         } else {
@@ -340,7 +326,6 @@ impl RamfluxClient {
         let super::own_device_copy::OwnMessageInput {
             id: envelope,
             conversation,
-            group,
             created_at: at,
             body: bytes,
             ..
@@ -353,7 +338,7 @@ impl RamfluxClient {
         let generated =
             g::OwnSentMessage::decode(bytes).map_err(|_| invalid("invalid own sent message"))?;
         let packet = SentMessage::from_generated(&generated)?;
-        self.apply_own_sent_packet(source, envelope, conversation, group, at, &packet)
+        self.apply_own_sent_packet(source, envelope, conversation, at, &packet)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -363,11 +348,10 @@ impl RamfluxClient {
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         envelope: &str,
         conversation: &str,
-        group: Option<&str>,
         at: i64,
         packet: &SentMessage,
     ) -> Result<bool, SdkError> {
-        packet.validate_route(envelope, conversation, group)?;
+        packet.validate_route(envelope, conversation)?;
         let body = zeroize::Zeroizing::new(
             ramflux_protocol::decode_base64url(&packet.body_base64)
                 .map_err(|_| invalid("invalid own sent message body encoding"))?,
@@ -438,7 +422,6 @@ impl RamfluxClient {
                 message: &packet.message_id,
                 sender: &packet.sender_id,
                 original_recipients: &packet.original_recipients,
-                group,
                 peer: None,
                 body: &body,
                 ciphertext: &[],

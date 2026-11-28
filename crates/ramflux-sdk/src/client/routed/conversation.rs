@@ -55,9 +55,6 @@ impl RamfluxClient {
         {
             return Err(invalid("conversation event differs from authenticated author or wire"));
         }
-        if identity.group_id.is_some() {
-            return Err(invalid("group conversation events are unavailable"));
-        }
         let route = Route::direct();
         self.current_custody_authority(local.root_commitment(), crate::custody::network_now()?)?
             .ok_or(SdkError::NetworkingPending)?;
@@ -111,7 +108,7 @@ impl RamfluxClient {
             // Edit retirement erases old payload graphs. Capture/queue the accepted revision after it.
             self.capture_own_authored_direct(&message, exact)?;
             if matches!(content.value, Some(g::content::Value::Reaction(_))) {
-                self.stage_authored_conversation_reaction(&message, &identity, exact, recipients)?;
+                self.stage_authored_conversation_reaction(&message, exact, recipients)?;
             }
             reconcile.map_or(Ok(()), |commit| commit())?;
             Ok::<_, SdkError>(())
@@ -122,18 +119,16 @@ impl RamfluxClient {
     fn stage_authored_conversation_reaction(
         &self,
         message: &GatewayDirectMessage,
-        identity: &g::EventIdentity,
         exact: &[u8],
         recipients: &[String],
     ) -> Result<(), SdkError> {
-        let peer = identity.group_id.is_none().then(|| self.own_sent_peer(message)).transpose()?;
+        let peer = Some(self.own_sent_peer(message)?);
         self.stage_authored_mutation_copy(crate::client::own_sent_message::OwnSentInput {
             envelope: &format!("conversation-mutation-copy-{}", message.message_id),
             conversation: &message.conversation_id,
             message: &message.message_id,
             sender: &message.sender_id,
             original_recipients: recipients,
-            group: identity.group_id.as_deref(),
             peer: peer.as_deref(),
             body: exact,
             ciphertext: &[],

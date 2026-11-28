@@ -21,9 +21,6 @@ impl RamfluxClient {
         }
         let inner = g::Inner::decode(item.exact_inner.as_slice()).map_err(|_| bad)?;
         let identity = inner.identity.ok_or(bad)?;
-        if identity.group_id.is_some() {
-            return Err(bad.into());
-        }
         let origin = RetainedOrigin {
             evidence: item.source_evidence.clone().ok_or(EvidenceError::OriginEvidenceMissing)?,
             reported_inner: Vec::new(),

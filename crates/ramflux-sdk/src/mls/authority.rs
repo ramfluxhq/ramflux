@@ -36,15 +36,12 @@ impl SdkAuthority {
             code: "internal",
             detail: "the authority snapshot lock is poisoned".to_owned(),
         })?;
-        match record {
-            Some(record) => {
-                heads.insert(anchor.to_owned(), record);
-                Ok(true)
-            }
-            None => {
-                heads.remove(anchor);
-                Ok(false)
-            }
+        if let Some(record) = record {
+            heads.insert(anchor.to_owned(), record);
+            Ok(true)
+        } else {
+            heads.remove(anchor);
+            Ok(false)
         }
     }
 }

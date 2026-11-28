@@ -29,8 +29,6 @@ pub fn transient_message_frame(update: &MessageUpdate) -> Result<LocalBusFrame, 
         || identity.device_sequence != 0
         || identity.hlc != 0
         || identity.conversation_id.is_empty()
-        || identity.group_id.is_some()
-        || identity.group_epoch.is_some()
         || identity.author.as_ref().is_none_or(|author| {
             author.account_anchor.is_empty()
                 || author.device_id.is_empty()

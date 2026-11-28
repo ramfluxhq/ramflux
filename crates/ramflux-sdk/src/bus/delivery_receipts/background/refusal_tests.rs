@@ -137,7 +137,6 @@ pub(super) async fn seeded(
         author: Some(author),
         device_sequence: 1,
         hlc: 1000,
-        ..Default::default()
     };
     let target = ramflux_protocol::encode_base64url(&identity.id);
     source.client.account_db()?.persist_message_actor_state(

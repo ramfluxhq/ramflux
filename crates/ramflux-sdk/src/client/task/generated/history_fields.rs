@@ -57,7 +57,6 @@ impl TryFrom<&OwnContext> for g::OwnContext {
         Ok(Self {
             conversation_id: value.conversation_id.clone(),
             participants: value.participants.clone(),
-            group: None,
             friend: value
                 .friend
                 .as_ref()
@@ -70,9 +69,6 @@ impl TryFrom<&OwnContext> for g::OwnContext {
 impl TryFrom<&g::OwnContext> for OwnContext {
     type Error = SdkError;
     fn try_from(value: &g::OwnContext) -> Result<Self, Self::Error> {
-        if value.group.is_some() {
-            return Err(invalid("task group context is not accepted"));
-        }
         let friend = value.friend.as_ref().map(|friend| {
             serde_json::from_value(serde_json::json!({
                 "link_id": friend.link_id, "requester_id": friend.requester_id, "target_id": friend.target_id,

@@ -17,10 +17,6 @@ pub struct EventIdentity {
     pub device_sequence: u64,
     #[prost(uint64, tag = "5")]
     pub hlc: u64,
-    #[prost(string, optional, tag = "6")]
-    pub group_id: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(uint64, optional, tag = "7")]
-    pub group_epoch: ::core::option::Option<u64>,
 }
 impl serde::Serialize for EventIdentity {
     #[allow(deprecated)]
@@ -43,12 +39,6 @@ impl serde::Serialize for EventIdentity {
             len += 1;
         }
         if self.hlc != 0 {
-            len += 1;
-        }
-        if self.group_id.is_some() {
-            len += 1;
-        }
-        if self.group_epoch.is_some() {
             len += 1;
         }
         let mut struct_ser =
@@ -77,14 +67,6 @@ impl serde::Serialize for EventIdentity {
             #[allow(clippy::needless_borrows_for_generic_args)]
             struct_ser.serialize_field("hlc", ToString::to_string(&self.hlc).as_str())?;
         }
-        if let Some(v) = self.group_id.as_ref() {
-            struct_ser.serialize_field("groupId", v)?;
-        }
-        if let Some(v) = self.group_epoch.as_ref() {
-            #[allow(clippy::needless_borrow)]
-            #[allow(clippy::needless_borrows_for_generic_args)]
-            struct_ser.serialize_field("groupEpoch", ToString::to_string(&v).as_str())?;
-        }
         struct_ser.end()
     }
 }
@@ -102,10 +84,6 @@ impl<'de> serde::Deserialize<'de> for EventIdentity {
             "device_sequence",
             "deviceSequence",
             "hlc",
-            "group_id",
-            "groupId",
-            "group_epoch",
-            "groupEpoch",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
@@ -114,8 +92,6 @@ impl<'de> serde::Deserialize<'de> for EventIdentity {
             Author,
             DeviceSequence,
             Hlc,
-            GroupId,
-            GroupEpoch,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -146,8 +122,6 @@ impl<'de> serde::Deserialize<'de> for EventIdentity {
                                 Ok(GeneratedField::DeviceSequence)
                             }
                             "hlc" => Ok(GeneratedField::Hlc),
-                            "groupId" | "group_id" => Ok(GeneratedField::GroupId),
-                            "groupEpoch" | "group_epoch" => Ok(GeneratedField::GroupEpoch),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -170,8 +144,6 @@ impl<'de> serde::Deserialize<'de> for EventIdentity {
                 let mut author__ = None;
                 let mut device_sequence__ = None;
                 let mut hlc__ = None;
-                let mut group_id__ = None;
-                let mut group_epoch__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -214,24 +186,6 @@ impl<'de> serde::Deserialize<'de> for EventIdentity {
                                 map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
                             );
                         }
-                        GeneratedField::GroupId => {
-                            if group_id__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("groupId"));
-                            }
-                            group_id__ = map_.next_value()?;
-                        }
-                        GeneratedField::GroupEpoch => {
-                            if group_epoch__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("groupEpoch"));
-                            }
-                            group_epoch__ = map_
-                                .next_value::<
-                                    ::std::option::Option<
-                                        ::pbjson::private::NumberDeserialize<_>,
-                                    >,
-                                >()?
-                                .map(|x| x.0);
-                        }
                     }
                 }
                 Ok(EventIdentity {
@@ -240,8 +194,6 @@ impl<'de> serde::Deserialize<'de> for EventIdentity {
                     author: author__,
                     device_sequence: device_sequence__.unwrap_or_default(),
                     hlc: hlc__.unwrap_or_default(),
-                    group_id: group_id__,
-                    group_epoch: group_epoch__,
                 })
             }
         }

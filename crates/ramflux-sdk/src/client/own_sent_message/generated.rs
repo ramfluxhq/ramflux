@@ -48,7 +48,7 @@ impl RamfluxClient {
         self.require_native_operation(source, NativeOperation::Sync)?;
         self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
         let packet = SentMessage::from_generated(sent)?;
-        packet.validate_route(&sent.envelope_id, conversation, None)?;
+        packet.validate_route(&sent.envelope_id, conversation)?;
         self.validate_own_context_namespace(&packet.context)?;
         let scanned = g::validation::scan_inner(&sent.exact_inner)
             .map_err(|_| invalid("own sent Inner malformed"))?;
@@ -60,27 +60,10 @@ impl RamfluxClient {
         if author.account_anchor != source.root_commitment()
             || identity.device_sequence & (1 << 63) != 0
             || identity.conversation_id != conversation
-            || identity.group_id.is_some()
             || ramflux_protocol::encode_base64url(&identity.id) != sent.message_id
             || !matches!(scanned.kind, 1 | 3 | 4 | 5)
         {
             return Err(invalid("own sent original identity or kind mismatch"));
-        }
-        if scanned.kind == 1
-            && g::Message::decode(scanned.body)
-                .map_err(|_| invalid("own sent Message malformed"))?
-                .sealed_group
-                .is_some()
-        {
-            return Err(invalid("own sent requires plaintext Message"));
-        }
-        if scanned.kind == 3
-            && g::Edit::decode(scanned.body)
-                .map_err(|_| invalid("own sent Edit malformed"))?
-                .replacement
-                .is_some_and(|message| message.sealed_group.is_some())
-        {
-            return Err(invalid("own sent requires plaintext Edit replacement"));
         }
         let original = self.device_identity_for_root(&author.account_anchor, &author.device_id)?;
         let record = self
@@ -148,7 +131,7 @@ impl RamfluxClient {
                 return Ok(true);
             };
             match content.value.as_ref() {
-                Some(g::content::Value::Message(message)) if message.sealed_group.is_none() => {
+                Some(g::content::Value::Message(_)) => {
                     self.project_generated_own_sent_message(
                         &original,
                         &identity,
@@ -201,9 +184,6 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         let thread = db.client_record("conversation", &identity.conversation_id)?;
-        if identity.group_id.is_some() {
-            return Err(invalid("own sent group copies are unavailable"));
-        }
         let thread = thread.ok_or_else(|| {
             SdkError::InboundPending(
                 "own sent direct context awaits native contact bootstrap".into(),
@@ -257,9 +237,6 @@ impl RamfluxClient {
         packet: &SentMessage,
         projection: MessageProjection,
     ) -> Result<(), SdkError> {
-        if identity.group_id.is_some() {
-            return Err(invalid("own sent group copies are unavailable"));
-        }
         let (copy_created_at, topic) = match projection {
             MessageProjection::Live(at) => (at, "message.received"),
             MessageProjection::Reparse(at) => (at, "message.schema.updated"),
@@ -326,7 +303,6 @@ impl RamfluxClient {
                 message: &id,
                 sender: &packet.sender_id,
                 original_recipients: &packet.original_recipients,
-                group: identity.group_id.as_deref(),
                 peer: None,
                 body: &sent.exact_inner,
                 ciphertext: &[],

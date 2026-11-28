@@ -22,10 +22,6 @@ pub(super) struct DisplayMessage {
     #[serde(default)]
     #[prost(message, repeated, tag = "5")]
     pub media: Vec<DisplayMedia>,
-    #[serde(default)]
-    #[prost(message, optional, tag = "16")]
-    #[serde(alias = "sealed_group")]
-    pub sealed_group: Option<Concealed>,
 }
 impl Drop for DisplayMessage {
     fn drop(&mut self) {
@@ -70,9 +66,6 @@ impl Drop for DisplayMedia {
         self.file_name.zeroize();
     }
 }
-#[derive(Clone, PartialEq, prost::Message, serde::Deserialize)]
-#[prost(skip_debug)]
-pub(super) struct Concealed {}
 #[derive(Clone, PartialEq, prost::Message)]
 #[prost(skip_debug)]
 struct Replacement {

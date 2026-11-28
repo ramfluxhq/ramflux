@@ -496,13 +496,6 @@ pub(super) fn message_media_entries(
         )
         .into());
     };
-    if message.sealed_group.is_some() {
-        return Err(Refusal::because_of(
-            CODE_LAYOUT_INVALID,
-            "the stored content is a group message",
-        )
-        .into());
-    }
     Ok(message.media)
 }
 

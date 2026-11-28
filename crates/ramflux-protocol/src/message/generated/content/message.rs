@@ -18,8 +18,6 @@ pub struct Message {
     pub forward: ::core::option::Option<Forward>,
     #[prost(message, repeated, tag = "5")]
     pub media: ::prost::alloc::vec::Vec<MediaRef>,
-    #[prost(message, optional, tag = "16")]
-    pub sealed_group: ::core::option::Option<GroupSealedContent>,
     /// Private entropy for erased-revision digests; never part of a public update/header.
     #[prost(bytes = "vec", tag = "17")]
     pub erasure_nonce: ::prost::alloc::vec::Vec<u8>,
@@ -47,9 +45,6 @@ impl serde::Serialize for Message {
         if !self.media.is_empty() {
             len += 1;
         }
-        if self.sealed_group.is_some() {
-            len += 1;
-        }
         if !self.erasure_nonce.is_empty() {
             len += 1;
         }
@@ -68,9 +63,6 @@ impl serde::Serialize for Message {
         }
         if !self.media.is_empty() {
             struct_ser.serialize_field("media", &self.media)?;
-        }
-        if let Some(v) = self.sealed_group.as_ref() {
-            struct_ser.serialize_field("sealedGroup", v)?;
         }
         if !self.erasure_nonce.is_empty() {
             #[allow(clippy::needless_borrow)]
@@ -96,8 +88,6 @@ impl<'de> serde::Deserialize<'de> for Message {
             "replyTo",
             "forward",
             "media",
-            "sealed_group",
-            "sealedGroup",
             "erasure_nonce",
             "erasureNonce",
         ];
@@ -108,7 +98,6 @@ impl<'de> serde::Deserialize<'de> for Message {
             ReplyTo,
             Forward,
             Media,
-            SealedGroup,
             ErasureNonce,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
@@ -136,7 +125,6 @@ impl<'de> serde::Deserialize<'de> for Message {
                             "replyTo" | "reply_to" => Ok(GeneratedField::ReplyTo),
                             "forward" => Ok(GeneratedField::Forward),
                             "media" => Ok(GeneratedField::Media),
-                            "sealedGroup" | "sealed_group" => Ok(GeneratedField::SealedGroup),
                             "erasureNonce" | "erasure_nonce" => Ok(GeneratedField::ErasureNonce),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
@@ -160,7 +148,6 @@ impl<'de> serde::Deserialize<'de> for Message {
                 let mut reply_to__ = None;
                 let mut forward__ = None;
                 let mut media__ = None;
-                let mut sealed_group__ = None;
                 let mut erasure_nonce__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
@@ -198,12 +185,6 @@ impl<'de> serde::Deserialize<'de> for Message {
                             }
                             media__ = Some(map_.next_value()?);
                         }
-                        GeneratedField::SealedGroup => {
-                            if sealed_group__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("sealedGroup"));
-                            }
-                            sealed_group__ = map_.next_value()?;
-                        }
                         GeneratedField::ErasureNonce => {
                             if erasure_nonce__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("erasureNonce"));
@@ -220,7 +201,6 @@ impl<'de> serde::Deserialize<'de> for Message {
                     reply_to: reply_to__,
                     forward: forward__,
                     media: media__.unwrap_or_default(),
-                    sealed_group: sealed_group__,
                     erasure_nonce: erasure_nonce__.unwrap_or_default(),
                 })
             }

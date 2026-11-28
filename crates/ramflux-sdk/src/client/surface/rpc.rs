@@ -133,13 +133,10 @@ impl RamfluxClient {
         }
         let now = crate::prelude::now_unix_timestamp();
         let db = self.account_db()?;
-        let thread = db
-            .client_record("conversation", &carrier.conversation_id)?
+        db.client_record("conversation", &carrier.conversation_id)?
             .ok_or_else(|| invalid("RPC conversation missing"))?;
-        let group = thread.get("group_id").and_then(Value::as_str);
         self.authorize_surface_peer_context(
             &carrier.conversation_id,
-            group,
             &carrier.sender_principal_id,
         )?;
         if !self.claim_surface_rpc_rate(&carrier.author_principal_id, now)? {
@@ -161,7 +158,7 @@ impl RamfluxClient {
                 db.append_journal(&crate::new_surface_message_id()?,"surface.rpc.conflict",&json!({"conversation_id":carrier.conversation_id,"author_principal_id":carrier.author_principal_id,"function_call_id":id}),now,None)?;
                 return Ok(dropped());
             }
-            self.queue_rpc_response(carrier, &entry, group, group_epoch)?;
+            self.queue_rpc_response(carrier, &entry, group_epoch)?;
             return Ok(accepted());
         }
         if db.actor_state_key_page(&prefix, MAX_ENTRIES)?.len() >= MAX_ENTRIES as usize {
@@ -212,7 +209,7 @@ impl RamfluxClient {
         };
         // Within the account writer transaction, first construction wins until expiry.
         db.persist_actor_state(&entry_key, &entry)?;
-        self.queue_rpc_response(carrier, &entry, group, group_epoch)?;
+        self.queue_rpc_response(carrier, &entry, group_epoch)?;
         Ok(accepted())
     }
     fn claim_surface_rpc_rate(&self, author: &str, now: i64) -> Result<bool, SdkError> {
@@ -235,7 +232,6 @@ impl RamfluxClient {
         &self,
         call: &Carrier,
         entry: &Entry,
-        group: Option<&str>,
         epoch: Option<u64>,
     ) -> Result<(), SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
@@ -277,7 +273,7 @@ impl RamfluxClient {
             root: required("principal_commitment")?,
             device: call.sender_device_id.clone(),
             target: required("target_delivery_id")?,
-            group: group.map(str::to_owned),
+            group: None,
             epoch,
             expires_at: entry.expires_at,
         };
@@ -450,23 +446,16 @@ impl RamfluxClient {
             response_kind: RpcKind::Error,
             expires_at: crate::prelude::now_unix_timestamp().saturating_add(RETENTION_SECONDS),
         };
-        let Some(thread) =
-            self.account_db()?.client_record("conversation", &carrier.conversation_id)?
-        else {
+        if self.account_db()?.client_record("conversation", &carrier.conversation_id)?.is_none() {
             return Ok(());
-        };
+        }
         if !self.surface_error_report_route_ready(
             &carrier.sender_principal_id,
             &carrier.sender_device_id,
         )? {
             return Ok(());
         }
-        self.queue_rpc_response(
-            carrier,
-            &entry,
-            thread.get("group_id").and_then(Value::as_str),
-            epoch,
-        )?;
+        self.queue_rpc_response(carrier, &entry, epoch)?;
         // A monotonic per-surface floor coalesces older reports and never reports the
         // same attempted version twice, without retaining one row per hostile version.
         self.account_db()?.persist_actor_state(&marker, &event.version())?;

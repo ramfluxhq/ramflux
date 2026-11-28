@@ -237,7 +237,6 @@ fn seal_live_copy(
                 id: intent["id"].as_str().ok_or("original envelope")?,
                 created_at: intent["created_at"].as_i64().ok_or("authored time")?,
                 conversation,
-                group: None,
                 body: &bytes,
             },
             source.manifest.clone(),

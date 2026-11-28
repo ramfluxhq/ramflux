@@ -376,8 +376,6 @@ fn confirmation_is_current(
         return false;
     };
     decoded.identity.as_ref() == Some(origin)
-        && decoded.identity.as_ref().is_some_and(|identity| identity.group_id.is_none())
-        && decoded.identity.as_ref().is_some_and(|identity| identity.group_epoch.is_none())
 }
 
 enum Decision {
@@ -797,10 +795,7 @@ fn commit_compared(
         super::generated_identity::now_ms(),
         true,
     )?;
-    if origin.group_id.is_some()
-        || origin.group_epoch.is_some()
-        || identity::verify(&origin).is_err()
-    {
+    if identity::verify(&origin).is_err() {
         return Err(required(ContactReason::ExpectedSafetyRequired));
     }
     let confirmation = g::ContactSafetyConfirmation {

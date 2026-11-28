@@ -162,10 +162,8 @@ fn output_scope_matches(state: &crate::Checkpoint, pending: &Pending) -> Result<
         if event.conversation_id() != pending.conversation_id {
             return Err(Error::State);
         }
-    } else {
-        if pending.body["sender_id"] != state.device_id {
-            return Err(Error::Unauthorized);
-        }
+    } else if pending.body["sender_id"] != state.device_id {
+        return Err(Error::Unauthorized);
     }
     Ok(true)
 }

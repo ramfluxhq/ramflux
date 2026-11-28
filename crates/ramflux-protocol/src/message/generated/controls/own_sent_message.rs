@@ -5,7 +5,7 @@
 #[allow(unused_imports)]
 use super::super::*;
 
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 #[prost(skip_debug)]
 pub struct OwnSentMessage {
     #[prost(string, tag = "1")]

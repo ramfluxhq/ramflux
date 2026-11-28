@@ -19,8 +19,6 @@ fn payload_operation_and_tag(payload: &g::control::Payload) -> (u32, u32) {
         g::control::Payload::Reset(_) => (1, 16),
         g::control::Payload::ResetAck(_) => (2, 17),
         g::control::Payload::ContactControl(_) => (3, 18),
-        g::control::Payload::GroupState(_) => (4, 19),
-        g::control::Payload::GroupKeyControl(_) => (5, 20),
         g::control::Payload::OwnContactSync(_) => (6, 21),
         g::control::Payload::OwnHistory(_) => (7, 22),
         g::control::Payload::HomeMigration(_) => (8, 23),
@@ -29,7 +27,6 @@ fn payload_operation_and_tag(payload: &g::control::Payload) -> (u32, u32) {
         g::control::Payload::A2i(_) => (11, 26),
         g::control::Payload::ObjectRevoke(_) => (12, 27),
         g::control::Payload::OwnContactTombstone(_) => (13, 28),
-        g::control::Payload::OwnGroupConsent(_) => (14, 29),
         g::control::Payload::OwnMessageCopy(_) => (15, 30),
         g::control::Payload::OwnLayerRenewal(_) => (18, 34),
         g::control::Payload::Friend(_) => (16, 31),
@@ -92,11 +89,6 @@ pub fn validate_control_native(control: &g::Control) -> Result<(), SdkError> {
             body.consent.as_ref().map(|leaf| leaf.canonical.as_slice()),
             "contact control requires native consent",
         ),
-        Some(
-            g::control::Payload::GroupState(_)
-            | g::control::Payload::GroupKeyControl(_)
-            | g::control::Payload::OwnGroupConsent(_),
-        ) => Err(refused("group controls are unavailable until the MLS group track")),
         Some(g::control::Payload::OwnContactSync(body)) => validate_own_contact_sync(body),
         Some(g::control::Payload::OwnHistory(page)) => {
             if page.transfer_id.is_empty() {

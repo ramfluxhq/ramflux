@@ -205,27 +205,26 @@ impl RamfluxClient {
         device: &str,
     ) -> Result<String, SdkError> {
         let own = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        if let Some(thread) = self.account_db()?.client_record("conversation", conversation)? {
-            if thread["kind"] == "direct"
-                && let Some(ids) = thread["participants"].as_array()
+        if let Some(thread) = self.account_db()?.client_record("conversation", conversation)?
+            && thread["kind"] == "direct"
+            && let Some(ids) = thread["participants"].as_array()
+        {
+            let peers = ids
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|p| *p != own.principal_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            if !ids.is_empty() && peers.is_empty() {
+                return Ok(self.owned_device_identity()?.root_commitment().into());
+            }
+            if peers.len() == 1
+                && let Some(peer) = peers.first()
+                && let Some(identity) = self.account_db()?.client_record("identity", peer)?
+                && let Some(root) = identity["contact_identity_commitment"].as_str()
+                && (self.friend_link_peer_is_accepted(peer)?
+                    || self.friend_link_peer_is_accepted(root)?)
             {
-                let peers = ids
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .filter(|p| *p != own.principal_id)
-                    .collect::<std::collections::BTreeSet<_>>();
-                if !ids.is_empty() && peers.is_empty() {
-                    return Ok(self.owned_device_identity()?.root_commitment().into());
-                }
-                if peers.len() == 1
-                    && let Some(peer) = peers.first()
-                    && let Some(identity) = self.account_db()?.client_record("identity", peer)?
-                    && let Some(root) = identity["contact_identity_commitment"].as_str()
-                    && (self.friend_link_peer_is_accepted(peer)?
-                        || self.friend_link_peer_is_accepted(root)?)
-                {
-                    return Ok(root.to_owned());
-                }
+                return Ok(root.to_owned());
             }
         }
         self.trusted_recipient_root(device)

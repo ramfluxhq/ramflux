@@ -67,7 +67,7 @@ async fn cached_attachment_retry_keeps_completed_download_state_without_rewritin
     let mut fixture = Fixture::new("cached-attachment").await?;
     let object = fixture.client.put_encrypted_object("cached-object", &vec![0x5a; 3072])?;
     let key = fixture.client.object_content_key(&object.object_id)?;
-    let manifest = chunk_manifest_for_object(&object.object_id, &object.ciphertext, 1024, None);
+    let manifest = chunk_manifest_for_object(&object.object_id, &object.ciphertext, 1024);
     let reference = reference(&fixture.client, &object, &manifest)?;
     fixture
         .client
@@ -127,7 +127,7 @@ async fn attachment_last_owner_erasure_invalidates_cached_keys_and_reopen_reads(
     let mut donor = ObjectStore::new();
     let object = donor.put_encrypted_object("erasure-wire", b"attachment-private-body")?;
     let key = donor.object_key(&object.object_id)?;
-    let manifest = chunk_manifest_for_object(&object.object_id, &object.ciphertext, 1024, None);
+    let manifest = chunk_manifest_for_object(&object.object_id, &object.ciphertext, 1024);
     let reference = reference(&fixture.client, &object, &manifest)?;
     for message in ["first", "last"] {
         fixture.client.send_direct_message("thread", message, "peer", b"body")?;
@@ -215,7 +215,7 @@ async fn attachment_erasure_requires_explicit_conflict_checked_replacement() -> 
     ));
     assert_eq!(fixture.client.decrypt_object("replace-wire")?, b"replacement");
     fixture.client.send_direct_message("thread", "message", "peer", b"body")?;
-    let manifest = chunk_manifest_for_object("replace-wire", &replacement.ciphertext, 1024, None);
+    let manifest = chunk_manifest_for_object("replace-wire", &replacement.ciphertext, 1024);
     let reference = reference(&fixture.client, &replacement, &manifest)?;
     fixture
         .client

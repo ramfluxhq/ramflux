@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::{
     A2iControlEvent, Ack, BotEvent, BotInstallGrant, BotManifest, BranchProof, ConversationEvent,
-    Cursor, DeviceProof, Envelope, EventId, FederationHandshake, FriendLinkEvent, GroupEvent,
+    Cursor, DeviceProof, Envelope, EventId, FederationHandshake, FriendLinkEvent,
     HomeNodeMigrationProof, IdentityDeletionProof, IdentityEvent, McpGrant, MessageEvent, Nack,
     NotificationWake, ObjectChunkRequest, ObjectManifest, SignedRequest, domain,
 };
@@ -75,10 +75,6 @@ impl_protocol_object!(IdentityEvent, domain::IDENTITY_EVENT, |v: &IdentityEvent|
 impl_protocol_object!(FriendLinkEvent, domain::FRIEND_EVENT, |v: &FriendLinkEvent| {
     Some(format!("{}:{}", v.domain, v.event_id))
 });
-impl_protocol_object!(GroupEvent, domain::GROUP_EVENT, |v: &GroupEvent| Some(format!(
-    "{}:{}",
-    v.domain, v.event_id
-)));
 impl_protocol_object!(ConversationEvent, domain::CONVERSATION_EVENT, |v: &ConversationEvent| {
     Some(format!("{}:{}", v.domain, v.event_id))
 });

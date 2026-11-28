@@ -11,7 +11,7 @@ pub struct Control {
     pub operation: i32,
     #[prost(
         oneof = "control::Payload",
-        tags = "16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 34"
+        tags = "16, 17, 18, 21, 22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 34"
     )]
     pub payload: ::core::option::Option<control::Payload>,
 }
@@ -25,10 +25,6 @@ pub mod control {
         ResetAck(super::PairResetAck),
         #[prost(message, tag = "18")]
         ContactControl(super::ContactControl),
-        #[prost(message, tag = "19")]
-        GroupState(super::GroupStateControl),
-        #[prost(message, tag = "20")]
-        GroupKeyControl(super::GroupKeyControl),
         #[prost(message, tag = "21")]
         OwnContactSync(super::OwnContactSync),
         #[prost(message, tag = "22")]
@@ -45,8 +41,6 @@ pub mod control {
         ObjectRevoke(super::ObjectRevokeAccess),
         #[prost(message, tag = "28")]
         OwnContactTombstone(super::OwnContactTombstone),
-        #[prost(message, tag = "29")]
-        OwnGroupConsent(super::OwnGroupConsent),
         #[prost(message, tag = "30")]
         OwnMessageCopy(super::OwnMessageCopy),
         #[prost(message, tag = "31")]
@@ -88,12 +82,6 @@ impl serde::Serialize for Control {
                 control::Payload::ContactControl(v) => {
                     struct_ser.serialize_field("contactControl", v)?;
                 }
-                control::Payload::GroupState(v) => {
-                    struct_ser.serialize_field("groupState", v)?;
-                }
-                control::Payload::GroupKeyControl(v) => {
-                    struct_ser.serialize_field("groupKeyControl", v)?;
-                }
                 control::Payload::OwnContactSync(v) => {
                     struct_ser.serialize_field("ownContactSync", v)?;
                 }
@@ -117,9 +105,6 @@ impl serde::Serialize for Control {
                 }
                 control::Payload::OwnContactTombstone(v) => {
                     struct_ser.serialize_field("ownContactTombstone", v)?;
-                }
-                control::Payload::OwnGroupConsent(v) => {
-                    struct_ser.serialize_field("ownGroupConsent", v)?;
                 }
                 control::Payload::OwnMessageCopy(v) => {
                     struct_ser.serialize_field("ownMessageCopy", v)?;
@@ -151,10 +136,6 @@ impl<'de> serde::Deserialize<'de> for Control {
             "resetAck",
             "contact_control",
             "contactControl",
-            "group_state",
-            "groupState",
-            "group_key_control",
-            "groupKeyControl",
             "own_contact_sync",
             "ownContactSync",
             "own_history",
@@ -170,8 +151,6 @@ impl<'de> serde::Deserialize<'de> for Control {
             "objectRevoke",
             "own_contact_tombstone",
             "ownContactTombstone",
-            "own_group_consent",
-            "ownGroupConsent",
             "own_message_copy",
             "ownMessageCopy",
             "friend",
@@ -186,8 +165,6 @@ impl<'de> serde::Deserialize<'de> for Control {
             Reset,
             ResetAck,
             ContactControl,
-            GroupState,
-            GroupKeyControl,
             OwnContactSync,
             OwnHistory,
             HomeMigration,
@@ -196,7 +173,6 @@ impl<'de> serde::Deserialize<'de> for Control {
             A2i,
             ObjectRevoke,
             OwnContactTombstone,
-            OwnGroupConsent,
             OwnMessageCopy,
             Friend,
             AgentSync,
@@ -228,10 +204,6 @@ impl<'de> serde::Deserialize<'de> for Control {
                             "contactControl" | "contact_control" => {
                                 Ok(GeneratedField::ContactControl)
                             }
-                            "groupState" | "group_state" => Ok(GeneratedField::GroupState),
-                            "groupKeyControl" | "group_key_control" => {
-                                Ok(GeneratedField::GroupKeyControl)
-                            }
                             "ownContactSync" | "own_contact_sync" => {
                                 Ok(GeneratedField::OwnContactSync)
                             }
@@ -245,9 +217,6 @@ impl<'de> serde::Deserialize<'de> for Control {
                             "objectRevoke" | "object_revoke" => Ok(GeneratedField::ObjectRevoke),
                             "ownContactTombstone" | "own_contact_tombstone" => {
                                 Ok(GeneratedField::OwnContactTombstone)
-                            }
-                            "ownGroupConsent" | "own_group_consent" => {
-                                Ok(GeneratedField::OwnGroupConsent)
                             }
                             "ownMessageCopy" | "own_message_copy" => {
                                 Ok(GeneratedField::OwnMessageCopy)
@@ -318,22 +287,6 @@ impl<'de> serde::Deserialize<'de> for Control {
                                 .next_value::<::std::option::Option<_>>()?
                                 .map(control::Payload::ContactControl);
                         }
-                        GeneratedField::GroupState => {
-                            if payload__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("groupState"));
-                            }
-                            payload__ = map_
-                                .next_value::<::std::option::Option<_>>()?
-                                .map(control::Payload::GroupState);
-                        }
-                        GeneratedField::GroupKeyControl => {
-                            if payload__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("groupKeyControl"));
-                            }
-                            payload__ = map_
-                                .next_value::<::std::option::Option<_>>()?
-                                .map(control::Payload::GroupKeyControl);
-                        }
                         GeneratedField::OwnContactSync => {
                             if payload__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("ownContactSync"));
@@ -399,14 +352,6 @@ impl<'de> serde::Deserialize<'de> for Control {
                             payload__ = map_
                                 .next_value::<::std::option::Option<_>>()?
                                 .map(control::Payload::OwnContactTombstone);
-                        }
-                        GeneratedField::OwnGroupConsent => {
-                            if payload__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("ownGroupConsent"));
-                            }
-                            payload__ = map_
-                                .next_value::<::std::option::Option<_>>()?
-                                .map(control::Payload::OwnGroupConsent);
                         }
                         GeneratedField::OwnMessageCopy => {
                             if payload__.is_some() {

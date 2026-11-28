@@ -207,7 +207,6 @@ fn generated_delivery(
     };
     let prepared = sender.client.prepare_authored_message(
         &mut request,
-        None,
         &ramflux_protocol::message::Message { text: text.into(), ..Default::default() },
     )?;
     let message = request.message_id.clone();
@@ -664,7 +663,6 @@ async fn generated_receive_acks_after_commit_and_serves_durable_reader()
         };
         let prepared = a.client.prepare_authored_message(
             &mut message,
-            None,
             &g::Message { text: "committed before native ACK".into(), ..Default::default() },
         )?;
         let envelope = a.seal_inner_to_with_id(&b, &prepared.wire, &message.envelope_id)?;

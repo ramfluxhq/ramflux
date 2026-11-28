@@ -35,7 +35,6 @@ async fn ordinary_bus_capture_keeps_native_roots_for_the_next_authored_revision(
             };
             let prepared = source.client.prepare_authored_message(
                 &mut message,
-                None,
                 &g::Message { text: text.into(), ..Default::default() },
             )?;
             let db = source.client.account_db()?;

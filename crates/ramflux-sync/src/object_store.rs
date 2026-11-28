@@ -262,7 +262,7 @@ impl ObjectStore {
         let object = data.objects.get(object_id).ok_or(SyncError::ObjectNotFound)?;
         let object_key =
             data.object_keys.get(object_id).copied().ok_or(SyncError::ObjectKeyMissing)?;
-        let manifest = chunk_manifest_for_object(object_id, &object.ciphertext, 64 * 1024, None);
+        let manifest = chunk_manifest_for_object(object_id, &object.ciphertext, 64 * 1024);
         let mut session = ObjectSyncSession::new(manifest.clone(), object_key);
         for chunk_index in 0..manifest.total_chunks {
             let start = usize::try_from(chunk_index)
@@ -524,7 +524,6 @@ pub struct ChunkManifest {
     pub manifest_hash: String,
     pub chunk_size: usize,
     pub total_chunks: u32,
-    pub object_created_group_key_epoch: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -752,7 +751,6 @@ pub fn chunk_manifest_for_object(
     object_id: &str,
     ciphertext: &[u8],
     chunk_size: usize,
-    object_created_group_key_epoch: Option<u64>,
 ) -> ChunkManifest {
     let safe_chunk_size = chunk_size.max(1);
     let total_chunks_usize = ciphertext.len().div_ceil(safe_chunk_size);
@@ -765,7 +763,6 @@ pub fn chunk_manifest_for_object(
         ),
         chunk_size: safe_chunk_size,
         total_chunks,
-        object_created_group_key_epoch,
     }
 }
 
@@ -1431,7 +1428,7 @@ mod tests {
     fn chunk_aead_roundtrip_and_tamper_rejects() -> Result<(), Box<dyn std::error::Error>> {
         let content_key = [0xA5; 32];
         let wrong_content_key = [0x5A; 32];
-        let manifest = chunk_manifest_for_object("object_chunked", b"abcdef", 3, Some(9));
+        let manifest = chunk_manifest_for_object("object_chunked", b"abcdef", 3);
         let chunk = chunk_payload(&content_key, &manifest, 0, b"abc");
         assert_ne!(chunk.ciphertext, b"abc");
         assert_eq!(decrypt_chunk_payload(&content_key, &manifest, &chunk)?, b"abc");
@@ -1537,7 +1534,7 @@ mod tests {
         let branch = device_branch("device_resume", 4, [0x55; 32]);
         let content_key = [0xB6; 32];
         let ciphertext = b"aaabbbccc";
-        let manifest = chunk_manifest_for_object("object_resume", ciphertext, 3, None);
+        let manifest = chunk_manifest_for_object("object_resume", ciphertext, 3);
         let mut receiver = ObjectSyncSession::with_session(
             manifest.clone(),
             content_key,

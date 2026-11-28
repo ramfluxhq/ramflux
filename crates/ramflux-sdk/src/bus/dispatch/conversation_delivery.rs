@@ -69,12 +69,6 @@ async fn routes(
     prepared: &Prepared,
 ) -> Result<Vec<LocalBusMemberRoute>, SdkError> {
     let identity = &prepared.identity;
-    if identity.group_id.is_some() {
-        return Err(SdkError::GeneratedRefused {
-            code: crate::GeneratedRefusalCode::Content,
-            reason: "group conversations are unavailable until the MLS group track".into(),
-        });
-    }
     let thread = account
         .client
         .account_db()?

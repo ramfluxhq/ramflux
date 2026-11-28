@@ -49,7 +49,6 @@ pub(super) fn fixture(
             context: Some(g::OwnContext {
                 conversation_id: "thread".into(),
                 participants: vec!["human".into(), "agent".into()],
-                group: None,
                 friend: Some(g::FriendLinkRecord {
                     link_id: "link".into(),
                     requester_id: "human".into(),
@@ -62,7 +61,6 @@ pub(super) fn fixture(
             }),
             history: Some(g::TaskHistory { events, created_at: -29, updated_at: 83 }),
             manifests: vec![],
-            pins: vec![],
             base: 0,
             prefix_hash: super::history::prefix_hash(&[])?,
         }],
@@ -160,7 +158,7 @@ fn every_task_event_approval_control_and_history_round_trips() -> TestResult {
 fn generated_history_received_fields_and_cross_bindings_reject_exactly() -> TestResult {
     let client = client();
     let original = fixture(&client)?;
-    for field in 0..18 {
+    for field in 0..17 {
         let mut changed = original.clone();
         let packet = changed.packets.first_mut().ok_or("packet")?;
         let expected = match field {
@@ -223,13 +221,9 @@ fn generated_history_received_fields_and_cross_bindings_reject_exactly() -> Test
                 packet.history.as_mut().ok_or("history")?.events[6].decision_certificate = None;
                 "task history resolution certificate missing"
             }
-            16 => {
+            _ => {
                 packet.context.as_mut().ok_or("context")?.participants.clear();
                 "task history direct participant mismatch"
-            }
-            _ => {
-                packet.pins = vec![g::SdkOwnDeviceGroupMemberPin::default()];
-                "task history group pins are not accepted"
             }
         };
         exact(client.decode_generated_task_history_export(&wire(changed)), expected);

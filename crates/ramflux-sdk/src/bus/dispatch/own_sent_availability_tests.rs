@@ -170,11 +170,8 @@ async fn an_oversized_copy_payload_cannot_roll_back_primary_storage_or_submissio
         Box::new(super::fixture::RecordingGateway::new(Arc::clone(&captured))),
     );
     let mut message = f.message("large")?;
-    let prepared = f.source.client.prepare_authored_content(
-        &mut message,
-        None,
-        &text_content("primary body"),
-    )?;
+    let prepared =
+        f.source.client.prepare_authored_content(&mut message, &text_content("primary body"))?;
     let sealed = f
         .source
         .client
@@ -205,7 +202,6 @@ async fn an_oversized_copy_payload_cannot_roll_back_primary_storage_or_submissio
                     message: "large",
                     sender: "device-sender",
                     original_recipients: &[],
-                    group: None,
                     peer: Some("peer"),
                     body: &copy_body,
                     ciphertext: &message.encrypted_body,
@@ -267,7 +263,6 @@ async fn missing_group_or_peer_copy_context_cannot_roll_back_a_primary_transacti
                         message: "primary",
                         sender: "device-sender",
                         original_recipients: &[],
-                        group: Some("missing-group"),
                         peer: None,
                         body: b"primary body",
                         ciphertext: b"primary ciphertext",
@@ -302,11 +297,8 @@ async fn held_copies_are_never_couriered_before_confirmation_and_failed_submissi
     ));
     for (id, confirmed) in [("discard", false), ("release", true)] {
         let mut message = f.message(id)?;
-        let prepared = f.source.client.prepare_authored_content(
-            &mut message,
-            None,
-            &text_content("held body"),
-        )?;
+        let prepared =
+            f.source.client.prepare_authored_content(&mut message, &text_content("held body"))?;
         f.source.client.send_direct_message(
             &message.conversation_id,
             &message.message_id,
@@ -319,7 +311,6 @@ async fn held_copies_are_never_couriered_before_confirmation_and_failed_submissi
             message: &message.message_id,
             sender: "device-sender",
             original_recipients: &[],
-            group: None,
             peer: Some("peer"),
             body: &prepared.exact,
             ciphertext: b"cipher",
@@ -538,7 +529,6 @@ async fn untyped_plain_copy_intents_are_refused_without_any_submission() -> Test
         message: "legacy",
         sender: "device-sender",
         original_recipients: &[],
-        group: None,
         peer: Some("peer"),
         body: b"legacy body",
         ciphertext: b"cipher",

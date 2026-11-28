@@ -29,7 +29,6 @@ fn fixture_identity(id: &str, hlc: u64) -> g::EventIdentity {
         author: Some(author),
         hlc,
         device_sequence: sequence,
-        ..Default::default()
     }
 }
 fn reference(id: &str) -> g::MessageRef {

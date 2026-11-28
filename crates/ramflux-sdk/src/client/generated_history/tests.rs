@@ -38,7 +38,6 @@ fn identity(sender: &HistorySenderFixture, sequence: u64) -> TestResult<g::Event
         author: Some(sender.author.clone()),
         device_sequence: sequence,
         hlc: sequence,
-        ..Default::default()
     })
 }
 fn inner(
@@ -52,9 +51,7 @@ fn inner(
         g::content::Value::Edit(edit) => edit.replacement.as_mut(),
         _ => None,
     };
-    if let Some(message) = message
-        && message.sealed_group.is_none()
-    {
+    if let Some(message) = message {
         message.erasure_nonce = vec![0x71; 32];
     }
     let (kind, body) = g::registry::encode_body(&g::Content { value: Some(content) })?;
@@ -112,7 +109,6 @@ fn evidence_with_policy(
         canonical_sender_envelope: ramflux_protocol::sender_origin_evidence(&outer)?,
         source_authority: Some(sender.manifest.clone()),
         report_opening: opening.to_vec(),
-        ..Default::default()
     })
 }
 fn item(
@@ -158,7 +154,6 @@ fn item_with_message(
             canonical_sender_envelope: original_evidence.canonical_sender_envelope,
             source_authority: original_evidence.source_authority,
             layer: g::registry::PROFILE_FLOOR,
-            ..Default::default()
         }),
         ..Default::default()
     })
@@ -322,9 +317,7 @@ fn import_receiver_with_message(
     let client = empty_import_receiver(root)?;
     let id = ramflux_protocol::encode_base64url(&original.id);
     let mut message = message.clone();
-    if message.sealed_group.is_none() {
-        message.erasure_nonce = vec![0x71; 32];
-    }
+    message.erasure_nonce = vec![0x71; 32];
     let old = g::Inner {
         layer: g::registry::PROFILE_FLOOR,
         kind: 1,
@@ -761,7 +754,6 @@ fn reparse_preserves_original_channel_and_authority() -> TestResult {
                 targets: vec![target.clone()],
                 scope: g::DeleteScope::Everyone as i32,
                 tombstone_id: g::identity::delete_tombstone(&delete_identity.id)?.to_vec(),
-                ..Default::default()
             }),
         )?;
         let delete_id = retain_upgrade_candidate(&client, &author, &deletion, mode, now)?;

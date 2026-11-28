@@ -407,15 +407,10 @@ fn load_rows(
     principal: &str,
     conversation: &str,
 ) -> Result<Vec<Row>, SdkError> {
-    let group = thread.get("group_id").and_then(Value::as_str);
-    let peer = if group.is_none() {
-        thread
-            .get("participants")
-            .and_then(Value::as_array)
-            .and_then(|ids| ids.iter().filter_map(Value::as_str).find(|id| *id != principal))
-    } else {
-        None
-    };
+    let peer = thread
+        .get("participants")
+        .and_then(Value::as_array)
+        .and_then(|ids| ids.iter().filter_map(Value::as_str).find(|id| *id != principal));
     let mut rows = Vec::with_capacity(prepares.len());
     for (index, id) in prepares.iter().enumerate() {
         if prepares[..index].iter().any(|earlier| earlier == id) {
@@ -423,7 +418,7 @@ fn load_rows(
         }
         let row = store.load(id)?;
         ready(&row)?;
-        if !recipient_ok(&row.recipient, group, peer, conversation) {
+        if !recipient_ok(&row.recipient, peer, conversation) {
             return Err(Refusal::new(CODE_LAYOUT_INVALID).into());
         }
         rows.push(row);
@@ -442,19 +437,9 @@ fn ready(row: &Row) -> Result<(), Refusal> {
     }
 }
 
-fn recipient_ok(
-    recipient: &Recipient,
-    group: Option<&str>,
-    peer: Option<&str>,
-    conversation: &str,
-) -> bool {
-    match (recipient, group) {
-        (Recipient::Group { group_id }, Some(group)) => group_id == group,
-        (Recipient::Dm { peer: label }, None) => {
-            Some(label.as_str()) == peer || label == conversation
-        }
-        _ => false,
-    }
+fn recipient_ok(recipient: &Recipient, peer: Option<&str>, conversation: &str) -> bool {
+    let Recipient::Dm { peer: label } = recipient;
+    Some(label.as_str()) == peer || label == conversation
 }
 
 /// Where the roster comes from: the roots to refresh, the homes, and the membership.
@@ -477,12 +462,6 @@ impl Scope {
     ) -> Result<Self, SdkError> {
         let own_root = account.client.own_account_anchor()?;
         let mut homes = BTreeMap::from([(own_root.clone(), pin.home.clone())]);
-        if thread.get("group_id").and_then(Value::as_str).is_some() {
-            return Err(crate::attachment_send::because(
-                CODE_AUTHORITY_UNAVAILABLE,
-                "group attachments are unavailable until the MLS group track",
-            ));
-        }
         let (peer, root) = super::conversation_send::peer_root(account, thread, principal)?;
         homes.insert(root.clone(), home_of(&account.client, &peer)?);
         Ok(Self {

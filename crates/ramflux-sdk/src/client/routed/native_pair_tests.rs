@@ -170,7 +170,7 @@ async fn media_projection_failure_rolls_back_generated_body_and_receive_pair() -
             created_at: crate::time::now_unix_timestamp(),
             ttl: 300,
         };
-        let prepared = source.client.prepare_authored_message(&mut request, None, &content)?;
+        let prepared = source.client.prepare_authored_message(&mut request, &content)?;
         let packet = source.seal_inner_to_with_id(
             &target,
             &prepared.wire,

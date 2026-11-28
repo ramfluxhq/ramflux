@@ -128,7 +128,6 @@ pub(super) fn capture_before_enrollment(
             message: owner,
             sender: &source.config.device_id,
             original_recipients: &[peer.client.owned_device_identity()?.storage_key().into()],
-            group: None,
             peer: Some(&peer.manifest.principal_id),
             body: exact,
             ciphertext: &[],

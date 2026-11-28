@@ -20,7 +20,6 @@ impl Drop for OwnSentAttestation {
         self.exact_outer_inner.zeroize();
         self.origin.reported_inner.zeroize();
         self.origin.evidence.report_opening.zeroize();
-        self.origin.evidence.group_plaintext.zeroize();
     }
 }
 
@@ -45,10 +44,7 @@ impl OwnSentAttestation {
         let scanned = g::validation::scan_inner(&self.exact_outer_inner).map_err(|_| bad)?;
         let outer = g::Inner::decode(self.exact_outer_inner.as_slice()).map_err(|_| bad)?;
         let identity = outer.identity.as_ref().ok_or(bad)?;
-        if scanned.kind != 8
-            || identity.group_id.is_some()
-            || identity.device_sequence & (1 << 63) == 0
-        {
+        if scanned.kind != 8 || identity.device_sequence & (1 << 63) == 0 {
             return Err(bad.into());
         }
         // This verifies C against the enclosing own-copy, never against the nested Message.
@@ -325,7 +321,6 @@ mod tests {
                 )?,
             }),
             report_opening: opening.to_vec(),
-            ..Default::default()
         };
         let proof = OwnSentAttestation {
             exact_outer_inner,

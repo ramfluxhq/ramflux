@@ -44,7 +44,6 @@ fn encode_edit_delete() -> TestResult {
             targets: vec![named()],
             scope: DeleteScope::Everyone as i32,
             tombstone_id: b"tomb".to_vec(),
-            native_group_authorization: Vec::new(),
         },
     )?;
     let (edit_id, edit_content) = RamfluxClient::decode_generated_inner(&edit)?;

@@ -88,7 +88,6 @@ impl RamfluxClient {
                 message: owner,
                 sender: &packet.sender_id,
                 original_recipients: &packet.original_recipients,
-                group: identity.group_id.as_deref(),
                 peer: None,
                 body: &sent.exact_inner,
                 ciphertext: &[],

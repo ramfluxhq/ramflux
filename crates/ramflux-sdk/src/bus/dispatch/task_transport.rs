@@ -188,22 +188,20 @@ pub(super) async fn prepare(
         _ => c.bytes()?,
     };
     let control = intent || matches!(mode, Mode::Ack(_));
-    if control {
-        if intent {
-            let state =
-                client.task_history(&c.conversation_id, c.event()?.event().task_id())?.state()?;
-            let task = state.task().ok_or_else(|| invalid("task not found"))?;
-            let ramflux_protocol::TaskEventBody::Resolve(resolution) = c.event()?.event().clone()
-            else {
-                return Err(invalid("task resolve expected"));
-            };
-            let (executor, _) = client
-                .task_history(&c.conversation_id, &task.task_id)?
-                .intervention_source(&resolution.step_id, &resolution.target)?;
-            peers.retain(|target| target.device == executor);
-            if peers.is_empty() && executor != local.device_id {
-                return Err(invalid("task executor has no active delivery route"));
-            }
+    if control && intent {
+        let state =
+            client.task_history(&c.conversation_id, c.event()?.event().task_id())?.state()?;
+        let task = state.task().ok_or_else(|| invalid("task not found"))?;
+        let ramflux_protocol::TaskEventBody::Resolve(resolution) = c.event()?.event().clone()
+        else {
+            return Err(invalid("task resolve expected"));
+        };
+        let (executor, _) = client
+            .task_history(&c.conversation_id, &task.task_id)?
+            .intervention_source(&resolution.step_id, &resolution.target)?;
+        peers.retain(|target| target.device == executor);
+        if peers.is_empty() && executor != local.device_id {
+            return Err(invalid("task executor has no active delivery route"));
         }
     }
     let (own_packet, original_own_event) = if own_targets.is_empty() {
@@ -848,7 +846,6 @@ pub(in crate::bus) fn prepare_task_inner(
         format!("task/{}", ramflux_protocol::hash_base64url("ramflux.message.typed.Task.v1", body));
     let prepared = client.prepare_authored_content(
         message,
-        None,
         &g::Content { value: Some(g::content::Value::Task(task)) },
     )?;
     Ok(zeroize::Zeroizing::new(prepared.wire.clone()))

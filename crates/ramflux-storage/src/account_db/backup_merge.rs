@@ -770,7 +770,6 @@ const ORDER_FIELDS: &[&str] = &[
     "edit_counter",
     "deleted_epoch",
     "removed_epoch",
-    "group_key_epoch",
     "marker_epoch",
     "updated_at",
     "deleted_at",

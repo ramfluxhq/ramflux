@@ -32,7 +32,6 @@ async fn fanout_preserves_one_row_and_refuses_changed_content_or_scope() -> Test
         };
         let prepared = source.client.prepare_authored_message(
             &mut message,
-            None,
             &g::Message { text: "same text".into(), ..Default::default() },
         )?;
         source.client.project_authored_message(&message, &prepared.exact, b"cipher-one")?;

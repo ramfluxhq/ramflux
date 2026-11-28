@@ -62,7 +62,6 @@ async fn due_receipt_is_sent_by_actor_priority_before_stalled_task_submit() -> C
                 author: Some(author),
                 device_sequence: 1,
                 hlc: 1000,
-                ..Default::default()
             };
             let received = ramflux_protocol::encode_base64url(&identity.id);
             f.source.client.account_db()?.persist_message_actor_state(

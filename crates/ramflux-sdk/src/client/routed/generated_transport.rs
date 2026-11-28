@@ -19,9 +19,6 @@ pub(super) fn generated_plaintext(bytes: &[u8]) -> Result<Plaintext, SdkError> {
         identified_inner(bytes).ok_or_else(|| invalid("generated transport identity missing"))?;
     let identity = inner.identity.ok_or_else(|| invalid("generated transport identity missing"))?;
     g::identity::verify(&identity).map_err(|_| invalid("generated transport identity invalid"))?;
-    if identity.group_id.is_some() {
-        return Err(invalid("group identities are not accepted"));
-    }
     let control = match scanned.kind {
         8 | 11 | 12 => true,
         9 => g::Surface::decode(scanned.body).is_ok_and(|value| match value.payload {

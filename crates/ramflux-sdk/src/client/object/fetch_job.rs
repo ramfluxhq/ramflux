@@ -74,7 +74,6 @@ impl RamfluxClient {
             manifest_hash: reference.manifest_hash.clone(),
             chunk_size: reference.chunk_size.max(1),
             total_chunks: reference.total_chunks,
-            object_created_group_key_epoch: None,
         };
         let transfer_id = object_transfer_id(
             &reference.object_id,

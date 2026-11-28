@@ -19,7 +19,6 @@ struct Intent {
     sequence: u64,
     id: String,
     conversation: String,
-    group: Option<String>,
     body: String,
     created_at: i64,
     expires_at: i64,
@@ -140,7 +139,6 @@ fn stage_inner(
             sequence: 0,
             id: input.id.into(),
             conversation: input.conversation.into(),
-            group: input.group.map(str::to_owned),
             body: ramflux_protocol::encode_base64url(input.body),
             created_at: input.created_at,
             expires_at: input.created_at.saturating_add(i64::from(client.content_ttl()?)),
@@ -367,7 +365,7 @@ mod retention_compatibility_tests {
     #[test]
     fn own_copy_intent_without_payload_kind_is_refused() -> Result<(), SdkError> {
         let old = json!({"copy_id":"copy","sequence":1,"id":"message","conversation":"thread",
-            "group":null,"body":"","created_at":100,"expires_at":900,"owner_record":null});
+            "body":"","created_at":100,"expires_at":900,"owner_record":null});
         let error = serde_json::from_value::<Intent>(old).err().ok_or_else(|| {
             SdkError::LocalBus("old intent row without payload_kind parsed".into())
         })?;
@@ -380,13 +378,13 @@ mod retention_compatibility_tests {
     #[test]
     fn own_copy_intent_requires_expiry() -> Result<(), SdkError> {
         let missing = json!({"payload_kind":"RawInner","copy_id":"copy","sequence":1,"id":"message",
-            "conversation":"thread","group":null,"body":"","created_at":100,"owner_record":null});
+            "conversation":"thread","body":"","created_at":100,"owner_record":null});
         assert!(
             serde_json::from_value::<Intent>(missing).is_err(),
             "an intent row without expires_at must be refused"
         );
         let stored = json!({"payload_kind":"RawInner","copy_id":"copy","sequence":1,"id":"message",
-            "conversation":"thread","group":null,"body":"","created_at":100,"expires_at":900,
+            "conversation":"thread","body":"","created_at":100,"expires_at":900,
             "owner_record":null});
         let intent: Intent = serde_json::from_value(stored.clone())?;
         assert_eq!(intent.expiry(), 900, "the stored expiry is the only lifetime");

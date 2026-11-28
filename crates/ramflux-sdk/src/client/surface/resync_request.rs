@@ -205,11 +205,7 @@ impl RamfluxClient {
         if entry.envelope.source_principal_id == local.principal_id {
             self.authorize_owned_surface_source(&source)?;
         } else {
-            self.authorize_surface_peer_context(
-                conversation,
-                request.group.as_deref(),
-                &entry.envelope.source_principal_id,
-            )?;
+            self.authorize_surface_peer_context(conversation, &entry.envelope.source_principal_id)?;
         }
         let Some((record, _)) = self.surface_state_ref(&request.surface_ref)? else {
             return Ok(true);
@@ -333,11 +329,7 @@ impl RamfluxClient {
         if target.principal == local.principal_id {
             self.authorize_owned_surface_source(&device)?;
         } else {
-            self.authorize_surface_peer_context(
-                &reply.carrier.conversation_id,
-                target.group.as_deref(),
-                &target.principal,
-            )?;
+            self.authorize_surface_peer_context(&reply.carrier.conversation_id, &target.principal)?;
         }
         Ok(())
     }
@@ -413,7 +405,6 @@ impl RamfluxClient {
             g::Surface { payload: Some(g::surface::Payload::Delivery(control.to_generated()?)) };
         let body = self.prepare_authored_content(
             &mut message,
-            reply.destination.group.as_deref(),
             &g::Content { value: Some(g::content::Value::Surface(surface)) },
         )?;
         let route = crate::client::routed::Route::from_inner(&body.wire)?;

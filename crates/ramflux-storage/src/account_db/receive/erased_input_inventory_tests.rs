@@ -231,7 +231,8 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
         params![body("p-archived-event", now)],
     )?;
     // The local account owns the same payloads (its own bindings), as a real account would.
-    for payload in ["p-archived-event"] {
+    {
+        let payload = "p-archived-event";
         p.local.connection.execute(
             "INSERT INTO message_copy_binding VALUES(?1,'A')",
             params![format!("payload:{payload}")],
@@ -284,7 +285,8 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
             payload: f.payload.clone(),
         });
     }
-    for (kind, payload) in [("archived_event", "p-archived-event")] {
+    {
+        let (kind, payload) = ("archived_event", "p-archived-event");
         let (_, selector) = current_in(&p, payload)?;
         expected.push(Want {
             kind,
@@ -295,7 +297,8 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
     }
     // The source deleted A itself, which captured the two archived-family tuples under the
     // source's own bundle; the merge unions those tombstones in as well.
-    for (kind, payload) in [("source_capture_event", "p-archived-event")] {
+    {
+        let (kind, payload) = ("source_capture_event", "p-archived-event");
         let (_, selector) = current(&p.source, "ip", "id", payload)?;
         expected.push(Want {
             kind,
@@ -396,7 +399,8 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
     drop(mid_merged);
     drop(mid);
     let carrier = AccountDb::open(&carrier_index, "account", &mid_target.key)?;
-    for payload in ["p-archived-event"] {
+    {
+        let payload = "p-archived-event";
         carrier.connection.execute(
             "INSERT INTO message_copy_binding VALUES(?1,'A')",
             params![format!("payload:{payload}")],

@@ -80,7 +80,6 @@ impl RamfluxClient {
         };
         self.prepare_authored_content(
             message,
-            target.group_id.as_deref(),
             &g::Content { value: Some(g::content::Value::Receipt(receipt)) },
         )
     }

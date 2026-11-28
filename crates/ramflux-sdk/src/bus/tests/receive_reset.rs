@@ -194,7 +194,7 @@ fn incoming_reset(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
             },
         )),
     };
-    let prepared = source.prepare_authored_content(&mut message, None, &content)?;
+    let prepared = source.prepare_authored_content(&mut message, &content)?;
     let packet = source.seal_generated_routed_prepared(
         &fixture.source.sealing_config()?,
         &message,

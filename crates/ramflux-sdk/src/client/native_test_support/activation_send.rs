@@ -173,7 +173,7 @@ pub(crate) mod tests {
         let mut unsupported = message(&source, &target, "unsupported-media")?;
         assert!(
             matches!(
-                source.client.prepare_authored_message(&mut unsupported, None, &content),
+                source.client.prepare_authored_message(&mut unsupported, &content),
                 Err(SdkError::LocalBusRefused { code, .. }) if code == "PeerUpgradeRequired"
             ),
             "r4 media requires an endorsed layer-4 peer before allocating identity"
@@ -268,7 +268,7 @@ pub(crate) mod tests {
         super::super::watchdog::within(async {
             let (mut source, mut target, content) = Box::pin(media_pair()).await?;
             let mut first = message(&source, &target, "operation-1")?;
-            let exact = source.client.prepare_authored_message(&mut first, None, &content)?;
+            let exact = source.client.prepare_authored_message(&mut first, &content)?;
             let (original, decoded) = RamfluxClient::decode_generated_inner(&exact.exact)?;
             assert_eq!(
                 decoded.value,
@@ -341,14 +341,13 @@ pub(crate) mod tests {
                     .client
                     .prepare_authored_message(
                         &mut conflict,
-                        None,
                         &g::Message { text: "conflicting payload".into(), ..Default::default() }
                     )
                     .is_err(),
                 "operation token cannot bind two payloads"
             );
             let mut next = message(&source, &target, "operation-2")?;
-            let next = source.client.prepare_authored_message(&mut next, None, &content)?;
+            let next = source.client.prepare_authored_message(&mut next, &content)?;
             let next = RamfluxClient::decode_generated_inner(&next.exact)?.0;
             assert_eq!(
                 next.device_sequence,
@@ -375,7 +374,7 @@ pub(crate) mod tests {
         )?;
         let mut erased = message(source, target, "operation-1")?;
         assert!(
-            source.client.prepare_authored_message(&mut erased, None, content).is_err(),
+            source.client.prepare_authored_message(&mut erased, content).is_err(),
             "erasure must retire prepared content without resurrection"
         );
         assert_eq!(
@@ -438,7 +437,7 @@ pub(crate) mod tests {
         let mut retry = message(source, target, "operation-1")?;
         retry.envelope_id = "caller-retried-with-a-different-transport-id".into();
         retry.created_at += 10;
-        let retained = source.client.prepare_authored_message(&mut retry, None, content)?;
+        let retained = source.client.prepare_authored_message(&mut retry, content)?;
         assert_eq!(
             retry.envelope_id, first.envelope_id,
             "an operation retry must retain its first transport identity"
@@ -556,7 +555,6 @@ pub(crate) mod tests {
                         id: intent["id"].as_str().ok_or("history id")?,
                         created_at: intent["created_at"].as_i64().ok_or("history time")?,
                         conversation: intent["conversation"].as_str().ok_or("history scope")?,
-                        group: None,
                         body: &bytes,
                     },
                     source.manifest.clone(),
@@ -623,9 +621,9 @@ pub(crate) mod tests {
             target.accept_peer(&source)?;
             let mut outgoing = message(&source, &target, "task-start-operation")?;
             let content = task_content(&source, &target, &outgoing.conversation_id)?;
-            let prepared = source.client.prepare_authored_content(&mut outgoing, None, &content)?;
+            let prepared = source.client.prepare_authored_content(&mut outgoing, &content)?;
             let mut retry = message(&source, &target, "task-start-operation")?;
-            let retained = source.client.prepare_authored_content(&mut retry, None, &content)?;
+            let retained = source.client.prepare_authored_content(&mut retry, &content)?;
             assert_eq!(prepared.exact, retained.exact, "Task retry must retain its canonical revision");
             assert_eq!(outgoing.message_id, retry.message_id, "Task retry must retain its event identity");
             source.client.project_authored_message(&outgoing, &prepared.exact, &[])?;
@@ -751,7 +749,7 @@ pub(crate) mod tests {
             source.client.validate_user_authored_content(&content, &outgoing.conversation_id)?;
             let prepared = source
                 .client
-                .prepare_authored_content(&mut outgoing, None, &content)
+                .prepare_authored_content(&mut outgoing, &content)
                 .map_err(|error| format!("surface authored preparation: {error:?}"))?;
             source
                 .client

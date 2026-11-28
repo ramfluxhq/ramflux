@@ -874,7 +874,6 @@ fn seal_control(
         g::Call::decode(control.bytes.as_slice()).map_err(|_| invalid("invalid typed Call"))?;
     let prepared = account.client.prepare_authored_content(
         &mut control.message,
-        None,
         &g::Content { value: Some(g::content::Value::Call(call)) },
     )?;
     let sealed = account.client.seal_routed_prepared(

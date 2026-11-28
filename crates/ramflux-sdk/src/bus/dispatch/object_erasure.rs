@@ -422,8 +422,6 @@ mod tests {
                 author: Some(author),
                 device_sequence: 1,
                 hlc: 1,
-                group_id: None,
-                group_epoch: None,
             };
             let exact =
                 RamfluxClient::encode_generated_inner(identity, &content).expect("encode message");

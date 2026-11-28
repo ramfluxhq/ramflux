@@ -166,7 +166,6 @@ pub(crate) fn fan_out(
             id: &id,
             created_at: crate::time::now_unix_timestamp(),
             conversation: &conversation,
-            group: None,
             body: &body,
         },
         None,

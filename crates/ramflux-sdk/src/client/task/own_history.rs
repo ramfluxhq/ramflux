@@ -66,16 +66,12 @@ impl TaskOwnPacket {
                 .iter()
                 .map(g::NativeDeviceManifest::try_from)
                 .collect::<Result<_, _>>()?,
-            pins: Vec::new(),
             base: u64::try_from(self.base).map_err(|_| invalid("task page base overflow"))?,
             prefix_hash: self.prefix_hash.clone(),
         })
     }
     pub(crate) fn from_generated(value: &g::TaskOwnPacket) -> Result<Self, SdkError> {
         let history = value.history.as_ref().ok_or_else(|| invalid("Task history missing"))?;
-        if !value.pins.is_empty() {
-            return Err(invalid("task history group pins are not accepted"));
-        }
         Ok(Self {
             context: OwnContext::try_from(
                 value.context.as_ref().ok_or_else(|| invalid("Task context missing"))?,
@@ -236,7 +232,6 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
         conversation: &str,
-        group: Option<&str>,
         body: &[u8],
     ) -> Result<bool, SdkError> {
         let Some(packet) = TaskOwnPacket::decode(body)? else { return Ok(false) };
@@ -254,7 +249,6 @@ impl RamfluxClient {
         }
         self.authorize_owned_surface_source(&source)?;
         if packet.context.conversation_id != conversation
-            || group.is_some()
             || packet.history.events.len() > 289
             || packet.manifests.len() > 64
         {

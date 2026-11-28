@@ -29,17 +29,6 @@ pub enum EventOrderingState {
     ConflictPending,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum GroupEpochState {
-    Known,
-    PendingUnknownEpoch,
-    RejectedEpochRollback,
-    ConflictPending,
-    SupersededTransition,
-    CanonicalProjection,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EventSortKey {
     pub lamport_time: u64,

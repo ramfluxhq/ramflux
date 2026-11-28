@@ -7,7 +7,6 @@ use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::message as g;
 
 pub(crate) struct DeleteDraft {
-    pub(crate) original: g::EventIdentity,
     pub(crate) content: g::Content,
     pub(crate) operation: String,
 }
@@ -65,7 +64,6 @@ impl RamfluxClient {
             }],
             scope: g::DeleteScope::Everyone.into(),
             tombstone_id: Vec::new(),
-            native_group_authorization: Vec::new(),
         };
         self.validate_authored_delete(&delete, conversation)?;
         // This is a local retry token. The event identifier and its tombstone are
@@ -75,7 +73,6 @@ impl RamfluxClient {
             &ramflux_protocol::canonical_json_bytes(&(message, conversation, operation))?,
         );
         Ok(DeleteDraft {
-            original,
             content: g::Content { value: Some(g::content::Value::Delete(delete)) },
             operation,
         })
@@ -90,7 +87,6 @@ impl RamfluxClient {
             || delete.targets.len() > 256
             || delete.scope != g::DeleteScope::Everyone as i32
             || !delete.tombstone_id.is_empty()
-            || !delete.native_group_authorization.is_empty()
         {
             return Err(refused(
                 "peer Delete requires targets and EVERYONE; tombstones are derived",
@@ -107,9 +103,6 @@ impl RamfluxClient {
                 || target.author_anchor != author.account_anchor
             {
                 return Err(refused("target author or conversation differs from original"));
-            }
-            if original.group_id.is_some() {
-                return Err(refused("group scope is unavailable"));
             }
             if target.author_anchor != own.root_commitment() {
                 return Err(SdkError::GeneratedRefused {
@@ -136,9 +129,6 @@ impl RamfluxClient {
             let event_id = ramflux_protocol::encode_base64url(&identity.id);
             let staged = format!("delete-send/own-staged/{event_id}");
             if !db.actor_state_exists(&staged)? {
-                if identity.group_id.is_some() {
-                    return Err(refused("group scope is unavailable"));
-                }
                 let recipients: Vec<String> = Vec::new();
                 let peer = Some(self.own_sent_peer(message)?);
                 self.stage_authored_mutation_copy(crate::client::own_sent_message::OwnSentInput {
@@ -147,7 +137,6 @@ impl RamfluxClient {
                     message: &event_id,
                     sender: &message.sender_id,
                     original_recipients: &recipients,
-                    group: None,
                     peer: peer.as_deref(),
                     body: exact,
                     ciphertext: &[],

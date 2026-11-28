@@ -168,8 +168,6 @@ fn project_message(
         author: Some(author.clone()),
         device_sequence: sequence,
         hlc: 1,
-        group_id: None,
-        group_epoch: None,
     };
     let message_id = ramflux_protocol::encode_base64url(id);
     let exact = RamfluxClient::encode_generated_inner(identity.clone(), content)?;

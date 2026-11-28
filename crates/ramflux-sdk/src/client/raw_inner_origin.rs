@@ -46,12 +46,6 @@ impl RetainedOrigin {
         if decoded.identity.as_ref() != Some(identity) {
             return Err(bad.into());
         }
-        if !self.evidence.group_plaintext.is_empty()
-            || identity.group_id.is_some()
-            || identity.group_epoch.is_some()
-        {
-            return Err(bad.into());
-        }
         if decoded.kind != 7 && g::identity::verify(identity).is_err() {
             return Err(bad.into());
         }
@@ -144,7 +138,6 @@ impl RamfluxClient {
                     canonical: ramflux_protocol::canonical_json_bytes(&manifest)?,
                 }),
                 report_opening: parsed.opening().to_vec(),
-                ..Default::default()
             },
             reported_inner: if parsed.inner() == opened.body.as_slice() {
                 Vec::new()

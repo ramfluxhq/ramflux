@@ -92,7 +92,6 @@ pub(crate) async fn identity(
     state.account_id = account.into();
     state.principal_id = principal.into();
     state.device_id = device.into();
-    state.native_account = status.get("client_mode").is_none();
     Ok(status
         .get("custodian_account_id")
         .and_then(Value::as_str)
@@ -224,60 +223,58 @@ pub(crate) async fn reply_outputs(
     let message_id = format!("agent-{operation}");
     let body = json!({"conversation_id":conversation_id,"message_id":message_id,"sender_id":state.device_id,"encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(text.as_bytes())});
     if !conversation["group_id"].is_null() {
-        Err(Error::Unauthorized)
-    } else {
-        let peer = direct_peer(bus, message).await?;
-        let principal = field(&peer, "principal_id")?.to_owned();
-        if principal == state.principal_id || !array_has(&conversation["participants"], &principal)
-        {
-            return Err(Error::Unauthorized);
-        }
-        let devices = peer["devices"]
-            .as_array()
-            .filter(|devices| !devices.is_empty())
-            .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
-        let mut active = devices
-            .iter()
-            .filter(|device| device["revoked"] != true && device["status"] != "revoked")
-            .collect::<Vec<_>>();
-        active.sort_by_key(|device| device["device_id"].as_str());
-        if active.is_empty() {
-            return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound));
-        }
-        if active.len() > 96 {
-            return Err(Error::Limit);
-        }
-        let created_at = crate::bus::now_ms() / 1000;
-        let mut outputs = Vec::with_capacity(active.len());
-        for device in active {
-            let mut body = body.clone();
-            let device_id = field(device, "device_id")
-                .map_err(|_| Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
-            let delivery_id = field(device, "target_delivery_id")
-                .map_err(|_| Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
-            let operation_id = ramflux_protocol::hash_base64url(
-                "ramflux.agent.reply.device.v1",
-                &ramflux_protocol::canonical_json_bytes(&(&operation, device_id))
-                    .map_err(|_| Error::State)?,
-            );
-            body["recipient_device_id"] = json!(device_id);
-            body["recipient_principal_commitment"] =
-                json!(field(&peer, "contact_identity_commitment")?);
-            body["target_delivery_id"] = json!(delivery_id);
-            body["source_principal_id"] = json!(state.principal_id);
-            body["envelope_id"] = json!(format!("agent-env-{operation_id}"));
-            // Freeze this timestamp in the prepared checkpoint so retries reuse the same intent.
-            // A delayed input must not inherit an expired gateway delivery timestamp.
-            body["created_at"] = json!(created_at);
-            body["ttl"] = json!(300);
-            outputs.push(crate::checkpoint::Output {
-                method: "message.submit".into(),
-                operation_id,
-                body,
-            });
-        }
-        Ok(outputs)
+        return Err(Error::Unauthorized);
     }
+    let peer = direct_peer(bus, message).await?;
+    let principal = field(&peer, "principal_id")?.to_owned();
+    if principal == state.principal_id || !array_has(&conversation["participants"], &principal) {
+        return Err(Error::Unauthorized);
+    }
+    let devices = peer["devices"]
+        .as_array()
+        .filter(|devices| !devices.is_empty())
+        .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
+    let mut active = devices
+        .iter()
+        .filter(|device| device["revoked"] != true && device["status"] != "revoked")
+        .collect::<Vec<_>>();
+    active.sort_by_key(|device| device["device_id"].as_str());
+    if active.is_empty() {
+        return Err(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound));
+    }
+    if active.len() > 96 {
+        return Err(Error::Limit);
+    }
+    let created_at = crate::bus::now_ms() / 1000;
+    let mut outputs = Vec::with_capacity(active.len());
+    for device in active {
+        let mut body = body.clone();
+        let device_id = field(device, "device_id")
+            .map_err(|_| Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
+        let delivery_id = field(device, "target_delivery_id")
+            .map_err(|_| Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
+        let operation_id = ramflux_protocol::hash_base64url(
+            "ramflux.agent.reply.device.v1",
+            &ramflux_protocol::canonical_json_bytes(&(&operation, device_id))
+                .map_err(|_| Error::State)?,
+        );
+        body["recipient_device_id"] = json!(device_id);
+        body["recipient_principal_commitment"] =
+            json!(field(&peer, "contact_identity_commitment")?);
+        body["target_delivery_id"] = json!(delivery_id);
+        body["source_principal_id"] = json!(state.principal_id);
+        body["envelope_id"] = json!(format!("agent-env-{operation_id}"));
+        // Freeze this timestamp in the prepared checkpoint so retries reuse the same intent.
+        // A delayed input must not inherit an expired gateway delivery timestamp.
+        body["created_at"] = json!(created_at);
+        body["ttl"] = json!(300);
+        outputs.push(crate::checkpoint::Output {
+            method: "message.submit".into(),
+            operation_id,
+            body,
+        });
+    }
+    Ok(outputs)
 }
 
 #[cfg(test)]

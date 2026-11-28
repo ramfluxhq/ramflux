@@ -22,8 +22,6 @@ pub struct ObjectManifest {
     pub encrypted_relation_ref: Option<String>,
     pub encrypted_metadata: String,
     pub object_key_slots: Vec<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub object_created_group_key_epoch: Option<u64>,
     pub chunk_manifest_hash: String,
     pub chunk_count: u32,
     pub total_cipher_size: u64,

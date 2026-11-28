@@ -234,7 +234,6 @@ impl RamfluxClient {
                 id: &id,
                 created_at: crate::prelude::now_unix_timestamp(),
                 conversation: "own-contact",
-                group: None,
                 body,
             },
             None,

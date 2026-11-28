@@ -42,9 +42,6 @@ pub(super) async fn dispatch(
         &body.message_id,
         body.operation_id.as_deref(),
     )?;
-    if draft.original.group_id.is_some() {
-        return Err(refused("group conversations are unavailable until the MLS group track"));
-    }
     let (event, count) =
         send_direct(account, &body.conversation_id, &draft.operation, &draft.content).await?;
     let identity = ramflux_protocol::decode_base64url(&event)

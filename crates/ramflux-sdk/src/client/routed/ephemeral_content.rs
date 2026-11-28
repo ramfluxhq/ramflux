@@ -125,8 +125,6 @@ impl RamfluxClient {
                 || author.device_id != remote.device_id()
                 || Some(author.device_epoch) != epoch
         }) || identity.conversation_id != conversation
-            || identity.group_id.is_some()
-            || identity.group_epoch.is_some()
             || identity.id.len() != 32
             || (kind != 7 && ramflux_protocol::message::identity::verify(identity).is_err())
         {

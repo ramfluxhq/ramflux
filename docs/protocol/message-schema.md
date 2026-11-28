@@ -4,7 +4,7 @@
 # Message schema
 
 This specification defines message identity, transient admission, Unsupported
-views, private revision entropy and native group snapshot rules. The complete
+views and private revision entropy. The complete
 wire grammar is [message.proto](../../crates/ramflux-protocol/src/message/schema/message.proto).
 Storage profile requirements are described in [storage profile reset](../schema_profile_reset.md).
 
@@ -23,10 +23,10 @@ shared protocol implementation and independent golden vector are in
 The entire `dm:` namespace is reserved, including malformed suffixes. Groups
 cannot create, link, import, restore or repair into it. Known reserved direct
 IDs must equal the derived pair ID and still satisfy their existing immutable
-kind, group and participant-root bindings. New ordinary direct scopes require
+kind and participant-root bindings. New ordinary direct scopes require
 the canonical ID. Creation and binding are transactional and preserve existing
 erasure state. Same-root own controls and SelfSync may reference scopes;
-they grant no permission to rebind them. Native CONTACT/GROUP_STATE bootstraps
+they grant no permission to rebind them. Native CONTACT bootstraps
 retain their separate authority checks and cannot allocate conflicting
 reserved scopes. The DM ID is public and offline matchable: it is neither a
 clear routing field nor a replacement for keyed collapse tags.
@@ -58,7 +58,7 @@ writer transaction. Recognizing a retained ephemeral kind cannot authorize a
 Delete, Edit, Reaction, Receipt, SelfSync or native operation. Recognized Typing
 is discarded without reconstructing durable content. Durable author Deletes
 use verified original source evidence; LOCAL and moderator effects additionally
-require current Sync or group permission. Both owner fences, provenance and the
+require current Sync permission. Both owner fences, provenance and the
 erasure generation are checked before installation. Historical Message/Service
 projection is cosmetic; Control/Call/Task/Surface never execute retroactively.
 A Service does not execute a pin action. The v1 native pin action is unavailable
@@ -100,26 +100,11 @@ original author's visible indicators in its conversation. A failed writer
 transaction cannot clear them or count as received peer progress.
 
 The shared transient binding codec accepts only Typing content, a 32-byte opaque
-nonce, zero device sequence/HLC and no group fields. Both `MessageUpdate` and the
+nonce, zero device sequence/HLC. Both `MessageUpdate` and the
 `message.transient` event carry sequence zero. Live stream subscriptions register
 this topic only after the subscribe acknowledgement; it has no journal replay.
 The journal's central insertion path refuses this topic. Transient queue overflow
 is lossy, preserves its subscriber and never changes the client's durable cursor.
-
-Ordinary group-history
-`group_opening` is exactly 64 raw bytes, opening_key[32] || commitment_key[32].
-One shared native verifier recomputes every native franking hash/commitment over
-the exact nested Message, signed sealed-group ciphertext/header and native AAD.
-It wipes the supplied temporary opening on success and every refusal; no master
-key or new author authority is conveyed. Edited original evidence still contains
-no group opening or plaintext. Verification requires native header byte equality and the native session-id:counter event id; AAD is reconstructed from the authenticated wrapper, never supplied by the caller. These checks apply to signed history, import, report and restore.
-
-Group receipt captures both native per-message keys on the successful decrypt;
-re-decryption is a replay, not an evidence-recovery operation. The original
-v2 signature, custody authority, signed group snapshot, outer C and native
-opening are checked together. Reparse uses that retained proof and exact nested
-Message, without keeping a sender chain merely for reparse. It rechecks current
-local/author group roles and the immutable conversation binding inside its writer.
 
 Known content keeps private origin evidence under ordinary local-history policy;
 Unsupported copies include it in their existing raw quota. Both use registered
@@ -127,7 +112,7 @@ message owners. Edit retirement removes the original origin, nested content,
 prepared copies and whole cached pages in the same writer; a late original
 opening cannot pass the retired-opening fence. Delete remains a sticky fence.
 Original signed evidence may be selected only through explicit history/report
-APIs; ordinary updates carry no report or group opening.
+APIs; ordinary updates carry no report opening.
 
 ## Unsupported diagnostics and native control admission
 
@@ -176,8 +161,7 @@ Layer 3 / profile floor 3 adds Message tag 17, `bytes erasure_nonce`: exactly 32
 cryptographically random bytes on every plaintext Message and Edit replacement.
 The SDK prepares this once per logical revision before recipient fan-out. Reuse
 that prepared content or its exact encoded Inner for all recipients; each new
-revision receives independent entropy. The sealed group wrapper carries no
-nonce: it is inside the encrypted nested Message. Admission scans exact canonical wire before prost. Every committed plaintext
+revision receives independent entropy. Admission scans exact canonical wire before prost. Every committed plaintext
 Message requires one `8a 01 20 || nonce[32]` field; duplicate, absent, empty,
 wrong-length, wrong-wire-type and nonminimal encodings are refused. SelfSync
 drafts forbid tag 17; draft validation is separate from committed content.
@@ -202,19 +186,3 @@ Protobuf wire vector: text "yes", then tag17 varint `8a 01`, length `20`, then
 bytes `00 01 ... 1f`. Nonce hashing, public sanitization, stale-copy retirement,
 private history/reparse/restore, sibling digest agreement, competing edits and
 transactional retirement/rollback follow the same revision and erasure rules.
-
-## Native group snapshots
-
-```proto
-message GroupControlBodySnapshot {
-  NativeGroupSnapshot snapshot = 1;
-  optional GroupKeyDistribution distribution = 2;
-}
-// GroupControlBody.value: GroupControlBodySnapshot snapshot = 5;
-```
-
-The selected arm invokes the existing canonical GroupStateSnapshot codec and native verification/state machine. Its schema field is checked against the native fixed value; it never selects a different codec. Native issuer/transport, current directory and membership, state continuity/removal floors and invitation-consent checks remain mandatory. A sender omits the distribution for recipients outside the signed membership. A present distribution must match the authenticated issuer, group, snapshot epoch and state hash, and pass the existing native key authentication before installation. Required consent precedes membership, route, joined-floor and key installation. Working seed copies are zeroized; private retained native invitation/key material follows the existing lifecycle. A typed control that is Unsupported never applies its native action.
-
-The snapshot is required, nonempty and exactly canonical native JSON (duplicate/unknown native keys refuse), verified before installation. Raw generated scanning enforces minimal encoding, ordered singleton fields and oneof presence before decoding. Unknown generated fields remain Unsupported and never execute. Every NativeGroupSnapshot canonical leaf, including Transfer, OwnContext, OwnGroupConsent and original/history evidence, has the native 98,304-byte bound; other native leaves retain 8,192 bytes. Encoded GroupKeyDistribution is bounded to 4,096 bytes before parsing. Inner aggregate/depth/frame limits still apply.
-
-Typed distribution maps explicitly to native v3/v4 schema/version, with exactly32 seed bytes, transport sender equal to snapshot issuer, pinned signing key, group/epoch/state-head equality, native v4 seed-bound signature and native v3 same-head seed fence. Identical replay cannot rewind a receiver; a valid v4 fresh chain remains permitted. State reconciliation and eligible key import form one transaction, and import requires that snapshot hash remain the installed head and local membership be effective. Production sealing derives eligibility from the selected root/device plus verified directory and snapshot; terminal/nonmember recipients receive no seed. Removed previously joined recipients may install terminal state without keys. History evidence never installs live state; reparsing Control never executes it.

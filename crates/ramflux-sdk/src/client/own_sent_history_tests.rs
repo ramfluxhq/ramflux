@@ -87,7 +87,7 @@ fn receive_generated(
     // This fixture exercises the retiring legacy projection, not native generated admission.
     // Activated generated receive has independent native-authority tests.
     let packet = SentMessage::from_generated(sent)?;
-    client.apply_own_sent_packet(source, &packet.envelope_id, conversation, None, at, &packet)
+    client.apply_own_sent_packet(source, &packet.envelope_id, conversation, at, &packet)
 }
 
 fn alias_for(
@@ -158,7 +158,6 @@ async fn own_sent_fields_body() -> TestResult {
     let context = sent.context.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     assert_eq!(context.conversation_id, "direct");
     assert_eq!(context.participants, [own.principal.as_str(), "peer"]);
-    assert!(context.group.is_none());
     assert!(context.friend.is_none());
     assert_ne!(sent.sender_id, own.source.device_id());
 
@@ -304,9 +303,8 @@ async fn retired_own_sent_prefix_cannot_claim_original_dm_rows() -> TestResult {
     let own = Box::pin(Own::new("original-recipient")).await?;
     let client = &own.target.client;
     {
-        let (conversation, group, context) = (
+        let (conversation, context) = (
             "direct-original",
-            None,
             json!({"conversation_id":"direct-original","participants":[own.principal,own.principal],"friend":null}),
         );
         let bytes = retired_prefix_bytes(&json!({
@@ -318,7 +316,6 @@ async fn retired_own_sent_prefix_cannot_claim_original_dm_rows() -> TestResult {
             payload_kind: OwnPayloadKind::Sent,
             id: "original-envelope",
             conversation,
-            group,
             created_at: 1,
             body: &bytes,
         };
@@ -357,7 +354,6 @@ async fn retired_own_sent_prefix_cannot_alias_equal_sender_labels_ids_and_text()
             payload_kind: OwnPayloadKind::RawInner,
             id: "different-envelope",
             conversation: "direct",
-            group: None,
             created_at: 1,
             body: &bytes,
         },

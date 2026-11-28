@@ -40,7 +40,7 @@ pub(crate) async fn exercise(deletion_first: bool, copies: usize) -> TestResult 
     message.envelope_id = "sibling-erasure-delete".into();
     let draft = source.client.authored_delete_draft(&conversation, &owner, None)?;
     message.message_id = draft.operation;
-    let prepared = source.client.prepare_authored_content(&mut message, None, &draft.content)?;
+    let prepared = source.client.prepare_authored_content(&mut message, &draft.content)?;
     source.client.project_authored_message(&message, &prepared.exact, &[])?;
     let erase = queued_delete(&source)?;
     Box::pin(super::authored_edit_erasure::deliver_sent(&source, &mut target, erase)).await?;
@@ -80,7 +80,6 @@ pub(crate) async fn authored(
     };
     let prepared = source.client.prepare_authored_message(
         &mut message,
-        None,
         &g::Message { text: "SIBLING_DELETION_BODY_CANARY".into(), ..Default::default() },
     )?;
     let envelope = source.seal_inner_to_with_id(peer, &prepared.wire, &message.envelope_id)?;

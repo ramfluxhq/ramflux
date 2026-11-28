@@ -657,7 +657,7 @@ impl RamfluxClient {
         let remote = self.device_reference(remote)?;
         let wire_remote =
             crate::client::identity_authority::device_namespace::wire_device_id(&remote)?;
-        let route = self.prepare_seal_routing(message, body, route)?;
+        let route = Self::prepare_seal_routing(message, body, route);
         let inner = generated_transport::seal_plaintext(body, &route)?;
         let report = report::maybe_assemble_report(
             self,
@@ -691,15 +691,10 @@ impl RamfluxClient {
         )
     }
 
-    fn prepare_seal_routing(
-        &self,
-        message: &GatewayDirectMessage,
-        body: &[u8],
-        route: Route,
-    ) -> Result<Routing, SdkError> {
+    fn prepare_seal_routing(message: &GatewayDirectMessage, body: &[u8], route: Route) -> Routing {
         let mut route = routing(message, route);
         bind_generated_route_identity(&mut route, body);
-        Ok(route)
+        route
     }
 
     pub(crate) fn open_routed(

@@ -80,7 +80,6 @@ durable reader (`"durable_reader": "message.read"`) and the journal head
   "device_sequence": "00000000000000000007",
   "hlc_ms": 1731434000000,
   "hlc_logical": 0,
-  "group_id": null,
   "journal_sequence": 42,
   "is_own": false,
   "state": "content",

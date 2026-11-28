@@ -25,12 +25,7 @@ mod encoding;
 pub mod ephemeral;
 mod error;
 mod events;
-mod group_device_roots;
-pub use group_device_roots::{GROUP_DEVICE_ROOTS_EXTENSION, GroupDeviceRoots, group_event_member};
-pub mod group_state;
-pub use group_state::*;
 mod fixtures;
-pub mod group_permissions;
 mod header;
 pub mod home_migration;
 mod home_node_migration;
@@ -63,15 +58,15 @@ pub use canonical_json::{
 };
 pub use core_types::{
     Ack, BotEvent, BranchProof, ClientEvent, ConversationEvent, Cursor, DeliveryClass, DeviceProof,
-    Envelope, EventId, Ext, FriendLinkEvent, GroupEvent, HomeNodeMigrationProof, HttpMethod,
+    Envelope, EventId, Ext, FriendLinkEvent, HomeNodeMigrationProof, HttpMethod,
     IdentityDeletionProof, IdentityEvent, MessageEvent, Nack, NackReason, Priority, SignatureAlg,
     SignedFields, SignedRequest,
 };
 pub use encoding::{decode_base64url, encode_base64url};
 pub use error::ProtocolError;
 pub use events::{
-    ConversationEventBody, ForwardedFrom, FriendLinkEventBody, GroupEventBody, IdentityEventBody,
-    MessageEventBody, RecoveryApproval, RecoveryApprovalContext, RecoveryQuorumConfigured,
+    ConversationEventBody, ForwardedFrom, FriendLinkEventBody, IdentityEventBody, MessageEventBody,
+    RecoveryApproval, RecoveryApprovalContext, RecoveryQuorumConfigured,
     RecoveryQuorumMemberCommitment, RecoveryQuorumMemberKind, RecoveryQuorumProof, ReplyTo,
 };
 pub use fixtures::{
@@ -98,7 +93,7 @@ pub use replay::{
     REPLAY_WINDOW_SECONDS, ReplayGuard,
 };
 pub use signature::{verify_canonical_signature, verify_json_signature, verify_signed_fields};
-pub use state::{CursorState, EventOrderingState, EventSortKey, GroupEpochState, event_sort_key};
+pub use state::{CursorState, EventOrderingState, EventSortKey, event_sort_key};
 pub use surfaces::{
     A2iControlEvent, ActorType, BotEventBody, BotInstallGrant, BotManifest, ControlDomain,
     FederationHandshake, HostingModel, KeyCustodyClass, McpCapability, McpGrant,

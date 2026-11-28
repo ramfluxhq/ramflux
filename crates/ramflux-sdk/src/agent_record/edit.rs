@@ -186,8 +186,6 @@ pub(crate) fn mint(
         }),
         device_sequence,
         hlc,
-        group_id: None,
-        group_epoch: None,
     };
     ramflux_protocol::message::identity::order_key(&identity)
         .map_err(|_| SdkError::CustodySetupInvalid)?;

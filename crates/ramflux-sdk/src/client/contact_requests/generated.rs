@@ -77,8 +77,6 @@ impl RamfluxClient {
                 || inner.layer != layer
                 || inner.body != control.encode_to_vec()
                 || identity.conversation_id != conversation
-                || identity.group_id.is_some()
-                || identity.group_epoch.is_some()
                 || identity.device_sequence & (1 << 63) != 0
                 || g::identity::verify(identity).is_err()
                 || identity.author.as_ref().is_none_or(|author| {

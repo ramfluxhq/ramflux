@@ -53,9 +53,6 @@ pub(crate) fn authority(
         device_epoch: author.device_epoch,
     };
     let certified = verified.authorize(&device, "message", issued).map_err(|_| bad)?;
-    if identity.group_id.is_some() {
-        verified.authorize(&device, "group", issued).map_err(|_| bad)?;
-    }
     ramflux_protocol::verify_sender_signature(
         outer,
         ramflux_protocol::SenderTranscriptMode::Evidence,
@@ -78,9 +75,7 @@ fn verify_edit_origin(
 ) -> Result<Author, SdkError> {
     let bad = EvidenceError::OriginCommitmentMismatch;
     let evidence = item.source_evidence.as_ref().ok_or(EvidenceError::OriginEvidenceMissing)?;
-    if evidence.canonical_sender_envelope.len() > g::original_header::MAX_OUTER_BYTES
-        || !evidence.group_plaintext.is_empty()
-    {
+    if evidence.canonical_sender_envelope.len() > g::original_header::MAX_OUTER_BYTES {
         return Err(bad.into());
     }
     let outer: Value =
@@ -153,23 +148,10 @@ impl RamfluxClient {
             || target.conversation_id != checked.identity.conversation_id
             || checked.edit_identity.conversation_id != checked.identity.conversation_id
             || target.author_anchor != original.root
-            || checked.edit_identity.group_id != checked.identity.group_id
         {
             return Err(EvidenceError::EditTargetMismatch.into());
         }
-        Self::refuse_group_history_scope(&checked.identity, &checked.edit_identity)?;
         Ok(checked.identity)
-    }
-
-    /// Group history evidence is unavailable until the MLS group track.
-    fn refuse_group_history_scope(
-        original: &g::EventIdentity,
-        edit: &g::EventIdentity,
-    ) -> Result<(), SdkError> {
-        if original.group_id.is_some() || edit.group_id.is_some() {
-            return Err(EvidenceError::OriginCommitmentMismatch.into());
-        }
-        Ok(())
     }
 }
 
@@ -208,11 +190,6 @@ impl RamfluxClient {
             custodian_publication: authority.custodian_publication,
             devices: Vec::new(),
         };
-        let message = g::Message::decode(scanned.body)
-            .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
-        if message.sealed_group.is_some() {
-            return Err(EvidenceError::OriginCommitmentMismatch.into());
-        }
         let canonical_sender_envelope = ramflux_protocol::sender_origin_evidence(&entry.envelope)?;
         if canonical_sender_envelope.len() > g::original_header::MAX_OUTER_BYTES {
             return Err(EvidenceError::OriginCommitmentMismatch.into());
@@ -224,8 +201,6 @@ impl RamfluxClient {
                 source_authority: Some(g::NativeCustodyManifest {
                     canonical: ramflux_protocol::canonical_json_bytes(&manifest)?,
                 }),
-                group_membership: None,
-                group_binding: None,
                 layer: scanned.layer,
             },
         };

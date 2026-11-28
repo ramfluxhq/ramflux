@@ -79,16 +79,9 @@ pub(super) fn sources(
     {
         return Err(SearchError::IndexUnavailable.into());
     }
-    // Group messages are not searchable until the MLS group track lands.
-    if identity.group_id.is_some() {
-        return Ok(Vec::new());
-    }
     let Some(message) = super::projection::decode(&input.body)? else {
         return Ok(Vec::new());
     };
-    if message.sealed_group.is_some() {
-        return Ok(Vec::new());
-    }
     let dependencies = vec![
         dependency("runtime_message_content", key),
         dependency("direct_message_projection", key),

@@ -230,7 +230,6 @@ pub(crate) async fn author_first_hand(
     };
     let prepared = source.client.prepare_authored_message(
         &mut message,
-        None,
         &g::Message { text: text.into(), ..Default::default() },
     )?;
     let envelope = source.seal_inner_to_with_id(peer, &prepared.wire, &message.envelope_id)?;

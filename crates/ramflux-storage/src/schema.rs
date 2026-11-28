@@ -342,7 +342,6 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
             CREATE TABLE IF NOT EXISTS object_index (
                 object_id TEXT PRIMARY KEY,
                 chunk_manifest_hash BLOB NOT NULL,
-                object_created_group_key_epoch INTEGER,
                 object_state TEXT NOT NULL,
                 total_cipher_size INTEGER NOT NULL,
                 chunk_count INTEGER NOT NULL,
@@ -364,7 +363,6 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
                 encrypted_relation_ref BLOB,
                 encrypted_metadata BLOB NOT NULL,
                 object_key_slots BLOB NOT NULL,
-                object_created_group_key_epoch INTEGER,
                 chunk_manifest_hash BLOB NOT NULL,
                 chunk_count INTEGER NOT NULL,
                 total_cipher_size INTEGER NOT NULL,
@@ -378,7 +376,6 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
                 object_id TEXT NOT NULL,
                 recipient_kind TEXT NOT NULL,
                 recipient_id_hash BLOB NOT NULL,
-                group_key_epoch INTEGER,
                 wrapped_key BLOB NOT NULL,
                 key_wrap_alg TEXT NOT NULL,
                 FOREIGN KEY(object_id) REFERENCES object_manifest(object_id)

@@ -182,7 +182,6 @@ impl RamfluxClient {
         let control = crate::client::generated_control::control_from_payload(payload)?;
         let prepared = self.prepare_authored_content(
             &mut message,
-            None,
             &g::Content { value: Some(g::content::Value::Control(control)) },
         )?;
         let body = prepared.wire.clone();

@@ -108,7 +108,6 @@ impl RamfluxClient {
             author: Some(author),
             device_sequence: wire_sequence,
             hlc,
-            ..Default::default()
         })
     }
 

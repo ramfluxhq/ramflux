@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Same-root transport authority and original Message evidence remain separate.
-use super::*;
+use super::{EvidenceError, OriginalHeader, RamfluxClient, SdkError, Value, g};
 use crate::client::identity_authority::NativeOperation;
 use crate::client::raw_inner_origin::{RetainedOrigin, VerifiedOrigin};
 
@@ -60,9 +60,6 @@ impl RamfluxClient {
         &self,
         identity: &g::EventIdentity,
     ) -> Result<(), SdkError> {
-        if identity.group_id.is_some() {
-            return Err(EvidenceError::OriginCommitmentMismatch.into());
-        }
         self.authorize_direct_history_scope(identity)
     }
 
@@ -120,9 +117,6 @@ impl RamfluxClient {
         let id = ramflux_protocol::encode_base64url(&identity.id);
         let scanned = g::validation::scan_inner(&item.exact_inner)
             .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
-        if identity.group_id.is_some() {
-            return Err(EvidenceError::OriginCommitmentMismatch.into());
-        }
         let supported = scanned.outcome == g::validation::ScanOutcome::Supported;
         self.bind_history_message_conversation(identity, verified)?;
         db.import_direct_message_projection(ramflux_storage::DirectMessageWrite {
@@ -184,7 +178,7 @@ impl RamfluxClient {
         identity: &g::EventIdentity,
         summary: &g::CallSummary,
     ) -> Result<bool, SdkError> {
-        self.admit_call_summary_item(sibling, item, identity)?;
+        self.admit_call_summary_item(sibling, item)?;
         self.account_db()?
             .write_transaction(|| self.install_call_summary_item(item, identity, summary))
     }
@@ -193,13 +187,11 @@ impl RamfluxClient {
         &self,
         sibling: &ramflux_crypto::RootQualifiedDeviceRef,
         item: &g::HistoryItem,
-        identity: &g::EventIdentity,
     ) -> Result<(), SdkError> {
         if item.tombstone.is_some()
             || item.source_evidence.is_some()
             || item.original_metadata_evidence.is_some()
             || !item.exact_original_identity.is_empty()
-            || identity.group_id.is_some()
         {
             return Err(EvidenceError::OriginCommitmentMismatch.into());
         }
@@ -299,9 +291,6 @@ impl RamfluxClient {
         identity: &g::EventIdentity,
         verified: &VerifiedOrigin,
     ) -> Result<(), SdkError> {
-        if let Some(group) = identity.group_id.as_ref() {
-            return self.merge_routed_group_link(group, &identity.conversation_id);
-        }
         let db = self.account_db()?;
         if db.client_record("conversation", &identity.conversation_id)?.is_none() {
             let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
@@ -328,17 +317,11 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let bad = EvidenceError::OriginCommitmentMismatch;
         let scanned = g::validation::scan_inner(bytes).map_err(|_| bad)?;
-        let message = g::Message::decode(scanned.body).map_err(|_| bad)?;
-        if message.sealed_group.is_some() || origin.evidence.group_membership.is_some() {
-            return Err(bad.into());
-        }
         let original = OriginalHeader {
             exact_identity: g::original_header::exact_identity(bytes)?.to_vec(),
             evidence: g::HistoryOriginalMetadataEvidence {
                 canonical_sender_envelope: origin.evidence.canonical_sender_envelope.clone(),
                 source_authority: origin.evidence.source_authority.clone(),
-                group_membership: None,
-                group_binding: None,
                 layer: scanned.layer,
             },
         };

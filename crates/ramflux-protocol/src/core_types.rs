@@ -10,8 +10,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::{
-    BotEventBody, ConversationEventBody, FriendLinkEventBody, GroupEventBody, IdentityEventBody,
-    MessageEventBody, ProtocolError,
+    BotEventBody, ConversationEventBody, FriendLinkEventBody, IdentityEventBody, MessageEventBody,
+    ProtocolError,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -314,7 +314,6 @@ pub enum NackReason {
     UnknownDevice,
     RevokedCapability,
     MissingDependency,
-    UnknownGroupEpoch,
     EpochRollback,
     PayloadTooLarge,
     RateLimited,
@@ -395,7 +394,6 @@ impl<T> ClientEvent<T> {
 
 pub type IdentityEvent = ClientEvent<IdentityEventBody>;
 pub type FriendLinkEvent = ClientEvent<FriendLinkEventBody>;
-pub type GroupEvent = ClientEvent<GroupEventBody>;
 pub type ConversationEvent = ClientEvent<ConversationEventBody>;
 pub type MessageEvent = ClientEvent<MessageEventBody>;
 pub type BotEvent = ClientEvent<BotEventBody>;

@@ -119,33 +119,6 @@ pub use expected_contact_safety_types::*;
 #[path = "friend_control.rs"]
 mod friend_control_types;
 pub use friend_control_types::*;
-#[path = "group_control_body.rs"]
-mod group_control_body_types;
-pub use group_control_body_types::*;
-#[path = "group_control_body_device_set.rs"]
-mod group_control_body_device_set_types;
-pub use group_control_body_device_set_types::*;
-#[path = "group_control_body_request.rs"]
-mod group_control_body_request_types;
-pub use group_control_body_request_types::*;
-#[path = "group_control_body_result.rs"]
-mod group_control_body_result_types;
-pub use group_control_body_result_types::*;
-#[path = "group_control_body_snapshot.rs"]
-mod group_control_body_snapshot_types;
-pub use group_control_body_snapshot_types::*;
-#[path = "group_control_body_transfer.rs"]
-mod group_control_body_transfer_types;
-pub use group_control_body_transfer_types::*;
-#[path = "group_key_control.rs"]
-mod group_key_control_types;
-pub use group_key_control_types::*;
-#[path = "group_key_distribution.rs"]
-mod group_key_distribution_types;
-pub use group_key_distribution_types::*;
-#[path = "group_state_control.rs"]
-mod group_state_control_types;
-pub use group_state_control_types::*;
 #[path = "guardian_accept.rs"]
 mod guardian_accept_types;
 pub use guardian_accept_types::*;
@@ -185,9 +158,6 @@ pub use own_contact_tombstone_types::*;
 #[path = "own_context.rs"]
 mod own_context_types;
 pub use own_context_types::*;
-#[path = "own_group_consent.rs"]
-mod own_group_consent_types;
-pub use own_group_consent_types::*;
 #[path = "own_layer_renewal.rs"]
 mod own_layer_renewal_types;
 pub use own_layer_renewal_types::*;
@@ -206,24 +176,3 @@ pub use pair_reset_ack_types::*;
 #[path = "recovery_control.rs"]
 mod recovery_control_types;
 pub use recovery_control_types::*;
-#[path = "transfer_body.rs"]
-mod transfer_body_types;
-pub use transfer_body_types::*;
-#[path = "transfer_body_head.rs"]
-mod transfer_body_head_types;
-pub use transfer_body_head_types::*;
-#[path = "transfer_body_probe.rs"]
-mod transfer_body_probe_types;
-pub use transfer_body_probe_types::*;
-#[path = "transfer_control.rs"]
-mod transfer_control_types;
-pub use transfer_control_types::*;
-#[path = "transfer_device.rs"]
-mod transfer_device_types;
-pub use transfer_device_types::*;
-#[path = "transfer_head.rs"]
-mod transfer_head_types;
-pub use transfer_head_types::*;
-#[path = "transfer_probe.rs"]
-mod transfer_probe_types;
-pub use transfer_probe_types::*;

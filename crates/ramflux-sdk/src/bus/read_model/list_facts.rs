@@ -131,9 +131,6 @@ fn classify_content(content: &g::Content) -> PreviewClass {
 }
 
 fn classify_message(message: &g::Message) -> PreviewClass {
-    if message.sealed_group.is_some() {
-        return PreviewClass::Unsupported;
-    }
     if !message.media.is_empty() {
         return PreviewClass::Attachment;
     }

@@ -234,16 +234,6 @@ pub fn validate_message(message: &Message) -> Result<(), ValidationError> {
     {
         return Err(ValidationError::Limit);
     }
-    if message.sealed_group.is_some()
-        && (!message.text.is_empty()
-            || !message.entities.is_empty()
-            || !message.media.is_empty()
-            || message.reply_to.is_some()
-            || message.forward.is_some()
-            || !message.erasure_nonce.is_empty())
-    {
-        return Err(ValidationError::Content);
-    }
     validate_optional_message_ref(message.reply_to.as_ref())?;
     if let Some(forward) = message.forward.as_ref() {
         if !forward.origin_assertion.is_empty()
@@ -287,7 +277,6 @@ fn validate_edit(edit: &Edit) -> Result<(), ValidationError> {
         || edit.revision == 0
         || edit.revision > 1_000_000
         || edit.target.is_none()
-        || edit.replacement.as_ref().is_some_and(|message| message.sealed_group.is_some())
     {
         return Err(ValidationError::Content);
     }
@@ -300,7 +289,6 @@ fn validate_delete(delete: &Delete) -> Result<(), ValidationError> {
         || delete.targets.len() > 256
         || delete.tombstone_id.len() != 32
         || !matches!(delete.scope, 1 | 2)
-        || !delete.native_group_authorization.is_empty()
     {
         return Err(ValidationError::Content);
     }

@@ -316,8 +316,6 @@ fn install_received_reference(
         author: Some(author),
         device_sequence: 1,
         hlc: 1,
-        group_id: None,
-        group_epoch: None,
     };
     let message_id = ramflux_protocol::encode_base64url(id);
     let index = ramflux_storage::AccountIndex::open(bob_root)?;

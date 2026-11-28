@@ -136,10 +136,10 @@ async fn native_call_invite_and_replay_hold_media_with_real_master_and_anchor() 
     let invite = outgoing.pending[0].clone();
     alice.client.voice_calls.insert(id.clone(), outgoing);
     let (entry, body) = signed_control(&alice, &bob, &invite)?;
-    assert!(bob.client.project_call_control(&entry, "native-call-thread", None, &body)?);
+    assert!(bob.client.project_call_control(&entry, "native-call-thread", &body)?);
     assert!(bob.client.refresh_call_control(&body)?);
     let before = bob.client.voice_calls[&id].row.clone();
-    assert!(bob.client.project_call_control(&entry, "native-call-thread", None, &body)?);
+    assert!(bob.client.project_call_control(&entry, "native-call-thread", &body)?);
     assert!(bob.client.refresh_call_control(&body)?);
     assert_eq!(bob.client.voice_calls[&id].row, before);
     let call = bob.client.voice_calls.get_mut(&id).ok_or("incoming")?;
@@ -153,7 +153,7 @@ async fn native_call_invite_and_replay_hold_media_with_real_master_and_anchor() 
     let mut forged = invite;
     forged.sender.root_public_key = peer.root_public_key;
     let (entry, body) = signed_control(&alice, &bob, &forged)?;
-    assert!(bob.client.project_call_control(&entry, "native-call-thread", None, &body).is_err());
+    assert!(bob.client.project_call_control(&entry, "native-call-thread", &body).is_err());
     assert!(alice.client.identity_root.is_none());
     assert!(bob.client.identity_root.is_none());
     Ok(())
@@ -220,7 +220,7 @@ async fn generated_call_cache_uses_exact_inner_transition_after_native_commit() 
     let converted = crate::client::generated_call::native::to_native(call)?;
     assert!(converted == signed, "generated carrier must retain signed Start authority");
     bob.client.account_db()?.write_transaction(|| {
-        bob.client.project_native_call_control(&entry, &conversation, None, &converted, &raw)
+        bob.client.project_native_call_control(&entry, &conversation, &converted, &raw)
     })?;
     assert!(bob.client.refresh_generated_control_cache(&raw)?);
     assert!(
@@ -261,7 +261,7 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
             let reference = if index == 0 { [62;16] } else { [63;16] };
             control.call_ref = Some(ramflux_protocol::encode_base64url(reference));
             let (entry, body) = signed_control(&alice,receiver,&control)?;
-            receiver.client.project_call_control(&entry,&conversation,None,&body)?;
+            receiver.client.project_call_control(&entry,&conversation,&body)?;
             receiver.client.refresh_call_control(&body)?;
             starts.push(decode(&body)?.and_then(|c|c.call_start).ok_or("test: Start")?);
         }
@@ -286,7 +286,7 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
         let id = caller.row.call_id.clone();
         alice.client.persist_call_row(&caller.row)?;
         alice.client.voice_calls.insert(id.clone(),caller);
-        alice.client.project_call_control(&answer_entry,&conversation,None,&answer_body)?;
+        alice.client.project_call_control(&answer_entry,&conversation,&answer_body)?;
         alice.client.refresh_call_control(&answer_body)?;
         let selected = alice.client.voice_calls.get(&id).ok_or("test: selected call")?;
         assert!(selected.callee == second, "native secondary answer did not select its endpoint");
@@ -297,7 +297,7 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
         let mut cross = answer;
         cross.call_ref = Some(first_start.body.call_ref.clone());
         let (cross_entry,cross_body) = signed_control(&secondary,&alice,&cross)?;
-        let refusal = alice.client.project_call_control(&cross_entry,&conversation,None,&cross_body).err().ok_or("test: cross-sibling reference admitted")?;
+        let refusal = alice.client.project_call_control(&cross_entry,&conversation,&cross_body).err().ok_or("test: cross-sibling reference admitted")?;
         assert!(refusal.to_string().contains("control Start reference differs"), "cross-sibling control failed at the wrong boundary: {refusal}");
         both_confirmed.apply_media_for(second.clone(),second_start,true,true)?;
         both_confirmed.hold_media_for(&second);

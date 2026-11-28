@@ -159,9 +159,6 @@ fn message_limits(
         }
         super::media_metadata::validate_dimensions(width, height)?;
     }
-    if descriptor.name() == "GroupKeyDistribution" && bytes.len() > 4096 {
-        return Err(ValidationError::Limit);
-    }
     Ok(())
 }
 
@@ -229,7 +226,6 @@ fn scan_field(
             let cap = match (schema.parent_message().name(), schema.name()) {
                 ("Thumbnail", "encoded_image") => 16 * 1024,
                 (_, "native_authority_proof") | ("CallControl", "call_start") => 8 * 1024,
-                ("NativeGroupSnapshot", "canonical") => crate::group_state::MAX_GROUP_STATE_BYTES,
                 ("NativeCustodyManifest", "canonical") => super::validation::MAX_INNER_BYTES,
                 (name, "canonical") if name.starts_with("Native") => 8 * 1024,
                 _ => super::validation::MAX_INNER_BYTES,
@@ -304,56 +300,21 @@ mod tests {
     use prost::Message as _;
 
     #[test]
-    fn native_snapshot_and_custody_leaves_preserve_other_leaf_caps()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let pool = prost_reflect::DescriptorPool::decode(super::super::FILE_DESCRIPTOR_SET)?;
-        for name in ["NativeGroupSnapshot", "NativeCustodyManifest", "NativeGroupActor"] {
-            let descriptor = pool
-                .all_messages()
-                .find(|value| value.name() == name)
-                .ok_or("native descriptor missing")?;
-            let cap = if name == "NativeGroupSnapshot" {
-                crate::group_state::MAX_GROUP_STATE_BYTES
-            } else if name == "NativeCustodyManifest" {
-                super::super::validation::MAX_INNER_BYTES
-            } else {
-                8192
-            };
-            for size in [cap, cap + 1] {
-                let bytes = super::super::NativeGroupSnapshot { canonical: vec![b'x'; size] }
-                    .encode_to_vec();
-                let result = scan(&descriptor, &bytes, 3, 0);
-                if size == cap {
-                    assert_eq!(result?, ScanOutcome::Supported, "{name} at cap");
-                } else {
-                    assert_eq!(result, Err(ValidationError::Limit), "{name} beyond cap");
-                }
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn group_distribution_is_bounded_before_native_parsing()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn native_custody_leaf_preserves_leaf_cap() -> Result<(), Box<dyn std::error::Error>> {
         let pool = prost_reflect::DescriptorPool::decode(super::super::FILE_DESCRIPTOR_SET)?;
         let descriptor = pool
             .all_messages()
-            .find(|value| value.name() == "GroupKeyDistribution")
-            .ok_or("distribution descriptor missing")?;
-        for size in [4093, 4094] {
-            // Tag + minimal two-byte length produce exactly cap / cap+1.
-            let bytes = super::super::GroupKeyDistribution {
-                sender_key_seed: vec![1; size],
-                ..Default::default()
-            }
-            .encode_to_vec();
-            assert_eq!(bytes.len(), size + 3);
+            .find(|value| value.name() == "NativeCustodyManifest")
+            .ok_or("native descriptor missing")?;
+        let cap = super::super::validation::MAX_INNER_BYTES;
+        for size in [cap, cap + 1] {
+            let bytes =
+                super::super::NativeCustodyManifest { canonical: vec![b'x'; size] }.encode_to_vec();
             let result = scan(&descriptor, &bytes, 3, 0);
-            if size == 4093 {
-                assert_eq!(result?, ScanOutcome::Supported);
+            if size == cap {
+                assert_eq!(result?, ScanOutcome::Supported, "at cap");
             } else {
-                assert_eq!(result, Err(ValidationError::Limit));
+                assert_eq!(result, Err(ValidationError::Limit), "beyond cap");
             }
         }
         Ok(())

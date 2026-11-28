@@ -5,14 +5,12 @@
 #[allow(unused_imports)]
 use super::super::*;
 
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct OwnContext {
     #[prost(string, tag = "1")]
     pub conversation_id: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "2")]
     pub participants: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(message, optional, tag = "3")]
-    pub group: ::core::option::Option<SdkOwnDeviceGroupSnapshot>,
     #[prost(message, optional, tag = "4")]
     pub friend: ::core::option::Option<FriendLinkRecord>,
 }
@@ -30,9 +28,6 @@ impl serde::Serialize for OwnContext {
         if !self.participants.is_empty() {
             len += 1;
         }
-        if self.group.is_some() {
-            len += 1;
-        }
         if self.friend.is_some() {
             len += 1;
         }
@@ -42,9 +37,6 @@ impl serde::Serialize for OwnContext {
         }
         if !self.participants.is_empty() {
             struct_ser.serialize_field("participants", &self.participants)?;
-        }
-        if let Some(v) = self.group.as_ref() {
-            struct_ser.serialize_field("group", v)?;
         }
         if let Some(v) = self.friend.as_ref() {
             struct_ser.serialize_field("friend", v)?;
@@ -58,13 +50,11 @@ impl<'de> serde::Deserialize<'de> for OwnContext {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] =
-            &["conversation_id", "conversationId", "participants", "group", "friend"];
+        const FIELDS: &[&str] = &["conversation_id", "conversationId", "participants", "friend"];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             ConversationId,
             Participants,
-            Group,
             Friend,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
@@ -91,7 +81,6 @@ impl<'de> serde::Deserialize<'de> for OwnContext {
                                 Ok(GeneratedField::ConversationId)
                             }
                             "participants" => Ok(GeneratedField::Participants),
-                            "group" => Ok(GeneratedField::Group),
                             "friend" => Ok(GeneratedField::Friend),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
@@ -112,7 +101,6 @@ impl<'de> serde::Deserialize<'de> for OwnContext {
             {
                 let mut conversation_id__ = None;
                 let mut participants__ = None;
-                let mut group__ = None;
                 let mut friend__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
@@ -132,12 +120,6 @@ impl<'de> serde::Deserialize<'de> for OwnContext {
                             }
                             participants__ = Some(map_.next_value()?);
                         }
-                        GeneratedField::Group => {
-                            if group__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("group"));
-                            }
-                            group__ = map_.next_value()?;
-                        }
                         GeneratedField::Friend => {
                             if friend__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("friend"));
@@ -149,7 +131,6 @@ impl<'de> serde::Deserialize<'de> for OwnContext {
                 Ok(OwnContext {
                     conversation_id: conversation_id__.unwrap_or_default(),
                     participants: participants__.unwrap_or_default(),
-                    group: group__,
                     friend: friend__,
                 })
             }

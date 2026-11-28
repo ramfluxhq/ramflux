@@ -321,13 +321,12 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
         conversation: &str,
-        group: Option<&str>,
         body: &[u8],
     ) -> Result<bool, SdkError> {
         let Some(c) = decode(body)? else {
             return Ok(false);
         };
-        self.project_native_call_control(entry, conversation, group, &c, body)
+        self.project_native_call_control(entry, conversation, &c, body)
     }
 
     /// A call that already ended still accepts the caller's hangup, which is the shared end.
@@ -387,7 +386,6 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
         conversation: &str,
-        group: Option<&str>,
         c: &CallControl,
         body: &[u8],
     ) -> Result<bool, SdkError> {
@@ -395,9 +393,6 @@ impl RamfluxClient {
         let id = ramflux_protocol::decode_base64url(&c.call_id).map_err(|_| invalid("call id"))?;
         if c.schema != "ramflux.call.control.v1" || id.len() != 16 {
             return Err(invalid("control schema or id"));
-        }
-        if group.is_some() {
-            return Err(invalid("group calls are unsupported"));
         }
         self.verify_call(c, entry, conversation)?;
         if self

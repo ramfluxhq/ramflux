@@ -50,7 +50,7 @@ impl RamfluxClient {
                 };
                 &text_content
             };
-            authored = self.prepare_authored_content(&mut message, None, content)?;
+            authored = self.prepare_authored_content(&mut message, content)?;
             authored.wire.as_slice()
         } else {
             plaintext

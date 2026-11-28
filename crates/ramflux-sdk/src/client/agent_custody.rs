@@ -418,7 +418,6 @@ impl RamfluxClient {
                 id: &id,
                 created_at,
                 conversation: &scope,
-                group: None,
                 body: &body,
             },
             target,

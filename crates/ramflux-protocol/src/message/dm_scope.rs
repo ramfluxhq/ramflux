@@ -15,8 +15,6 @@ pub enum DmScopeError {
     EqualRoots,
     #[error("reserved DM conversation belongs to another root pair")]
     WrongPair,
-    #[error("group conversation cannot use the reserved dm: namespace")]
-    ReservedGroup,
 }
 
 fn anchor(value: &str) -> Result<(), DmScopeError> {
@@ -56,13 +54,6 @@ pub fn derive(first: &str, second: &str) -> Result<String, DmScopeError> {
         "{PREFIX}{}",
         crate::encode_base64url(blake3::hash(&transcript(first, second)?).as_bytes())
     ))
-}
-
-/// Reserve the entire prefix at every group creation, import, link and repair boundary.
-/// # Errors
-/// Refuses even malformed ids beginning with the reserved prefix.
-pub fn validate_group(conversation: &str) -> Result<(), DmScopeError> {
-    if conversation.starts_with(PREFIX) { Err(DmScopeError::ReservedGroup) } else { Ok(()) }
 }
 
 /// Check every reserved direct id, including an existing one; callers also check bound roots/kind.
@@ -130,10 +121,6 @@ mod tests {
         ] {
             assert_eq!(derive(A, bad), Err(DmScopeError::Anchor), "{bad}");
         }
-        for group in ["dm:", "dm:malformed", ID] {
-            assert_eq!(validate_group(group), Err(DmScopeError::ReservedGroup));
-        }
-        validate_group("group:ordinary")?;
         validate_direct(ID, A, B)?;
         assert_eq!(validate_direct("dm:wrong", A, B), Err(DmScopeError::WrongPair));
         let third = crate::encode_base64url([1; 32]);

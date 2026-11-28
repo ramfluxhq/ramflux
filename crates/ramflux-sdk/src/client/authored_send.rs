@@ -31,9 +31,7 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         match content.value.as_ref() {
-            Some(g::content::Value::Message(value))
-                if value.erasure_nonce.is_empty() && value.sealed_group.is_none() =>
-            {
+            Some(g::content::Value::Message(value)) if value.erasure_nonce.is_empty() => {
                 Self::attachment_message_content(&value.text, &value.media)?;
                 Ok(())
             }
@@ -86,12 +84,10 @@ impl RamfluxClient {
     pub(crate) fn prepare_authored_message(
         &self,
         message: &mut GatewayDirectMessage,
-        group: Option<&str>,
         content: &g::Message,
     ) -> Result<PreparedMessage, SdkError> {
         self.prepare_authored_content(
             message,
-            group,
             &g::Content { value: Some(g::content::Value::Message(content.clone())) },
         )
     }
@@ -99,18 +95,14 @@ impl RamfluxClient {
     fn validate_authored_source(
         &self,
         message: &GatewayDirectMessage,
-        group: Option<&str>,
         content: &g::Content,
     ) -> Result<(ramflux_crypto::RootQualifiedDeviceRef, bool), SdkError> {
-        if group.is_some() {
-            return Err(refused("group scope is unavailable"));
-        }
         if message.message_id.is_empty() || message.message_id.len() > 256 {
             return Err(refused("operation token must be 1..256 bytes"));
         }
-        if matches!(content.value.as_ref(), Some(g::content::Value::Message(value)) if !value.erasure_nonce.is_empty() || value.sealed_group.is_some())
+        if matches!(content.value.as_ref(), Some(g::content::Value::Message(value)) if !value.erasure_nonce.is_empty())
         {
-            return Err(refused("caller cannot choose private revision entropy or a sealed group"));
+            return Err(refused("caller cannot choose private revision entropy"));
         }
         if let Some(g::content::Value::Message(value)) = content.value.as_ref() {
             Self::attachment_message_content(&value.text, &value.media)?;
@@ -122,13 +114,10 @@ impl RamfluxClient {
         if let Some(g::content::Value::Delete(delete)) = content.value.as_ref() {
             self.validate_authored_delete(delete, &message.conversation_id)?;
             for target in &delete.targets {
-                let original = self.delete_target_identity(
+                self.delete_target_identity(
                     &message.conversation_id,
                     &ramflux_protocol::encode_base64url(&target.id),
                 )?;
-                if original.group_id.is_some() {
-                    return Err(refused("Delete route differs from original group scope"));
-                }
             }
         }
         self.require_backup_outbound_ready()?;
@@ -157,7 +146,6 @@ impl RamfluxClient {
     fn authored_operation_keys(
         &self,
         message: &GatewayDirectMessage,
-        group: Option<&str>,
         own: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<(String, String), SdkError> {
         let operation = format!(
@@ -168,7 +156,6 @@ impl RamfluxClient {
                     own.storage_key(),
                     self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_epoch,
                     &message.conversation_id,
-                    group,
                     &message.message_id,
                 ))?,
             )
@@ -237,14 +224,10 @@ impl RamfluxClient {
         target_id: &str,
     ) -> Result<Option<i64>, SdkError> {
         let db = self.account_db()?;
-        let target = db
-            .load_actor_state::<g::EventIdentity>(&format!(
-                "routed/generated-identity/{target_id}"
-            ))?
+        db.load_actor_state::<g::EventIdentity>(&format!("routed/generated-identity/{target_id}"))?
             .ok_or_else(|| refused("receipt target has no authenticated identity"))?;
         let own = self.owned_device_identity()?;
-        let (operation, _) =
-            self.authored_operation_keys(message, target.group_id.as_deref(), &own)?;
+        let (operation, _) = self.authored_operation_keys(message, &own)?;
         let Some(id) = db.load_actor_state::<String>(&operation)? else { return Ok(None) };
         let prepared = db
             .load_actor_state::<PreparedMessage>(&format!("message-send/prepared/{id}"))?
@@ -262,11 +245,10 @@ impl RamfluxClient {
     pub(crate) fn prepare_authored_content(
         &self,
         message: &mut GatewayDirectMessage,
-        group: Option<&str>,
         content: &g::Content,
     ) -> Result<PreparedMessage, SdkError> {
-        let (own, own_only) = self.validate_authored_source(message, group, content)?;
-        let (operation, transport) = self.authored_operation_keys(message, group, &own)?;
+        let (own, own_only) = self.validate_authored_source(message, content)?;
+        let (operation, transport) = self.authored_operation_keys(message, &own)?;
         let db = self.account_db()?;
         db.write_transaction(|| {
             self.ensure_authored_direct_context(message, &own)?;
@@ -439,9 +421,7 @@ impl RamfluxClient {
                 })?;
             }
             let own = self.owned_device_identity()?;
-            if identity.group_id.is_none() {
-                self.ensure_authored_direct_context(message, &own)?;
-            }
+            self.ensure_authored_direct_context(message, &own)?;
             db.store_message_content(&message.conversation_id, &message.message_id, exact)?;
             for (prefix, value) in [
                 ("routed/generated-order/", identity.hlc),

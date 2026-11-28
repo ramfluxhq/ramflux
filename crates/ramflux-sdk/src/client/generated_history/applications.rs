@@ -37,13 +37,7 @@ impl RamfluxClient {
                 })),
             }
             .encode_to_vec();
-            self.stage_application_history(
-                target,
-                OwnPayloadKind::Task,
-                &conversation,
-                None,
-                &bytes,
-            )?;
+            self.stage_application_history(target, OwnPayloadKind::Task, &conversation, &bytes)?;
         }
         for packet in packets {
             let packet = packet.to_generated()?;
@@ -51,7 +45,6 @@ impl RamfluxClient {
                 .context
                 .as_ref()
                 .ok_or_else(|| SdkError::InboundRejected("Task history context missing".into()))?;
-            let group = context.group.as_ref().map(|group| group.group_id.as_str());
             let bytes = g::Task {
                 payload: Some(g::task::Payload::OwnHistory(g::TaskHistoryExport {
                     packets: vec![packet.clone()],
@@ -63,7 +56,6 @@ impl RamfluxClient {
                 target,
                 OwnPayloadKind::Task,
                 &context.conversation_id,
-                group,
                 &bytes,
             )?;
         }
@@ -124,7 +116,7 @@ impl RamfluxClient {
         }
         let bytes = g::Surface { payload: Some(g::surface::Payload::OwnHistory(page.clone())) }
             .encode_to_vec();
-        self.stage_application_history(target, OwnPayloadKind::Surface, conversation, None, &bytes)
+        self.stage_application_history(target, OwnPayloadKind::Surface, conversation, &bytes)
     }
 
     fn stage_application_history(
@@ -132,7 +124,6 @@ impl RamfluxClient {
         target: &ramflux_crypto::RootQualifiedDeviceRef,
         kind: OwnPayloadKind,
         conversation: &str,
-        group: Option<&str>,
         bytes: &[u8],
     ) -> Result<(), SdkError> {
         let id = ramflux_protocol::hash_base64url(
@@ -155,7 +146,6 @@ impl RamfluxClient {
                     id: &id,
                     created_at: crate::time::now_unix_timestamp(),
                     conversation,
-                    group,
                     body: bytes,
                 },
                 target,

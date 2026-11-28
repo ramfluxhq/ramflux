@@ -27,16 +27,16 @@ fn protojson_integer_presence_unicode_conformance() -> Result<(), Box<dyn std::e
         Message { text: "é e\u{301} 👩🏽‍💻 中文".into(), ..Default::default() };
     assert_eq!(from_protojson::<Message>(&serde_json::to_string(&original)?)?, original);
     assert_eq!(Message::decode(original.encode_to_vec().as_slice())?, original);
-    let absent = EventIdentity::default();
+    let absent = MediaRef::default();
     let present =
-        EventIdentity { group_id: Some(String::new()), group_epoch: Some(0), ..Default::default() };
+        MediaRef { file_name: Some(String::new()), duration_ms: Some(0), ..Default::default() };
     assert_eq!(serde_json::to_string(&absent)?, "{}");
-    assert_eq!(serde_json::to_string(&present)?, r#"{"groupId":"","groupEpoch":"0"}"#);
-    assert_eq!(from_protojson::<EventIdentity>(&serde_json::to_string(&present)?)?, present);
+    assert_eq!(serde_json::to_string(&present)?, r#"{"fileName":"","durationMs":"0"}"#);
+    assert_eq!(from_protojson::<MediaRef>(&serde_json::to_string(&present)?)?, present);
     let inner = Inner { body: vec![0, 255, 254], ..Default::default() };
     assert_eq!(serde_json::to_string(&inner)?, r#"{"body":"AP/+"}"#);
     assert_eq!(from_protojson::<Inner>(r#"{"body":"AP_-"}"#)?, inner);
-    assert_eq!(from_protojson::<EventIdentity>(r#"{"groupEpoch":null}"#)?, absent);
+    assert_eq!(from_protojson::<MediaRef>(r#"{"durationMs":null}"#)?, absent);
     assert_eq!(
         from_protojson::<Entity>(r#"{"kind":"ENTITY_BOLD"}"#)?.kind,
         EntityKind::EntityBold as i32
@@ -50,15 +50,15 @@ fn protojson_integer_presence_unicode_conformance() -> Result<(), Box<dyn std::e
     let unknown = Entity { kind: 9876, ..Default::default() };
     assert_eq!(serde_json::to_string(&unknown)?, r#"{"kind":9876}"#);
     assert_eq!(from_protojson::<Entity>(r#"{"kind":9876}"#)?, unknown);
-    assert_eq!(from_protojson::<EventIdentity>(r#"{"group_epoch":"7"}"#)?.group_epoch, Some(7));
+    assert_eq!(from_protojson::<MediaRef>(r#"{"duration_ms":"7"}"#)?.duration_ms, Some(7));
     for bad in [
-        r#"{"groupEpoch":"1","group_epoch":"2"}"#,
-        r#"{"groupEpoch":null,"group_epoch":"2"}"#,
-        r#"{"groupEpoch":null,"groupEpoch":null}"#,
+        r#"{"durationMs":"1","duration_ms":"2"}"#,
+        r#"{"durationMs":null,"duration_ms":"2"}"#,
+        r#"{"durationMs":null,"durationMs":null}"#,
         r#"{"unknown":1}"#,
-        r#"{"groupEpoch":"18446744073709551616"}"#,
+        r#"{"durationMs":"18446744073709551616"}"#,
     ] {
-        assert!(from_protojson::<EventIdentity>(bad).is_err(), "accepted {bad}");
+        assert!(from_protojson::<MediaRef>(bad).is_err(), "accepted {bad}");
     }
     assert!(from_protojson::<MessageRequest>(r#"{"send":{},"edit":{}}"#).is_err());
     Ok(())
@@ -98,7 +98,7 @@ fn canonical_protobuf_binary_vectors_round_trip() -> Result<(), Box<dyn std::err
         Ok(())
     }
     identity::<Inner>(&[0x08, 1, 0x10, 1, 0x22, 3, 0x0a, 1, b'x'])?;
-    identity::<EventIdentity>(&[0x32, 0, 0x38, 0])?; // explicit optional empty/zero
+    identity::<MediaRef>(&[0x32, 0, 0x58, 0])?; // explicit optional empty/zero
     identity::<Message>(&[0x0a, 7, b'A', 0xf0, 0x9f, 0x98, 0x80, 0xc3, 0xa9])?;
     identity::<SurfaceExportMetadata>(&[
         0x1a, 5, 0x0a, 1, b'a', 0x10, 1, 0x1a, 5, 0x0a, 1, b'b', 0x10, 2,

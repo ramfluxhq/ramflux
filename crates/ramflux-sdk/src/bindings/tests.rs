@@ -208,7 +208,6 @@ fn assert_updates_and_optional_presence() -> TestResult {
             targets: vec![named_ref()],
             scope: DeleteScope::Everyone as i32,
             tombstone_id: b"t".to_vec(),
-            native_group_authorization: Vec::new(),
         })),
     };
     let decoded = uniffi::round_trip_update(&tombstone)?;

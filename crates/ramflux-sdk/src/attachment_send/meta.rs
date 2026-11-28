@@ -32,7 +32,6 @@ pub(crate) enum Phase {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Recipient {
     Dm { peer: String },
-    Group { group_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

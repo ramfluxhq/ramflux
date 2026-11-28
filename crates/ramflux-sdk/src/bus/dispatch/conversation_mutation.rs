@@ -374,12 +374,6 @@ fn target(client: &RamfluxClient, intent: &Intent) -> Result<Target, SdkError> {
     let stored = db
         .message_content(&intent.message_id)?
         .ok_or_else(|| refused(Code::TargetNotFound, "target content unavailable"))?;
-    if original.group_id.is_some() {
-        return Err(refused(
-            Code::NotAuthorized,
-            "group conversations are unavailable until the MLS group track",
-        ));
-    }
     Ok(Target {
         reference: g::MessageRef {
             id: original.id,
@@ -447,7 +441,6 @@ fn content(
                 targets: vec![target.clone()],
                 scope: scope as i32,
                 tombstone_id: vec![1; 32],
-                native_group_authorization: Vec::new(),
             })
         }
         _ => return Err(refused(Code::InvalidArgument, "unsupported conversation operation")),

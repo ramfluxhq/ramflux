@@ -75,7 +75,6 @@ pub struct MessageView {
     pub hlc_ms: u64,
     /// 16-bit logical counter of the hybrid logical clock.
     pub hlc_logical: u64,
-    pub group_id: Option<String>,
     /// Durable sequence of this row's last change; the change cursor.
     pub journal_sequence: u64,
     pub is_own: bool,
@@ -467,7 +466,6 @@ impl RamfluxClient {
             device_sequence: PaddedSequence(identity.device_sequence),
             hlc_ms: identity.hlc >> 16,
             hlc_logical: identity.hlc & 0xffff,
-            group_id: identity.group_id,
             journal_sequence: update.journal_sequence,
             is_own: message.is_own,
             state: "tombstone",

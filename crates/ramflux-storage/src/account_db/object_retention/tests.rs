@@ -266,9 +266,9 @@ fn attachment_erasure_canary_covers_payload_legacy_tables_archives_journal_and_w
     db.connection.execute_batch("CREATE TABLE backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); CREATE TABLE backup_archived_local_event(source TEXT NOT NULL,event_id TEXT NOT NULL,event_body BLOB NOT NULL,PRIMARY KEY(source,event_id));")?;
     db.connection.call(|db| super::super::message_footprint::install(db))?;
     let secret = b"private-canary";
-    db.connection.execute("INSERT INTO object_manifest VALUES('wire',CAST('manifest' AS BLOB),?1,NULL,?1,?1,NULL,?1,1,14,NULL,1)", params![secret])?;
+    db.connection.execute("INSERT INTO object_manifest VALUES('wire',CAST('manifest' AS BLOB),?1,NULL,?1,?1,?1,1,14,NULL,1)", params![secret])?;
     db.connection.execute(
-        "INSERT INTO object_key_slot VALUES('slot','wire','device',?1,NULL,?2,'aead')",
+        "INSERT INTO object_key_slot VALUES('slot','wire','device',?1,?2,'aead')",
         params![secret, [7_u8; 32].as_slice()],
     )?;
     db.connection.execute("INSERT INTO object_chunk VALUES('chunk','wire',0,?1,NULL,14,'private-canary','complete',1)",params![secret])?;

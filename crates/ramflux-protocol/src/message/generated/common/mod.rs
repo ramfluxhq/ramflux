@@ -47,9 +47,6 @@ pub use layer_declaration_types::*;
 #[path = "local_bus_federation_route.rs"]
 mod local_bus_federation_route_types;
 pub use local_bus_federation_route_types::*;
-#[path = "local_bus_group_member_route.rs"]
-mod local_bus_group_member_route_types;
-pub use local_bus_group_member_route_types::*;
 #[path = "local_mcp_approval_record.rs"]
 mod local_mcp_approval_record_types;
 pub use local_mcp_approval_record_types::*;
@@ -119,24 +116,6 @@ pub use native_custody_manifest_types::*;
 #[path = "native_device_manifest.rs"]
 mod native_device_manifest_types;
 pub use native_device_manifest_types::*;
-#[path = "native_group_actor.rs"]
-mod native_group_actor_types;
-pub use native_group_actor_types::*;
-#[path = "native_group_change_request.rs"]
-mod native_group_change_request_types;
-pub use native_group_change_request_types::*;
-#[path = "native_group_change_result.rs"]
-mod native_group_change_result_types;
-pub use native_group_change_result_types::*;
-#[path = "native_group_event.rs"]
-mod native_group_event_types;
-pub use native_group_event_types::*;
-#[path = "native_group_snapshot.rs"]
-mod native_group_snapshot_types;
-pub use native_group_snapshot_types::*;
-#[path = "native_group_transfer_acceptance.rs"]
-mod native_group_transfer_acceptance_types;
-pub use native_group_transfer_acceptance_types::*;
 #[path = "native_home_authorization.rs"]
 mod native_home_authorization_types;
 pub use native_home_authorization_types::*;
@@ -146,9 +125,6 @@ pub use native_prekey_bundle_types::*;
 #[path = "native_signed_device_set.rs"]
 mod native_signed_device_set_types;
 pub use native_signed_device_set_types::*;
-#[path = "original_group_binding.rs"]
-mod original_group_binding_types;
-pub use original_group_binding_types::*;
 #[path = "padded_inner.rs"]
 mod padded_inner_types;
 pub use padded_inner_types::*;
@@ -191,15 +167,6 @@ pub use risk_level_low_types::*;
 #[path = "risk_level_medium.rs"]
 mod risk_level_medium_types;
 pub use risk_level_medium_types::*;
-#[path = "sdk_own_device_group_member_pin.rs"]
-mod sdk_own_device_group_member_pin_types;
-pub use sdk_own_device_group_member_pin_types::*;
-#[path = "sdk_own_device_group_member_snapshot.rs"]
-mod sdk_own_device_group_member_snapshot_types;
-pub use sdk_own_device_group_member_snapshot_types::*;
-#[path = "sdk_own_device_group_snapshot.rs"]
-mod sdk_own_device_group_snapshot_types;
-pub use sdk_own_device_group_snapshot_types::*;
 #[path = "signature_alg.rs"]
 mod signature_alg_types;
 pub use signature_alg_types::*;

@@ -345,9 +345,6 @@ pub(crate) fn unix_now() -> Result<u64, SdkError> {
 fn recipient(body: &BeginBody) -> Result<Recipient, Refusal> {
     match body.kind.as_str() {
         "dm" if !body.peer.is_empty() => Ok(Recipient::Dm { peer: body.peer.clone() }),
-        "group" if !body.group_id.is_empty() => {
-            Ok(Recipient::Group { group_id: body.group_id.clone() })
-        }
         _ => Err(Refusal::new(CODE_LAYOUT_INVALID)),
     }
 }
@@ -403,8 +400,6 @@ struct BeginBody {
     kind: String,
     #[serde(default)]
     peer: String,
-    #[serde(default)]
-    group_id: String,
     file_name: String,
     mime: String,
     #[serde(default)]

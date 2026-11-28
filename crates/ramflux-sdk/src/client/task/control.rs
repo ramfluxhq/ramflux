@@ -133,7 +133,6 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
         conversation: &str,
-        group: Option<&str>,
         body: &[u8],
     ) -> Result<bool, SdkError> {
         let Some(control) = Control::decode(body)? else { return Ok(false) };
@@ -141,13 +140,9 @@ impl RamfluxClient {
             return Err(invalid("task control byte budget exceeded"));
         }
         self.require_task_member(conversation, &entry.envelope.source_principal_id)?;
-        let thread = self
-            .account_db()?
+        self.account_db()?
             .client_record("conversation", conversation)?
             .ok_or_else(|| invalid("task control conversation missing"))?;
-        if thread["group_id"].as_str() != group {
-            return Err(invalid("task control group context mismatch"));
-        }
         self.account_db()?.write_transaction(|| {
             match control {
                 Control::Intent { carrier_base64 } => {

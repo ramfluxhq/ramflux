@@ -45,7 +45,7 @@ async fn roundtrip_body(text: &[u8], probe_wrapper: bool) -> TestResult {
         ttl: 300,
     };
     let content = g::Message { text: std::str::from_utf8(text)?.into(), ..Default::default() };
-    let prepared = source.client.prepare_authored_message(&mut message, None, &content)?;
+    let prepared = source.client.prepare_authored_message(&mut message, &content)?;
     let material = source.material_for(&target)?;
     let envelope = source.client.account_db()?.write_transaction(|| {
         let sealed = source.client.seal_generated_routed_prepared(

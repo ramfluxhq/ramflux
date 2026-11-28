@@ -182,7 +182,7 @@ impl RamfluxClient {
     ) -> Result<(String, GatewayInboxEntry), SdkError> {
         message.ttl = self.content_ttl()?;
         self.resolve_message_recipient(engine.config(), &mut message).await?;
-        let prepared = self.prepare_authored_content(&mut message, None, content)?;
+        let prepared = self.prepare_authored_content(&mut message, content)?;
         let id = message.message_id.clone();
         let entry = self
             .send_plaintext_direct_message_via_gateway_inner(

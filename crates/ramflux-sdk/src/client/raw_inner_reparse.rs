@@ -126,18 +126,7 @@ impl RamfluxClient {
             return Ok(false);
         }
         match prepared.content.value.as_ref() {
-            Some(g::content::Value::Message(message)) if message.sealed_group.is_none() => (),
-            Some(g::content::Value::Message(_)) if prepared.identity.group_id.is_some() => {
-                let Some((_, origin)) = prepared.origin.as_ref() else {
-                    return Ok(false);
-                };
-                let nested = &origin.evidence.group_plaintext;
-                if validation::scan_message("Message", nested, g::registry::COMPILED_LAYER)
-                    != Ok(ScanOutcome::Supported)
-                {
-                    return Ok(false);
-                }
-            }
+            Some(g::content::Value::Message(_)) => (),
             Some(g::content::Value::Delete(delete)) if prepared.origin.is_some() => {
                 // A failed peer authorization rolls back only this copy's effects,
                 // preserving its attempted marker and progress for other sources.
@@ -336,9 +325,6 @@ impl RamfluxClient {
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         identity: &g::EventIdentity,
     ) -> Result<bool, SdkError> {
-        if identity.group_id.is_some() {
-            return Ok(false);
-        }
         self.raw_reparse_scope_allowed(source, &identity.conversation_id)
     }
 

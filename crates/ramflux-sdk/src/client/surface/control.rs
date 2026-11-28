@@ -166,27 +166,25 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
         conversation: &str,
-        group: Option<&str>,
         body: &[u8],
     ) -> Result<bool, SdkError> {
         if SurfaceControl::decode(body)?.is_none() {
             return Ok(false);
         }
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-        self.receive_surface_control_from(entry, &source, conversation, group, body)
+        self.receive_surface_control_from(entry, &source, conversation, body)
     }
     pub(in crate::client) fn receive_surface_control_from(
         &self,
         entry: &GatewayInboxEntry,
         source_identity: &ramflux_crypto::RootQualifiedDeviceRef,
         conversation: &str,
-        group: Option<&str>,
         body: &[u8],
     ) -> Result<bool, SdkError> {
         self.receive_surface_control_scoped(
             entry,
             source_identity,
-            (conversation, group, None),
+            (conversation, None),
             body,
             None,
         )
@@ -195,11 +193,11 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
         source_identity: &ramflux_crypto::RootQualifiedDeviceRef,
-        scope: (&str, Option<&str>, Option<&str>),
+        scope: (&str, Option<&str>),
         body: &[u8],
         expires_at: Option<i64>,
     ) -> Result<bool, SdkError> {
-        let (conversation, group, logical_message) = scope;
+        let (conversation, logical_message) = scope;
         let Some(control) = SurfaceControl::decode(body)? else {
             return Ok(false);
         };
@@ -246,16 +244,16 @@ impl RamfluxClient {
         self.verify_surface_carrier(&carrier, &signer, &carrier.sender_device_id)?;
         if control.kind == ControlKind::Own {
             if let Some(context) = &control.context {
-                if context.conversation_id != conversation || group.is_some() {
+                if context.conversation_id != conversation {
                     return Err(invalid("own surface routing context mismatch"));
                 }
                 self.import_surface_context(context)?;
             } else {
-                self.require_existing_own_surface_context(conversation, group)?;
+                self.require_existing_own_surface_context(conversation)?;
             }
             self.bootstrap_owned_surface(&carrier)?;
         } else {
-            self.authorize_surface_peer_context(conversation, group, principal)?;
+            self.authorize_surface_peer_context(conversation, principal)?;
         }
         self.project_surface_control(entry, &carrier, &control, logical_message, expires_at)
     }

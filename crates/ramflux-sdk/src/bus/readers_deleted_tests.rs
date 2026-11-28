@@ -37,7 +37,6 @@ async fn list_and_read_project_deleted_peer_and_own_rows_without_private_content
             author: Some(author),
             device_sequence: sequence,
             hlc: sequence << 16,
-            ..Default::default()
         };
         let id = ramflux_protocol::encode_base64url(&identity.id);
         db.send_direct_message("thread", &id, sender, body)?;

@@ -97,7 +97,7 @@ async fn cached_history(fixture: &mut Fixture) -> Case<(GatewayInboxEntry, Strin
             },
         )),
     };
-    let prepared = peer.prepare_authored_content(&mut message, None, &content)?;
+    let prepared = peer.prepare_authored_content(&mut message, &content)?;
     let logical = message.message_id.clone();
     let sealed = peer.seal_generated_routed_prepared(
         &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&peer_config)?,

@@ -169,8 +169,7 @@ impl RamfluxClient {
                 let control = self.live_surface_control_packet(carrier, epoch)?;
                 let bytes = zeroize::Zeroizing::new(control.bytes()?);
                 let message = self.surface_generated_message_id(carrier)?;
-                let thread = self
-                    .account_db()?
+                self.account_db()?
                     .client_record("conversation", &carrier.conversation_id)?
                     .ok_or_else(|| invalid("own surface conversation missing"))?;
                 crate::bus::own_device_copy::stage(
@@ -180,7 +179,6 @@ impl RamfluxClient {
                         id: &message,
                         created_at: crate::prelude::now_unix_timestamp(),
                         conversation: &carrier.conversation_id,
-                        group: thread["group_id"].as_str(),
                         body: &bytes,
                     },
                     Some(("message", &message)),

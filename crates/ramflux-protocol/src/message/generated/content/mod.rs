@@ -11,9 +11,6 @@ pub use delete_scope_types::*;
 #[path = "edit.rs"]
 mod edit_types;
 pub use edit_types::*;
-#[path = "group_sealed_content.rs"]
-mod group_sealed_content_types;
-pub use group_sealed_content_types::*;
 #[path = "message.rs"]
 mod message_types;
 pub use message_types::*;

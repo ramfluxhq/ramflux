@@ -144,7 +144,6 @@ SurfaceControlKind	peer	1	ControlKind::Peer	SurfaceControlKindPeer (empty)
 SurfaceControlKind	own	2	ControlKind::Own	SurfaceControlKindOwn (empty)
 OwnContext	conversation_id	1	OwnContext.conversation_id	string
 OwnContext	participants	2	OwnContext.participants	repeated string
-OwnContext	group	3	OwnContext.group	optional SdkOwnDeviceGroupSnapshot
 OwnContext	friend	4	OwnContext.friend	optional FriendLinkRecord
 TaskCarrier	content_type	1	Carrier.content_type	string
 TaskCarrier	conversation_id	2	Carrier.conversation_id	string
@@ -201,7 +200,6 @@ TaskMembership	members	5	Membership.members	repeated string
 TaskOwnPacket	context	1	TaskOwnPacket.context	OwnContext
 TaskOwnPacket	history	2	TaskOwnPacket.history	TaskHistory
 TaskOwnPacket	manifests	3	TaskOwnPacket.manifests	repeated NativeDeviceManifest
-TaskOwnPacket	pins	4	TaskOwnPacket.pins	repeated SdkOwnDeviceGroupMemberPin
 TaskOwnPacket	base	5	TaskOwnPacket.base	uint64
 TaskOwnPacket	prefix_hash	6	TaskOwnPacket.prefix_hash	string
 TaskApprovalBinding	conversation_id	1	TaskApprovalBinding.conversation_id	string
@@ -240,48 +238,10 @@ LocalMcpApprovalRecord	confirmation_mode	7	LocalMcpApprovalRecord.confirmation_m
 LocalMcpApprovalRecord	expires_at	8	LocalMcpApprovalRecord.expires_at	int64
 LocalMcpApprovalRecord	status	9	LocalMcpApprovalRecord.status	string
 LocalMcpApprovalRecord	details	10	LocalMcpApprovalRecord.details	JsonValue
-GroupStateControl	schema	1	GroupControlPacket.schema	string
-GroupStateControl	body	2	GroupControlPacket.body	GroupControlBody
-GroupControlBody	request	1	GroupControlBody::Request{ request: GroupChangeRequest, federation: Option<LocalBusFederationRoute> }	GroupControlBodyRequest (NativeGroupChangeRequest request = 1;; optional LocalBusFederationRoute federation = 2;)
-GroupControlBody	result	2	GroupControlBody::Result{ result: GroupChangeResult }	GroupControlBodyResult (NativeGroupChangeResult result = 1;)
-GroupControlBody	device_set	3	GroupControlBody::DeviceSet{ group_id: String, actor: GroupStateActor, device_set_epoch: u64 }	GroupControlBodyDeviceSet (string group_id = 1;; NativeGroupActor actor = 2;; uint64 device_set_epoch = 3;)
-GroupControlBody	transfer	4	GroupControlBody::Transfer{ control: Box<super::TransferControl> }	GroupControlBodyTransfer (TransferControl control = 1;)
-TransferDevice	root	1	TransferDevice.root	string
-TransferDevice	device	2	TransferDevice.device	string
-TransferProbe	id	1	TransferProbe.id	string
-TransferProbe	actor	2	TransferProbe.actor	NativeGroupActor
-TransferProbe	creator	3	TransferProbe.creator	NativeGroupActor
-TransferProbe	base	4	TransferProbe.base	NativeGroupSnapshot
-TransferProbe	required	5	TransferProbe.required	repeated TransferDevice
-TransferProbe	issued_at	6	TransferProbe.issued_at	int64
-TransferProbe	expires_at	7	TransferProbe.expires_at	int64
-TransferHead	proposal	1	TransferHead.proposal	string
-TransferHead	actor	2	TransferHead.actor	NativeGroupActor
-TransferHead	requested_hash	3	TransferHead.requested_hash	string
-TransferHead	head	4	TransferHead.head	NativeGroupSnapshot
-TransferHead	acceptance	5	TransferHead.acceptance	optional NativeGroupTransferAcceptance
-TransferHead	requires_sync	6	TransferHead.requires_sync	bool
-TransferHead	target	7	TransferHead.target	TransferDevice
-TransferHead	additional_targets	8	TransferHead.additional_targets	repeated TransferDevice
-TransferHead	cancelled	9	TransferHead.cancelled	bool
-TransferHead	cancel_ack	10	TransferHead.cancel_ack	bool
-TransferHead	issued_at	11	TransferHead.issued_at	int64
-TransferHead	expires_at	12	TransferHead.expires_at	int64
-TransferBody	probe	1	TransferBody::Probe{ probe: Box<TransferProbe> }	TransferBodyProbe (TransferProbe probe = 1;)
-TransferBody	head	2	TransferBody::Head{ reply: Box<TransferHead> }	TransferBodyHead (TransferHead reply = 1;)
-TransferControl	body	1	TransferControl.body	TransferBody
-TransferControl	signature	2	TransferControl.signature	string
 OwnContactSync	manifest	1	Contact.manifest	NativeDeviceManifest
 OwnContactSync	link	2	Contact.link	FriendLinkRecord
 OwnContactTombstone	link	1	Tombstone.link	FriendLinkRecord
 OwnContactTombstone	decided_at	2	Tombstone.decided_at	optional int64
-OwnGroupConsent	schema	1	Consent.schema	string
-OwnGroupConsent	actor	2	Consent.actor	NativeGroupActor
-OwnGroupConsent	snapshot	3	Consent.snapshot	NativeGroupSnapshot
-OwnGroupConsent	accepted	4	Consent.accepted	bool
-OwnGroupConsent	issued_at	5	Consent.issued_at	int64
-OwnGroupConsent	expires_at	6	Consent.expires_at	int64
-OwnGroupConsent	signature	7	Consent.signature	string
 SurfaceResyncRequest	kind	1	ResyncRequest.kind	string
 SurfaceResyncRequest	conversation_id	2	ResyncRequest.conversation_id	string
 SurfaceResyncRequest	surface_ref	3	ResyncRequest.surface_ref	string
@@ -319,42 +279,6 @@ GuardianAccept	guardian_device_public_key_base64url	9	SdkGuardianAcceptMessage.g
 GuardianAccept	recovery_quorum_id	10	SdkGuardianAcceptMessage.recovery_quorum_id	string
 GuardianAccept	accepted_at	11	SdkGuardianAcceptMessage.accepted_at	int64
 GuardianAccept	signed	12	SdkGuardianAcceptMessage.signed	SignedFields
-SdkOwnDeviceGroupSnapshot	shared_state	1	SdkOwnDeviceGroupSnapshot.shared_state	optional NativeGroupSnapshot
-SdkOwnDeviceGroupSnapshot	group_id	2	SdkOwnDeviceGroupSnapshot.group_id	string
-SdkOwnDeviceGroupSnapshot	group_epoch	3	SdkOwnDeviceGroupSnapshot.group_epoch	uint64
-SdkOwnDeviceGroupSnapshot	max_members	4	SdkOwnDeviceGroupSnapshot.max_members	uint32
-SdkOwnDeviceGroupSnapshot	new_member_history	5	SdkOwnDeviceGroupSnapshot.new_member_history	string
-SdkOwnDeviceGroupSnapshot	local_role	6	SdkOwnDeviceGroupSnapshot.local_role	string
-SdkOwnDeviceGroupSnapshot	local_joined_epoch	7	SdkOwnDeviceGroupSnapshot.local_joined_epoch	uint64
-SdkOwnDeviceGroupSnapshot	members	8	SdkOwnDeviceGroupSnapshot.members	repeated SdkOwnDeviceGroupMemberSnapshot
-SdkOwnDeviceGroupSnapshot	routes	9	SdkOwnDeviceGroupSnapshot.routes	repeated LocalBusGroupMemberRoute
-SdkOwnDeviceGroupMemberPin	group_id	1	SdkOwnDeviceGroupMemberPin.group_id	string
-SdkOwnDeviceGroupMemberPin	device_id	2	SdkOwnDeviceGroupMemberPin.device_id	string
-SdkOwnDeviceGroupMemberPin	signing_public_key	3	SdkOwnDeviceGroupMemberPin.signing_public_key	string
-SdkOwnDeviceGroupMemberPin	principal_id	4	SdkOwnDeviceGroupMemberPin.principal_id	optional string
-SdkOwnDeviceGroupMemberPin	principal_commitment	5	SdkOwnDeviceGroupMemberPin.principal_commitment	optional string
-SdkOwnDeviceGroupMemberSnapshot	member_id	1	SdkOwnDeviceGroupMemberSnapshot.member_id	string
-SdkOwnDeviceGroupMemberSnapshot	role	2	SdkOwnDeviceGroupMemberSnapshot.role	string
-SdkOwnDeviceGroupMemberSnapshot	joined_epoch	3	SdkOwnDeviceGroupMemberSnapshot.joined_epoch	uint64
-LocalBusGroupMemberRoute	member_id	1	LocalBusGroupMemberRoute.member_id	string
-LocalBusGroupMemberRoute	member_principal_commitment	2	LocalBusGroupMemberRoute.member_principal_commitment	optional string
-LocalBusGroupMemberRoute	device_signing_public_key	3	LocalBusGroupMemberRoute.device_signing_public_key	optional string
-LocalBusGroupMemberRoute	target_delivery_id	4	LocalBusGroupMemberRoute.target_delivery_id	optional string
-LocalBusGroupMemberRoute	federation	5	LocalBusGroupMemberRoute.federation	optional LocalBusFederationRoute
-GroupKeyDistribution	schema	1	SdkGroupSenderKeyDistribution.schema	string
-GroupKeyDistribution	version	2	SdkGroupSenderKeyDistribution.version	uint32
-GroupKeyDistribution	group_id	3	SdkGroupSenderKeyDistribution.group_id	string
-GroupKeyDistribution	sender_id	4	SdkGroupSenderKeyDistribution.sender_id	string
-GroupKeyDistribution	group_key_epoch	5	SdkGroupSenderKeyDistribution.group_key_epoch	uint64
-GroupKeyDistribution	group_state_hash	6	SdkGroupSenderKeyDistribution.group_state_hash	optional string
-GroupKeyDistribution	sender_key_seed	7	SdkGroupSenderKeyDistribution.sender_key_seed	bytes
-GroupKeyDistribution	sender_key_signature	8	SdkGroupSenderKeyDistribution.sender_key_signature	optional string
-GroupKeyDistribution	sender_device_signing_public_key	9	SdkGroupSenderKeyDistribution.sender_device_signing_public_key	optional string
-GroupKeyControl	schema	1	SdkGroupSenderKeyDistributionEnvelope.schema	string
-GroupKeyControl	version	2	SdkGroupSenderKeyDistributionEnvelope.version	uint32
-GroupKeyControl	membership_event	3	SdkGroupSenderKeyDistributionEnvelope.membership_event_base64	NativeGroupEvent
-GroupKeyControl	actor_manifest_url	4	SdkGroupSenderKeyDistributionEnvelope.actor_manifest_url	optional string
-GroupKeyControl	distribution	5	SdkGroupSenderKeyDistributionEnvelope.distribution_base64	GroupKeyDistribution
 SurfaceExportMetadata	truncated	1	SurfaceExportMetadata.truncated	bool
 SurfaceExportMetadata	next_before	2	SurfaceExportMetadata.next_before	optional int64
 SurfaceExportMetadata	skipped	3	SurfaceExportMetadata.skipped	map<string, uint32>
@@ -427,9 +351,6 @@ OwnSentMessage	ciphertext_digest	5	SentMessage.ciphertext_hash	optional bytes
 OwnSentMessage	context	6	SentMessage.context	OwnContext
 OwnSentMessage	authored_at	7	SentMessage.authored_at	optional int64
 OwnSentMessage	exact_inner	8	SentMessage.body_base64	bytes
-GroupControlBody	snapshot	5	SharedGroupPacket	GroupControlBodySnapshot
-GroupControlBodySnapshot	snapshot	1	SharedGroupPacket.snapshot_base64	NativeGroupSnapshot
-GroupControlBodySnapshot	distribution	2	SharedGroupPacket.distribution_base64	optional GroupKeyDistribution
 CallControl	call_ref	11	CallControl.call_ref	optional string
 CallControl	call_start	12	CallControl.call_start	optional bytes
 SurfaceEvent	schema	1	a2ui::SurfaceEvent.schema	string

@@ -104,15 +104,14 @@ impl AccountDb {
             }
             self.connection.execute(
                 "INSERT INTO object_index (
-                object_id, chunk_manifest_hash, object_created_group_key_epoch, object_state,
+                object_id, chunk_manifest_hash, object_state,
                 total_cipher_size, chunk_count, created_at, updated_at, manifest_hash, nonce,
                 ciphertext, plaintext_hash, tombstoned, backup_excluded, object_content_key,
                 object_body
              ) VALUES (
-                ?1, ?2, NULL, ?3, ?4, 1, ?5, ?5, ?2, ?6, ?7, ?8, ?9, ?10, ?11, ?12
+                ?1, ?2, ?3, ?4, 1, ?5, ?5, ?2, ?6, ?7, ?8, ?9, ?10, ?11, ?12
              ) ON CONFLICT(object_id) DO UPDATE SET
                 chunk_manifest_hash = excluded.chunk_manifest_hash,
-                object_created_group_key_epoch = excluded.object_created_group_key_epoch,
                 object_state = excluded.object_state,
                 total_cipher_size = excluded.total_cipher_size,
                 chunk_count = excluded.chunk_count,

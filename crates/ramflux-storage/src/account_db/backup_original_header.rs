@@ -92,25 +92,18 @@ fn verified_preimage(target: &str, bytes: &[u8]) -> Result<Vec<u8>, h::EvidenceE
         &certificate.branch_signing_public_key,
     )
     .map_err(|_| bad)?;
-    refuse_group_evidence(&identity)?;
     let header = h::Header {
         layer: evidence.layer,
         kind: 1,
         exact_identity: &original.exact_identity,
         issued_at: issued,
         expires_at: expires,
-        group: evidence.group_binding.as_ref(),
     };
     let ext = ramflux_protocol::Ext {
         ext: serde_json::from_value(outer["ext"].clone()).map_err(|_| bad)?,
     };
     h::verify_extension(&ext, 1, Some(&header))?;
     h::transcript(&header)
-}
-
-/// Old shared-group evidence is refused: MLS group history is never carried by this header.
-fn refuse_group_evidence(identity: &g::EventIdentity) -> Result<(), h::EvidenceError> {
-    if identity.group_id.is_none() { Ok(()) } else { mismatch() }
 }
 
 fn headers(

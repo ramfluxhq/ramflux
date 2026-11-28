@@ -321,14 +321,6 @@ pub(super) const RULE_81: FamilyRule = table_rule!(
             CodecRule::Scalar { cell_type: CellType::Bytes }
         ),
         (
-            "object_created_group_key_epoch",
-            I64,
-            true,
-            Exclude,
-            PreferLocal,
-            CodecRule::Scalar { cell_type: CellType::I64 }
-        ),
-        (
             "object_state",
             Utf8,
             false,
@@ -458,14 +450,6 @@ pub(super) const RULE_82: FamilyRule = table_rule!(
             Transfer,
             Immutable,
             CodecRule::Scalar { cell_type: CellType::Bytes }
-        ),
-        (
-            "object_created_group_key_epoch",
-            I64,
-            true,
-            Transfer,
-            Immutable,
-            CodecRule::Scalar { cell_type: CellType::I64 }
         ),
         (
             "object_state",
@@ -608,14 +592,6 @@ pub(super) const RULE_83: FamilyRule = table_rule!(
             CodecRule::Scalar { cell_type: CellType::Bytes }
         ),
         (
-            "group_key_epoch",
-            I64,
-            true,
-            Transfer,
-            Immutable,
-            CodecRule::Scalar { cell_type: CellType::I64 }
-        ),
-        (
             "wrapped_key",
             Bytes,
             false,
@@ -735,14 +711,6 @@ pub(super) const RULE_85: FamilyRule = table_rule!(
             Transfer,
             Immutable,
             CodecRule::Scalar { cell_type: CellType::Bytes }
-        ),
-        (
-            "object_created_group_key_epoch",
-            I64,
-            true,
-            Transfer,
-            Immutable,
-            CodecRule::Scalar { cell_type: CellType::I64 }
         ),
         (
             "chunk_manifest_hash",

@@ -49,7 +49,7 @@ pub(crate) async fn send(
     };
     Box::pin(prepare_direct_target(account, carrier, &thread, &mut authored)).await?;
     let prepared =
-        account.client.prepare_authored_content(&mut authored, None, &surface_content(carrier)?)?;
+        account.client.prepare_authored_content(&mut authored, &surface_content(carrier)?)?;
     let outcome = account.client.account_db()?.surface_transaction(|| {
         let outcome =
             account.client.stage_surface_outgoing_as(carrier, None, &authored.message_id)?;
@@ -194,14 +194,8 @@ pub(super) async fn submit_pair_control(
     g::validation::scan_message("Surface", body, g::registry::COMPILED_LAYER)
         .map_err(|_| invalid("invalid Surface control"))?;
     let surface = g::Surface::decode(body).map_err(|_| invalid("invalid Surface control"))?;
-    let requested_group = match surface.payload.as_ref() {
-        Some(g::surface::Payload::ResyncRequest(request)) => request.group.clone(),
-        _ => None,
-    };
-    let group = requested_group.as_deref();
     let prepared = client.prepare_authored_content(
         &mut message,
-        group,
         &g::Content { value: Some(g::content::Value::Surface(surface)) },
     )?;
     let route = crate::client::routed::Route::from_inner(&prepared.wire)?;

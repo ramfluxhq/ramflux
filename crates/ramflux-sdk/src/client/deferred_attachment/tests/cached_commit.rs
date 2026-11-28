@@ -275,7 +275,6 @@ fn stage_chunks(f: &Fixture) -> Result<(), SdkError> {
         &f.reference.object_id,
         &f.package.object.ciphertext,
         f.reference.chunk_size,
-        None,
     );
     let payload =
         ramflux_sync::chunk_payload(&slot.object_key, &manifest, 0, &f.package.object.ciphertext);
@@ -591,7 +590,6 @@ async fn attachment_valid_grant_completes_remaining_cached_acks()
         &f.reference.object_id,
         &f.package.object.ciphertext,
         16,
-        None,
     );
     f.reference.total_chunks = manifest.total_chunks;
     let db = f.client.account_db()?;

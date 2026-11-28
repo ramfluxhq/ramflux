@@ -80,7 +80,7 @@ async fn exercise() -> TestResult {
     let content = g::Message { text: "content to erase".into(), ..Default::default() };
     let prepared = source
         .client
-        .prepare_authored_message(&mut original, None, &content)
+        .prepare_authored_message(&mut original, &content)
         .map_err(|e| format!("original prepare: {e}"))?;
     let first = seal(&source, &target, &mut original, &prepared.wire)
         .map_err(|e| format!("original seal: {e}"))?;
@@ -95,7 +95,7 @@ async fn exercise() -> TestResult {
     let retry_input = erase.clone();
     let prepared = source
         .client
-        .prepare_authored_content(&mut erase, None, &draft.content)
+        .prepare_authored_content(&mut erase, &draft.content)
         .map_err(|e| format!("Delete prepare: {e}"))?;
     let identity =
         g::Inner::decode(prepared.exact.as_slice())?.identity.ok_or("Delete identity")?;
@@ -120,7 +120,7 @@ async fn exercise() -> TestResult {
         source.client.authored_delete_draft(&conversation, &original.message_id, None)?;
     let mut retry = retry_input;
     retry.envelope_id = "changed-delete-retry-header".into();
-    let retained = source.client.prepare_authored_content(&mut retry, None, &repeated.content)?;
+    let retained = source.client.prepare_authored_content(&mut retry, &repeated.content)?;
     assert_eq!(
         retained.exact, prepared.exact,
         "erasure retry must retain the exact generated Delete identity and tombstone"
@@ -188,10 +188,7 @@ fn refuse_peer_and_selected_tombstone(
     delete.tombstone_id = vec![99; 32];
     let mut request = request(source, target, &original.conversation_id, "selected-tombstone");
     assert!(
-        source
-            .client
-            .prepare_authored_content(&mut request, draft.original.group_id.as_deref(), &invalid)
-            .is_err(),
+        source.client.prepare_authored_content(&mut request, &invalid).is_err(),
         "callers cannot select the tombstone derived from an unallocated Delete event"
     );
     assert_eq!(

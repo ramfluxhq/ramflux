@@ -231,13 +231,13 @@ fn cursor_and_epoch_states_roundtrip() -> Result<(), Box<dyn std::error::Error>>
     );
 
     let root = fixture_root();
-    let group_fixture = fixture_object("group_event")?;
-    let fixture = read_json(&root.join(fixture_json_path(group_fixture)))?;
-    let event: ramflux_protocol::GroupEvent = serde_json::from_value(fixture)?;
+    let conversation_fixture = fixture_object("conversation_event")?;
+    let fixture = read_json(&root.join(fixture_json_path(conversation_fixture)))?;
+    let event: ramflux_protocol::ConversationEvent = serde_json::from_value(fixture)?;
     let key = event_sort_key(&event);
-    assert_eq!(key.lamport_time, 10);
+    assert_eq!(key.lamport_time, 8);
     assert_eq!(key.actor_device_id, "dev_a");
-    assert_eq!(key.event_id, "evt_group_01");
+    assert_eq!(key.event_id, "evt_conv_01");
     Ok(())
 }
 

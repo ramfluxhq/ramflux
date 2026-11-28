@@ -34,7 +34,6 @@ impl RamfluxClient {
             manifest_hash: reference.manifest_hash.clone(),
             chunk_size: reference.chunk_size,
             total_chunks: reference.total_chunks,
-            object_created_group_key_epoch: None,
         };
         let mut session = ObjectSyncSession::new(manifest.clone(), *key);
         for index in 0..manifest.total_chunks {

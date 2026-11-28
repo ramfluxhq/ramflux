@@ -13,8 +13,6 @@ pub struct Delete {
     pub scope: i32,
     #[prost(bytes = "vec", tag = "3")]
     pub tombstone_id: ::prost::alloc::vec::Vec<u8>,
-    #[prost(bytes = "vec", tag = "4")]
-    pub native_group_authorization: ::prost::alloc::vec::Vec<u8>,
 }
 impl serde::Serialize for Delete {
     #[allow(deprecated)]
@@ -33,9 +31,6 @@ impl serde::Serialize for Delete {
         if !self.tombstone_id.is_empty() {
             len += 1;
         }
-        if !self.native_group_authorization.is_empty() {
-            len += 1;
-        }
         let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.Delete", len)?;
         if !self.targets.is_empty() {
             struct_ser.serialize_field("targets", &self.targets)?;
@@ -52,14 +47,6 @@ impl serde::Serialize for Delete {
                 pbjson::private::base64::encode(&self.tombstone_id).as_str(),
             )?;
         }
-        if !self.native_group_authorization.is_empty() {
-            #[allow(clippy::needless_borrow)]
-            #[allow(clippy::needless_borrows_for_generic_args)]
-            struct_ser.serialize_field(
-                "nativeGroupAuthorization",
-                pbjson::private::base64::encode(&self.native_group_authorization).as_str(),
-            )?;
-        }
         struct_ser.end()
     }
 }
@@ -69,20 +56,12 @@ impl<'de> serde::Deserialize<'de> for Delete {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] = &[
-            "targets",
-            "scope",
-            "tombstone_id",
-            "tombstoneId",
-            "native_group_authorization",
-            "nativeGroupAuthorization",
-        ];
+        const FIELDS: &[&str] = &["targets", "scope", "tombstone_id", "tombstoneId"];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             Targets,
             Scope,
             TombstoneId,
-            NativeGroupAuthorization,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -107,9 +86,6 @@ impl<'de> serde::Deserialize<'de> for Delete {
                             "targets" => Ok(GeneratedField::Targets),
                             "scope" => Ok(GeneratedField::Scope),
                             "tombstoneId" | "tombstone_id" => Ok(GeneratedField::TombstoneId),
-                            "nativeGroupAuthorization" | "native_group_authorization" => {
-                                Ok(GeneratedField::NativeGroupAuthorization)
-                            }
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -130,7 +106,6 @@ impl<'de> serde::Deserialize<'de> for Delete {
                 let mut targets__ = None;
                 let mut scope__ = None;
                 let mut tombstone_id__ = None;
-                let mut native_group_authorization__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -163,23 +138,12 @@ impl<'de> serde::Deserialize<'de> for Delete {
                                 map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
                             );
                         }
-                        GeneratedField::NativeGroupAuthorization => {
-                            if native_group_authorization__.is_some() {
-                                return Err(serde::de::Error::duplicate_field(
-                                    "nativeGroupAuthorization",
-                                ));
-                            }
-                            native_group_authorization__ = Some(
-                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
-                            );
-                        }
                     }
                 }
                 Ok(Delete {
                     targets: targets__.unwrap_or_default(),
                     scope: scope__.unwrap_or_default(),
                     tombstone_id: tombstone_id__.unwrap_or_default(),
-                    native_group_authorization: native_group_authorization__.unwrap_or_default(),
                 })
             }
         }

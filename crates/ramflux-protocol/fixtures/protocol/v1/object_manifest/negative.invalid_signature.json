@@ -5,7 +5,6 @@
   "encrypted_metadata": "bWV0YWRhdGE",
   "encrypted_owner_ref": "b3duZXItcmVm",
   "encrypted_relation_ref": "cmVsYXRpb24tcmVm",
-  "object_created_group_key_epoch": 8,
   "object_id": "obj_01",
   "object_key_slots": [],
   "schema": "ramflux.object_manifest.v1",

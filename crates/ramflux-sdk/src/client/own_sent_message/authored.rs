@@ -39,7 +39,6 @@ impl RamfluxClient {
             || author.device_epoch
                 != self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_epoch
             || identity.conversation_id != input.conversation
-            || identity.group_id.as_deref() != input.group
         {
             return Err(invalid("authored capture source or context mismatch"));
         }
@@ -50,12 +49,6 @@ impl RamfluxClient {
                 .ok_or_else(|| invalid("authored Edit target missing"))?
                 .id
         } else {
-            let message = g::Message::decode(scanned.body)
-                .map_err(|_| invalid("authored Message missing"))?;
-            // Group wrappers are never a plaintext capture. The caller captures I before group seal.
-            if message.sealed_group.is_some() {
-                return Ok(());
-            }
             identity.id.clone()
         };
         let mut packet = self.own_sent_packet(input)?;
@@ -63,7 +56,7 @@ impl RamfluxClient {
         packet.ciphertext_hash = None;
         let sent = packet.to_generated()?;
         self.validate_own_context_namespace(&packet.context)?;
-        packet.validate_route(input.envelope, input.conversation, input.group)?;
+        packet.validate_route(input.envelope, input.conversation)?;
         let owner = ramflux_protocol::encode_base64url(&target);
         let db = self.account_db()?;
         let key = format!("{CAPTURE}{owner}");
@@ -152,7 +145,6 @@ impl RamfluxClient {
             message: &message.message_id,
             sender: &message.sender_id,
             original_recipients: &recipients,
-            group: None,
             peer: Some(&peer),
             body: exact,
             ciphertext: &[],

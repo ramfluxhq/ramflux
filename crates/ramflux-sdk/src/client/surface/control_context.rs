@@ -59,19 +59,12 @@ impl RamfluxClient {
     pub(super) fn require_existing_own_surface_context(
         &self,
         conversation: &str,
-        group: Option<&str>,
     ) -> Result<(), SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let thread =
             self.account_db()?.client_record("conversation", conversation)?.ok_or_else(|| {
                 SdkError::InboundPending("own surface context unavailable; resync required".into())
             })?;
-        if thread["group_id"].as_str() != group {
-            return Err(invalid("own surface group context mismatch"));
-        }
-        if group.is_some() {
-            return Err(invalid("own surface group context is unavailable"));
-        }
         if thread["kind"] != "direct"
             || !thread["participants"]
                 .as_array()
@@ -94,14 +87,10 @@ impl RamfluxClient {
     pub(super) fn authorize_surface_peer_context(
         &self,
         conversation: &str,
-        group: Option<&str>,
         principal: &str,
     ) -> Result<(), SdkError> {
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let thread = self.account_db()?.client_record("conversation", conversation)?;
-        if group.is_some() {
-            return Err(SdkError::InboundPending("surface group context unavailable".into()));
-        }
         if self.friend_rejection_reason(principal)?.is_some() {
             return Err(invalid("surface peer is blocked or revoked"));
         }

@@ -51,13 +51,6 @@ impl RamfluxClient {
         match surface.payload.as_ref().ok_or_else(|| invalid("Surface payload missing"))? {
             g::surface::Payload::Delivery(delivery) => {
                 let native = crate::client::surface::SurfaceControl::from_generated(delivery)?;
-                let own_group = if native.kind == crate::client::surface::ControlKind::Own {
-                    self.account_db()?
-                        .client_record("conversation", &routing.conversation_id)?
-                        .and_then(|value| value["group_id"].as_str().map(str::to_owned))
-                } else {
-                    None
-                };
                 self.record_surface_origin(
                     &routing.message_id,
                     entry,
@@ -67,7 +60,7 @@ impl RamfluxClient {
                 if !self.receive_surface_control_scoped(
                     entry,
                     &source,
-                    (&routing.conversation_id, own_group.as_deref(), Some(&routing.message_id)),
+                    (&routing.conversation_id, Some(&routing.message_id)),
                     &native.bytes()?,
                     Some(expires_at),
                 )? {
@@ -134,7 +127,6 @@ impl RamfluxClient {
                 if !self.receive_task_control(
                     entry,
                     &routing.conversation_id,
-                    None,
                     &task.encode_to_vec(),
                 )? {
                     return Err(invalid("Task Control was not admitted"));
@@ -182,7 +174,6 @@ impl RamfluxClient {
                     if !self.receive_task_own(
                         entry,
                         &routing.conversation_id,
-                        None,
                         &item.encode_to_vec(),
                     )? {
                         return Err(invalid("Task OwnHistory was not admitted"));

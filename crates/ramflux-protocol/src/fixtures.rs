@@ -3,7 +3,7 @@
 
 use crate::domain;
 
-pub const FIXTURE_OBJECTS: [FixtureObject; 24] = [
+pub const FIXTURE_OBJECTS: [FixtureObject; 23] = [
     FixtureObject { dir: "envelope", domain: domain::ENVELOPE, signed: true },
     FixtureObject { dir: "signed_request", domain: domain::SIGNED_REQUEST, signed: true },
     FixtureObject { dir: "device_proof", domain: domain::DEVICE_PROOF, signed: true },
@@ -24,7 +24,6 @@ pub const FIXTURE_OBJECTS: [FixtureObject; 24] = [
     FixtureObject { dir: "event_id", domain: domain::EVENT, signed: false },
     FixtureObject { dir: "identity_event", domain: domain::IDENTITY_EVENT, signed: true },
     FixtureObject { dir: "friend_event", domain: domain::FRIEND_EVENT, signed: true },
-    FixtureObject { dir: "group_event", domain: domain::GROUP_EVENT, signed: true },
     FixtureObject { dir: "conversation_event", domain: domain::CONVERSATION_EVENT, signed: true },
     FixtureObject { dir: "message_event", domain: domain::MESSAGE_EVENT, signed: true },
     FixtureObject { dir: "object_manifest", domain: domain::OBJECT_MANIFEST, signed: true },

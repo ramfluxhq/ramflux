@@ -9,7 +9,6 @@ const MAGIC: &[u8; 4] = b"RFH1";
 #[repr(u8)]
 pub enum HeaderKind {
     DmMessage = 0x01,
-    GroupMessage = 0x02,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

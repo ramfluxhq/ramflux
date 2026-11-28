@@ -263,25 +263,6 @@ fn fixture_value(object: FixtureObject) -> Value {
                 "causal_event_id": "evt_friend_prev"
             }
         }),
-        "group_event" => json!({
-            "schema": domain::GROUP_EVENT,
-            "version": 1,
-            "domain": domain::GROUP_EVENT,
-            "event_id": "evt_group_01",
-            "event_type": "group.bot_joined",
-            "actor_principal_id": "id_a",
-            "actor_device_id": "dev_a",
-            "device_counter": 4,
-            "lamport_time": 10,
-            "created_at": 1_760_000_000,
-            "body": {
-                "group_id": "grp_01",
-                "previous_epoch": 7,
-                "new_group_epoch": 8,
-                "bot_identity": "bot_01",
-                "granted_permissions": ["read.group_context"]
-            }
-        }),
         "conversation_event" => json!({
             "schema": domain::CONVERSATION_EVENT,
             "version": 1,
@@ -331,7 +312,6 @@ fn fixture_value(object: FixtureObject) -> Value {
             "encrypted_relation_ref": b64("relation-ref"),
             "encrypted_metadata": b64("metadata"),
             "object_key_slots": [],
-            "object_created_group_key_epoch": 8,
             "chunk_manifest_hash": b64("chunk-manifest-hash"),
             "chunk_count": 2,
             "total_cipher_size": 2048

@@ -282,7 +282,6 @@ fn own_copy(
         context: Some(g::OwnContext {
             conversation_id: conversation.to_owned(),
             participants: vec![own.principal_id.clone(), remote.principal_id.clone()],
-            group: None,
             friend: None,
         }),
         authored_at: Some(now_unix_timestamp()),
@@ -297,7 +296,6 @@ fn own_copy(
                 id: "incoming-sibling-envelope",
                 created_at: now_unix_timestamp(),
                 conversation,
-                group: None,
                 body: &body,
             },
             own.clone(),

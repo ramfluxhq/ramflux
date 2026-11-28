@@ -54,7 +54,6 @@ impl RamfluxClient {
             || ramflux_protocol::encode_base64url(&identity.id) != route.message_id
             || author.account_anchor != source.root_commitment()
             || author.device_id != source.device_id()
-            || identity.group_id.is_some()
         {
             return Err(invalid("held generated message provenance mismatch"));
         }
@@ -77,7 +76,7 @@ impl RamfluxClient {
             }))?;
         }
         let projected = match content.value.ok_or_else(|| invalid("held content missing"))? {
-            g::content::Value::Message(message) if message.sealed_group.is_none() => {
+            g::content::Value::Message(message) => {
                 self.append_plaintext_projection_once(
                     &route.conversation_id,
                     &route.message_id,

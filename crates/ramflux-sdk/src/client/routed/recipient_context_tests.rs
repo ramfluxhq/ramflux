@@ -58,7 +58,6 @@ async fn a_second_account_device_accepts_the_peer_only_after_an_authenticated_co
         };
         let prepared = alice.client.prepare_authored_message(
             &mut message,
-            None,
             &g::Message { text: "hello both devices".into(), ..Default::default() },
         )?;
         let envelope =
@@ -134,7 +133,7 @@ async fn a_peer_cannot_preclaim_a_future_own_copy_row_id()
         preclaim.target_delivery_id = receiver.config.target_delivery_id.clone();
         preclaim.encrypted_body.clear();
         let prepared = peer.client.prepare_authored_message(
-            &mut preclaim, None, &g::Message { text: "peer preclaim attempt".into(), ..Default::default() }
+            &mut preclaim, &g::Message { text: "peer preclaim attempt".into(), ..Default::default() }
         )?;
         assert_ne!(preclaim.message_id, original.message_id,
             "reusing another author's id as an operation token must allocate a different qualified event");

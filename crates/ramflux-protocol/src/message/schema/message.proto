@@ -32,9 +32,7 @@ message EventIdentity {
   QualifiedDevice author = 3;
   uint64 device_sequence = 4;
   uint64 hlc = 5;
-  optional string group_id = 6;
-  optional uint64 group_epoch = 7;
-  reserved 8, 9;
+  reserved 6 to 9;
 }
 message Inner {
   uint32 layer = 1;
@@ -156,34 +154,9 @@ message Message {
   MessageRef reply_to = 3;
   Forward forward = 4;
   repeated MediaRef media = 5;
-  reserved 6 to 15;
-  GroupSealedContent sealed_group = 16;
+  reserved 6 to 16;
   // Private entropy for erased-revision digests; never part of a public update/header.
   bytes erasure_nonce = 17;
-}
-message GroupSealedContent {
-  string group_id = 1;
-  QualifiedDevice author = 2;
-  uint64 key_epoch = 3;
-  bytes group_state_hash = 4;
-  bytes session_id = 5;
-  uint64 counter = 6;
-  bytes nonce = 7;
-  bytes ciphertext = 8;
-  bytes ratchet_public_key = 9;
-  uint64 previous_chain_length = 10;
-  bytes canonical_crypto_header = 11;
-  bytes key_commitment = 12;
-  bytes content_commitment = 13;
-  bytes ciphertext_hash = 14;
-  bytes native_authority_proof = 15;
-  bytes sender_device_hash = 16;
-  bytes recipient_device_hash = 17;
-  uint64 device_epoch = 18;
-  bytes event_id = 19;
-  bytes header_hash = 20;
-  bytes franking_commitment = 21;
-  bytes commitment = 22;
 }
 enum ServiceAction {
   SERVICE_UNSPECIFIED = 0;
@@ -218,7 +191,7 @@ message Delete {
   repeated MessageRef targets = 1;
   DeleteScope scope = 2;
   bytes tombstone_id = 3;
-  bytes native_group_authorization = 4;
+  reserved 4;
 }
 message Reaction {
   MessageRef target = 1;
@@ -246,8 +219,7 @@ enum ControlOperation {
   CONTROL_PAIR_RESET = 1;
   CONTROL_PAIR_RESET_ACK = 2;
   CONTROL_CONTACT = 3;
-  CONTROL_GROUP_STATE = 4;
-  CONTROL_GROUP_KEY = 5;
+  reserved 4, 5, 14;
   CONTROL_OWN_CONTACT = 6;
   CONTROL_OWN_HISTORY = 7;
   CONTROL_HOME_MIGRATION = 8;
@@ -256,7 +228,6 @@ enum ControlOperation {
   CONTROL_A2I = 11;
   CONTROL_OBJECT_REVOKE = 12;
   CONTROL_OWN_CONTACT_TOMBSTONE = 13;
-  CONTROL_OWN_GROUP_CONSENT = 14;
   CONTROL_OWN_MESSAGE_COPY = 15;
   CONTROL_FRIEND = 16;
   CONTROL_AGENT_SYNC = 17;
@@ -265,14 +236,13 @@ enum ControlOperation {
 message Control {
   ControlOperation operation = 1;
   reserved 2 to 15;
+  reserved 19, 20, 29;
   reserved "target", "correlation_id", "native_signed_document", "history", "epoch",
            "subjects", "contact", "group_key", "pair_recovery", "recovery", "own_contact";
   oneof payload {
     PairReset reset = 16;
     PairResetAck reset_ack = 17;
     ContactControl contact_control = 18;
-    GroupStateControl group_state = 19;
-    GroupKeyControl group_key_control = 20;
     OwnContactSync own_contact_sync = 21;
     HistoryPage own_history = 22;
     HomeMigrationControl home_migration = 23;
@@ -281,7 +251,6 @@ message Control {
     A2iControlEvent a2i = 26;
     ObjectRevokeAccess object_revoke = 27;
     OwnContactTombstone own_contact_tombstone = 28;
-    OwnGroupConsent own_group_consent = 29;
     OwnMessageCopy own_message_copy = 30;
     FriendControl friend = 31;
     AgentHostPacket agent_sync = 32;
@@ -516,23 +485,15 @@ message HistoryItem {
 message HistoryOriginalMetadataEvidence {
   bytes canonical_sender_envelope = 1;
   NativeCustodyManifest source_authority = 2;
-  optional NativeGroupSnapshot group_membership = 3;
-  optional OriginalGroupBinding group_binding = 4;
+  reserved 3, 4;
   uint32 layer = 5; // Original Message layer preimage; never inferred from the Edit.
-}
-message OriginalGroupBinding {
-  string group_id = 1;
-  QualifiedDevice author = 2;
-  uint64 key_epoch = 3;
-  bytes group_state_hash = 4;
 }
 message HistoryOriginEvidence {
   bytes canonical_sender_envelope = 1;
   NativeCustodyManifest source_authority = 2;
-  optional NativeGroupSnapshot group_membership = 3;
+  reserved 3;
   bytes report_opening = 4;
-  bytes group_plaintext = 5;
-  bytes group_opening = 6;
+  reserved 5, 6;
 }
 message HistoryPage {
   bytes transfer_id = 1;
@@ -559,13 +520,7 @@ message NativeCustodyManifest { bytes canonical = 1; }
 message NativeSignedDeviceSet { bytes canonical = 1; }
 message NativePrekeyBundle { bytes canonical = 1; }
 message NativeBranchProof { bytes canonical = 1; }
-message NativeGroupActor { bytes canonical = 1; }
-message NativeGroupSnapshot { bytes canonical = 1; }
-message NativeGroupChangeRequest { bytes canonical = 1; }
-message NativeGroupChangeResult { bytes canonical = 1; }
-message NativeGroupTransferAcceptance { bytes canonical = 1; }
 message NativeContactConsent { bytes canonical = 1; }
-message NativeGroupEvent { bytes canonical = 1; }
 message NativeHomeAuthorization { bytes canonical = 1; }
 message CallEndpoint {
   string principal_id = 1;
@@ -945,7 +900,7 @@ message SurfaceControlKind {
 message OwnContext {
   string conversation_id = 1;
   repeated string participants = 2;
-  optional SdkOwnDeviceGroupSnapshot group = 3;
+  reserved 3;
   optional FriendLinkRecord friend = 4;
 }
 message TaskCarrier {
@@ -1055,7 +1010,7 @@ message TaskOwnPacket {
   OwnContext context = 1;
   TaskHistory history = 2;
   repeated NativeDeviceManifest manifests = 3;
-  repeated SdkOwnDeviceGroupMemberPin pins = 4;
+  reserved 4;
   uint64 base = 5;
   string prefix_hash = 6;
 }
@@ -1103,81 +1058,6 @@ message LocalMcpApprovalRecord {
   string status = 9;
   JsonValue details = 10;
 }
-message GroupStateControl {
-  string schema = 1;
-  GroupControlBody body = 2;
-}
-message GroupControlBodyRequest {
-  NativeGroupChangeRequest request = 1;
-  optional LocalBusFederationRoute federation = 2;
-}
-message GroupControlBodyResult {
-  NativeGroupChangeResult result = 1;
-}
-message GroupControlBodyDeviceSet {
-  string group_id = 1;
-  NativeGroupActor actor = 2;
-  uint64 device_set_epoch = 3;
-}
-message GroupControlBodyTransfer {
-  TransferControl control = 1;
-}
-message GroupControlBodySnapshot {
-  NativeGroupSnapshot snapshot = 1;
-  optional GroupKeyDistribution distribution = 2;
-}
-message GroupControlBody {
-  oneof value {
-    GroupControlBodyRequest request = 1;
-    GroupControlBodyResult result = 2;
-    GroupControlBodyDeviceSet device_set = 3;
-    GroupControlBodyTransfer transfer = 4;
-    GroupControlBodySnapshot snapshot = 5;
-  }
-}
-message TransferDevice {
-  string root = 1;
-  string device = 2;
-}
-message TransferProbe {
-  string id = 1;
-  NativeGroupActor actor = 2;
-  NativeGroupActor creator = 3;
-  NativeGroupSnapshot base = 4;
-  repeated TransferDevice required = 5;
-  int64 issued_at = 6;
-  int64 expires_at = 7;
-}
-message TransferHead {
-  string proposal = 1;
-  NativeGroupActor actor = 2;
-  string requested_hash = 3;
-  NativeGroupSnapshot head = 4;
-  optional NativeGroupTransferAcceptance acceptance = 5;
-  bool requires_sync = 6;
-  TransferDevice target = 7;
-  repeated TransferDevice additional_targets = 8;
-  bool cancelled = 9;
-  bool cancel_ack = 10;
-  int64 issued_at = 11;
-  int64 expires_at = 12;
-}
-message TransferBodyProbe {
-  TransferProbe probe = 1;
-}
-message TransferBodyHead {
-  TransferHead reply = 1;
-}
-message TransferBody {
-  oneof value {
-    TransferBodyProbe probe = 1;
-    TransferBodyHead head = 2;
-  }
-}
-message TransferControl {
-  TransferBody body = 1;
-  string signature = 2;
-}
 message OwnContactSync {
   NativeDeviceManifest manifest = 1;
   FriendLinkRecord link = 2;
@@ -1186,15 +1066,6 @@ message OwnContactSync {
 message OwnContactTombstone {
   FriendLinkRecord link = 1;
   optional int64 decided_at = 2;
-}
-message OwnGroupConsent {
-  string schema = 1;
-  NativeGroupActor actor = 2;
-  NativeGroupSnapshot snapshot = 3;
-  bool accepted = 4;
-  int64 issued_at = 5;
-  int64 expires_at = 6;
-  string signature = 7;
 }
 message SurfaceCheckpoint {
   reserved 1, 2, 6;
@@ -1259,54 +1130,6 @@ message GuardianAccept {
   string recovery_quorum_id = 10;
   int64 accepted_at = 11;
   SignedFields signed = 12;
-}
-message SdkOwnDeviceGroupSnapshot {
-  optional NativeGroupSnapshot shared_state = 1;
-  string group_id = 2;
-  uint64 group_epoch = 3;
-  uint32 max_members = 4;
-  string new_member_history = 5;
-  string local_role = 6;
-  uint64 local_joined_epoch = 7;
-  repeated SdkOwnDeviceGroupMemberSnapshot members = 8;
-  repeated LocalBusGroupMemberRoute routes = 9;
-}
-message SdkOwnDeviceGroupMemberPin {
-  string group_id = 1;
-  string device_id = 2;
-  string signing_public_key = 3;
-  optional string principal_id = 4;
-  optional string principal_commitment = 5;
-}
-message SdkOwnDeviceGroupMemberSnapshot {
-  string member_id = 1;
-  string role = 2;
-  uint64 joined_epoch = 3;
-}
-message LocalBusGroupMemberRoute {
-  string member_id = 1;
-  optional string member_principal_commitment = 2;
-  optional string device_signing_public_key = 3;
-  optional string target_delivery_id = 4;
-  optional LocalBusFederationRoute federation = 5;
-}
-message GroupKeyDistribution {
-  string schema = 1;
-  uint32 version = 2;
-  string group_id = 3;
-  string sender_id = 4;
-  uint64 group_key_epoch = 5;
-  optional string group_state_hash = 6;
-  bytes sender_key_seed = 7;
-  optional string sender_key_signature = 8;
-  optional string sender_device_signing_public_key = 9;
-}
-message GroupKeyControl {
-  string schema = 1;
-  uint32 version = 2;
-  NativeGroupEvent membership_event = 3;
-  optional string actor_manifest_url = 4;
-  GroupKeyDistribution distribution = 5;
 }
 message SurfaceExportMetadata {
   bool truncated = 1;

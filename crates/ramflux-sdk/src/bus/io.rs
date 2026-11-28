@@ -311,20 +311,6 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::TaskRefused { reason, .. } => reason.as_str(),
         SdkError::InvalidOfflineRetention(_) => "InvalidOfflineRetention",
         SdkError::PassphrasePolicy(error) => error.code(),
-        SdkError::Storage(StorageError::Protocol(
-            ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
-        ))
-        | SdkError::Protocol(ramflux_protocol::ProtocolError::GroupTransferRequiresSync)
-        | SdkError::Crypto(CryptoError::Protocol(
-            ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
-        )) => "transfer_requires_sync",
-        SdkError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(_))
-        | SdkError::Storage(StorageError::Protocol(
-            ramflux_protocol::ProtocolError::GroupStateLimit(_),
-        ))
-        | SdkError::Crypto(CryptoError::Protocol(
-            ramflux_protocol::ProtocolError::GroupStateLimit(_),
-        )) => "GroupStateCapacity",
         SdkError::PairingCode(code) => code,
         other => delivery_error_code(other),
     }

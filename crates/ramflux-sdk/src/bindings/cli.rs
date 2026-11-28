@@ -81,7 +81,6 @@ pub fn delete_message(
                 g::DeleteScope::Local as i32
             },
             tombstone_id: tombstone_id.unwrap_or(&[]).to_vec(),
-            native_group_authorization: Vec::new(),
         })),
     };
     round_trip_request(&request)
@@ -122,8 +121,6 @@ pub fn identity_update(
             author: None,
             device_sequence: 0,
             hlc: 0,
-            group_id: None,
-            group_epoch: None,
         }),
         state: Some(g::message_update::State::Unsupported(g::UnsupportedView {
             layer: ramflux_protocol::message::registry::COMPILED_LAYER,

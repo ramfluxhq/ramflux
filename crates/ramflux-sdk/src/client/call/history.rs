@@ -374,7 +374,6 @@ fn shared_identity(
         author: Some(author),
         device_sequence,
         hlc: 0,
-        ..g::EventIdentity::default()
     })
 }
 

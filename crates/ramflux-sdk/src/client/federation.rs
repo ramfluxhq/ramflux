@@ -33,7 +33,6 @@ impl RamfluxClient {
             .map_err(|_| SdkError::LocalBus("Message text must be UTF-8".into()))?;
         let prepared = self.prepare_authored_content(
             &mut message,
-            None,
             &ramflux_protocol::message::Content {
                 value: Some(ramflux_protocol::message::content::Value::Message(
                     ramflux_protocol::message::Message { text: text.into(), ..Default::default() },
@@ -225,7 +224,6 @@ fn contact_message(
     )?;
     let prepared = client.prepare_authored_content(
         &mut message,
-        None,
         &g::Content { value: Some(g::content::Value::Control(control)) },
     )?;
     Ok((message, prepared.wire.clone()))

@@ -45,9 +45,6 @@ impl RamfluxClient {
         let messages = std::mem::take(&mut draft.messages);
         let siblings = std::mem::take(&mut draft.siblings);
         let mut envelopes = Vec::with_capacity(messages.len());
-        if draft.group.is_some() {
-            return Err(invalid("group own-device copies are unavailable"));
-        }
         let identity = self.allocate_generated_identity(
             &draft.conversation,
             crate::client::generated_identity::now_ms(),
@@ -227,7 +224,6 @@ impl RamfluxClient {
             root: source.account_anchor.clone(),
             source: source.device_id.clone(),
             conversation: generated.conversation.to_owned(),
-            group: generated.group.map(str::to_owned),
             created_at: copy.created_at,
             expires_at: copy.expires_at,
         };
@@ -312,7 +308,6 @@ fn copy_id_for(root: &str, source: &str, message: &str) -> Result<String, SdkErr
 struct GeneratedCopyParts<'a> {
     id: &'a str,
     conversation: &'a str,
-    group: Option<&'a str>,
     sent: Option<&'a g::OwnSentMessage>,
 }
 
@@ -324,17 +319,11 @@ fn generated_copy_parts<'a>(
         Some(own_message_copy::Payload::Sent(sent)) => Ok(GeneratedCopyParts {
             id: sent.envelope_id.as_str(),
             conversation: sent.context.as_ref().map_or("", |ctx| ctx.conversation_id.as_str()),
-            group: sent
-                .context
-                .as_ref()
-                .and_then(|ctx| ctx.group.as_ref())
-                .map(|group| group.group_id.as_str()),
             sent: Some(sent),
         }),
         Some(own_message_copy::Payload::Item(_)) => Ok(GeneratedCopyParts {
             id: opened.routing.message_id.as_str(),
             conversation: opened.routing.conversation_id.as_str(),
-            group: None,
             sent: None,
         }),
         None => Err(invalid("own message copy requires HistoryItem or OwnSentMessage")),

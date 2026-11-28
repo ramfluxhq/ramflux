@@ -152,14 +152,6 @@ mod tests {
             super::super::validation::scan_message("Message", &media_only.encode_to_vec(), 3)?,
             super::super::validation::ScanOutcome::Supported
         );
-        let outer = super::super::Message {
-            sealed_group: Some(super::super::GroupSealedContent::default()),
-            erasure_nonce: vec![1; 32],
-            ..Default::default()
-        };
-        assert!(
-            super::super::validation::scan_message("Message", &outer.encode_to_vec(), 3).is_err()
-        );
         Ok(())
     }
 }

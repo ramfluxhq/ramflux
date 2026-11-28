@@ -50,12 +50,7 @@ fn executor_acknowledgement_applies_the_original_pending_intent_only_from_the_au
         carrier_base64: ramflux_protocol::encode_base64url(intent.bytes()?),
     }
     .bytes()?;
-    assert!(f.agent.receive_task_control(
-        &entry("human", "human-device"),
-        "thread",
-        None,
-        &control
-    )?);
+    assert!(f.agent.receive_task_control(&entry("human", "human-device"), "thread", &control)?);
     assert_eq!(f.agent.task_get(Some("thread"), "task")?["version"], 2);
     decisions::store(&f, &decisions::grant(&f)?)?;
     assert_eq!(f.agent.retry_pending_tasks(crate::time::now_unix_timestamp())?, 1);
@@ -63,16 +58,12 @@ fn executor_acknowledgement_applies_the_original_pending_intent_only_from_the_au
         f.agent.account_db()?.task_record_page::<control::AckJob>("task/ack/", "task/ack/", 65)?;
     assert_eq!(jobs.len(), 1);
     let ack = control::Control::Ack(Box::new(jobs[0].1.ack.clone())).bytes()?;
-    assert!(
-        f.human
-            .receive_task_control(&entry("human", "human-device"), "thread", None, &ack)
-            .is_err()
-    );
+    assert!(f.human.receive_task_control(&entry("human", "human-device"), "thread", &ack).is_err());
     assert_eq!(f.human.task_get(Some("thread"), "task")?["version"], 2);
-    assert!(f.human.receive_task_control(&entry("agent", "agent-device"), "thread", None, &ack)?);
+    assert!(f.human.receive_task_control(&entry("agent", "agent-device"), "thread", &ack)?);
     assert_eq!(f.human.task_get(Some("thread"), "task")?["version"], 3);
     assert_eq!(f.human.task_history("thread", "task")?.events.len(), 3);
-    assert!(f.human.receive_task_control(&entry("agent", "agent-device"), "thread", None, &ack)?);
+    assert!(f.human.receive_task_control(&entry("agent", "agent-device"), "thread", &ack)?);
     assert_eq!(f.human.task_history("thread", "task")?.events.len(), 3);
     Ok(())
 }
@@ -126,7 +117,7 @@ fn a_late_executor_ack_commits_a_compacted_local_intent_and_preserves_its_origin
     let jobs =
         f.agent.account_db()?.task_record_page::<control::AckJob>("task/ack/", "task/ack/", 65)?;
     let ack = control::Control::Ack(Box::new(jobs[0].1.ack.clone())).bytes()?;
-    assert!(f.human.receive_task_control(&entry("agent", "agent-device"), "thread", None, &ack)?);
+    assert!(f.human.receive_task_control(&entry("agent", "agent-device"), "thread", &ack)?);
     assert_eq!(f.human.task_get(Some("thread"), "task")?["version"], 3);
     assert_eq!(f.human.account_db()?.task_state_usage("task/local_intent_status/")?.0, 0);
     assert_eq!(

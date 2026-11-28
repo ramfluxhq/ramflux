@@ -285,7 +285,6 @@ async fn first_direct_after_native_contact(
     );
     let prepared = sender.client.prepare_authored_message(
         &mut message,
-        None,
         &ramflux_protocol::message::Message { text: "first message".into(), ..Default::default() },
     )?;
     let context = sender

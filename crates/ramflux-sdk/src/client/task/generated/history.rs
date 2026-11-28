@@ -150,9 +150,6 @@ impl RamfluxClient {
         for manifest in &packet.manifests {
             self.check_generated_task_manifest(manifest, &manifest.principal_id)?;
         }
-        if !packet.pins.is_empty() {
-            return Err(invalid("task history group pins are not accepted"));
-        }
         let mut task_id = None;
         for accepted in &history.events {
             let id = self.check_generated_task_history_event(accepted, context)?;

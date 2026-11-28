@@ -108,7 +108,7 @@ fn verify_approved_fields() -> TestResult {
         assert_eq!(actual, expected, "{message}.{name}");
         count += 1;
     }
-    assert_eq!(count, 484, "v3 native mapping inventory covers every descriptor field");
+    assert_eq!(count, 405, "v3 native mapping inventory covers every descriptor field");
     Ok(())
 }
 
@@ -203,7 +203,6 @@ fn all_kind_binding_round_trip() -> TestResult {
             targets: vec![reference.clone()],
             scope: 1,
             tombstone_id: vec![2; 32],
-            ..Default::default()
         }),
         content::Value::Reaction(Reaction {
             target: Some(reference.clone()),

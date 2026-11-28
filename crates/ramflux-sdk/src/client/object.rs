@@ -556,7 +556,6 @@ impl RamfluxClient {
             manifest_hash: attachment.manifest_hash.clone(),
             chunk_size: attachment.chunk_size.max(1),
             total_chunks: attachment.total_chunks,
-            object_created_group_key_epoch: None,
         };
         let object_stub = dm_attachment_object_stub(attachment);
         let mut session = ObjectSyncSession::new(manifest.clone(), *object_key);
@@ -1138,8 +1137,7 @@ impl RamfluxClient {
             .object_transfer(object_id, Some(OBJECT_TRANSFER_UPLOAD))?
             .map_or(64 * 1024, |record| usize::try_from(record.chunk_size).unwrap_or(64 * 1024))
             .max(1);
-        let manifest =
-            chunk_manifest_for_object(&object.object_id, &object.ciphertext, chunk_size, None);
+        let manifest = chunk_manifest_for_object(&object.object_id, &object.ciphertext, chunk_size);
         let transfer_id =
             object_transfer_id(&object.object_id, &object.manifest_hash, OBJECT_TRANSFER_DOWNLOAD);
         let mut completed = self

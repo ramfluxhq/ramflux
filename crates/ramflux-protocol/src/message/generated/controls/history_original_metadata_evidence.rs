@@ -11,10 +11,6 @@ pub struct HistoryOriginalMetadataEvidence {
     pub canonical_sender_envelope: ::prost::alloc::vec::Vec<u8>,
     #[prost(message, optional, tag = "2")]
     pub source_authority: ::core::option::Option<NativeCustodyManifest>,
-    #[prost(message, optional, tag = "3")]
-    pub group_membership: ::core::option::Option<NativeGroupSnapshot>,
-    #[prost(message, optional, tag = "4")]
-    pub group_binding: ::core::option::Option<OriginalGroupBinding>,
     /// Original Message layer preimage; never inferred from the Edit.
     #[prost(uint32, tag = "5")]
     pub layer: u32,
@@ -33,12 +29,6 @@ impl serde::Serialize for HistoryOriginalMetadataEvidence {
         if self.source_authority.is_some() {
             len += 1;
         }
-        if self.group_membership.is_some() {
-            len += 1;
-        }
-        if self.group_binding.is_some() {
-            len += 1;
-        }
         if self.layer != 0 {
             len += 1;
         }
@@ -54,12 +44,6 @@ impl serde::Serialize for HistoryOriginalMetadataEvidence {
         }
         if let Some(v) = self.source_authority.as_ref() {
             struct_ser.serialize_field("sourceAuthority", v)?;
-        }
-        if let Some(v) = self.group_membership.as_ref() {
-            struct_ser.serialize_field("groupMembership", v)?;
-        }
-        if let Some(v) = self.group_binding.as_ref() {
-            struct_ser.serialize_field("groupBinding", v)?;
         }
         if self.layer != 0 {
             struct_ser.serialize_field("layer", &self.layer)?;
@@ -78,18 +62,12 @@ impl<'de> serde::Deserialize<'de> for HistoryOriginalMetadataEvidence {
             "canonicalSenderEnvelope",
             "source_authority",
             "sourceAuthority",
-            "group_membership",
-            "groupMembership",
-            "group_binding",
-            "groupBinding",
             "layer",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             CanonicalSenderEnvelope,
             SourceAuthority,
-            GroupMembership,
-            GroupBinding,
             Layer,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
@@ -118,10 +96,6 @@ impl<'de> serde::Deserialize<'de> for HistoryOriginalMetadataEvidence {
                             "sourceAuthority" | "source_authority" => {
                                 Ok(GeneratedField::SourceAuthority)
                             }
-                            "groupMembership" | "group_membership" => {
-                                Ok(GeneratedField::GroupMembership)
-                            }
-                            "groupBinding" | "group_binding" => Ok(GeneratedField::GroupBinding),
                             "layer" => Ok(GeneratedField::Layer),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
@@ -145,8 +119,6 @@ impl<'de> serde::Deserialize<'de> for HistoryOriginalMetadataEvidence {
             {
                 let mut canonical_sender_envelope__ = None;
                 let mut source_authority__ = None;
-                let mut group_membership__ = None;
-                let mut group_binding__ = None;
                 let mut layer__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
@@ -170,18 +142,6 @@ impl<'de> serde::Deserialize<'de> for HistoryOriginalMetadataEvidence {
                             }
                             source_authority__ = map_.next_value()?;
                         }
-                        GeneratedField::GroupMembership => {
-                            if group_membership__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("groupMembership"));
-                            }
-                            group_membership__ = map_.next_value()?;
-                        }
-                        GeneratedField::GroupBinding => {
-                            if group_binding__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("groupBinding"));
-                            }
-                            group_binding__ = map_.next_value()?;
-                        }
                         GeneratedField::Layer => {
                             if layer__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("layer"));
@@ -195,8 +155,6 @@ impl<'de> serde::Deserialize<'de> for HistoryOriginalMetadataEvidence {
                 Ok(HistoryOriginalMetadataEvidence {
                     canonical_sender_envelope: canonical_sender_envelope__.unwrap_or_default(),
                     source_authority: source_authority__,
-                    group_membership: group_membership__,
-                    group_binding: group_binding__,
                     layer: layer__.unwrap_or_default(),
                 })
             }

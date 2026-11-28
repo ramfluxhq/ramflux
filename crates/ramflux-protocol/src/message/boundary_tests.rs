@@ -32,10 +32,10 @@ fn every_interleaved_oneof_has_a_field_order_encoder() -> TestResult {
     let pool = descriptors()?;
     assert_eq!(
         pool.all_messages().filter(|message| !message.is_map_entry()).count(),
-        253,
+        224,
         "v3 descriptor message inventory (OwnLayerRenewal, RFCORE-139, adds one)"
     );
-    assert_eq!(pool.all_messages().count(), 254, "v3 descriptor inventory includes the map entry");
+    assert_eq!(pool.all_messages().count(), 225, "v3 descriptor inventory includes the map entry");
     let mut interleaved = Vec::new();
     for message in pool.all_messages() {
         for choice in message.oneofs().filter(|choice| !choice.is_synthetic()) {
@@ -59,13 +59,11 @@ fn byte_limits_accept_the_cap_and_reject_one_more() -> TestResult {
     let mut caps = vec![
         ("Thumbnail".to_owned(), "encoded_image", 16 * 1024),
         ("Service".to_owned(), "native_authority_proof", 8 * 1024),
-        ("GroupSealedContent".to_owned(), "native_authority_proof", 8 * 1024),
     ];
     let pool = descriptors()?;
     for message in pool.all_messages().filter(|m| m.name().starts_with("Native")) {
         if message.get_field_by_name("canonical").is_some() {
             let cap = match message.name() {
-                "NativeGroupSnapshot" => crate::group_state::MAX_GROUP_STATE_BYTES,
                 "NativeCustodyManifest" => MAX_INNER_BYTES,
                 _ => 8 * 1024,
             };
@@ -240,21 +238,7 @@ fn scalar_descriptor_boundary(ty: &str, valid: u64, invalid: u64) -> TestResult 
 }
 
 #[test]
-fn sealed_content_and_entity_ranges_have_exact_errors() {
-    let sealed =
-        Message { sealed_group: Some(GroupSealedContent::default()), ..Default::default() };
-    assert_eq!(validate_message(&sealed), Ok(()));
-    for part in 0..5 {
-        let mut message = sealed.clone();
-        match part {
-            0 => message.text = "x".into(),
-            1 => message.entities.push(Entity { length: 1, kind: 1, ..Default::default() }),
-            2 => message.media.push(MediaRef::default()),
-            3 => message.reply_to = Some(MessageRef::default()),
-            _ => message.forward = Some(Forward::default()),
-        }
-        assert_eq!(validate_message(&message), Err(ValidationError::Content));
-    }
+fn entity_ranges_have_exact_errors() {
     for (offset, length) in [(0, 0), (1, 1), (u32::MAX, 1), (1, u32::MAX)] {
         let message = Message {
             text: "x".into(),

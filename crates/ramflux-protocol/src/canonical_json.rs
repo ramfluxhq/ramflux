@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 
 use crate::{
     A2iControlEvent, Ack, BotEvent, BotInstallGrant, BotManifest, BranchProof, ConversationEvent,
-    Cursor, DeviceProof, Envelope, EventId, FederationHandshake, FriendLinkEvent, GroupEvent,
+    Cursor, DeviceProof, Envelope, EventId, FederationHandshake, FriendLinkEvent,
     HomeNodeMigrationProof, IdentityDeletionProof, IdentityEvent, McpGrant, MessageEvent, Nack,
     NotificationWake, ObjectChunkRequest, ObjectManifest, SignedRequest,
 };
@@ -125,7 +125,6 @@ pub fn parse_fixture_value(object: FixtureObject, value: Value) -> Result<(), se
         "event_id" => serde_json::from_value::<EventId>(value).map(|_value| ()),
         "identity_event" => serde_json::from_value::<IdentityEvent>(value).map(|_value| ()),
         "friend_event" => serde_json::from_value::<FriendLinkEvent>(value).map(|_value| ()),
-        "group_event" => serde_json::from_value::<GroupEvent>(value).map(|_value| ()),
         "conversation_event" => serde_json::from_value::<ConversationEvent>(value).map(|_value| ()),
         "message_event" => serde_json::from_value::<MessageEvent>(value).map(|_value| ()),
         "object_manifest" => serde_json::from_value::<ObjectManifest>(value).map(|_value| ()),

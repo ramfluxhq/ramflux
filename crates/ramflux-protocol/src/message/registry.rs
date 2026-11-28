@@ -96,12 +96,10 @@ pub struct ControlBinding {
     pub body: &'static str,
 }
 /// Exact section 3.2 operation/payload map, all first introduced at layer 1.
-pub const CONTROLS: [ControlBinding; 18] = [
+pub const CONTROLS: [ControlBinding; 15] = [
     ControlBinding { operation: 1, tag: 16, body: "PairReset" },
     ControlBinding { operation: 2, tag: 17, body: "PairResetAck" },
     ControlBinding { operation: 3, tag: 18, body: "ContactControl" },
-    ControlBinding { operation: 4, tag: 19, body: "GroupStateControl" },
-    ControlBinding { operation: 5, tag: 20, body: "GroupKeyControl" },
     ControlBinding { operation: 6, tag: 21, body: "OwnContactSync" },
     ControlBinding { operation: 7, tag: 22, body: "HistoryPage" },
     ControlBinding { operation: 8, tag: 23, body: "HomeMigrationControl" },
@@ -110,7 +108,6 @@ pub const CONTROLS: [ControlBinding; 18] = [
     ControlBinding { operation: 11, tag: 26, body: "A2iControlEvent" },
     ControlBinding { operation: 12, tag: 27, body: "ObjectRevokeAccess" },
     ControlBinding { operation: 13, tag: 28, body: "OwnContactTombstone" },
-    ControlBinding { operation: 14, tag: 29, body: "OwnGroupConsent" },
     ControlBinding { operation: 15, tag: 30, body: "OwnMessageCopy" },
     ControlBinding { operation: 16, tag: 31, body: "FriendControl" },
     ControlBinding { operation: 17, tag: 32, body: "AgentHostPacket" },

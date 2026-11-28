@@ -39,12 +39,8 @@ fn category(name: &str) -> &'static str {
         || name.starts_with("ContactControl")
         || name.starts_with("ContactSafety")
         || name.starts_with("ExpectedContact")
-        || name.starts_with("GroupControl")
-        || name.starts_with("GroupStateControl")
-        || name.starts_with("GroupKey")
         || name.starts_with("Own")
         || name.starts_with("History")
-        || name.starts_with("Transfer")
         || name.starts_with("Guardian")
         || name.starts_with("RecoveryControl")
         || name.starts_with("HomeMigration")
@@ -58,7 +54,6 @@ fn category(name: &str) -> &'static str {
     } else if matches!(
         name,
         "Message"
-            | "GroupSealedContent"
             | "Service"
             | "ServiceAction"
             | "Edit"

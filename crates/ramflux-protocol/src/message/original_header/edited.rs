@@ -67,7 +67,6 @@ pub fn check(item: &g::HistoryItem) -> Result<EditedHeader, EvidenceError> {
             exact_identity: &item.exact_original_identity,
             issued_at,
             expires_at,
-            group: evidence.group_binding.as_ref(),
         }),
     )?;
     Ok(EditedHeader { identity, edit_identity, edit, original_outer: outer })

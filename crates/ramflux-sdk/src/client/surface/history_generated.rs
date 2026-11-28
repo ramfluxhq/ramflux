@@ -129,7 +129,6 @@ impl RamfluxClient {
                     entry,
                     &source,
                     &context.conversation_id,
-                    None,
                     &control.bytes()?,
                 )? {
                     return Err(invalid("surface history delivery was not admitted"));

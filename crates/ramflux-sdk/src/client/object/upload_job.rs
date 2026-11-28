@@ -76,7 +76,6 @@ impl RamfluxClient {
             &input.object.object_id,
             &input.object.ciphertext,
             input.chunk_size,
-            None,
         );
         self.persist_object_transfer(ObjectTransferPersist {
             transfer_id: &input.transfer_id,
@@ -114,7 +113,6 @@ where
         &input.object.object_id,
         &input.object.ciphertext,
         input.chunk_size,
-        None,
     );
     let mut completed = input.completed.clone();
     let mut done_bytes = completed

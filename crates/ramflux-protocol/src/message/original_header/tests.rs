@@ -19,7 +19,6 @@ fn original() -> Result<g::Inner, validation::ValidationError> {
             author: Some(author),
             device_sequence: 3,
             hlc: 9,
-            ..Default::default()
         }),
         body: g::Message {
             erasure_nonce: vec![0x71; 32],
@@ -86,7 +85,6 @@ fn original_header_never_commits_body_fields() -> TestResult {
         exact_identity: &identity,
         issued_at: 100,
         expires_at: 400,
-        group: None,
     })?;
     let vector: serde_json::Value = serde_json::from_str(include_str!("vectors.json"))?;
     assert_eq!(crate::encode_base64url(&transcript), vector["transcript_b64"]);
@@ -112,53 +110,6 @@ fn retained_identity_refuses_unknown_alternate_and_oversized_bytes() -> TestResu
 }
 
 #[test]
-fn edited_group_header_requires_exact_redacted_group_binding() -> TestResult {
-    let mut identity = original()?.identity.ok_or("identity")?;
-    identity.group_id = Some("group".into());
-    identity.group_epoch = Some(8);
-    let mut group = g::OriginalGroupBinding {
-        group_id: "group".into(),
-        author: identity.author.clone(),
-        key_epoch: 8,
-        group_state_hash: vec![5; 32],
-    };
-    let exact = identity.encode_to_vec();
-    let first = commitment(&Header {
-        layer: g::registry::PROFILE_FLOOR,
-        kind: 1,
-        exact_identity: &exact,
-        issued_at: 100,
-        expires_at: 400,
-        group: Some(&group),
-    })?;
-    group.group_state_hash[0] ^= 1;
-    assert_ne!(
-        first,
-        commitment(&Header {
-            layer: g::registry::PROFILE_FLOOR,
-            kind: 1,
-            exact_identity: &exact,
-            issued_at: 100,
-            expires_at: 400,
-            group: Some(&group)
-        })?
-    );
-    group.author.as_mut().ok_or("author")?.device_epoch = 9;
-    assert_eq!(
-        commitment(&Header {
-            layer: g::registry::PROFILE_FLOOR,
-            kind: 1,
-            exact_identity: &exact,
-            issued_at: 100,
-            expires_at: 400,
-            group: Some(&group)
-        }),
-        Err(EvidenceError::OriginCommitmentMismatch)
-    );
-    Ok(())
-}
-
-#[test]
 fn edited_history_evidence_fields_have_permanent_layer_bindings() -> TestResult {
     let item = g::HistoryItem {
         exact_inner: vec![1],
@@ -166,24 +117,11 @@ fn edited_history_evidence_fields_have_permanent_layer_bindings() -> TestResult 
         source_evidence: Some(g::HistoryOriginEvidence {
             canonical_sender_envelope: vec![3],
             report_opening: vec![4],
-            group_plaintext: vec![5],
-            group_opening: vec![6],
             ..Default::default()
         }),
         original_metadata_evidence: Some(g::HistoryOriginalMetadataEvidence {
             canonical_sender_envelope: vec![7],
             source_authority: Some(g::NativeCustodyManifest { canonical: vec![8] }),
-            group_membership: Some(g::NativeGroupSnapshot { canonical: vec![9] }),
-            group_binding: Some(g::OriginalGroupBinding {
-                group_id: "group".into(),
-                author: Some(g::QualifiedDevice {
-                    account_anchor: "root".into(),
-                    device_id: "device".into(),
-                    device_epoch: 1,
-                }),
-                key_epoch: 2,
-                group_state_hash: vec![3; 32],
-            }),
             layer: g::registry::PROFILE_FLOOR,
         }),
         ..Default::default()
@@ -191,86 +129,6 @@ fn edited_history_evidence_fields_have_permanent_layer_bindings() -> TestResult 
     assert_eq!(
         g::validation::scan_message("HistoryItem", &item.encode_to_vec(), 2)?,
         g::validation::ScanOutcome::Supported
-    );
-    Ok(())
-}
-
-#[test]
-fn edited_group_history_item_drops_wrapper_commitments() -> TestResult {
-    let mut identity = original()?.identity.ok_or("identity")?;
-    identity.group_id = Some("group".into());
-    identity.group_epoch = Some(8);
-    let group = g::GroupSealedContent {
-        group_id: "group".into(),
-        author: identity.author.clone(),
-        key_epoch: 8,
-        group_state_hash: vec![1; 32],
-        content_commitment: b"retired-content-commitment".to_vec(),
-        ciphertext_hash: b"retired-ciphertext-hash".to_vec(),
-        key_commitment: b"retired-key-commitment".to_vec(),
-        franking_commitment: b"retired-franking-commitment".to_vec(),
-        nonce: b"retired-nonce".to_vec(),
-        ratchet_public_key: b"retired-ratchet-key".to_vec(),
-        ciphertext: b"retired-ciphertext".to_vec(),
-        ..Default::default()
-    };
-    let mut retained = group_binding(&group);
-    let retained_bytes = retained.encode_to_vec();
-    for erased in [
-        &group.content_commitment,
-        &group.ciphertext_hash,
-        &group.key_commitment,
-        &group.franking_commitment,
-        &group.nonce,
-        &group.ratchet_public_key,
-        &group.ciphertext,
-    ] {
-        assert!(
-            !retained_bytes.windows(erased.len()).any(|bytes| bytes == erased),
-            "retained erased wrapper bytes"
-        );
-    }
-    let encoded = serde_json::to_value(&retained)?;
-    assert_eq!(encoded.as_object().ok_or("object")?.len(), 4);
-    for forbidden in [
-        "contentCommitment",
-        "ciphertextHash",
-        "keyCommitment",
-        "frankingCommitment",
-        "nonce",
-        "ratchetPublicKey",
-        "ciphertext",
-    ] {
-        assert!(encoded.get(forbidden).is_none(), "retained {forbidden}");
-    }
-    let exact = identity.encode_to_vec();
-    let mut ext = crate::Ext::default();
-    ext.ext.insert(
-        EXT_KEY.into(),
-        serde_json::json!(commitment(&Header {
-            layer: g::registry::PROFILE_FLOOR,
-            kind: 1,
-            exact_identity: &exact,
-            issued_at: 100,
-            expires_at: 400,
-            group: Some(&retained)
-        })?),
-    );
-    retained.group_state_hash[0] ^= 1;
-    assert_eq!(
-        verify_extension(
-            &ext,
-            1,
-            Some(&Header {
-                layer: g::registry::PROFILE_FLOOR,
-                kind: 1,
-                exact_identity: &exact,
-                issued_at: 100,
-                expires_at: 400,
-                group: Some(&retained)
-            })
-        ),
-        Err(EvidenceError::OriginCommitmentMismatch)
     );
     Ok(())
 }

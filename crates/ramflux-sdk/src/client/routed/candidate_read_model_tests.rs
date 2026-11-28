@@ -121,7 +121,6 @@ async fn read_model_serves_page_changes_and_detail_from_the_durable_store() -> R
             targets: vec![target.clone()],
             scope: g::DeleteScope::Everyone as i32,
             tombstone_id: Vec::new(),
-            native_group_authorization: Vec::new(),
         }),
     )
     .await?;

@@ -12,14 +12,8 @@ pub struct HistoryOriginEvidence {
     pub canonical_sender_envelope: ::prost::alloc::vec::Vec<u8>,
     #[prost(message, optional, tag = "2")]
     pub source_authority: ::core::option::Option<NativeCustodyManifest>,
-    #[prost(message, optional, tag = "3")]
-    pub group_membership: ::core::option::Option<NativeGroupSnapshot>,
     #[prost(bytes = "vec", tag = "4")]
     pub report_opening: ::prost::alloc::vec::Vec<u8>,
-    #[prost(bytes = "vec", tag = "5")]
-    pub group_plaintext: ::prost::alloc::vec::Vec<u8>,
-    #[prost(bytes = "vec", tag = "6")]
-    pub group_opening: ::prost::alloc::vec::Vec<u8>,
 }
 impl serde::Serialize for HistoryOriginEvidence {
     #[allow(deprecated)]
@@ -35,16 +29,7 @@ impl serde::Serialize for HistoryOriginEvidence {
         if self.source_authority.is_some() {
             len += 1;
         }
-        if self.group_membership.is_some() {
-            len += 1;
-        }
         if !self.report_opening.is_empty() {
-            len += 1;
-        }
-        if !self.group_plaintext.is_empty() {
-            len += 1;
-        }
-        if !self.group_opening.is_empty() {
             len += 1;
         }
         let mut struct_ser =
@@ -60,31 +45,12 @@ impl serde::Serialize for HistoryOriginEvidence {
         if let Some(v) = self.source_authority.as_ref() {
             struct_ser.serialize_field("sourceAuthority", v)?;
         }
-        if let Some(v) = self.group_membership.as_ref() {
-            struct_ser.serialize_field("groupMembership", v)?;
-        }
         if !self.report_opening.is_empty() {
             #[allow(clippy::needless_borrow)]
             #[allow(clippy::needless_borrows_for_generic_args)]
             struct_ser.serialize_field(
                 "reportOpening",
                 pbjson::private::base64::encode(&self.report_opening).as_str(),
-            )?;
-        }
-        if !self.group_plaintext.is_empty() {
-            #[allow(clippy::needless_borrow)]
-            #[allow(clippy::needless_borrows_for_generic_args)]
-            struct_ser.serialize_field(
-                "groupPlaintext",
-                pbjson::private::base64::encode(&self.group_plaintext).as_str(),
-            )?;
-        }
-        if !self.group_opening.is_empty() {
-            #[allow(clippy::needless_borrow)]
-            #[allow(clippy::needless_borrows_for_generic_args)]
-            struct_ser.serialize_field(
-                "groupOpening",
-                pbjson::private::base64::encode(&self.group_opening).as_str(),
             )?;
         }
         struct_ser.end()
@@ -101,23 +67,14 @@ impl<'de> serde::Deserialize<'de> for HistoryOriginEvidence {
             "canonicalSenderEnvelope",
             "source_authority",
             "sourceAuthority",
-            "group_membership",
-            "groupMembership",
             "report_opening",
             "reportOpening",
-            "group_plaintext",
-            "groupPlaintext",
-            "group_opening",
-            "groupOpening",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             CanonicalSenderEnvelope,
             SourceAuthority,
-            GroupMembership,
             ReportOpening,
-            GroupPlaintext,
-            GroupOpening,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -145,14 +102,7 @@ impl<'de> serde::Deserialize<'de> for HistoryOriginEvidence {
                             "sourceAuthority" | "source_authority" => {
                                 Ok(GeneratedField::SourceAuthority)
                             }
-                            "groupMembership" | "group_membership" => {
-                                Ok(GeneratedField::GroupMembership)
-                            }
                             "reportOpening" | "report_opening" => Ok(GeneratedField::ReportOpening),
-                            "groupPlaintext" | "group_plaintext" => {
-                                Ok(GeneratedField::GroupPlaintext)
-                            }
-                            "groupOpening" | "group_opening" => Ok(GeneratedField::GroupOpening),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -175,10 +125,7 @@ impl<'de> serde::Deserialize<'de> for HistoryOriginEvidence {
             {
                 let mut canonical_sender_envelope__ = None;
                 let mut source_authority__ = None;
-                let mut group_membership__ = None;
                 let mut report_opening__ = None;
-                let mut group_plaintext__ = None;
-                let mut group_opening__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -201,12 +148,6 @@ impl<'de> serde::Deserialize<'de> for HistoryOriginEvidence {
                             }
                             source_authority__ = map_.next_value()?;
                         }
-                        GeneratedField::GroupMembership => {
-                            if group_membership__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("groupMembership"));
-                            }
-                            group_membership__ = map_.next_value()?;
-                        }
                         GeneratedField::ReportOpening => {
                             if report_opening__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("reportOpening"));
@@ -215,31 +156,12 @@ impl<'de> serde::Deserialize<'de> for HistoryOriginEvidence {
                                 map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
                             );
                         }
-                        GeneratedField::GroupPlaintext => {
-                            if group_plaintext__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("groupPlaintext"));
-                            }
-                            group_plaintext__ = Some(
-                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
-                            );
-                        }
-                        GeneratedField::GroupOpening => {
-                            if group_opening__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("groupOpening"));
-                            }
-                            group_opening__ = Some(
-                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
-                            );
-                        }
                     }
                 }
                 Ok(HistoryOriginEvidence {
                     canonical_sender_envelope: canonical_sender_envelope__.unwrap_or_default(),
                     source_authority: source_authority__,
-                    group_membership: group_membership__,
                     report_opening: report_opening__.unwrap_or_default(),
-                    group_plaintext: group_plaintext__.unwrap_or_default(),
-                    group_opening: group_opening__.unwrap_or_default(),
                 })
             }
         }

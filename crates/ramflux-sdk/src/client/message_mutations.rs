@@ -211,7 +211,6 @@ impl RamfluxClient {
                 author.account_anchor != source.root_commitment()
                     || author.device_id != source.device_id()
             })
-            || !delete.native_group_authorization.is_empty()
             || delete.tombstone_id.as_slice()
                 != g::identity::delete_tombstone(&identity.id)
                     .map_err(|_| refused("Delete identity invalid"))?
@@ -293,15 +292,6 @@ impl RamfluxClient {
         }
     }
 
-    fn authorize_generated_edit_group(
-        identity: &ramflux_protocol::message::EventIdentity,
-    ) -> Result<(), SdkError> {
-        if identity.group_id.is_some() {
-            return Err(SdkError::InboundRejected("Edit group scope is unavailable".into()));
-        }
-        Ok(())
-    }
-
     pub(crate) fn apply_generated_edit_authorized(
         &self,
         authorization: EditContext<'_>,
@@ -319,9 +309,6 @@ impl RamfluxClient {
         let Some(g::content::Value::Edit(edit)) = content.value else {
             return Err(refused("expected generated Edit"));
         };
-        if edit.replacement.as_ref().is_some_and(|message| message.sealed_group.is_some()) {
-            return Err(SdkError::InboundRejected("edit replacement must be plain content".into()));
-        }
         let target = edit
             .target
             .as_ref()
@@ -331,7 +318,6 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("edit requires the original author".into()));
         }
-        Self::authorize_generated_edit_group(&identity)?;
         let target_id = ramflux_protocol::encode_base64url(&target.id);
         let db = self.account_db()?;
         db.write_transaction(|| {
@@ -349,11 +335,6 @@ impl RamfluxClient {
             };
             if author != source.root_commitment() || row.conversation_id != conversation {
                 return Err(SdkError::InboundRejected("edit target author or conversation mismatch".into()));
-            }
-            if db.load_actor_state::<g::EventIdentity>(&format!("routed/generated-identity/{target_id}"))?
-                .is_some_and(|original| original.group_id != identity.group_id)
-            {
-                return Err(SdkError::InboundRejected("Edit target group differs from event group".into()));
             }
             let state_key = format!("routed/edit-revision/{target_id}");
             let applied = db.load_actor_state::<EditRegister>(&state_key)?;

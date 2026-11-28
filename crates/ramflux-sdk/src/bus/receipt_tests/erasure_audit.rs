@@ -621,8 +621,6 @@ mod exemption_tests {
             author: Some(author),
             device_sequence: 1,
             hlc: 1,
-            group_id: None,
-            group_epoch: None,
         };
         let content = g::Content {
             value: Some(g::content::Value::Service(g::Service {

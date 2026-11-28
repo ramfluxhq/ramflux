@@ -232,7 +232,6 @@ impl super::RamfluxClient {
                     id: &id,
                     created_at: i64::try_from(now).unwrap_or(i64::MAX),
                     conversation: "own-layer-renewal",
-                    group: None,
                     body: &body,
                 },
                 None,

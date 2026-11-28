@@ -245,7 +245,6 @@ impl RamfluxClient {
                 }],
                 scope: fence.scope,
                 tombstone_id: fence.tombstone_id,
-                ..Default::default()
             }
         } else {
             let recorded =
@@ -274,7 +273,6 @@ impl RamfluxClient {
                     .ok_or_else(|| {
                         SdkError::InboundRejected("generated tombstone id invalid".into())
                     })?,
-                ..Default::default()
             }
         };
         g::identity::verify(&identity)

@@ -386,7 +386,7 @@ impl RamfluxClient {
     ) -> Result<GeneratedProjection, SdkError> {
         let GeneratedCommit { opened, entry, bytes, metadata, ref identity } = *frame;
         let projected = match content.value.ok_or_else(|| invalid("generated content missing"))? {
-            g::content::Value::Message(message) if message.sealed_group.is_none() => {
+            g::content::Value::Message(message) => {
                 let source =
                     self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
                 if let Some(reason) = self.friend_rejection_reason(source.root_commitment())? {
@@ -468,9 +468,6 @@ impl RamfluxClient {
             }
             g::content::Value::Typing(_) => {
                 return Err(invalid("Typing is forbidden on durable admission"));
-            }
-            g::content::Value::Message(_) => {
-                return Err(invalid("sealed group Message requires group admission"));
             }
         };
         Ok(GeneratedProjection::Handled(projected))
@@ -593,7 +590,6 @@ impl RamfluxClient {
                 self.project_native_call_control(
                     entry,
                     &opened.routing.conversation_id,
-                    None,
                     &native,
                     bytes,
                 )?;
@@ -655,12 +651,6 @@ impl RamfluxClient {
                 reason: "known Typing requires the ephemeral channel".into(),
             });
         }
-        let identity = g::Inner::decode(scanned.exact_inner)
-            .map_err(|_| invalid("generated identity missing"))?
-            .identity;
-        if identity.as_ref().is_some_and(|identity| identity.group_id.is_some()) {
-            return Err(invalid("group events are unavailable"));
-        }
         self.authorize_generated_scope(opened, entry, scanned)?;
         self.authorize_generated_native_fields(opened, entry, scanned)
     }
@@ -698,20 +688,6 @@ impl RamfluxClient {
         scanned: &validation::ScannedInner<'_>,
     ) -> Result<(), SdkError> {
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-        if scanned.kind == 1 && opened.routing.kind == Kind::Direct {
-            let message =
-                g::Message::decode(scanned.body).map_err(|_| invalid("Message missing"))?;
-            if message.sealed_group.is_some() {
-                return Err(invalid("sealed group on direct route"));
-            }
-        }
-        if scanned.kind == 4 {
-            let delete = g::Delete::decode(scanned.body)
-                .map_err(|_| invalid("Delete authority fields missing"))?;
-            if !delete.native_group_authorization.is_empty() {
-                return Err(invalid("Delete group proof forbidden in v1"));
-            }
-        }
         if scanned.kind == 2 {
             let service =
                 g::Service::decode(scanned.body).map_err(|_| invalid("Service missing"))?;
@@ -756,19 +732,6 @@ impl RamfluxClient {
         }
         if matches!(control.payload.as_ref(), Some(g::control::Payload::ContactControl(_))) {
             self.verify_contact_control(entry, &opened.routing, scanned.exact_inner)?;
-        }
-        if matches!(
-            control.payload.as_ref(),
-            Some(
-                g::control::Payload::GroupState(_)
-                    | g::control::Payload::GroupKeyControl(_)
-                    | g::control::Payload::OwnGroupConsent(_)
-            )
-        ) {
-            return Err(SdkError::GeneratedRefused {
-                code: crate::error::GeneratedRefusalCode::Content,
-                reason: "group controls are unavailable".into(),
-            });
         }
         if matches!(control.operation, 1 | 2) {
             self.authorize_generated_pair_control(opened, entry)?;

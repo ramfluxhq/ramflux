@@ -34,7 +34,6 @@ pub const DEVICE_SIGNING_KEY_COMMITMENT: &str = "ramflux.identity.device_signing
 pub const DEVICE_AGREEMENT_KEY_COMMITMENT: &str = "ramflux.identity.device_agreement_key.v1";
 pub const BRANCH_PROOF: &str = "ramflux.branch_proof.v1";
 pub const FRIEND_EVENT: &str = "ramflux.friend_event.v1";
-pub const GROUP_EVENT: &str = "ramflux.group_event.v1";
 pub const CONVERSATION_EVENT: &str = "ramflux.conversation_event.v1";
 pub const MESSAGE_EVENT: &str = "ramflux.message_event.v1";
 pub const NOTIFICATION_WAKE: &str = "ramflux.notification_wake.v1";
@@ -65,9 +64,6 @@ pub const DM_RATCHET_CHAIN: &str = "ramflux.dm_ratchet.chain.v1";
 pub const DM_RATCHET_MESSAGE: &str = "ramflux.dm_ratchet.message.v1";
 pub const DM_RATCHET_HEADER: &str = "ramflux.dm_ratchet.header.v1";
 pub const DM_RATCHET_SKIPPED_KEY: &str = "ramflux.dm_ratchet.skipped_key.v1";
-pub const GROUP_SENDER_KEY_DISTRIBUTION: &str = "ramflux.group_sender_key.distribution.v1";
-pub const GROUP_SENDER_KEY_CHAIN: &str = "ramflux.group_sender_key.chain.v1";
-pub const GROUP_SENDER_KEY_MESSAGE: &str = "ramflux.group_sender_key.message.v1";
 pub const COMMITTING_AEAD: &str = "ramflux.committing_aead.v1";
 pub const COMMITTING_AEAD_HEADER: &str = "ramflux.committing_aead.header.v1";
 pub const COMMITTING_AEAD_AD: &str = "ramflux.committing_aead.ad.v1";
@@ -219,7 +215,7 @@ pub const LG_ELECT_V1: &str = "rf-lg-elect-v1";
 /// Large-group session open (`rf-lg-open-v1`) tag.
 pub const LG_OPEN_V1: &str = "rf-lg-open-v1";
 
-pub const ALL: [&str; 176] = [
+pub const ALL: [&str; 172] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -250,7 +246,6 @@ pub const ALL: [&str; 176] = [
     DEVICE_SIGNING_KEY_COMMITMENT,
     DEVICE_AGREEMENT_KEY_COMMITMENT,
     FRIEND_EVENT,
-    GROUP_EVENT,
     CONVERSATION_EVENT,
     MESSAGE_EVENT,
     NOTIFICATION_WAKE,
@@ -273,9 +268,6 @@ pub const ALL: [&str; 176] = [
     DM_RATCHET_MESSAGE,
     DM_RATCHET_HEADER,
     DM_RATCHET_SKIPPED_KEY,
-    GROUP_SENDER_KEY_DISTRIBUTION,
-    GROUP_SENDER_KEY_CHAIN,
-    GROUP_SENDER_KEY_MESSAGE,
     COMMITTING_AEAD,
     COMMITTING_AEAD_HEADER,
     COMMITTING_AEAD_AD,
@@ -440,20 +432,20 @@ mod tests {
                 );
             }
         }
-        for label in &super::ALL[65..116] {
+        for label in &super::ALL[61..112] {
             assert!(
                 label.starts_with("ramflux.identity.") || *label == super::CUSTODY_BRANCH_EXPORTER
             );
         }
-        assert_eq!(super::ALL[116..139].len(), 23);
-        for label in &super::ALL[116..139] {
+        assert_eq!(super::ALL[112..135].len(), 23);
+        for label in &super::ALL[112..135] {
             assert!(label.starts_with("ramflux.dm_bootstrap_fs."));
         }
-        assert_eq!(super::ALL[139..154].len(), 15);
-        for label in &super::ALL[139..154] {
+        assert_eq!(super::ALL[135..150].len(), 15);
+        for label in &super::ALL[135..150] {
             assert!(label.starts_with("ramflux.identity."));
         }
-        assert_eq!(super::ALL[154..163].len(), 9);
+        assert_eq!(super::ALL[150..159].len(), 9);
         for label in [
             super::MESSAGE_ID,
             super::MESSAGE_FRIEND_APPLIED,
@@ -461,13 +453,13 @@ mod tests {
             super::MESSAGE_HISTORY_PAGE,
             super::MESSAGE_ORIGINAL_HEADER,
         ] {
-            assert!(super::ALL[154..163].contains(&label));
+            assert!(super::ALL[150..159].contains(&label));
         }
-        assert!(super::ALL[154..163].contains(&super::REPORT_OPENING));
-        assert!(super::ALL[154..163].contains(&super::COLLAPSE_KEY));
-        assert!(super::ALL[154..163].contains(&super::FRANKING_NODE_TAG_V2));
-        assert_eq!(super::ALL[163..167].len(), 4);
-        for label in &super::ALL[163..167] {
+        assert!(super::ALL[150..159].contains(&super::REPORT_OPENING));
+        assert!(super::ALL[150..159].contains(&super::COLLAPSE_KEY));
+        assert!(super::ALL[150..159].contains(&super::FRANKING_NODE_TAG_V2));
+        assert_eq!(super::ALL[159..163].len(), 4);
+        for label in &super::ALL[159..163] {
             assert!(label.starts_with("ramflux.notification."));
         }
         assert!(super::ALL.contains(&super::NOTIFICATION_WAKE_V2));

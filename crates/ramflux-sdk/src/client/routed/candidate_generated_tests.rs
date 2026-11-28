@@ -59,7 +59,6 @@ fn generated_identity(sender: &Fixture, id: &str) -> Result<g::EventIdentity, Sd
         author: Some(author),
         device_sequence: sequence,
         hlc: 1,
-        ..Default::default()
     })
 }
 
@@ -82,7 +81,6 @@ fn seal_as(
         && let Some(identity) = inner.identity
     {
         if identity.conversation_id == "c"
-            && identity.group_id.is_none()
             && b.client.account_db()?.client_record("conversation", "c")?.is_none()
             && route.kind == Kind::Direct
         {
@@ -287,7 +285,6 @@ async fn generated_edit_reaction_delete_preserves_exact_digest_and_erase_links()
             targets: vec![target.clone()],
             scope: g::DeleteScope::Everyone as i32,
             tombstone_id: b"delete-one".to_vec(),
-            native_group_authorization: Vec::new(),
         }),
     )
     .await?;

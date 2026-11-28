@@ -16,8 +16,6 @@ pub struct Checkpoint {
     pub account_id: String,
     pub principal_id: String,
     pub device_id: String,
-    #[serde(default)]
-    pub native_account: bool,
     pub cursor: Option<u64>,
     #[serde(default)]
     pub last_refusal: Option<OutputRefusal>,

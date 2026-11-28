@@ -19,9 +19,6 @@ struct Intent {
     media: Vec<ramflux_protocol::message::MediaRef>,
     #[serde(default)]
     prepares: Vec<PrepareId>,
-    /// Names the group when its conversation record has not been captured yet.
-    #[serde(default)]
-    group_id: Option<String>,
 }
 #[derive(Deserialize)]
 struct PrepareId {
@@ -118,7 +115,6 @@ pub(in crate::bus) async fn send_account(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let intent: Intent = serde_json::from_value(request.body.clone())?;
     admit_prepares(&intent)?;
-    refuse_group_conversation(&intent)?;
     let account_id = request_account_id(request)?;
     let operation = request
         .operation_id
@@ -131,13 +127,10 @@ pub(in crate::bus) async fn send_account(
         "ramflux.conversation.send.v1",
         &ramflux_protocol::canonical_json_bytes(&(account_id, operation))?,
     );
-    let thread = match account
-        .client
-        .account_db()?
-        .client_record("conversation", &intent.conversation_id)?
-    {
-        Some(thread) => thread,
-        None => return Err(invalid("conversation absent", "conversation_absent")),
+    let Some(thread) =
+        account.client.account_db()?.client_record("conversation", &intent.conversation_id)?
+    else {
+        return Err(invalid("conversation absent", "conversation_absent"));
     };
     let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let principal = local.principal_id.clone();
@@ -205,20 +198,6 @@ pub(in crate::bus) async fn send_account(
     Ok(local_bus_ok(body))
 }
 
-fn refuse_group_conversation(intent: &Intent) -> Result<(), SdkError> {
-    if intent.group_id.is_some() {
-        return Err(group_unavailable());
-    }
-    Ok(())
-}
-
-fn group_unavailable() -> SdkError {
-    SdkError::GeneratedRefused {
-        code: crate::GeneratedRefusalCode::Content,
-        reason: "group conversations are unavailable until the MLS group track".into(),
-    }
-}
-
 fn admit_prepares(intent: &Intent) -> Result<(), SdkError> {
     if !intent.attachments.is_empty() {
         return Err(SdkError::GeneratedRefused {
@@ -241,11 +220,7 @@ async fn deliver(
     intent: &Intent,
     send: &DirectSend<'_>,
 ) -> Result<Vec<Value>, SdkError> {
-    if send.thread.get("group_id").and_then(Value::as_str).is_some() {
-        Err(group_unavailable())
-    } else {
-        Box::pin(send_direct(account, intent, send)).await
-    }
+    Box::pin(send_direct(account, intent, send)).await
 }
 
 pub(in crate::bus) fn peer_root(

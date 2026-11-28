@@ -50,7 +50,6 @@ pub(super) struct PrivateContext {
     root: String,
     source: String,
     conversation: String,
-    group: Option<String>,
     created_at: i64,
     expires_at: i64,
 }
@@ -68,7 +67,6 @@ impl PrivateContext {
             || self.source != source
             || self.conversation.is_empty()
             || self.conversation.len() > 256
-            || self.group.as_ref().is_some_and(|s| s.is_empty() || s.len() > 256)
             || self.message.is_empty()
             || self.message.len() > 256
             || self.created_at > now.saturating_add(300)
@@ -90,7 +88,6 @@ impl Drop for PrivateContext {
         self.root.zeroize();
         self.source.zeroize();
         self.conversation.zeroize();
-        self.group.zeroize();
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -187,11 +184,9 @@ pub(crate) struct OwnMessageInput<'a> {
     pub id: &'a str,
     pub created_at: i64,
     pub conversation: &'a str,
-    pub group: Option<&'a str>,
     pub body: &'a [u8],
 }
 pub(crate) struct OwnCopyDraft {
-    group: Option<String>,
     pub(super) payload_kind: OwnPayloadKind,
     pub(crate) packet: OwnDeviceMessage,
     pub(super) key: zeroize::Zeroizing<[u8; 32]>,
@@ -293,7 +288,6 @@ impl RamfluxClient {
             root,
             source: source.clone(),
             conversation: input.conversation.into(),
-            group: input.group.map(str::to_owned),
             created_at: input.created_at,
             expires_at,
         };
@@ -325,7 +319,6 @@ impl RamfluxClient {
         let (messages, siblings) =
             self.own_copy_target_messages(&context, &packet, &source, &targets, input.created_at)?;
         Ok(Some(OwnCopyDraft {
-            group: context.group.clone(),
             payload_kind: input.payload_kind,
             packet,
             key,
@@ -428,7 +421,6 @@ mod receipt_compatibility {
             root: "root".into(),
             source: "device".into(),
             conversation: "conversation".into(),
-            group: None,
             created_at,
             expires_at: created_at + i64::from(crate::DEFAULT_OFFLINE_RETENTION_SECS),
         };

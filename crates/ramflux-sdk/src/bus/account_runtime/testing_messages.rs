@@ -125,7 +125,6 @@ impl NativeCallAccount {
         };
         let prepared = source.prepare_authored_content(
             &mut message,
-            None,
             &g::Content { value: Some(g::content::Value::Message(content.clone())) },
         )?;
         let sealed = source.seal_generated_routed_prepared(
@@ -187,7 +186,6 @@ impl NativeCallAccount {
         };
         let prepared = self.client.prepare_authored_content(
             &mut message,
-            None,
             &g::Content { value: Some(g::content::Value::Message(content.clone())) },
         )?;
         let sealed = self.client.seal_generated_routed_prepared(

@@ -14,8 +14,6 @@ use ramflux_protocol::message::validation::{self, ScanOutcome};
 pub struct GeneratedEventStream {
     conversation_id: String,
     author: g::QualifiedDevice,
-    group_id: Option<String>,
-    group_epoch: Option<u64>,
     device_sequence: u64,
     hlc: u64,
 }
@@ -24,22 +22,7 @@ impl GeneratedEventStream {
     /// Start a per-device stream. Sequence and HLC begin at zero and increment together.
     #[must_use]
     pub fn new(conversation_id: impl Into<String>, author: g::QualifiedDevice) -> Self {
-        Self {
-            conversation_id: conversation_id.into(),
-            author,
-            group_id: None,
-            group_epoch: None,
-            device_sequence: 0,
-            hlc: 0,
-        }
-    }
-
-    /// Attach group identity shared by every event on this stream.
-    #[must_use]
-    pub fn with_group(mut self, group_id: impl Into<String>, epoch: u64) -> Self {
-        self.group_id = Some(group_id.into());
-        self.group_epoch = Some(epoch);
-        self
+        Self { conversation_id: conversation_id.into(), author, device_sequence: 0, hlc: 0 }
     }
 
     /// Allocate the next source-qualified identity on this stream.
@@ -62,8 +45,6 @@ impl GeneratedEventStream {
             author: Some(self.author.clone()),
             device_sequence: self.device_sequence,
             hlc: self.hlc,
-            group_id: self.group_id.clone(),
-            group_epoch: self.group_epoch,
         })
     }
 }
@@ -71,9 +52,7 @@ impl GeneratedEventStream {
 impl RamfluxClient {
     pub(crate) fn validate_generated_media(content: &g::Content) -> Result<(), SdkError> {
         let message = match content.value.as_ref() {
-            Some(g::content::Value::Message(message)) if message.sealed_group.is_none() => {
-                Some(message)
-            }
+            Some(g::content::Value::Message(message)) => Some(message),
             Some(g::content::Value::Edit(edit)) => edit.replacement.as_ref(),
             _ => None,
         };
@@ -104,7 +83,6 @@ impl RamfluxClient {
             _ => None,
         };
         if let Some(message) = message
-            && message.sealed_group.is_none()
             && message.erasure_nonce.is_empty()
         {
             message.erasure_nonce = vec![0; 32];
@@ -158,7 +136,6 @@ impl RamfluxClient {
             _ => None,
         };
         if let Some(message) = message
-            && message.sealed_group.is_none()
             && message.erasure_nonce.is_empty()
         {
             message.erasure_nonce = ramflux_crypto::random_32()?.to_vec();

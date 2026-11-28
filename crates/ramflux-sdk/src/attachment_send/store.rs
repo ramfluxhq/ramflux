@@ -673,10 +673,7 @@ fn check_intent(intent: &Intent<'_>) -> Result<(), Refusal> {
     }
     match &intent.recipient {
         Recipient::Dm { peer } if peer.is_empty() => Err(Refusal::new(CODE_LAYOUT_INVALID)),
-        Recipient::Group { group_id } if group_id.is_empty() => {
-            Err(Refusal::new(CODE_LAYOUT_INVALID))
-        }
-        _ => Ok(()),
+        Recipient::Dm { .. } => Ok(()),
     }
 }
 

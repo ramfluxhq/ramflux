@@ -111,7 +111,6 @@ fn own_forward(
     target.receive_surface_control(
         &entry(source, target, &signed.message_id)?,
         "thread",
-        None,
         &control.bytes()?,
     )?;
     Ok(())
@@ -169,7 +168,7 @@ async fn two_terminals_per_identity_share_one_action_executor_and_decision_body(
         }),
         manifests: Vec::new(),
     };
-    b2.receive_surface_control(&entry(b1, b2, "receipt")?, "thread", None, &control.bytes()?)?;
+    b2.receive_surface_control(&entry(b1, b2, "receipt")?, "thread", &control.bytes()?)?;
     assert!(project(b2, &first, "b2-replay")?.accepted);
     let retry = action(a2, "another-terminal", 1, &hash)?;
     assert_eq!(

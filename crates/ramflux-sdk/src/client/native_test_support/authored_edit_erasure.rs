@@ -30,7 +30,6 @@ pub(super) async fn retire_and_refuse_redelivery(
         }],
         scope: g::DeleteScope::Everyone as i32,
         tombstone_id: g::identity::delete_tombstone(&identity.id)?.to_vec(),
-        native_group_authorization: Vec::new(),
     };
     let mut erase = sent.clone();
     erase.message_id = ramflux_protocol::encode_base64url(&identity.id);

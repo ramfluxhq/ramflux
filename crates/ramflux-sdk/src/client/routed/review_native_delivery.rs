@@ -29,7 +29,6 @@ fn authored(
     };
     let prepared = source.client.prepare_authored_message(
         &mut message,
-        None,
         &g::Message { text: text.into(), ..Default::default() },
     )?;
     let envelope = source.seal_inner_to_with_id(target, &prepared.wire, &message.envelope_id)?;
