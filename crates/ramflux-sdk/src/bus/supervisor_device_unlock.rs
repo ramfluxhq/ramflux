@@ -6,7 +6,7 @@
 //! Only accounts that were not explicitly locked and still hold a device wrap open this way;
 //! an explicit lock removes the device wrap, so the account code is needed again.
 
-use super::{AccountActor, RestoreState, Supervisor};
+use super::{RestoreState, Supervisor};
 use crate::bus::native_account::NativeUnlockSecret;
 use crate::prelude::*;
 
@@ -35,32 +35,9 @@ impl Supervisor {
     ) -> Result<crate::LocalBusCreatedAccount, SdkError> {
         self.refuse_unusable_agent(id)?;
         self.start_event_router();
-        let existing = self.accounts.borrow().get(id).cloned();
-        let (actor, started) = if let Some(actor) = existing {
-            (actor, false)
-        } else {
-            let actor = AccountActor::start(
-                id.into(),
-                self.config.clone(),
-                self.nodes.borrow().clone(),
-                self.index.clone(),
-                self.events.clone(),
-            )?;
-            self.accounts.borrow_mut().insert(id.into(), actor.clone());
-            (actor, true)
-        };
-        let result = match actor.unlock_native(NativeUnlockSecret::Device, None).await {
-            Ok(result) => result,
-            Err(error) => {
-                if started {
-                    self.accounts.borrow_mut().remove(id);
-                    if let Err(stop) = actor.stop().await {
-                        tracing::warn!(%stop, "silent unlock actor did not stop cleanly");
-                    }
-                }
-                return Err(error);
-            }
-        };
+        let (actor, started) = self.actor_for_unlock(id)?;
+        let result = actor.unlock_native(NativeUnlockSecret::Device, None).await;
+        let result = self.discard_on_failure(id, &actor, started, result).await?;
         self.set_unlocked(id, true).await?;
         self.advance_after_unlock(id).await;
         Ok(result)

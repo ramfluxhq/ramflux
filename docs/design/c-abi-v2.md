@@ -95,6 +95,9 @@ and sends no prompt. Around a configure the host also sees
 `account.app_lock.changed` events on the same connection; they are not a reply
 to the prompt.
 
+After a recovery the client did not see finish (for example `account.recover.begin`
+answered `NetworkingPending`), it unlocks with `account.unlock` and the account code.
+
 `account.app_lock.state` reports the code throttle in its ready body:
 `code_retry_after_ms` (milliseconds until a code is accepted; 0 when accepted
 now or when attempts are exhausted) and `code_attempts_exhausted` (boolean).
@@ -124,6 +127,12 @@ another account is, they answer `app_locked` as every other account method does.
   drops the account's lock state so other accounts and global methods such as
   `account.restore.*` are no longer refused. `rf account remove-local --account ID`
   asks for the account id on the controlling terminal.
+- `account.remove_local` never unlocks the account, opens its data, reads the code or
+  starts an actor. On an open account it first asks the node to clear every push route
+  (limit 5 s; a failure is logged as `push_clear_failed` and never blocks the erase). A
+  locked account makes no network call, so its node route lapses at its expiry. After the
+  reply the client drops the platform push-token association for that id and discards
+  wakes for ids it does not know.
 
 No header, enum or method-manifest change.
 

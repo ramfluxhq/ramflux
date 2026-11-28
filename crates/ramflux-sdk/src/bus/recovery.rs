@@ -223,6 +223,8 @@ async fn promote(
     pending.guard_commit(gate);
     if let Some(actor) = supervisor.account_actor(&id) {
         actor.stop().await?;
+        // A stopped actor is never reusable: drop it from every map that still names it.
+        supervisor.forget_stopped_actor(&id, &actor);
     }
     supervisor.remove_backup_actor(&id);
     let vault = super::custody_setup::primary_provider(&supervisor.config);
