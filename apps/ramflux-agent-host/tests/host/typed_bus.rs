@@ -51,14 +51,8 @@ async fn typed_refusal_code_survives_sdk_transport_without_leaking_or_parsing_di
     let listener = tokio::net::UnixListener::bind(&f.config.socket)?;
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await?;
-        for code in [
-            "not_author",
-            "too_large",
-            "stale_hash",
-            "unknown_failure",
-            "resync_required",
-            "GroupLeaseUnavailable",
-        ] {
+        for code in ["not_author", "too_large", "stale_hash", "unknown_failure", "resync_required"]
+        {
             let length = socket.read_u32().await?;
             let mut bytes = vec![0; usize::try_from(length)?];
             socket.read_exact(&mut bytes).await?;
@@ -97,10 +91,6 @@ async fn typed_refusal_code_survives_sdk_transport_without_leaking_or_parsing_di
             assert!(matches!(error, Error::Resync));
         }
     }
-    assert!(matches!(
-        bus.request("group.send", json!({}), None).await,
-        Err(Error::GroupLeaseUnavailable)
-    ));
     server.await?.map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -285,7 +275,6 @@ async fn contact02_r2_start_uses_the_real_adapter_capabilities_and_keeps_manual_
             "identity.directory",
             "bus.subscribe",
             "conversation.directory",
-            "group.list",
         ] {
             let socket = if method == "bus.subscribe" {
                 if subscription.is_none() {
@@ -317,8 +306,7 @@ async fn contact02_r2_start_uses_the_real_adapter_capabilities_and_keeps_manual_
                     json!({"identities":[{"principal_id":"agent","is_self":true,"kind":"headless_ai"}],"next_cursor":null})
                 }
                 "bus.subscribe" => json!({"head_seq":1}),
-                "conversation.directory" => json!({"conversations":[],"next_cursor":null}),
-                _ => json!({"groups":[],"next_cursor":null}),
+                _ => json!({"conversations":[],"next_cursor":null}),
             };
             let bytes = serde_json::to_vec(&frame)?;
             socket.write_u32(u32::try_from(bytes.len())?).await?;

@@ -30,7 +30,6 @@ impl<E: EngineProvider> AgentHost<E> {
                 return Err(error);
             }
             let refusal = OutputRefusal {
-                group_reason: None,
                 conversation_id: String::new(),
                 surface_id: None,
                 reason: crate::runner_policy::refusal(&error),

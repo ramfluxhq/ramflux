@@ -61,7 +61,6 @@ impl Carrier<'_> {
             || target != self.client.owned_device_identity()?.root_commitment()
             || current.envelope().body.account_anchor != body.actor_root
             || self.route.kind != Kind::Control
-            || self.route.group_id.is_some()
             || self.route.attachments
             || self.route.conversation_id != conversation(&body.requester_root, &body.target_root)?
         {

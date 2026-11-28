@@ -254,10 +254,8 @@ impl SelfSigningKey {
     ) -> Result<Envelope<ramflux_protocol::custody::pairing::channel::PreservationBody>, CryptoError>
     {
         self.check_preservation_candidate(previous, candidate, &body, now)?;
-        let signature = self.sign_group_state_bytes(&ramflux_protocol::custody::signing_bytes(
-            &body.schema,
-            &body,
-        )?);
+        let signature =
+            self.sign_bytes(&ramflux_protocol::custody::signing_bytes(&body.schema, &body)?);
         Ok(Envelope { body, signature })
     }
 
@@ -278,10 +276,8 @@ impl SelfSigningKey {
         use ramflux_protocol::custody::pairing::PairingWire as _;
         body.validate().map_err(|_| reject("full cooperative preservation body"))?;
         self.check_preservation_candidate(previous, candidate, &body.candidate_context(), now)?;
-        let signature = self.sign_group_state_bytes(&ramflux_protocol::custody::signing_bytes(
-            &body.schema,
-            &body,
-        )?);
+        let signature =
+            self.sign_bytes(&ramflux_protocol::custody::signing_bytes(&body.schema, &body)?);
         Ok(Envelope { body, signature })
     }
 

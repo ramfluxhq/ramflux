@@ -17,29 +17,13 @@ pub use object_erasure::{object_erasure_commitment, object_erasure_lookup};
 mod double_ratchet;
 mod error;
 mod franking;
-mod group_opening;
-mod group_sender;
-pub use group_opening::verify_group_message_opening;
-mod group_state;
-mod report_opening;
-mod report_receipt;
-pub use group_state::{
-    GroupChangeRequestInput, GroupStateCreateInput, GroupStateRelation, NativeGroupChangeApply,
-    VerifiedGroupState, accept_group_transfer, advance_group_state, advance_native_group_state,
-    advance_native_group_state_with_order, apply_group_change_request,
-    apply_native_group_change_request, apply_native_group_change_request_with_order,
-    certify_group_state_actor, certify_native_group_state_actor, change_already_applied,
-    create_group_state, create_native_group_state, group_change_request_hash,
-    resign_group_state_snapshot, sign_group_change_request, sign_group_change_result,
-    sign_native_group_change_result, validate_group_change_request, verify_group_change_request,
-    verify_group_change_result, verify_group_state_actor, verify_group_state_snapshot,
-    verify_group_transfer_acceptance,
-};
 pub mod home_migration;
 mod home_node_migration;
 mod identity;
 mod identity_binding;
 mod identity_profile;
+mod report_opening;
+mod report_receipt;
 pub mod username_directory;
 pub use identity_profile::{sign_identity_profile, verify_identity_profile};
 mod signed_device_set;
@@ -73,10 +57,6 @@ pub use error::CryptoError;
 pub use franking::{
     FrankingCommitment, FrankingCommitmentInput, franking_commitment, franking_node_tag_preimage,
     sign_franking_node_tag, sign_franking_node_tag_with_seed, verify_franking_node_tag,
-};
-pub use group_sender::{
-    GroupCiphertext, GroupMemberCommitment, GroupSenderKeyDistribution, GroupSenderKeyState,
-    MAX_GROUP_SKIP, create_group_sender_key_distribution, membership_commitment_hash,
 };
 pub use home_node_migration::{
     branch_proof_document_hash, migration_proof_hash, sign_home_node_migration_proof,

@@ -31,8 +31,6 @@ impl RamfluxClient {
                 kind: Kind::Direct,
                 conversation_id: identity.conversation_id.clone(),
                 message_id: ramflux_protocol::encode_base64url(&identity.id),
-                group_id: None,
-                group_message_id: None,
                 attachments: false,
             },
         };

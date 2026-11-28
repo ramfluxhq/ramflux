@@ -21,16 +21,6 @@ pub struct NodeReportReceipt {
     pub signature: String,
 }
 
-/// Per-message group opening plus native author proof required for group reports.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GroupReportEvidence<'a> {
-    pub inner: &'a [u8],
-    pub opening: &'a [u8; 32],
-    pub a0: &'a [u8],
-    pub group_message_opening: &'a [u8],
-    pub native_author_proof: &'a [u8],
-}
-
 fn source_ref(envelope: &CandidateOuterEnvelope) -> Result<String, NodeCoreError> {
     ramflux_protocol::qualified_device_id(&envelope.source_principal_id, &envelope.source_device_id)
         .map_err(|error| NodeCoreError::InvalidConfiguration(error.to_string()))
@@ -122,37 +112,6 @@ pub fn verify_bound_node_report_receipt(
     .map_err(|error| NodeCoreError::InvalidConfiguration(error.to_string()))
 }
 
-/// Group reports need the verified Inner opening **and** native author proof.
-///
-/// # Errors
-/// Missing group opening/author, C mismatch, or untrusted node receipt.
-pub fn verify_group_report_evidence(
-    envelope: &CandidateOuterEnvelope,
-    receipt: &NodeReportReceipt,
-    evidence: GroupReportEvidence<'_>,
-    trusted_node_public_key: &str,
-) -> Result<(), NodeCoreError> {
-    if evidence.group_message_opening.is_empty() {
-        return Err(NodeCoreError::InvalidConfiguration(
-            ramflux_crypto::CryptoError::GroupReportOpeningMissing.to_string(),
-        ));
-    }
-    if evidence.native_author_proof.is_empty() {
-        return Err(NodeCoreError::InvalidConfiguration(
-            ramflux_crypto::CryptoError::GroupReportAuthorMissing.to_string(),
-        ));
-    }
-    let expected = ramflux_crypto::report_commitment(evidence.opening, evidence.inner, evidence.a0)
-        .map_err(|error| NodeCoreError::InvalidConfiguration(error.to_string()))?;
-    let got = commitment_bytes(&envelope.report_commitment)?;
-    if expected != got {
-        return Err(NodeCoreError::InvalidConfiguration(
-            ramflux_crypto::CryptoError::ReportCommitmentMismatch.to_string(),
-        ));
-    }
-    verify_bound_node_report_receipt(envelope, receipt, trusted_node_public_key)
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -222,60 +181,6 @@ mod tests {
             verify_bound_node_report_receipt(&drifted, &receipt, trusted.public_key_base64url())
                 .is_err()
         );
-    }
-
-    #[test]
-    fn group_report_requires_message_opening_and_native_author() {
-        let trusted = NodeServiceSigningKey::from_seed([0x83; 32]);
-        let inner = b"group-inner";
-        let opening = [0x44; 32];
-        let a0 = b"a0-bytes";
-        let commitment = ramflux_crypto::report_commitment(&opening, inner, a0)
-            .expect("test: compute the direct report commitment");
-        let mut envelope = outer();
-        envelope.report_commitment = ramflux_protocol::encode_base64url(commitment);
-        envelope.delivery_class = CandidateDeliveryClass::Message;
-        let receipt = append_node_report_receipt(&mut envelope, "node-p08", &trusted, 9)
-            .expect("test: append the authenticated envelope");
-        let missing_opening = verify_group_report_evidence(
-            &envelope,
-            &receipt,
-            GroupReportEvidence {
-                inner,
-                opening: &opening,
-                a0,
-                group_message_opening: &[],
-                native_author_proof: b"author",
-            },
-            trusted.public_key_base64url(),
-        );
-        assert!(missing_opening.expect_err("opening").to_string().contains("per-message opening"));
-        let missing_author = verify_group_report_evidence(
-            &envelope,
-            &receipt,
-            GroupReportEvidence {
-                inner,
-                opening: &opening,
-                a0,
-                group_message_opening: b"open",
-                native_author_proof: &[],
-            },
-            trusted.public_key_base64url(),
-        );
-        assert!(missing_author.expect_err("author").to_string().contains("native author"));
-        verify_group_report_evidence(
-            &envelope,
-            &receipt,
-            GroupReportEvidence {
-                inner,
-                opening: &opening,
-                a0,
-                group_message_opening: b"open",
-                native_author_proof: b"author-proof",
-            },
-            trusted.public_key_base64url(),
-        )
-        .expect("test: complete group report");
     }
 
     #[test]

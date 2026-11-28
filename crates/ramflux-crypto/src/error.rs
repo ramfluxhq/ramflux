@@ -5,8 +5,6 @@ use ramflux_protocol::ProtocolError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
-    #[error("native group actor lease unavailable; refresh branch authority and retry")]
-    GroupLeaseUnavailable,
     #[error("voice rebind rejected: {0}")]
     VoiceRebind(&'static str),
     #[error("identity authority rejected: {0}")]
@@ -43,10 +41,6 @@ pub enum CryptoError {
     MaxSkipExceeded,
     #[error("unsupported dm session snapshot")]
     UnsupportedDmSessionSnapshot,
-    #[error("group sender key is missing or revoked")]
-    GroupSenderKeyUnavailable,
-    #[error("group membership commitment mismatch")]
-    MembershipCommitmentMismatch,
     #[error("recovery quorum has invalid parameters")]
     RecoveryQuorumInvalidParameters,
     #[error("recovery quorum does not contain enough unique shares")]
@@ -85,10 +79,6 @@ pub enum CryptoError {
     NodeReportReceiptTooLarge,
     #[error("node report receipt mismatch")]
     NodeReportReceiptMismatch,
-    #[error("group report requires per-message opening")]
-    GroupReportOpeningMissing,
-    #[error("group report requires native author proof")]
-    GroupReportAuthorMissing,
 }
 
 impl From<ramflux_protocol::custody::pairing::WireError> for CryptoError {

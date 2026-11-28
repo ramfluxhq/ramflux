@@ -33,7 +33,7 @@ fn unsupported_quota_is_atomic_and_preserves_existing_rows() -> TestResult {
             owner_id: "owner-existing",
             verified_source_anchor: "verified-root",
             copy_id: "copy-nested",
-            kind: RawInnerCopyKind::NestedGroup,
+            kind: RawInnerCopyKind::OuterInner,
             bytes: &nested,
             bounded_metadata: b"{}",
         })
@@ -85,7 +85,7 @@ fn raw_copy_write_requires_transaction_and_charges_duplicate_copies() -> TestRes
             owner_id: "owner",
             verified_source_anchor: "root",
             copy_id: "copy-b",
-            kind: RawInnerCopyKind::NestedGroup,
+            kind: RawInnerCopyKind::OuterInner,
             bytes,
             bounded_metadata: b"{}",
         })?;
@@ -667,7 +667,7 @@ fn raw_copies_survive_backup_restore_and_full_merge_with_footprints() -> TestRes
             owner_id: "message",
             verified_source_anchor: "verified-root",
             copy_id: "copy",
-            kind: RawInnerCopyKind::NestedGroup,
+            kind: RawInnerCopyKind::OuterInner,
             bytes: b"verified nested bytes",
             bounded_metadata: b"{}",
         })
@@ -730,7 +730,7 @@ fn full_merge_does_not_restore_a_raw_copy_for_a_deleted_owner() -> TestResult {
             owner_id: "deleted-message",
             verified_source_anchor: "verified-root",
             copy_id: "deleted-copy",
-            kind: RawInnerCopyKind::NestedGroup,
+            kind: RawInnerCopyKind::OuterInner,
             bytes: b"stale archive raw bytes",
             bounded_metadata: b"{}",
         })
@@ -780,7 +780,7 @@ fn full_merge_does_not_restore_a_bound_raw_copy_after_target_deletion() -> TestR
                 owner_id: "copy:authenticated-envelope",
                 verified_source_anchor: "verified-root",
                 copy_id: "bound-copy",
-                kind: RawInnerCopyKind::NestedGroup,
+                kind: RawInnerCopyKind::OuterInner,
                 bytes: b"stale bound raw bytes",
                 bounded_metadata: b"{}",
             })?;
@@ -850,7 +850,7 @@ fn full_merge_does_not_restore_a_raw_copy_deleted_only_by_mac_tombstone() -> Tes
             owner_id: "mac-only-message",
             verified_source_anchor: "verified-root",
             copy_id: "mac-only-copy",
-            kind: RawInnerCopyKind::NestedGroup,
+            kind: RawInnerCopyKind::OuterInner,
             bytes: b"stale mac-tombstone raw bytes",
             bounded_metadata: b"{}",
         })

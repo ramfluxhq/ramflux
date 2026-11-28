@@ -147,7 +147,7 @@ impl RamfluxClient {
                 });
             }
         } else if opened.routing.kind == Kind::Direct {
-            opened.routing.message_id = self.projection_id(entry, &opened.routing)?;
+            opened.routing.message_id = self.projection_id(entry)?;
         }
         self.confirm_routed_context(&opened.routing, entry)?;
         Ok(opened)

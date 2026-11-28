@@ -205,7 +205,7 @@ impl RamfluxClient {
         body: &g::RecoveryControl,
     ) -> Result<VerifiedRecovery, SdkError> {
         use crate::client::identity_authority::HeadUse;
-        if opened.routing.kind != Kind::Control || opened.routing.group_id.is_some() {
+        if opened.routing.kind != Kind::Control {
             return Err(authority("recovery control requires a direct control route"));
         }
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;

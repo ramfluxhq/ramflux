@@ -92,7 +92,7 @@ fn verified_preimage(target: &str, bytes: &[u8]) -> Result<Vec<u8>, h::EvidenceE
         &certificate.branch_signing_public_key,
     )
     .map_err(|_| bad)?;
-    refuse_group_evidence(&identity, &evidence)?;
+    refuse_group_evidence(&identity)?;
     let header = h::Header {
         layer: evidence.layer,
         kind: 1,
@@ -109,18 +109,8 @@ fn verified_preimage(target: &str, bytes: &[u8]) -> Result<Vec<u8>, h::EvidenceE
 }
 
 /// Old shared-group evidence is refused: MLS group history is never carried by this header.
-fn refuse_group_evidence(
-    identity: &g::EventIdentity,
-    evidence: &g::HistoryOriginalMetadataEvidence,
-) -> Result<(), h::EvidenceError> {
-    if identity.group_id.is_none()
-        && evidence.group_binding.is_none()
-        && evidence.group_membership.is_none()
-    {
-        Ok(())
-    } else {
-        mismatch()
-    }
+fn refuse_group_evidence(identity: &g::EventIdentity) -> Result<(), h::EvidenceError> {
+    if identity.group_id.is_none() { Ok(()) } else { mismatch() }
 }
 
 fn headers(

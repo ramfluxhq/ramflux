@@ -283,9 +283,7 @@ fn persist_projection_receipt(
         routing: Routing {
             kind: Kind::Direct,
             conversation_id: "thread".to_owned(),
-            group_id: None,
             message_id: "projection-owner".to_owned(),
-            group_message_id: None,
             attachments: false,
         },
         entry: entry.clone(),

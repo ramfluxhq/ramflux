@@ -3,12 +3,11 @@
 
 use ed25519_dalek::SigningKey;
 use ramflux_crypto::{
-    CryptoError, DmSession, GroupMemberCommitment, GroupSenderKeyState, X25519KeyPair,
-    create_device_branch, create_group_sender_key_distribution, create_prekey_bundle_with_lineage,
+    CryptoError, DmSession, X25519KeyPair, create_device_branch, create_prekey_bundle_with_lineage,
     create_recovery_quorum, derive_recovery_secret, franking_node_tag_preimage,
-    membership_commitment_hash, public_key_base64url_from_seed, recover_secret_from_quorum,
-    sign_canonical_bytes_with_seed, sign_franking_node_tag, verify_canonical_signature,
-    verify_franking_node_tag, verify_prekey_bundle_with_lineage,
+    public_key_base64url_from_seed, recover_secret_from_quorum, sign_canonical_bytes_with_seed,
+    sign_franking_node_tag, verify_canonical_signature, verify_franking_node_tag,
+    verify_prekey_bundle_with_lineage,
 };
 use ramflux_protocol::{decode_base64url, encode_base64url};
 
@@ -152,75 +151,6 @@ fn dm_with_ratchet_bootstrap_roundtrips_bidirectionally() -> Result<(), CryptoEr
     assert_eq!(alice.decrypt(&bob_first, b"ratchet-ad")?, b"bob first with ratchet");
     assert_eq!(alice.decrypt(&bob_second, b"ratchet-ad")?, b"bob second with ratchet");
     assert_eq!(alice.decrypt(&bob_third, b"ratchet-ad")?, b"bob third with ratchet");
-    Ok(())
-}
-
-#[test]
-fn group_sender_key_roundtrip_removed_member_cannot_decrypt() -> Result<(), CryptoError> {
-    let signing_key = SigningKey::from_bytes(&[0x33; 32]);
-    let members = vec![
-        GroupMemberCommitment {
-            member_device_id_hash: [0xa1; 32],
-            member_role: "member".to_owned(),
-            member_device_epoch: 1,
-        },
-        GroupMemberCommitment {
-            member_device_id_hash: [0xb2; 32],
-            member_role: "member".to_owned(),
-            member_device_epoch: 1,
-        },
-    ];
-    let membership = membership_commitment_hash([0x44; 32], 2, 3, &members, [0x55; 32], "sender-1");
-    let distribution = create_group_sender_key_distribution(
-        [0x44; 32],
-        2,
-        3,
-        [0xa1; 32],
-        "sender-1".to_owned(),
-        [0x66; 32],
-        signing_key.verifying_key().to_bytes(),
-        membership,
-    );
-    let mut sender = GroupSenderKeyState::from_distribution(distribution.clone());
-    let mut receiver = GroupSenderKeyState::from_distribution(distribution);
-    let ciphertext = sender.encrypt(b"group plaintext", b"group-ad", &signing_key)?;
-    assert_eq!(receiver.decrypt(&ciphertext, b"group-ad", &membership)?, b"group plaintext");
-
-    let removed_membership =
-        membership_commitment_hash([0x44; 32], 2, 4, &members[..1], [0x55; 32], "sender-2");
-    let removed = receiver.decrypt(&ciphertext, b"group-ad", &removed_membership);
-    assert!(matches!(removed, Err(CryptoError::MembershipCommitmentMismatch)));
-    Ok(())
-}
-
-#[test]
-fn group_sender_key_rejects_franking_commitment_field_tamper() -> Result<(), CryptoError> {
-    let signing_key = SigningKey::from_bytes(&[0x33; 32]);
-    let members = vec![GroupMemberCommitment {
-        member_device_id_hash: [0xa1; 32],
-        member_role: "member".to_owned(),
-        member_device_epoch: 1,
-    }];
-    let membership = membership_commitment_hash([0x44; 32], 2, 3, &members, [0x55; 32], "sender-1");
-    let distribution = create_group_sender_key_distribution(
-        [0x44; 32],
-        2,
-        3,
-        [0xa1; 32],
-        "sender-1".to_owned(),
-        [0x66; 32],
-        signing_key.verifying_key().to_bytes(),
-        membership,
-    );
-    let mut sender = GroupSenderKeyState::from_distribution(distribution.clone());
-    let mut receiver = GroupSenderKeyState::from_distribution(distribution);
-    let mut ciphertext = sender.encrypt(b"group franking field", b"group-ad", &signing_key)?;
-    ciphertext.franking_commitment = "tampered-franking-commitment".to_owned();
-
-    assert!(matches!(
-        receiver.decrypt(&ciphertext, b"group-ad", &membership),
-        Err(CryptoError::CommitmentMismatch)
-    ));
     Ok(())
 }
 
@@ -400,38 +330,6 @@ fn m_p0_2_kat_vectors_are_stable() -> Result<(), CryptoError> {
     assert_eq!(skipped_first.header_hash, "0FQOnIf_0dKlxDDyYyJSVcYZOK4zAJ7KKcn1Eu8Codk");
     assert_eq!(skipped_second.header_hash, "GP68vVLJf2X1KfXvXxVpUx9lXuoH-wzij9RRavCkwTE");
     assert_eq!(skipped_second.key_commitment, "CfA79qPnCn42CUWwxF6SCUcyGl6qI3h9WKs8YOshxac");
-
-    let signing_key = SigningKey::from_bytes(&[0x07; 32]);
-    let membership = membership_commitment_hash(
-        [0x08; 32],
-        9,
-        10,
-        &[GroupMemberCommitment {
-            member_device_id_hash: [0x09; 32],
-            member_role: "member".to_owned(),
-            member_device_epoch: 11,
-        }],
-        [0x0a; 32],
-        "kat-sender",
-    );
-    let distribution = create_group_sender_key_distribution(
-        [0x08; 32],
-        9,
-        10,
-        [0x09; 32],
-        "kat-sender".to_owned(),
-        [0x0b; 32],
-        signing_key.verifying_key().to_bytes(),
-        membership,
-    );
-    let mut group_sender = GroupSenderKeyState::from_distribution(distribution.clone());
-    let mut group_receiver = GroupSenderKeyState::from_distribution(distribution);
-    let group = group_sender.encrypt(b"kat-group", b"group-ad", &signing_key)?;
-    assert_eq!(group_receiver.decrypt(&group, b"group-ad", &membership)?, b"kat-group");
-    assert_eq!(group.header_hash, "IoDlQTV7M0QhAK-A3jzTSs_eBNkCPrppBwactq4a-QE");
-    assert_eq!(group.key_commitment, "6x7DddNJHUohU10oxDDHnpvBqwlnJkf4Cp5KlFqK4VI");
-    assert_eq!(group.franking_commitment, "auIKXiaCOn2sqowctDZ6_Epsy5Z313t8wEzQmg2U2Do");
-    assert_eq!(group.ciphertext_hash, "7Y9OypoZc_17IuT1LO8krJdpjy5rzdja2VR1YlL78BE");
 
     let node_key = SigningKey::from_bytes(&[0x0c; 32]);
     let node_tag = sign_franking_node_tag(

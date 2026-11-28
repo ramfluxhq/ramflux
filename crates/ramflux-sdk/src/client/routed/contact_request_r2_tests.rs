@@ -337,7 +337,7 @@ async fn contact02_r2_expiry_between_admission_and_projection_cannot_publish_con
     let entry = frames(&directory)?.into_iter().next().ok_or_else(|| invalid("message"))?;
     let client = account(&state, "bob")?;
     let mut opened = client.open_routed(&entry, "bob")?;
-    opened.routing.message_id = client.projection_id(&entry, &opened.routing)?;
+    opened.routing.message_id = client.projection_id(&entry)?;
     client.contact_route_gate(&entry, &opened.routing, &opened.body)?;
     let source = root(&state, "alice")?;
     let row = client

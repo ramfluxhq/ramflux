@@ -39,14 +39,14 @@ fn f2_restart_catchup_three_dms_once_in_order() -> e2e::Result<()> {
 
 #[ignore = "real-process Demo B B7: explicit WAL mode; CLI e2e CI job"]
 #[test]
-fn b7_offline_twenty_dms_three_group_messages_wal() -> e2e::Result<()> {
-    offline_demo_b(true, None, false)
+fn b7_offline_twenty_dms_wal() -> e2e::Result<()> {
+    offline_demo_b(true, None)
 }
 
 #[ignore = "real-process Demo B B7: explicit redb-only mode; CLI e2e CI job"]
 #[test]
-fn b7_offline_twenty_dms_three_group_messages_redb_only() -> e2e::Result<()> {
-    offline_demo_b(false, None, false)
+fn b7_offline_twenty_dms_redb_only() -> e2e::Result<()> {
+    offline_demo_b(false, None)
 }
 
 // Controller ruling: deterministic post-commit SIGABRT, not an in-transaction
@@ -54,25 +54,18 @@ fn b7_offline_twenty_dms_three_group_messages_redb_only() -> e2e::Result<()> {
 #[ignore = "real-process Demo B B7 crash at commit 7 and beyond-batch control; CLI e2e CI job"]
 #[test]
 fn b7_mid_batch_crash_wal() -> e2e::Result<()> {
-    offline_demo_b(true, Some(7), false)?;
-    offline_demo_b(true, Some(1000), false)
+    offline_demo_b(true, Some(7))?;
+    offline_demo_b(true, Some(1000))
 }
 
 #[ignore = "real-process Demo B B7 crash at commit 7 and beyond-batch control; CLI e2e CI job"]
 #[test]
 fn b7_mid_batch_crash_redb_only() -> e2e::Result<()> {
-    offline_demo_b(false, Some(7), false)?;
-    offline_demo_b(false, Some(1000), false)
+    offline_demo_b(false, Some(7))?;
+    offline_demo_b(false, Some(1000))
 }
 
-#[ignore = "real-process regression: foreground group read racing ledger receive; CLI e2e CI job"]
-#[test]
-fn b7_group_read_before_setup_ack_keeps_catchup_live() -> e2e::Result<()> {
-    offline_demo_b(false, None, true)?;
-    offline_demo_b(true, None, true)
-}
-
-fn offline_demo_b(wal: bool, crash_after: Option<u64>, read_before_ack: bool) -> e2e::Result<()> {
+fn offline_demo_b(wal: bool, crash_after: Option<u64>) -> e2e::Result<()> {
     let stack = e2e::boot_stack_with_wal(wal)?;
     let alice_d = start_daemon(&stack, "alice")?;
     let bob_d = start_daemon(&stack, "bob")?;
@@ -82,8 +75,6 @@ fn offline_demo_b(wal: bool, crash_after: Option<u64>, read_before_ack: bool) ->
     let bob = create_account(&bob_d, "Bob")?;
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
     let conversation = e2e::dm_conversation(&alice, &bob)?;
-    let group = unique("demo-b-offline-group");
-    establish_group(&stack, (&alice_d, &alice), (&bob_d, &bob), &group, read_before_ack)?;
     let base = e2e::wait_receive_settled(&bob_d, &bob)?;
     let base_cursor = e2e::receive_counter(&base, "committed_cursor")?;
     let (socket, root) = shutdown_daemon(bob_d)?;
@@ -91,11 +82,6 @@ fn offline_demo_b(wal: bool, crash_after: Option<u64>, read_before_ack: bool) ->
     let mut ids: Vec<String> = (0..20).map(|i| unique(&format!("offline-dm-{i:02}"))).collect();
     for (id, body) in ids.iter().zip(&bodies) {
         dm_send(&alice_d, &alice, &bob, &conversation, id, body)?;
-    }
-    let group_bodies = ["offline-group-00", "offline-group-01", "offline-group-02"];
-    for body in &group_bodies {
-        let sent = e2e::group_send(&alice_d, &alice, &group, &group, &unique(body), body)?;
-        ids.extend(e2e::group_envelope_ids(&sent, &bob)?);
     }
     e2e::wait_node_pending(&stack, &bob, &ids)?;
     let wal_root = stack.root.join("state/ramflux-router.redb.wal");
@@ -109,22 +95,6 @@ fn offline_demo_b(wal: bool, crash_after: Option<u64>, read_before_ack: bool) ->
     let received = wait_dm_texts(&bob_d, &bob, &conversation, &expected)
         .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d])))?;
     assert_eq!(e2e::message_texts(&received), bodies, "exact DM set and order");
-    let received = e2e::wait_group_texts(
-        &bob_d,
-        &bob,
-        &group,
-        &group,
-        &["group ready", "offline-group-00", "offline-group-01", "offline-group-02"],
-    )?;
-    // group.read includes decrypted deliveries, retained native history and the
-    // encrypted storage representation. The offline plaintext batch is ordered
-    // within its delivery view; history remains independently visible.
-    assert_texts_once_in_order(&received, &group_bodies)?;
-    assert_eq!(
-        e2e::message_texts(&received).iter().filter(|text| text.as_str() == "group ready").count(),
-        1,
-        "pre-restart group history remains visible exactly once"
-    );
     let receive = e2e::wait_receive_settled(&bob_d, &bob)?;
     // A resident session the product retires (for example a short priority exchange that
     // outlives its budget) is re-established and owes its own Connected catch-up; a later
@@ -162,7 +132,7 @@ fn offline_demo_b(wal: bool, crash_after: Option<u64>, read_before_ack: bool) ->
         "completed catch-ups are bounded by live sessions: {status}"
     );
     eprintln!(
-        "B7 storage_wal={wal} crash_after={crash_after:?}: 20 DMs + 3 group messages once in order; status={status}"
+        "B7 storage_wal={wal} crash_after={crash_after:?}: 20 DMs once in order; status={status}"
     );
     Ok(())
 }
@@ -213,27 +183,6 @@ fn restart_bob(
     let daemon = start_daemon_at(socket, root)?;
     unlock_account(&daemon, bob)?;
     Ok(daemon)
-}
-
-fn establish_group(
-    stack: &e2e::Stack,
-    alice: (&e2e::Daemon, &e2e::Account),
-    bob: (&e2e::Daemon, &e2e::Account),
-    group: &str,
-    read_before_ack: bool,
-) -> e2e::Result<()> {
-    let (alice_d, alice) = alice;
-    let (bob_d, bob) = bob;
-    e2e::group_create(alice_d, alice, group, &[bob])?;
-    let sent =
-        e2e::group_send(alice_d, alice, group, group, &unique("group-setup"), "group ready")?;
-    if !read_before_ack {
-        for id in e2e::group_envelope_ids(&sent, bob)? {
-            account_ack(stack, bob_d, bob, &id)?;
-        }
-    }
-    e2e::wait_group_texts(bob_d, bob, group, group, &["group ready"])?;
-    Ok(())
 }
 
 fn account_ack(

@@ -281,8 +281,6 @@ impl BackupDatabase {
             super::large_segments::retirement::merge_floors(&self.db)?;
             self.merge_object_erasure(progress)?;
             let preserved_actor = projected_actor(candidate);
-            // A restored generation starts fresh handshakes, never archived reservations.
-            self.archive_group_transfer(&preserved_actor)?;
             let refused_items = self.merge_original_header_agreement()?;
             let self_sync_floors = self.merge_message_register_floors()?;
             self.merge_username_restrictions()?;
@@ -376,11 +374,6 @@ impl BackupDatabase {
     fn archive_imported_pair_sessions(&self, preserved_actor: &str) -> Result<(), StorageError> {
         super::message_footprint::ensure_archive_actor_table(&self.db)?;
         self.db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,{preserved_actor} FROM incoming.runtime_actor_state r WHERE state_kind LIKE 'dm-pair/%' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid); INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%' AND NOT EXISTS(SELECT 1 FROM backup_local_pair l WHERE l.state_kind=incoming.runtime_actor_state.state_kind) AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind LIKE 'dm-pair/active/%' AND json_extract(CAST(a.state_json AS TEXT),'$')=substr(incoming.runtime_actor_state.state_kind,17));"))?;
-        Ok(())
-    }
-    fn archive_group_transfer(&self, preserved_actor: &str) -> Result<(), StorageError> {
-        super::message_footprint::ensure_archive_actor_table(&self.db)?;
-        self.db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'merge-local',state_kind,state_json FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,{preserved_actor} FROM incoming.runtime_actor_state r WHERE state_kind LIKE 'group-transfer/%' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid); DELETE FROM main.runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';"))?;
         Ok(())
     }
     fn merge_message_register_floors(
@@ -721,7 +714,6 @@ impl BackupDatabase {
         super::home_migration::strip_from_backup(&self.db)?;
         super::receive::ledger_backup::sanitize_backup(&self.db)?;
         super::pairing::sanitize_backup(&self.db)?;
-        self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';")?;
         super::backup_retirement::archive_outbound_state(&self.db)?;
         super::backup_retirement::strip_own_copy_locators(&self.db)?;
         super::backup_retirement::strip_gateway_actor_state(&self.db)?;
@@ -745,7 +737,7 @@ fn base_merge_filter(table: &str, native_data_only: bool) -> &'static str {
     if table == "runtime_actor_state" && native_data_only {
         super::backup_native::DATA_STATE_FILTER
     } else if table == "runtime_actor_state" {
-        "r.state_kind NOT LIKE 'self-sync/%' AND r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'dm-pair/active/%' AND r.state_kind NOT LIKE 'dm-pair/reset-work/%' AND r.state_kind NOT LIKE 'dm-pair/bootstrap/%' AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'"
+        "r.state_kind NOT LIKE 'self-sync/%' AND r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'dm-pair/active/%' AND r.state_kind NOT LIKE 'dm-pair/reset-work/%' AND r.state_kind NOT LIKE 'dm-pair/bootstrap/%' AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%'"
     } else if table == "friend_link_projection" {
         "NOT ((r.blocked=1 OR r.state='rejected') AND EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=r.link_id AND d.state='lifted'))"
     } else if table == "contact_request_projection" {

@@ -334,7 +334,7 @@ fn generated_copy_parts<'a>(
         Some(own_message_copy::Payload::Item(_)) => Ok(GeneratedCopyParts {
             id: opened.routing.message_id.as_str(),
             conversation: opened.routing.conversation_id.as_str(),
-            group: opened.routing.group_id.as_deref(),
+            group: None,
             sent: None,
         }),
         None => Err(invalid("own message copy requires HistoryItem or OwnSentMessage")),

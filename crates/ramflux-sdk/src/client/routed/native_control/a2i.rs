@@ -274,7 +274,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         event: &g::A2iControlEvent,
     ) -> Result<ramflux_protocol::A2iControlEvent, SdkError> {
-        if opened.routing.kind != Kind::Control || opened.routing.group_id.is_some() {
+        if opened.routing.kind != Kind::Control {
             return Err(authority("a2i control requires a direct control route"));
         }
         let native = to_native(event)?;

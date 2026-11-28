@@ -196,13 +196,13 @@ async fn r3_more_than_2048_choices_continue_after_the_recent_action_fifo_wraps()
     host.start(&mut bus).await?;
     for i in 0..CHOICES {
         let intents = engine.intents(&ConversationInput {
-            conversation_id: "group-thread",
+            conversation_id: "dm-thread",
             message_id: "prompt",
             text: "@agent checklist",
         })?;
         let Intent::CreateSurface(content) = &intents[0] else { return Err("create".into()) };
         let frame: ramflux_protocol::EventFrame = serde_json::from_value(json!({
-            "schema":ramflux_protocol::EVENT_SCHEMA,"conversationId":"group-thread",
+            "schema":ramflux_protocol::EVENT_SCHEMA,"conversationId":"dm-thread",
             "surfaceVersion":1,"newSurfaceHash":"","fallbackText":content.fallback_text,
             "a2ui":{"version":"1.0","createSurface":content.create()}
         }))?;

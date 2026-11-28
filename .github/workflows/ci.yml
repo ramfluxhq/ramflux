@@ -725,10 +725,8 @@ jobs:
           RAMFLUX_ITEST_BUILD: "1"
         run: |
           cargo build -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway
-          # Demo B: b7_offline_twenty_dms_three_group_messages_wal,
-          # b7_offline_twenty_dms_three_group_messages_redb_only,
-          # b7_mid_batch_crash_wal, b7_mid_batch_crash_redb_only,
-          # b7_group_read_before_setup_ack_keeps_catchup_live.
+          # Demo B: b7_offline_twenty_dms_wal, b7_offline_twenty_dms_redb_only,
+          # b7_mid_batch_crash_wal, b7_mid_batch_crash_redb_only.
           python3 -B scripts/ci/run-nextest.py --label e2e_demo_b_b7 -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1 -E 'test(b7_)'
 
       - name: Upload B7 JUnit

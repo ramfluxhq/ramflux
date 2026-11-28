@@ -56,9 +56,7 @@ pub(super) fn generated_plaintext(bytes: &[u8]) -> Result<Plaintext, SdkError> {
         routing: Routing {
             kind,
             conversation_id: identity.conversation_id,
-            group_id: None,
             message_id,
-            group_message_id: None,
             attachments: false,
         },
         body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(bytes)),
@@ -124,8 +122,6 @@ mod tests {
             kind: Kind::Control,
             conversation_id: "closed-control".into(),
             message_id: "closed".into(),
-            group_id: None,
-            group_message_id: None,
             attachments: false,
         };
         // The known discriminator is enough to refuse authority; no payload shape may

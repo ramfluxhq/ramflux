@@ -116,8 +116,7 @@ pub(crate) async fn send(
             target_delivery_id: account.target_delivery_id.clone(), encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(), ttl: account.client.content_ttl()?,
         };
-        let route = crate::client::routed::Route::direct();
-        let exact = prepare_task_inner(&account.client, &mut authored, &c.bytes()?, &route)?;
+        let exact = prepare_task_inner(&account.client, &mut authored, &c.bytes()?)?;
         let timeline = &authored.message_id;
         let outcome = account.client.project_task_message(&Delivery {
             conversation: &c.conversation_id,
@@ -356,7 +355,7 @@ pub(in crate::bus) async fn seal_assigned(
         created_at: assigned.created_at.unwrap_or_else(now_unix_timestamp),
         ttl: account.client.content_ttl()?,
     };
-    let prepared = prepare_task_inner(&account.client, &mut message, body, &kind)?;
+    let prepared = prepare_task_inner(&account.client, &mut message, body)?;
     let body = prepared.as_slice();
     let sealed = crate::client::recipient_home::seal_member(
         &account.client,
@@ -841,7 +840,6 @@ pub(in crate::bus) fn prepare_task_inner(
     client: &RamfluxClient,
     message: &mut GatewayDirectMessage,
     body: &[u8],
-    route: &crate::client::routed::Route,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
     g::validation::scan_message("Task", body, g::registry::COMPILED_LAYER)
         .map_err(|_| invalid("typed Task required"))?;
@@ -850,7 +848,7 @@ pub(in crate::bus) fn prepare_task_inner(
         format!("task/{}", ramflux_protocol::hash_base64url("ramflux.message.typed.Task.v1", body));
     let prepared = client.prepare_authored_content(
         message,
-        route.group_id.as_deref(),
+        None,
         &g::Content { value: Some(g::content::Value::Task(task)) },
     )?;
     Ok(zeroize::Zeroizing::new(prepared.wire.clone()))

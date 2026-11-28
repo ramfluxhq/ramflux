@@ -204,8 +204,7 @@ pub(crate) use redb_store::{
 pub use relay::*;
 pub use replay_guard::*;
 pub use report_receipt::{
-    GroupReportEvidence, NodeReportReceipt, append_node_report_receipt,
-    verify_bound_node_report_receipt, verify_group_report_evidence,
+    NodeReportReceipt, append_node_report_receipt, verify_bound_node_report_receipt,
 };
 pub use retention::*;
 pub use router::*;

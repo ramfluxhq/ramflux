@@ -1308,7 +1308,3 @@ mod redaction_tests {
         Ok(())
     }
 }
-
-#[cfg(test)]
-#[path = "double_ratchet_group_opening_tests.rs"]
-mod group_opening_tests;

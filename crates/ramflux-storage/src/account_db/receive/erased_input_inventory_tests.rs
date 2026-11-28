@@ -219,17 +219,10 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
     for (n, f) in (1_i64..).zip(&families) {
         seed_local(&p.local, f, n, now)?;
     }
-    // Archived families come from an earlier merge of a snapshot that carries them: a
-    // group-transfer actor row (archived only) and an event row.
+    // Archived families come from an earlier merge of a snapshot that carries them: an
+    // event row.
     p.local.send_direct_message("thread", "A", "peer", b"x")?;
     p.source.send_direct_message("thread", "A", "peer", b"x")?;
-    p.source
-        .connection
-        .execute("INSERT INTO message_copy_binding VALUES('payload:p-archived','A')", [])?;
-    p.source.persist_actor_state(
-        "group-transfer/p-archived",
-        &json!({"entry":{"envelope":full("ip","id","p-archived",now,3600)}}),
-    )?;
     p.source
         .connection
         .execute("INSERT INTO message_copy_binding VALUES('payload:p-archived-event','A')", [])?;
@@ -238,7 +231,7 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
         params![body("p-archived-event", now)],
     )?;
     // The local account owns the same payloads (its own bindings), as a real account would.
-    for payload in ["p-archived", "p-archived-event"] {
+    for payload in ["p-archived-event"] {
         p.local.connection.execute(
             "INSERT INTO message_copy_binding VALUES(?1,'A')",
             params![format!("payload:{payload}")],
@@ -250,19 +243,6 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
     let target = p.local.write_backup_snapshot(&path)?;
     let mut merged = BackupDatabase::open(&path, &target.key)?;
     merged.merge_backup(&first, &first_snapshot.key, || Ok(()))?;
-    // Exactly two archived copies of the row are expected, one per archive source key: the
-    // group-transfer pass (`archive_group_transfer`) stores it under `import`, and the general
-    // imported-archive pass (`preserve_imported_archives`) stores every incoming actor row under
-    // the incoming key's fingerprint. Both are retained history and both are capture sources.
-    let mut sources: Vec<String> = merged
-        .db
-        .prepare("SELECT source FROM backup_archived_actor_state WHERE state_kind='group-transfer/p-archived' ORDER BY source")?
-        .query_map([], |r| r.get(0))?
-        .collect::<Result<_, _>>()?;
-    let mut want = vec!["import".to_owned(), first_snapshot.key.fingerprint()];
-    want.sort();
-    sources.sort();
-    assert_eq!(sources, want, "the earlier merge archived the group-transfer row twice");
     // The earlier merge also imported the event as a live row; remove it so the archived copy
     // is the only source of that tuple.
     merged.db.execute("DELETE FROM local_event_log WHERE event_id='ev-archived'", [])?;
@@ -273,7 +253,7 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
         .collect::<Result<_, _>>()?;
     assert_eq!(
         footprint_kinds,
-        vec!["archived_actor".to_owned(), "archived_event".to_owned()],
+        vec!["archived_event".to_owned()],
         "only the archived copies carry the tuples of A"
     );
     // A held contact request is seeded after the earlier merge: the generic merge drops a held
@@ -304,9 +284,7 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
             payload: f.payload.clone(),
         });
     }
-    for (kind, payload) in
-        [("archived_actor", "p-archived"), ("archived_event", "p-archived-event")]
-    {
+    for (kind, payload) in [("archived_event", "p-archived-event")] {
         let (_, selector) = current_in(&p, payload)?;
         expected.push(Want {
             kind,
@@ -317,10 +295,7 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
     }
     // The source deleted A itself, which captured the two archived-family tuples under the
     // source's own bundle; the merge unions those tombstones in as well.
-    for (kind, payload) in [
-        ("source_capture_group_transfer", "p-archived"),
-        ("source_capture_event", "p-archived-event"),
-    ] {
+    for (kind, payload) in [("source_capture_event", "p-archived-event")] {
         let (_, selector) = current(&p.source, "ip", "id", payload)?;
         expected.push(Want {
             kind,
@@ -342,12 +317,6 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
         classification_guard(db).expect("every footprint store and kind is classified");
         // Exactly the expected tuples: the a2i receipt left nothing behind.
         assert_eq!(tombstone_count(db)?, i64::try_from(expected.len()).expect("count"));
-        let archived: i64 = db.query_row(
-            "SELECT count(*) FROM backup_archived_actor_state WHERE state_kind='group-transfer/p-archived'",
-            [],
-            |r| r.get(0),
-        )?;
-        assert_eq!(archived, 0, "both archived group-transfer copies are erased");
         Ok(())
     };
     verify(&merged.db)?;
@@ -400,16 +369,8 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         p.local.send_direct_message("thread", id, "peer", b"x")?;
         p.local.delete_direct_message("thread", id, "local", &format!("d-{id}"))?;
     }
-    // Archived families come from an earlier merge into the incoming account: a group-transfer
-    // actor row (archived only) and an event row, both carried by a first snapshot.
+    // Archived families come from an earlier merge into the incoming account: an event row, carried by a first snapshot.
     p.source.send_direct_message("thread", "A", "peer", b"x")?;
-    p.source
-        .connection
-        .execute("INSERT INTO message_copy_binding VALUES('payload:p-archived','A')", [])?;
-    p.source.persist_actor_state(
-        "group-transfer/p-archived",
-        &json!({"entry":{"envelope":full("ip","id","p-archived",now,3600)}}),
-    )?;
     p.source
         .connection
         .execute("INSERT INTO message_copy_binding VALUES('payload:p-archived-event','A')", [])?;
@@ -435,7 +396,7 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
     drop(mid_merged);
     drop(mid);
     let carrier = AccountDb::open(&carrier_index, "account", &mid_target.key)?;
-    for payload in ["p-archived", "p-archived-event"] {
+    for payload in ["p-archived-event"] {
         carrier.connection.execute(
             "INSERT INTO message_copy_binding VALUES(?1,'A')",
             params![format!("payload:{payload}")],
@@ -535,7 +496,6 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         });
     }
     for (kind, payload) in [
-        ("archived_actor", "p-archived"),
         ("archived_event", "p-archived-event"),
         ("legacy_replay_rule_c", "p-legacy"),
         ("legacy_replay_rule_c_archived", "p-legacy-archived"),
@@ -560,12 +520,6 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         // Every footprint store and kind that the seeded databases carry is classified.
         classification_guard(db).expect("every footprint store and kind is classified");
         assert_eq!(tombstone_count(db)?, i64::try_from(expected.len()).expect("count"));
-        let archived: i64 = db.query_row(
-            "SELECT count(*) FROM backup_archived_actor_state WHERE state_kind='group-transfer/p-archived'",
-            [],
-            |r| r.get(0),
-        )?;
-        assert_eq!(archived, 0, "both archived group-transfer copies are erased");
         Ok(())
     };
     verify(&merged.db)?;

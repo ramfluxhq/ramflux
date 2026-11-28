@@ -67,7 +67,6 @@ impl RamfluxClient {
                     snapshot.copy.kind,
                     ramflux_storage::RawInnerCopyKind::OuterInner
                         | ramflux_storage::RawInnerCopyKind::SourceEvidence
-                        | ramflux_storage::RawInnerCopyKind::NestedGroup
                 ) && !db
                     .actor_state_exists(&format!("routed/unsupported/{}", snapshot.copy.owner_id))?
                     && db.message_content(&snapshot.copy.owner_id)?.is_some()

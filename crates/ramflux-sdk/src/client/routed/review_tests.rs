@@ -93,7 +93,7 @@ async fn a_friend_cannot_inject_into_another_principals_direct_thread() -> Resul
 #[tokio::test(flavor = "current_thread")]
 async fn json_text_in_a_direct_message_cannot_select_a_control_route() -> Result<(), SdkError> {
     native_text::roundtrip(
-        br#"{"schema":"ramflux.sdk.group_sender_key.message.v1","group_id":"victim"}"#,
+        br#"{"schema":"ramflux.sdk.control.message.v1","group_id":"victim"}"#,
         false,
     )
     .await

@@ -72,17 +72,17 @@ impl<E: EngineProvider> AgentHost<E> {
             participant::identity(bus, &mut self.state, &self.config.account_id).await?;
             let context =
                 participant::conversation(bus, &self.state, &pending.conversation_id).await?;
-            let Some(current) = context else {
+            if context.is_none() {
                 self.stop_surface_output(&pending, ramflux_sdk::SurfaceRefusalCode::NotPermitted)?;
                 return Ok(());
-            };
+            }
             if let Some(reason) = pending.needs_rederive {
                 if self.resume_refused_pending(bus, &pending, reason).await? {
                     continue;
                 }
                 return Ok(());
             }
-            if !output_scope_matches(&self.state, &pending, &current)? {
+            if !output_scope_matches(&self.state, &pending)? {
                 self.complete_pending(&pending)?;
                 return Ok(());
             }
@@ -90,18 +90,6 @@ impl<E: EngineProvider> AgentHost<E> {
                 .request(&pending.method, pending.body.clone(), Some(&pending.operation_id))
                 .await;
             let (value, refusal) = match result {
-                Err(Error::GroupLeaseUnavailable) => {
-                    // Retire this intent; only a fresh command after authority refresh may speak.
-                    self.stop_surface_output(
-                        &pending,
-                        ramflux_sdk::SurfaceRefusalCode::NotPermitted,
-                    )?;
-                    if let Some(refusal) = &mut self.state.last_refusal {
-                        refusal.group_reason = Some(crate::GroupRefusal::LeaseUnavailable);
-                    }
-                    self.store.save(&self.state)?;
-                    return Ok(());
-                }
                 Err(Error::SurfaceRefused(code)) => (serde_json::Value::Null, Some(code)),
                 Err(error) => return Err(error),
                 Ok(value)
@@ -161,11 +149,7 @@ impl<E: EngineProvider> AgentHost<E> {
         self.store.save(&self.state)
     }
 }
-fn output_scope_matches(
-    state: &crate::Checkpoint,
-    pending: &Pending,
-    current: &serde_json::Value,
-) -> Result<bool> {
+fn output_scope_matches(state: &crate::Checkpoint, pending: &Pending) -> Result<bool> {
     if pending.method == "surface.resync" {
         participant::field(&pending.body, "surface_ref")?;
     } else if pending.method == "surface.send" {
@@ -179,18 +163,8 @@ fn output_scope_matches(
             return Err(Error::State);
         }
     } else {
-        let sender = if pending.method == "group.send" && state.native_account {
-            &state.principal_id
-        } else {
-            &state.device_id
-        };
-        if pending.body["sender_id"] != *sender {
+        if pending.body["sender_id"] != state.device_id {
             return Err(Error::Unauthorized);
-        }
-        if pending.method == "group.send" && current["group_id"] != pending.body["group_id"]
-            || pending.method == "message.submit" && !current["group_id"].is_null()
-        {
-            return Ok(false);
         }
     }
     Ok(true)

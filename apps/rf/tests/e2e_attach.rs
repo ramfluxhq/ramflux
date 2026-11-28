@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! ATTACH-SEND-01 r2 (review M1): real accounts, real daemons, the real gateway and the real
-//! relay. A file is sent in a DM and in a group of three, received, imported by every
+//! relay. A file is sent in a DM, received, imported by every
 //! recipient and by the sender, revoked, and then refused. No seeded rows, no test plane.
 #![cfg(all(unix, feature = "itest-memory-vault"))]
 
@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use e2e::{
     Account, Daemon, boot_stack_with_relay, configure_node, create_account, dm_conversation,
-    dump_logs, exchange_contacts, group_create, rf_json_timeout, rf_output_with_timeout,
-    start_daemon, unique, wait_dm_texts, wait_group_texts, wait_json,
+    dump_logs, exchange_contacts, rf_json_timeout, rf_output_with_timeout, start_daemon, unique,
+    wait_dm_texts, wait_json,
 };
 use serde_json::Value;
 
@@ -275,73 +275,5 @@ fn a_file_is_sent_received_imported_revoked_and_then_refused() -> e2e::Result<()
     let own = import(&alice_d, &alice, &sent_id, &alice_out)?;
     assert!(!own.status.success(), "the sender is refused as well");
     assert_eq!(std::fs::read(&alice_out)?, original, "the sender's earlier output stays");
-    Ok(())
-}
-
-#[ignore = "cli e2e: CI job cli-e2e only; not a local lane gate"]
-#[test]
-fn a_file_in_a_group_of_three_reaches_both_members() -> e2e::Result<()> {
-    let stack = boot_stack_with_relay()?;
-    let alice_d = start_daemon(&stack, "alice")?;
-    let bob_d = start_daemon(&stack, "bob")?;
-    let carol_d = start_daemon(&stack, "carol")?;
-    for daemon in [&alice_d, &bob_d, &carol_d] {
-        configure_node(daemon, &stack.discovery_url)?;
-    }
-    let alice = create_account(&alice_d, "Alice")?;
-    let bob = create_account(&bob_d, "Bob")?;
-    let carol = create_account(&carol_d, "Carol")?;
-    exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
-    exchange_contacts(&alice_d, &alice, &carol_d, &carol)?;
-    exchange_contacts(&bob_d, &bob, &carol_d, &carol)?;
-    let logs = || dump_logs(&stack, &[&alice_d, &bob_d, &carol_d]);
-    for (daemon, account) in [(&alice_d, &alice), (&bob_d, &bob), (&carol_d, &carol)] {
-        enable(daemon, account).map_err(|error| format!("{error}; logs={}", logs()))?;
-    }
-    let group = unique("e2e-attach-group");
-    group_create(&alice_d, &alice, &group, &[&bob, &carol])?;
-
-    let source = scratch(&alice_d, "group-source.bin")?;
-    let original = file_bytes(1_200_000, 31);
-    std::fs::write(&source, &original)?;
-    let source_text = source.to_string_lossy().into_owned();
-    for (daemon, account) in [(&alice_d, &alice), (&bob_d, &bob), (&carol_d, &carol)] {
-        declared(daemon, account)?;
-    }
-    let caption = "a file for the whole group";
-    let sent = send_fresh(&alice_d, "group-attach", |message| {
-        [
-            "group",
-            "send",
-            "--account",
-            &alice.id,
-            "--group",
-            &group,
-            "--conversation",
-            &group,
-            "--message",
-            message,
-            "--sender",
-            &alice.device_id,
-            "--body",
-            caption,
-            "--attach",
-            &source_text,
-        ]
-        .map(str::to_owned)
-        .to_vec()
-    })
-    .map_err(|error| format!("{error}; logs={}", logs()))?;
-    assert_eq!(sent["delivery_state"], "submitted", "the group send was admitted: {sent}");
-
-    for (daemon, account, name) in [(&bob_d, &bob, "bob"), (&carol_d, &carol, "carol")] {
-        let view = wait_group_texts(daemon, account, &group, &group, &[caption])
-            .map_err(|error| format!("{error}; logs={}", logs()))?;
-        let id = message_id(&view, caption)?;
-        let out = scratch(daemon, &format!("group-{name}.bin"))?;
-        let bytes = import_ok(daemon, account, &id, &out)
-            .map_err(|error| format!("{error}; logs={}", logs()))?;
-        assert_eq!(bytes, original, "{name} imports the exact bytes from its own entry");
-    }
     Ok(())
 }

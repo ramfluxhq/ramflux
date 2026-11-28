@@ -149,27 +149,6 @@ fn parse_both(command: &str) -> Result<(), clap::Error> {
 }
 
 #[test]
-fn group_selectors_accept_hyphen_values_for_every_membership_operation() -> Result<(), clap::Error>
-{
-    for command in [
-        "group create --account -abc --group -abc --creator -abc --creator-signing-public-key -abc --creator-target-delivery -abc --member -abc --member-target-delivery -abc",
-        "group member add --account -abc --group -abc --member-device -abc --member-signing-public-key -abc --member-principal-commitment -abc --target-delivery -abc",
-        "group role set --account -abc --group -abc --actor -abc --member-device -abc --role member",
-        "group send --account -abc --group -abc --conversation -abc --message -abc --sender -abc --body hello --source-principal -abc --envelope -abc --target -abc",
-        "group rename --account -abc --group -abc --name title --request-id -abc",
-        "group read --account -abc --group -abc --conversation -abc",
-    ] {
-        parse_both(command)?;
-    }
-    for verb in ["remove", "kick"] {
-        parse_both(&format!(
-            "group member {verb} --account -abc --group -abc --actor -abc --member-device -abc"
-        ))?;
-    }
-    Ok(())
-}
-
-#[test]
 fn contact_selectors_accept_hyphen_values_for_links_and_federation() -> Result<(), clap::Error> {
     parse_both(
         "contact request --account -abc --link -abc --requester -abc --target -abc --conversation -abc --message -abc --envelope -abc --source-principal -abc --sender -abc --recipient-device -abc --target-delivery -abc",

@@ -299,7 +299,7 @@ mod tests {
                 owner_id: "copy:authenticated-envelope",
                 verified_source_anchor: "verified-root",
                 copy_id: "bound-copy",
-                kind: super::super::raw_inner::RawInnerCopyKind::NestedGroup,
+                kind: super::super::raw_inner::RawInnerCopyKind::OuterInner,
                 bytes: b"stale bound bytes",
                 bounded_metadata: b"{}",
             })?;

@@ -246,11 +246,6 @@ fn replay_footprint_migration_merge_erases_late_owner_and_registers_imported_row
     drop(local);
     let local = AccountDb::open(&local_index, "account", &local_key)?;
     assert_eq!(actor_owners(&local, "zz-new/local-late")?.len(), 2);
-    // The merge deletes these tail rows before importing, so SQLite reuses their rowids; an
-    // imported row must be identified by key, never by a rowid threshold.
-    for n in 0..64 {
-        local.persist_actor_state(&format!("group-transfer/review-tail-{n}"), &json!({"n": n}))?;
-    }
     // (g) Pre-fix rows that exist only in the incoming snapshot carry no footprint.
     for (n, key) in ["zz-new/imported", "legacy/replay/committed/imported"].into_iter().enumerate()
     {

@@ -15,7 +15,6 @@ pub(super) const SUPPORTED_OWN_ATTESTATION_KIND: &str = "supported_own_attestati
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RawInnerCopyKind {
     OuterInner,
-    NestedGroup,
     HistoryContainer,
     SourceEvidence,
     /// Supported own Message/Edit proof. Charged on its own quota, erased with the message.
@@ -26,7 +25,6 @@ impl RawInnerCopyKind {
     fn from_sql(value: &str) -> Result<Self, StorageError> {
         match value {
             "outer_inner" => Ok(Self::OuterInner),
-            "nested_group" => Ok(Self::NestedGroup),
             "history_container" => Ok(Self::HistoryContainer),
             "source_evidence" => Ok(Self::SourceEvidence),
             SUPPORTED_OWN_ATTESTATION_KIND => Ok(Self::SupportedOwnAttestation),
@@ -37,7 +35,6 @@ impl RawInnerCopyKind {
     fn as_sql(self) -> &'static str {
         match self {
             Self::OuterInner => "outer_inner",
-            Self::NestedGroup => "nested_group",
             Self::HistoryContainer => "history_container",
             Self::SourceEvidence => "source_evidence",
             Self::SupportedOwnAttestation => SUPPORTED_OWN_ATTESTATION_KIND,
@@ -102,7 +99,7 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
         RawInnerCopyKind::HistoryContainer
         | RawInnerCopyKind::SourceEvidence
         | RawInnerCopyKind::SupportedOwnAttestation => MAX_HISTORY_CONTAINER_BYTES,
-        RawInnerCopyKind::OuterInner | RawInnerCopyKind::NestedGroup => MAX_INNER_BYTES,
+        RawInnerCopyKind::OuterInner => MAX_INNER_BYTES,
     };
     if bytes.is_empty() || bytes.len() > max_bytes || metadata.len() > 4096 {
         return Err(StorageError::AuthorizationRejected);

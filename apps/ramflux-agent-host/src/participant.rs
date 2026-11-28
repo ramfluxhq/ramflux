@@ -130,63 +130,15 @@ pub(crate) async fn conversation(
     if row["removed"] == true || row["deleted"] == true {
         return Ok(None);
     }
-    if let Some(group) = row["group_id"].as_str() {
-        let membership = bus.request("group.members", json!({"group_id":group}), None).await?;
-        if membership["deleted"] == true
-            || !array_has(&membership["members"], &state.device_id)
-                && !array_has(&membership["members"], &state.principal_id)
-        {
-            return Ok(None);
-        }
-        if state.native_account && !pinned_native_member(bus, state, &membership).await? {
-            return Ok(None);
-        }
-    } else if row["kind"] != "direct" || !array_has(&row["participants"], &state.principal_id) {
+    if !row["group_id"].is_null()
+        || row["kind"] != "direct"
+        || !array_has(&row["participants"], &state.principal_id)
+    {
         return Ok(None);
     }
     Ok(Some(row))
 }
 
-async fn pinned_native_member(
-    bus: &mut impl AgentBus,
-    state: &Checkpoint,
-    membership: &Value,
-) -> Result<bool> {
-    // The effective device list alone is a display projection. Require the signed,
-    // root-qualified roster and the current verified self identity as well.
-    let Some(own) = directory_find(bus, "identity.directory", "identities", |row| {
-        row["is_self"] == true && row["principal_id"] == state.principal_id
-    })
-    .await?
-    else {
-        return Ok(false);
-    };
-    let Some(root) = own["contact_identity_commitment"].as_str().filter(|s| !s.is_empty()) else {
-        return Ok(false);
-    };
-    let Some(device) = own["devices"]
-        .as_array()
-        .and_then(|rows| rows.iter().find(|row| row["device_id"] == state.device_id))
-    else {
-        return Ok(false);
-    };
-    let Some(key) = device["signing_public_key"].as_str().filter(|s| !s.is_empty()) else {
-        return Ok(false);
-    };
-    Ok(array_has(&membership["members"], &state.device_id)
-        && membership["member_roster"].as_array().is_some_and(|members| {
-            members.iter().any(|member| {
-                let pin = &member["identity"];
-                pin["principal_id"] == state.principal_id
-                    && pin["root_commitment"] == root
-                    && (pin["device_id"] != state.device_id || pin["signing_public_key"] == key)
-            })
-        })
-        && !membership["excluded_devices"].as_array().is_some_and(|rows| {
-            rows.iter()
-                .any(|row| row["root_commitment"] == root && row["device_id"] == state.device_id)
-        }))
-}
 pub(crate) fn array_has(value: &Value, id: &str) -> bool {
     value.as_array().is_some_and(|values| values.iter().any(|v| v == id))
 }
@@ -270,17 +222,9 @@ pub(crate) async fn reply_outputs(
         .map_err(|_| Error::State)?,
     );
     let message_id = format!("agent-{operation}");
-    let mut body = json!({"conversation_id":conversation_id,"message_id":message_id,"sender_id":state.device_id,"encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(text.as_bytes())});
-    if let Some(group) = conversation["group_id"].as_str() {
-        body["group_id"] = json!(group);
-        if state.native_account {
-            body["sender_id"] = json!(state.principal_id);
-        }
-        Ok(vec![crate::checkpoint::Output {
-            method: "group.send".into(),
-            operation_id: operation,
-            body,
-        }])
+    let body = json!({"conversation_id":conversation_id,"message_id":message_id,"sender_id":state.device_id,"encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(text.as_bytes())});
+    if !conversation["group_id"].is_null() {
+        Err(Error::Unauthorized)
     } else {
         let peer = direct_peer(bus, message).await?;
         let principal = field(&peer, "principal_id")?.to_owned();

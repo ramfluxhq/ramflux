@@ -25,7 +25,6 @@ async fn startup_and_reconnect_authentication_races_retry_identity_before_resumi
                         "identity.directory",
                         "bus.subscribe",
                         "conversation.directory",
-                        "group.list",
                     ] {
                         // AP-07 keeps subscription events off the RPC connection.
                         let socket = if method == "bus.subscribe" {
@@ -58,10 +57,7 @@ async fn startup_and_reconnect_authentication_races_retry_identity_before_resumi
                                 json!({"identities":[{"principal_id":"agent","is_self":true,"kind":"headless_ai"}],"next_cursor":null})
                             }
                             "bus.subscribe" => json!({"head_seq":1}),
-                            "conversation.directory" => {
-                                json!({"conversations":[],"next_cursor":null})
-                            }
-                            _ => json!({"groups":[],"next_cursor":null}),
+                            _ => json!({"conversations":[],"next_cursor":null}),
                         };
                         if racing {
                             frame.error = Some(LocalBusErrorBody {

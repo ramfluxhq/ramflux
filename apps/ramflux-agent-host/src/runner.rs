@@ -43,10 +43,8 @@ impl<E: EngineProvider> AgentHost<E> {
         if !crate::runner_approval::valid(&state)
             || state.handled_actions.len() > 2048
             || state.pending.as_ref().is_some_and(|p| {
-                !matches!(
-                    p.method.as_str(),
-                    "message.submit" | "group.send" | "surface.send" | "surface.resync"
-                ) || p.remaining.len() > 95
+                !matches!(p.method.as_str(), "message.submit" | "surface.send" | "surface.resync")
+                    || p.remaining.len() > 95
                     || p.remaining.iter().any(|o| {
                         !matches!(o.method.as_str(), "surface.send" | "message.submit")
                             || o.body["conversation_id"] != p.conversation_id
@@ -113,10 +111,8 @@ impl<E: EngineProvider> AgentHost<E> {
             participant::identity(bus, &mut self.state, &self.config.account_id).await?;
         let topics = json!([
             "message.received",
-            "group.message.received",
             "message.updated",
             "conversation.changed",
-            "group.changed",
             "device.changed",
             "identity.device_branch.revoked",
             "surface.changed",
@@ -141,7 +137,6 @@ impl<E: EngineProvider> AgentHost<E> {
             self.state.cursor = Some(ack["head_seq"].as_u64().ok_or(Error::State)?);
         }
         participant::snapshot(bus, "conversation.directory", "conversations").await?;
-        participant::snapshot(bus, "group.list", "groups").await?;
         self.save_state()?;
         self.recover_pending(bus).await
     }
@@ -205,13 +200,13 @@ impl<E: EngineProvider> AgentHost<E> {
             // An edit is not a new turn. Only a deleted row erases the PRX session.
             self.erase_deleted_message(event).await?;
         }
-        if matches!(event.method.as_str(), "message.received" | "group.message.received") {
+        if matches!(event.method.as_str(), "message.received") {
             self.message(bus, event, seq, now_ms).await?;
         }
         if event.method == "surface.changed" {
             self.surface_action(bus, event, seq).await?;
         }
-        if matches!(event.method.as_str(), "conversation.changed" | "group.changed") {
+        if event.method == "conversation.changed" {
             self.cancel_removed_conversations(bus).await?;
         }
         crate::runner_run_approval::forward(bus, &mut self.engine, event).await?;
@@ -234,11 +229,9 @@ impl<E: EngineProvider> AgentHost<E> {
             return Ok(());
         }
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
-        let Some(conversation) =
-            participant::conversation(bus, &self.state, conversation_id).await?
-        else {
+        if participant::conversation(bus, &self.state, conversation_id).await?.is_none() {
             return Ok(());
-        };
+        }
         let Some(message) = crate::message_input::read(bus, conversation_id, message_id).await?
         else {
             return Ok(());
@@ -252,7 +245,7 @@ impl<E: EngineProvider> AgentHost<E> {
         }
         let text = message["text"].as_str().ok_or(Error::MalformedField("text"))?;
         let sender_display_name = participant::sender_display_name(bus, &message).await?;
-        let chat_kind = if conversation["group_id"].is_string() { "group" } else { "direct" };
+        let chat_kind = "direct";
         let mentioned = participant::mentions_self(bus, &self.state, &message).await?;
         let events = self
             .engine
@@ -444,7 +437,6 @@ impl<E: EngineProvider> AgentHost<E> {
                 Ok(plan) => Some(plan),
                 Err(Error::SurfaceRefused(reason)) => {
                     self.state.last_refusal = Some(crate::OutputRefusal {
-                        group_reason: None,
                         conversation_id: conversation_id.into(),
                         surface_id: intents.first().and_then(Intent::surface_id).map(str::to_owned),
                         reason,

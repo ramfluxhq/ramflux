@@ -1061,9 +1061,7 @@ async fn routed_committed_covers_and_acks_case() -> Case {
                 routing: crate::client::routed::Routing {
                     kind: crate::client::routed::Kind::Direct,
                     conversation_id: "healthy".into(),
-                    group_id: None,
                     message_id: "committed-seed".into(),
-                    group_message_id: None,
                     attachments: false,
                 },
                 entry: first,

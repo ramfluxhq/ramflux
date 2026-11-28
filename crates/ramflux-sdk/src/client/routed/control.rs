@@ -23,7 +23,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-        if source != opened.remote_device || opened.routing.group_id.is_some() {
+        if source != opened.remote_device {
             return Err(invalid(
                 "pair reset requires the authenticated pair peer on a direct control route",
             ));

@@ -19,7 +19,7 @@ const AUDIT_IDENTITY_TABLES: &[&str] = &[
     "runtime_inbox_changes",
 ];
 const AUDIT_IDENTITY_ACTOR_FILTER: &str = "state_kind GLOB 'directory/identity/*' OR state_kind GLOB 'directory/device/*' OR state_kind GLOB 'directory/contact/*' OR state_kind GLOB 'directory/commitment/*' OR state_kind GLOB 'directory/conversation/*' OR state_kind GLOB 'directory/group/*' OR state_kind GLOB 'directory/group-local/*' OR state_kind GLOB 'directory/group-name/*' OR state_kind GLOB 'identity/*' OR state_kind GLOB 'authority/*'";
-const AUDIT_IDENTITY_EVENT_FILTER: &str = "event_type GLOB 'identity.*' OR event_type GLOB 'device.*' OR event_type GLOB 'prekey.*' OR event_type GLOB 'x3dh.prekey.*' OR event_type IN ('dm.ratchet_session','group.sender_key.state','group.member.route')";
+const AUDIT_IDENTITY_EVENT_FILTER: &str = "event_type GLOB 'identity.*' OR event_type GLOB 'device.*' OR event_type GLOB 'prekey.*' OR event_type GLOB 'x3dh.prekey.*' OR event_type IN ('dm.ratchet_session')";
 // Static migration descriptions are schema metadata, never account or message copies.
 const AUDIT_STRUCTURAL_TABLES: &[&str] = &["schema_migration"];
 
@@ -139,7 +139,10 @@ fn seed_copies(
     )?;
     db.persist_actor_state(&format!("routed/projection/{hash}"), &"projection-id")?;
     db.persist_actor_state("routed/message-owner/projection-id", &sender)?;
-    db.persist_actor_state("routed/message-metadata/projection-id",&json!({"message_id":"projection-id","group_id":"group","group_message_id":"logical-private-id","sender":sender}))?;
+    db.persist_actor_state(
+        "routed/message-metadata/projection-id",
+        &json!({"message_id":"projection-id","sender":sender}),
+    )?;
     db.persist_actor_state(
         "attachment/reference/object-selector",
         &json!({"reference":{"object_id":"object-selector","owner":sender}}),
@@ -951,55 +954,6 @@ fn lazily_created_archive_registers_retired_outbound_copies() -> Result<(), Stor
     let db = reopen(&root, db)?;
     assert_eq!(archive_row_count(&db, "own-device/send/x")?, 0);
     drop(db);
-    Ok(())
-}
-
-#[test]
-fn lazily_created_archive_registers_merge_local_copies() -> Result<(), StorageError> {
-    let root = crate::tests::temp_root("footprint-lazy-merge");
-    let source_index = AccountIndex::open(root.join("source"))?;
-    let local_index = AccountIndex::open(root.join("local"))?;
-    source_index.create_account("account", "root")?;
-    local_index.create_account("account", "root")?;
-    let source = AccountDb::open(&source_index, "account", &AccountDbKey::generate()?)?;
-    let local = AccountDb::open(&local_index, "account", &AccountDbKey::generate()?)?;
-    local.send_direct_message("thread", "message", "peer", b"secret")?;
-    local.persist_actor_state("group-transfer/local", &envelope_value("message"))?;
-    let incoming = root.join("incoming.db");
-    let snapshot = source.write_backup_snapshot(&incoming)?;
-    let path = root.join("merged.db");
-    let target = local.write_backup_snapshot(&path)?;
-    let mut merged = crate::BackupDatabase::open(&path, &target.key)?;
-    assert!(!super::schema::exists(&merged.db, "backup_archived_actor_state")?);
-    merged.merge_backup(&incoming, &snapshot.key, || Ok(()))?;
-    let owned = |db: &rusqlite::Connection| -> rusqlite::Result<i64> {
-        db.query_row(
-            "SELECT count(*) FROM backup_archived_actor_state a JOIN message_footprint f \
-             ON f.kind='archived_actor' AND f.locator=CAST(a.rowid AS TEXT) \
-             AND f.message_id='message' WHERE a.state_kind='group-transfer/local'",
-            [],
-            |row| row.get(0),
-        )
-    };
-    assert_eq!(owned(&merged.db)?, 1);
-    assert_eq!(audit::unregistered_envelope_copies(&merged.db, 16)?, Vec::<String>::new());
-    merged
-        .db
-        .execute("UPDATE direct_message_projection SET deleted=1 WHERE message_id='message'", [])?;
-    let remaining = |db: &rusqlite::Connection| -> rusqlite::Result<i64> {
-        db.query_row(
-            "SELECT count(*) FROM backup_archived_actor_state WHERE state_kind='group-transfer/local'",
-            [],
-            |row| row.get(0),
-        )
-    };
-    assert_eq!(remaining(&merged.db)?, 0);
-    drop(merged);
-    let reopened = crate::BackupDatabase::open(&path, &target.key)?;
-    assert_eq!(remaining(&reopened.db)?, 0);
-    drop(reopened);
-    drop(source);
-    drop(local);
     Ok(())
 }
 

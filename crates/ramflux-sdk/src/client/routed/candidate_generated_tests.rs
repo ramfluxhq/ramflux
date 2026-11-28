@@ -415,7 +415,7 @@ async fn unknown_field_entity_layer_and_signed_payload_keep_exact_bytes() -> Res
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn unknown_cannot_bypass_native_group_or_own_origin_authority() -> Result<(), SdkError> {
+async fn unknown_cannot_bypass_own_origin_authority() -> Result<(), SdkError> {
     let (a, mut b) = pair(219, 221).await?;
     let mut control = g::Control {
         operation: 15,

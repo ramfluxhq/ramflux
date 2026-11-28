@@ -80,7 +80,6 @@ fn verify_edit_origin(
     let evidence = item.source_evidence.as_ref().ok_or(EvidenceError::OriginEvidenceMissing)?;
     if evidence.canonical_sender_envelope.len() > g::original_header::MAX_OUTER_BYTES
         || !evidence.group_plaintext.is_empty()
-        || !evidence.group_opening.is_empty()
     {
         return Err(bad.into());
     }
@@ -158,25 +157,16 @@ impl RamfluxClient {
         {
             return Err(EvidenceError::EditTargetMismatch.into());
         }
-        Self::refuse_group_history_scope(
-            original_evidence,
-            &checked.identity,
-            &checked.edit_identity,
-        )?;
+        Self::refuse_group_history_scope(&checked.identity, &checked.edit_identity)?;
         Ok(checked.identity)
     }
 
     /// Group history evidence is unavailable until the MLS group track.
     fn refuse_group_history_scope(
-        evidence: &g::HistoryOriginalMetadataEvidence,
         original: &g::EventIdentity,
         edit: &g::EventIdentity,
     ) -> Result<(), SdkError> {
-        if evidence.group_binding.is_some()
-            || evidence.group_membership.is_some()
-            || original.group_id.is_some()
-            || edit.group_id.is_some()
-        {
+        if original.group_id.is_some() || edit.group_id.is_some() {
             return Err(EvidenceError::OriginCommitmentMismatch.into());
         }
         Ok(())

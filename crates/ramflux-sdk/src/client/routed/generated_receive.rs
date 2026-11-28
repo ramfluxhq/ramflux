@@ -593,7 +593,7 @@ impl RamfluxClient {
                 self.project_native_call_control(
                     entry,
                     &opened.routing.conversation_id,
-                    opened.routing.group_id.as_deref(),
+                    None,
                     &native,
                     bytes,
                 )?;
@@ -672,8 +672,7 @@ impl RamfluxClient {
         scanned: &validation::ScannedInner<'_>,
     ) -> Result<(), SdkError> {
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-        if opened.routing.group_id.is_none()
-            && source.root_commitment() != self.own_account_anchor()?
+        if source.root_commitment() != self.own_account_anchor()?
             && opened.routing.conversation_id.starts_with(g::dm_scope::PREFIX)
         {
             g::dm_scope::validate_direct(
@@ -683,10 +682,7 @@ impl RamfluxClient {
             )
             .map_err(|_| invalid("reserved DM root pair mismatch"))?;
         }
-        if opened.routing.group_id.is_some() {
-            g::dm_scope::validate_group(&opened.routing.conversation_id)
-                .map_err(|_| invalid("group uses reserved DM namespace"))?;
-        } else if source.root_commitment() != self.own_account_anchor()?
+        if source.root_commitment() != self.own_account_anchor()?
             && !(scanned.kind == 8
                 && g::Control::decode(scanned.body).is_ok_and(|c| matches!(c.operation, 3 | 4)))
         {

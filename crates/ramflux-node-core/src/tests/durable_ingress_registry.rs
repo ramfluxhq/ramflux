@@ -155,10 +155,6 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         Class::NonIngress("pure candidate receipt signature and binding verification"),
     ),
     (
-        "report_receipt.rs:verify_group_report_evidence",
-        Class::NonIngress("pure candidate group opening and native author evidence verification"),
-    ),
-    (
         "replay_guard.rs:envelope_replay_tuple_key",
         Class::NonIngress("pure replay-key construction"),
     ),

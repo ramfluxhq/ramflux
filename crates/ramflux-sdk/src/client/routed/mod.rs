@@ -67,10 +67,7 @@ pub(crate) enum Kind {
 pub(crate) struct Routing {
     pub kind: Kind,
     pub conversation_id: String,
-    pub group_id: Option<String>,
     pub message_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group_message_id: Option<String>,
     #[serde(default)]
     pub attachments: bool,
 }
@@ -190,40 +187,33 @@ fn associated_data_bound(
 #[derive(Clone)]
 pub(crate) struct Route {
     pub kind: Kind,
-    pub group_id: Option<String>,
     pub attachments: bool,
 }
 impl Route {
     pub(crate) fn from_inner(body: &[u8]) -> Result<Self, SdkError> {
         let parsed = generated_transport::generated_plaintext(body)?;
-        Ok(Self {
-            kind: parsed.routing.kind,
-            group_id: parsed.routing.group_id,
-            attachments: false,
-        })
+        Ok(Self { kind: parsed.routing.kind, attachments: false })
     }
 
     #[cfg(test)]
     pub fn attachments() -> Self {
-        Self { kind: Kind::Direct, group_id: None, attachments: true }
+        Self { kind: Kind::Direct, attachments: true }
     }
     pub fn direct() -> Self {
-        Self { kind: Kind::Direct, group_id: None, attachments: false }
+        Self { kind: Kind::Direct, attachments: false }
     }
     pub fn control() -> Self {
-        Self { kind: Kind::Control, group_id: None, attachments: false }
+        Self { kind: Kind::Control, attachments: false }
     }
     pub fn receipt() -> Self {
-        Self { kind: Kind::Receipt, group_id: None, attachments: false }
+        Self { kind: Kind::Receipt, attachments: false }
     }
 }
 fn routing(message: &GatewayDirectMessage, route: Route) -> Routing {
     Routing {
         kind: route.kind,
         attachments: route.attachments,
-        group_id: route.group_id,
         conversation_id: message.conversation_id.clone(),
-        group_message_id: None,
         message_id: message.envelope_id.clone(),
     }
 }
@@ -776,9 +766,6 @@ impl RamfluxClient {
                 != logical_id.as_deref().unwrap_or(&entry.envelope.envelope_id)
         {
             return Err(invalid("invalid authenticated routing header"));
-        }
-        if plaintext.routing.group_message_id.is_some() {
-            return Err(invalid("invalid authenticated group message id"));
         }
         Ok(Opened {
             routing: plaintext.routing,

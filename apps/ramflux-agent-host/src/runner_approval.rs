@@ -330,7 +330,6 @@ impl<E: EngineProvider> AgentHost<E> {
                     // A signed task can refuse terminalization while a human step is open.
                     // Never turn that permanent refusal into a host-wide reconnect loop.
                     self.state.last_refusal = Some(crate::OutputRefusal {
-                        group_reason: None,
                         conversation_id: bridge.conversation_id.clone(),
                         surface_id: None,
                         reason: refusal,

@@ -22,7 +22,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         revoke: &g::ObjectRevokeAccess,
     ) -> Result<RootQualifiedDeviceRef, SdkError> {
-        if opened.routing.kind != Kind::Control || opened.routing.group_id.is_some() {
+        if opened.routing.kind != Kind::Control {
             return Err(authority("object revoke requires a direct control route"));
         }
         if revoke.reason.len() > MAX_REASON_BYTES || revoke.effective_at <= 0 {

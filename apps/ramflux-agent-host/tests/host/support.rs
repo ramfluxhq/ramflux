@@ -57,7 +57,6 @@ pub enum Fault {
     Gap,
     Human,
     Removed,
-    ChangedContext,
     Absent,
     SelfSender,
     SpoofKind,
@@ -105,11 +104,15 @@ impl Fake {
                 json!({"principal_id":"human-principal","devices":[{"device_id":"human-device","target_delivery_id":"human-target"}]})
             }
             "conversation.directory" => {
-                json!({"conversations":if self.faults.contains(&Fault::Absent){vec![]}else{vec![json!({"id":"dm","kind":"direct","participants":["agent-principal","human-principal"]}),json!({"id":"group-thread","kind":"group","group_id":if self.faults.contains(&Fault::ChangedContext){"another-group"}else{"group"}})]},"next_cursor":null})
-            }
-            "group.list" => json!({"groups":[],"next_cursor":null}),
-            "group.members" => {
-                json!({"group_id":"group","member_roster":[{"identity":{"principal_id":"agent-principal","root_commitment":"agent-commitment","device_id":"agent-device","signing_public_key":"agent-key"},"role":"member"}],"excluded_devices":[],"members":if self.faults.contains(&Fault::Removed) || self.faults.contains(&Fault::RemoveBeforeSend) && self.requests.iter().filter(|(m,_)|m=="group.members").count()>=2 {vec!["human-device"]}else{vec!["human-device","agent-device"]}})
+                let removed = self.faults.contains(&Fault::Removed)
+                    || self.faults.contains(&Fault::RemoveBeforeSend)
+                        && self
+                            .requests
+                            .iter()
+                            .filter(|(m, _)| m == "conversation.directory")
+                            .count()
+                            >= 3;
+                json!({"conversations":if self.faults.contains(&Fault::Absent){vec![]}else{vec![json!({"id":"dm","kind":"direct","removed":removed,"participants":["agent-principal","human-principal"]}),json!({"id":"dm-thread","kind":"direct","removed":removed,"participants":["agent-principal","human-principal"]})]},"next_cursor":null})
             }
             "bus.subscribe" => {
                 if self.faults.contains(&Fault::Gap) && !body["since_seq"].is_null() {
@@ -124,7 +127,7 @@ impl Fake {
                 "@agent ping",
                 self.faults.contains(&Fault::SelfSender),
             ),
-            "message.submit" | "group.send" => {
+            "message.submit" => {
                 let id = operation.ok_or(Error::Bus)?;
                 if let Some(previous) = self.receipts.get(id) {
                     if previous != &body {
@@ -158,13 +161,13 @@ impl AgentBus for Fake {
         std::future::pending().await
     }
 }
-pub fn incoming(seq: u64, group: bool) -> LocalBusFrame {
+pub fn incoming(seq: u64, second: bool) -> LocalBusFrame {
     let mut event = LocalBusFrame::request(
         "event",
         Some("agent".into()),
         "stream",
-        if group { "group.message.received" } else { "message.received" },
-        json!({"message":{"conversation_id":if group{"group-thread"}else{"dm"},"message_id":"ping","sender_id":"human-device"}}),
+        "message.received",
+        json!({"message":{"conversation_id":if second{"dm-thread"}else{"dm"},"message_id":"ping","sender_id":"human-device"}}),
     );
     event.kind = LocalBusFrameKind::Event;
     event.seq = Some(seq);

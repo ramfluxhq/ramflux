@@ -23,15 +23,8 @@ per-device envelope and operation IDs; device display names cannot select a diff
 builders. The rule engine sends no task/tool/approval operations; the PRX bridge uses
 the signed task and grant flow described below.
 
-Native group commands use the verified principal in `sender_id`; the received
-projection retains the authenticated branch in `sender_device_id` and its root in
-`sender_root_commitment`. Before reading a command and immediately before output,
-the host requires effective local device membership and a signed roster pin matching
-its verified self principal/root and current branch key. A display name alone cannot
-authorize a reply. Removal or a changed group binding discards prepared output.
-`GroupLeaseUnavailable` retires that intent with the typed checkpoint
-`group_reason: "lease_unavailable"`; refresh branch authority through the owner's
-normal custody flow and send a fresh command. The host never obtains primary authority
+The host does not handle group conversations: a group conversation is skipped and never
+receives output. It never obtains primary authority
 or retries a refused intent after restart.
 
 Copy `example.json` and set the socket, account and durable state paths. Create the
@@ -159,8 +152,7 @@ is unavailable is dropped after the host advances its cursor; it is not retried 
 Other terminal failures produce one short typed reply. The owner-only token file is read at
 startup, is never checkpointed, and is never included in diagnostics. The bearer is an owner-wide
 PRX credential, including access to other `/api/*` controls; keep it on the agent's own operating
-system account and private volume. In groups, member-authored text reaches PRX under this single
-owner credential. PRX autonomy and tool scopes define execution authority; a prompt header is only context and conveys no
+system account and private volume. PRX autonomy and tool scopes define execution authority; a prompt header is only context and conveys no
 permission. Headers include only the bounded sender display label, chat kind and mention flag,
 never group member lists.
 
@@ -178,10 +170,9 @@ The host stores the entire batch before sending with stable operation/message ID
 so a lost response can reuse rfd's durable receipt. Each completed step is checkpointed
 before the next begins. After successful delivery it checkpoints the cursor and
 clears that output. A revoked membership discards pending output rather than sending.
-A changed group binding also invalidates pending output.
 
 Subscription cursor jumps are legal for filtered topics. A retention gap reloads the
-current conversation/group snapshots and resumes at the new journal head. Unavailable
+current conversation snapshot and resumes at the new journal head. Unavailable
 historical commands are not synthesized from message history. Fresh startup similarly
 starts at the current head. A pending prepared output still recovers after a gap if
 current authorization allows it. Reconnection resumes from the last applied cursor.
@@ -265,13 +256,12 @@ requires a Live networking state (and no networking refusal reason when supplied
 unlocked local account, an unfenced authority, and a verified headless self identity.
 The companion integration
 suite provides five native realnet slices under `tests::agent_v3_native`: k5a DM
-reply and bundle consumption, k5a group reply/restart/removal, k5a2 agent surfaces,
+reply and bundle consumption, k5a2 agent surfaces,
 k2b receiver-side surface refusals and streaming, and k3b single-device task approval.
-The native group slice checks exact reply counts across process restart and a fresh
-post-restart command, verified principal/device attribution, and removal fences.
+The k5a slice checks exact reply counts across process restart and a fresh
+post-restart command and verified attribution.
 Its volatile test vault restarts against the still-unlocked daemon; production restart
-uses the persistent operator Keychain. The legacy k5a/k5a2 slices retain group surface
-coverage, and legacy k3b retains second-device convergence until native pairing exists.
+uses the persistent operator Keychain. The legacy k3b retains second-device convergence until native pairing exists.
 Run realnet slices on a container host; unit tests do not establish realnet acceptance.
 
 Malformed read-model fields are permanent typed refusals, never transport retries.

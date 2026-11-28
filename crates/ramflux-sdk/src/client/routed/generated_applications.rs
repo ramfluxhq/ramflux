@@ -56,7 +56,7 @@ impl RamfluxClient {
                         .client_record("conversation", &routing.conversation_id)?
                         .and_then(|value| value["group_id"].as_str().map(str::to_owned))
                 } else {
-                    routing.group_id.clone()
+                    None
                 };
                 self.record_surface_origin(
                     &routing.message_id,
@@ -134,7 +134,7 @@ impl RamfluxClient {
                 if !self.receive_task_control(
                     entry,
                     &routing.conversation_id,
-                    routing.group_id.as_deref(),
+                    None,
                     &task.encode_to_vec(),
                 )? {
                     return Err(invalid("Task Control was not admitted"));
@@ -182,7 +182,7 @@ impl RamfluxClient {
                     if !self.receive_task_own(
                         entry,
                         &routing.conversation_id,
-                        routing.group_id.as_deref(),
+                        None,
                         &item.encode_to_vec(),
                     )? {
                         return Err(invalid("Task OwnHistory was not admitted"));

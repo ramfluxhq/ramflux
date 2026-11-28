@@ -99,9 +99,7 @@ impl RamfluxClient {
         let routing = Routing {
             kind: Kind::Direct,
             conversation_id: conversation,
-            group_id: None,
             message_id,
-            group_message_id: None,
             attachments: false,
         };
         self.confirm_routed_context(&routing, entry)?;

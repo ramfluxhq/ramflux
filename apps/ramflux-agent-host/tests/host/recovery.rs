@@ -4,7 +4,7 @@ use super::support::{Fake, Fault, Fixture, TestResult, incoming};
 use ramflux_agent_host::{AgentHost, Error, RuleEngine};
 use serde_json::Value;
 #[tokio::test]
-async fn dm_and_group_reply_as_own_account_then_resume_without_duplicates() -> TestResult {
+async fn dm_replies_as_own_device_then_resume_without_duplicates() -> TestResult {
     let f = Fixture::new()?;
     let mut bus = Fake::default();
     let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
@@ -13,10 +13,7 @@ async fn dm_and_group_reply_as_own_account_then_resume_without_duplicates() -> T
     host.apply(&mut bus, incoming(40, true), 2000).await?;
     assert_eq!(bus.replies.len(), 2);
     for reply in &bus.replies {
-        assert_eq!(
-            reply["sender_id"],
-            if reply["group_id"].is_null() { "agent-device" } else { "agent-principal" }
-        );
+        assert_eq!(reply["sender_id"], "agent-device");
         assert_eq!(
             ramflux_protocol::decode_base64url(
                 reply["plaintext_body_base64"].as_str().ok_or("body")?
@@ -77,30 +74,14 @@ async fn removal_before_pending_recovery_cancels_the_reply() -> TestResult {
     let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
     host.start(&mut bus).await?;
     bus.faults.insert(Fault::LoseResponse);
-    assert!(matches!(host.apply(&mut bus, incoming(11, true), 2000).await, Err(Error::Bus)));
+    assert!(matches!(host.apply(&mut bus, incoming(11, false), 2000).await, Err(Error::Bus)));
     drop(host);
-    let sent = bus.requests.iter().filter(|(m, _)| m == "group.send").count();
+    let sent = bus.requests.iter().filter(|(m, _)| m == "message.submit").count();
     bus.faults.insert(Fault::Removed);
     let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
     host.start(&mut bus).await?;
-    assert_eq!(bus.requests.iter().filter(|(m, _)| m == "group.send").count(), sent);
+    assert_eq!(bus.requests.iter().filter(|(m, _)| m == "message.submit").count(), sent);
     assert_eq!(host.checkpoint().cursor, Some(11));
-    Ok(())
-}
-#[tokio::test]
-async fn a_changed_group_binding_discards_a_prepared_reply() -> TestResult {
-    let f = Fixture::new()?;
-    let mut bus = Fake::default();
-    let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
-    host.start(&mut bus).await?;
-    bus.faults.insert(Fault::LoseResponse);
-    assert!(matches!(host.apply(&mut bus, incoming(11, true), 2000).await, Err(Error::Bus)));
-    drop(host);
-    let sent = bus.requests.iter().filter(|(m, _)| m == "group.send").count();
-    bus.faults.insert(Fault::ChangedContext);
-    let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
-    host.start(&mut bus).await?;
-    assert_eq!(bus.requests.iter().filter(|(m, _)| m == "group.send").count(), sent);
     Ok(())
 }
 #[tokio::test]

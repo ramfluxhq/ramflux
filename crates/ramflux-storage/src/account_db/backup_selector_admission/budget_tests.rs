@@ -38,8 +38,8 @@ fn sample(n: i64, m: usize) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
             .execute_batch("BEGIN; CREATE TABLE main.budget_numbers(i INTEGER PRIMARY KEY);")?;
         target.db.execute("INSERT INTO budget_numbers WITH RECURSIVE n(i) AS (SELECT 1 WHERE ?1>0 UNION ALL SELECT i+1 FROM n WHERE i<?1) SELECT i FROM n", [n])?;
         target.db.execute_batch(r"
-INSERT INTO message_copy_binding SELECT 'group:other:unrelated-'||i,'unrelated-'||i FROM budget_numbers;
-INSERT INTO message_copy_binding VALUES('group:missing:missing','message');
+INSERT INTO message_copy_binding SELECT 'payload:other:unrelated-'||i,'unrelated-'||i FROM budget_numbers;
+INSERT INTO message_copy_binding VALUES('payload:missing:missing','message');
 INSERT INTO runtime_actor_state SELECT 'budget/'||i,x'7b7d' FROM budget_numbers;
 INSERT INTO message_footprint SELECT 'unrelated-'||i,'actor','budget/'||i FROM budget_numbers;
 INSERT INTO message_footprint SELECT 'unrelated-'||i,'revocation_selector',json_object('selector','alias-'||i,'wire','wire-'||i,'manifest','manifest','commitment','c-'||i) FROM budget_numbers;

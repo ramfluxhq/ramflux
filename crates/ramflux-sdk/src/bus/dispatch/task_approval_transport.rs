@@ -85,7 +85,6 @@ async fn prepare(
     }
     let route = crate::client::routed::Route {
         kind: crate::client::routed::Kind::Control,
-        group_id: None,
         attachments: false,
     };
     let mut deliveries = Vec::new();
@@ -143,7 +142,6 @@ pub(in crate::bus) fn prepared_drafts(
     }
     let route = crate::client::routed::Route {
         kind: crate::client::routed::Kind::Control,
-        group_id: None,
         attachments: false,
     };
     targets

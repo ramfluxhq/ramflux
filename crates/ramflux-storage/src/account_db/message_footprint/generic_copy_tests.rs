@@ -69,7 +69,7 @@ fn seed_registered_copies(db: &AccountDb) -> Result<(), StorageError> {
             owner_id: "projection-id",
             verified_source_anchor: "verified-root",
             copy_id: "raw-copy-1",
-            kind: super::super::raw_inner::RawInnerCopyKind::NestedGroup,
+            kind: super::super::raw_inner::RawInnerCopyKind::OuterInner,
             bytes: b"raw-inner-copy-secret",
             bounded_metadata: b"{}",
         })?;

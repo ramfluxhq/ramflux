@@ -146,7 +146,7 @@ impl SelfSigningKey {
     pub fn public_key(&self) -> String {
         encode_base64url(self.0.verifying_key().to_bytes())
     }
-    pub(crate) fn sign_group_state_bytes(&self, bytes: &[u8]) -> String {
+    pub(crate) fn sign_bytes(&self, bytes: &[u8]) -> String {
         encode_base64url(self.0.sign(bytes).to_bytes())
     }
     /// Certify branch keys with explicit operation scopes and a bounded lease.

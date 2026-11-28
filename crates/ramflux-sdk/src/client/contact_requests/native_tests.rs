@@ -133,10 +133,8 @@ fn transport(
             envelope: sender.seal_inner_to(target, exact)?,
         },
         Routing {
-            group_message_id: None,
             kind: Kind::Control,
             conversation_id: conversation,
-            group_id: None,
             message_id,
             attachments: false,
         },

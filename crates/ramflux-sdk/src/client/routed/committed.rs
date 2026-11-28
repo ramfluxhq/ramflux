@@ -220,15 +220,8 @@ pub(crate) fn object_watermark(
 }
 
 impl RamfluxClient {
-    pub(super) fn projection_id(
-        &self,
-        entry: &GatewayInboxEntry,
-        route: &Routing,
-    ) -> Result<String, SdkError> {
-        self.projection_id_for(
-            entry,
-            route.group_message_id.as_deref().unwrap_or(&entry.envelope.envelope_id),
-        )
+    pub(super) fn projection_id(&self, entry: &GatewayInboxEntry) -> Result<String, SdkError> {
+        self.projection_id_for(entry, &entry.envelope.envelope_id)
     }
     pub(super) fn projection_id_for(
         &self,

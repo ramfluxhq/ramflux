@@ -21,7 +21,6 @@ impl Drop for OwnSentAttestation {
         self.origin.reported_inner.zeroize();
         self.origin.evidence.report_opening.zeroize();
         self.origin.evidence.group_plaintext.zeroize();
-        self.origin.evidence.group_opening.zeroize();
     }
 }
 
@@ -337,8 +336,6 @@ mod tests {
                     kind: Kind::Control,
                     conversation_id: identity.conversation_id.clone(),
                     message_id: ramflux_protocol::encode_base64url(&identity.id),
-                    group_id: None,
-                    group_message_id: None,
                     attachments: false,
                 },
             },

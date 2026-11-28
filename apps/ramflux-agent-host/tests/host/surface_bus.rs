@@ -46,7 +46,7 @@ impl SurfaceBus {
     pub fn decision(&mut self) -> Result<()> {
         let mut frame = ramflux_protocol::ActionFrame {
             schema: ramflux_protocol::ACTION_SCHEMA.into(),
-            conversation_id: "group-thread".into(),
+            conversation_id: "dm-thread".into(),
             surface_version: self.state.version(),
             surface_hash: self.state.hash().ok_or(Error::State)?.into(),
             source_instance: Vec::new(),
@@ -230,7 +230,7 @@ impl AgentBus for SurfaceBus {
                 }
             }
             "surface.get" => Ok(
-                json!({"surface_ref":"ref","conversation_id":"group-thread","author_principal_id":"agent-principal","executor_device_id":"agent-device","is_action_executor":!self.replica,"out_of_sync":self.out_of_sync,"version":self.state.version(),"closed":self.state.is_closed(),"surface_hash":self.state.hash(),"streams":self.state.stream_states(),"snapshot":self.state.content(),"actions":self.action.iter().collect::<Vec<_>>()}),
+                json!({"surface_ref":"ref","conversation_id":"dm-thread","author_principal_id":"agent-principal","executor_device_id":"agent-device","is_action_executor":!self.replica,"out_of_sync":self.out_of_sync,"version":self.state.version(),"closed":self.state.is_closed(),"surface_hash":self.state.hash(),"streams":self.state.stream_states(),"snapshot":self.state.content(),"actions":self.action.iter().collect::<Vec<_>>()}),
             ),
             _ => self.inner.request(method, body, operation).await,
         }
@@ -242,6 +242,6 @@ impl AgentBus for SurfaceBus {
 pub fn event(seq: u64, replica: bool) -> LocalBusFrame {
     let mut frame = super::support::incoming(seq, true);
     frame.method = "surface.changed".into();
-    frame.body = json!({"conversation_id":"group-thread","surface_ref":"ref","author_principal_id":"agent-principal","executor_device_id":"agent-device","is_action_executor":!replica,"last_action_id":"decision"});
+    frame.body = json!({"conversation_id":"dm-thread","surface_ref":"ref","author_principal_id":"agent-principal","executor_device_id":"agent-device","is_action_executor":!replica,"last_action_id":"decision"});
     frame
 }

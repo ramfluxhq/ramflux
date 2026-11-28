@@ -71,7 +71,6 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
             | ramflux_crypto::CryptoError::InvalidHomeNodeMigrationProof(_)
             | ramflux_crypto::CryptoError::Pairing(_)
             | ramflux_crypto::CryptoError::VoiceRebind(_)
-            | ramflux_crypto::CryptoError::MembershipCommitmentMismatch
             | ramflux_crypto::CryptoError::ReportFrameTooShort
             | ramflux_crypto::CryptoError::ReportInnerLengthMismatch
             | ramflux_crypto::CryptoError::ReportPaddingOrHeaderRefused
@@ -79,8 +78,6 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
             | ramflux_crypto::CryptoError::ReportA0TooLarge
             | ramflux_crypto::CryptoError::NodeReportReceiptTooLarge
             | ramflux_crypto::CryptoError::NodeReportReceiptMismatch
-            | ramflux_crypto::CryptoError::GroupReportOpeningMissing
-            | ramflux_crypto::CryptoError::GroupReportAuthorMissing
             | ramflux_crypto::CryptoError::AeadFailed
             | ramflux_crypto::CryptoError::KeyCommitmentMismatch
             | ramflux_crypto::CryptoError::CommitmentMismatch
@@ -275,16 +272,12 @@ mod immutable_crypto_refusal_tests {
             CryptoError::InvalidPublicKeyLength(7),
             CryptoError::IdentityAuthority("scope denied"),
             CryptoError::DeviceRevoked,
-            CryptoError::GroupReportOpeningMissing,
             CryptoError::NodeReportReceiptMismatch,
         ] {
             assert_eq!(deterministic(&SdkError::Crypto(error)), Some("authentication_failed"));
         }
-        for error in [
-            CryptoError::GroupLeaseUnavailable,
-            CryptoError::MaxSkipExceeded,
-            CryptoError::RandomUnavailable("local".into()),
-        ] {
+        for error in [CryptoError::MaxSkipExceeded, CryptoError::RandomUnavailable("local".into())]
+        {
             assert_eq!(deterministic(&SdkError::Crypto(error)), None);
         }
     }

@@ -37,7 +37,6 @@ pub use agent_master::{
 pub use keys::{MasterKey, SelfSigningKey};
 pub use management::{sign_enrollment_layer, verify_enrollment_layer};
 pub use phrase::RecoveryPhrase;
-pub(crate) use verify::verify_group_native_authority;
 pub use verify::{
     CapacityLimit, CapacityPressure, VerifiedRecord, verify_publication, verify_record,
 };

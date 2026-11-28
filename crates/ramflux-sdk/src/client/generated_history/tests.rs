@@ -619,8 +619,6 @@ fn retained_origin_uses_first_hand_native_proof_and_rejects_body_identity_and_ro
             kind: Kind::Direct,
             conversation_id: id.conversation_id.clone(),
             message_id: ramflux_protocol::encode_base64url(&id.id),
-            group_id: None,
-            group_message_id: None,
             attachments: false,
         },
     };
@@ -671,8 +669,6 @@ fn retain_upgrade_candidate(
         kind: Kind::Direct,
         conversation_id: identity.conversation_id.clone(),
         message_id: id.clone(),
-        group_id: None,
-        group_message_id: None,
         attachments: false,
     };
     let origin = RetainedOrigin {
@@ -922,8 +918,6 @@ mod producer_rows {
                 kind: Kind::Direct,
                 conversation_id: identity.conversation_id.clone(),
                 message_id: id.clone(),
-                group_id: None,
-                group_message_id: None,
                 attachments: false,
             },
         };

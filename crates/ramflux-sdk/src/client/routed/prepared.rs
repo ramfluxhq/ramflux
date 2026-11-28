@@ -140,7 +140,6 @@ impl RamfluxClient {
         let parsed = super::generated_transport::generated_plaintext(body)?;
         if parsed.routing.kind != route.kind
             || parsed.routing.conversation_id != message.conversation_id
-            || parsed.routing.group_id != route.group_id
         {
             return Err(invalid("generated send route differs from exact Inner"));
         }

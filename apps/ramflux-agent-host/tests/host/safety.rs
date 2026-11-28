@@ -45,7 +45,7 @@ async fn human_account_cannot_start_even_with_forged_headless_identity_kind() ->
     Ok(())
 }
 #[tokio::test]
-async fn removed_group_absent_conversation_and_self_message_do_not_trigger_replies() -> TestResult {
+async fn removed_absent_conversation_and_self_message_do_not_trigger_replies() -> TestResult {
     for scenario in [Fault::Removed, Fault::Absent, Fault::SelfSender] {
         let f = Fixture::new()?;
         let mut bus = Fake::with(scenario);

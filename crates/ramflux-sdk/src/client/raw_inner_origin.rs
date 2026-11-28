@@ -47,9 +47,6 @@ impl RetainedOrigin {
             return Err(bad.into());
         }
         if !self.evidence.group_plaintext.is_empty()
-            || !self.evidence.group_opening.is_empty()
-            || self.evidence.group_membership.is_some()
-            || self.routing.group_id.is_some()
             || identity.group_id.is_some()
             || identity.group_epoch.is_some()
         {
@@ -115,9 +112,6 @@ impl RamfluxClient {
         opened: &Opened,
         entry: &crate::GatewayInboxEntry,
     ) -> Result<Option<RetainedOrigin>, SdkError> {
-        if opened.routing.group_id.is_some() {
-            return Ok(None);
-        }
         self.capture_origin_material(opened, entry)
     }
 
