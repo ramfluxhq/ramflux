@@ -22,6 +22,8 @@ pub(crate) struct TokioRouterRuntime {
     cross_node_forward: std::sync::OnceLock<crate::cross_node_forward::Client>,
     forward_semaphore: Arc<tokio::sync::Semaphore>,
     forward_timeout: Duration,
+    dm_order: ramflux_node_core::DmOrderService,
+    key_package_limits: ramflux_node_core::KeyPackageFetchLimits,
     custody: std::sync::OnceLock<Arc<ramflux_node_core::CustodyService>>,
     migration_drain: std::sync::OnceLock<crate::migration_drain::MigrationDrain>,
     migration_courier: std::sync::OnceLock<crate::migration_courier::MigrationCourier>,
@@ -83,6 +85,8 @@ impl TokioRouterRuntime {
             cross_node_forward: std::sync::OnceLock::new(),
             forward_semaphore: Arc::new(tokio::sync::Semaphore::new(concurrency.max(1))),
             forward_timeout,
+            dm_order: ramflux_node_core::DmOrderService::new(),
+            key_package_limits: ramflux_node_core::KeyPackageFetchLimits::new(),
             custody: std::sync::OnceLock::new(),
             migration_courier: std::sync::OnceLock::new(),
             migration_drain: std::sync::OnceLock::new(),
@@ -182,6 +186,34 @@ impl RouterHandle {
                 )
             })?
             .forward(request)
+    }
+
+    /// Ordering table service of this router (limits live here, once per router).
+    pub(crate) fn dm_order(&self) -> &ramflux_node_core::DmOrderService {
+        let Self::Tokio(runtime) = self;
+        &runtime.dm_order
+    }
+
+    /// In-memory fetch limits of authenticated key package fetches.
+    pub(crate) fn key_package_limits(&self) -> &ramflux_node_core::KeyPackageFetchLimits {
+        let Self::Tokio(runtime) = self;
+        &runtime.key_package_limits
+    }
+
+    pub(crate) fn forward_dm_order(
+        &self,
+        request: &ramflux_node_core::DmOrderForward,
+    ) -> Result<ramflux_node_core::FederatedDmOrderResponse, ramflux_node_core::NodeCoreError> {
+        let Self::Tokio(runtime) = self;
+        runtime
+            .cross_node_forward
+            .get()
+            .ok_or_else(|| {
+                ramflux_node_core::NodeCoreError::ItestHttp(
+                    "missing federation mesh endpoint".into(),
+                )
+            })?
+            .forward_dm_order(request)
     }
 
     pub(crate) fn install_gateway_client_capabilities(&self, configured: &[String]) {

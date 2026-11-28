@@ -65,7 +65,7 @@ impl AccountSessionHarness {
         let id = client.account_db()?.local_account_id.clone();
         if client.born_v3_account.is_none()
             || !crate::custody::pairing::ordinary_session_admitted(&client, &id)?
-            || config.prekey_http_url.as_deref() != Some(node.prekey_http_url.as_str())
+            || config.prekey_http_url.as_deref() != Some(node.key_package_http_url.as_str())
         {
             return Err(SdkError::PairingCode("WrongContext"));
         }

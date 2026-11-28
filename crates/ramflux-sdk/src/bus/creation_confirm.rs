@@ -135,7 +135,7 @@ mod tests {
                 server_name: id.into(),
             },
             relay: crate::NodeRelay { quic_addr: "127.0.0.1:1".into(), server_name: id.into() },
-            prekey_http_url: format!("https://{id}"),
+            key_package_http_url: format!("https://{id}"),
             signaling_turn_addr: String::new(),
             protocol_versions: Vec::new(),
             client_capabilities: Vec::new(),

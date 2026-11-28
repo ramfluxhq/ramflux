@@ -31,6 +31,7 @@ an old combined endpoint to work.
 | Public | GET `/.well-known/ramflux/client` | SDK node discovery, demo status and node fingerprint verification |
 | Public | GET `/.well-known/ramflux/server` | Peer signed node discovery, `rf admin federation peer` well-known URLs |
 | Public | GET `/mvp1/prekey/{selector}` | SDK/CLI prekey consumers using `RAMFLUX_CLIENT_PREKEY_HTTP_URL` or recipient prekey URL; proxies authenticated router mesh |
+| Public | GET `/v1/key-packages/{anchor}` | A peer's client fetching one MLS key package per device of the anchor from its pinned home (`key_package_http_url`); per source address limit in memory only; proxies router mesh |
 | Public | GET `/mvp1/device-manifest/{selector}` | SDK device authority consumers on the same client HTTP origin; proxies router mesh |
 | Admin | GET `/healthz` | Private operator / production peering fixture readiness |
 | Admin | POST `/admin/federation/peer` | `rf admin federation peer`, private operator tooling; token required |

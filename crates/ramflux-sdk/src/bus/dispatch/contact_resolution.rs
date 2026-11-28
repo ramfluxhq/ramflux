@@ -359,10 +359,14 @@ async fn card_gateway(
     if node_id == home.node_id {
         return same_home_gateway(card, own, root, home, record).await;
     }
-    if record.prekey_http_url.is_empty() {
+    if record.key_package_http_url.is_empty() {
         return Err(ContactReason::ManifestInvalid.into());
     }
-    Ok(CardHome { gateway: own.clone(), node_id, directory_base: Some(record.prekey_http_url) })
+    Ok(CardHome {
+        gateway: own.clone(),
+        node_id,
+        directory_base: Some(record.key_package_http_url),
+    })
 }
 
 async fn same_home_gateway(

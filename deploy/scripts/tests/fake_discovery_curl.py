@@ -26,7 +26,7 @@ def load(name, path):
     return module
 
 
-BASE_CLIENT_CAPABILITIES = ["opaque_delivery", "prekey", "object_relay"]
+BASE_CLIENT_CAPABILITIES = ["opaque_delivery", "key_package", "object_relay"]
 
 
 def signed_client_capabilities(control, state, verify):
@@ -134,7 +134,7 @@ def main():
         "gateway_server_name": "ramflux-gateway",
         "relay_quic_addr": "demo.example.org:59447",
         "relay_server_name": "ramflux-relay",
-        "prekey_http_url": origin,
+        "key_package_http_url": origin,
         "signaling_turn_addr": "demo.example.org:59478",
         "protocol_versions": ["v1"],
         "client_capabilities": signed_client_capabilities(control, state, verify),

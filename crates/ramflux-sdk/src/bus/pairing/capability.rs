@@ -54,7 +54,7 @@ mod tests {
                 quic_addr: "relay.invalid:17447".into(),
                 server_name: "ramflux-relay".into(),
             },
-            prekey_http_url: String::new(),
+            key_package_http_url: String::new(),
             signaling_turn_addr: String::new(),
             protocol_versions: Vec::new(),
             client_capabilities: capabilities.iter().map(|name| (*name).to_owned()).collect(),
@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn node_without_device_pairing_refuses_naming_the_capability() {
-        let refusal = require_device_pairing(&profile(&["prekey", "object_relay"])).err();
+        let refusal = require_device_pairing(&profile(&["key_package", "object_relay"])).err();
         assert!(
             matches!(
                 &refusal,
@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn staged_resume_is_not_gated_by_the_capability() {
         assert!(
-            require_for_new_ceremony(&profile(&["prekey"]), false).is_ok(),
+            require_for_new_ceremony(&profile(&["key_package"]), false).is_ok(),
             "test: a staged resume of an existing ceremony must not be refused by the capability"
         );
     }
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn node_advertising_device_pairing_is_allowed() {
         assert!(
-            require_device_pairing(&profile(&["prekey", DEVICE_PAIRING_CAPABILITY])).is_ok(),
+            require_device_pairing(&profile(&["key_package", DEVICE_PAIRING_CAPABILITY])).is_ok(),
             "test: a node advertising device_pairing_v2 must be accepted for pairing"
         );
     }

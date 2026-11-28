@@ -359,7 +359,7 @@ fn seed_node(root: &std::path::Path) {
         "pin_source":"tofu","ca_cert_pem":"test-only CA",
         "gateway":{"quic_addr":"node.example.invalid:443","tcp_addr":"node.example.invalid:443","server_name":"node.example.invalid"},
         "relay":{"quic_addr":"node.example.invalid:443","server_name":"node.example.invalid"},
-        "prekey_http_url":"https://node.example.invalid","discovered_at":1,"expires_at":2,
+        "key_package_http_url":"https://node.example.invalid","discovered_at":1,"expires_at":2,
         "enabled":true,"builtin":false
     })).expect("test: bounded local node fixture");
     let mut store = crate::node::NodeStore::default();

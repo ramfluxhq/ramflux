@@ -6,6 +6,7 @@ mod attachment_source;
 mod cross_node_forward;
 mod cross_node_submit;
 mod custody_listener;
+mod dm_routes;
 #[cfg(test)]
 mod durable_ingress_registry;
 mod durable_mode;

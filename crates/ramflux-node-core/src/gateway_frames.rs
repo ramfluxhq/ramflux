@@ -322,9 +322,13 @@ pub enum GatewayClientFrame {
     KeyPackageFetch {
         anchor: String,
     },
-    /// One `dm_order` operation (`submit`, `since`, `status`) for a DM or self group.
+    /// One `dm_order` operation (`submit`, `since`, `status`) for a DM or self group. The orderer
+    /// is the home of the smaller anchor of a DM (the client knows it from the contact); absent or
+    /// this node means this node orders.
     DmOrder {
         request: crate::DmOrderOp,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        orderer_node: Option<String>,
     },
     RelayTokenV3Issue {
         request: Box<GatewayRelayTokenV3IssueRequest>,

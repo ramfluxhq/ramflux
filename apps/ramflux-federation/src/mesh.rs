@@ -372,6 +372,10 @@ pub(crate) fn mesh_body_cap(_method: &str, path: &str) -> usize {
         crate::attachment_renewal::MAX_BODY
     } else if path == ramflux_node_core::HOME_SUBMIT_FORWARD_PATH {
         ramflux_node_core::HOME_SUBMIT_FORWARD_MAX_BYTES
+    } else if path == ramflux_node_core::DM_ORDER_FORWARD_PATH
+        || path == ramflux_node_core::DM_ORDER_PEER_PATH
+    {
+        crate::dm_order::BODY_MAX_BYTES
     } else {
         ramflux_protocol::home_migration::MAX_FRAME_BYTES
     }
@@ -489,6 +493,12 @@ pub(crate) fn handle_mesh_request(
         ("POST", ramflux_node_core::HOME_SUBMIT_FORWARD_PATH) => {
             handle_home_submit_forward(stream, &request.body, peer_spiffe_uri, context)?;
         }
+        ("POST", ramflux_node_core::DM_ORDER_FORWARD_PATH) => {
+            handle_dm_order_forward(stream, &request.body, context)?;
+        }
+        ("POST", ramflux_node_core::DM_ORDER_PEER_PATH) => {
+            handle_dm_order_peer(stream, auth, &request.body, context)?;
+        }
         ("POST", RETENTION_GC_SWEEP_PATH) => {
             serve_retention_sweep(stream, context, peer_service_id, &request.body)?;
         }
@@ -572,6 +582,78 @@ fn handle_home_submit_forward(
     )?;
     ramflux_transport::write_mesh_json_response(stream, "200 OK", &response)
         .map_err(|error| mesh_transport_error(&error))
+}
+
+/// Local router to this federation: sign the call and send it to the orderer node.
+fn handle_dm_order_forward(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    body: &[u8],
+    context: &MeshServerContext,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let Ok(request) = ramflux_protocol::parse_i_json::<ramflux_node_core::DmOrderForward>(body)
+    else {
+        return ramflux_transport::write_mesh_text_response(
+            stream,
+            "400 Bad Request",
+            "request rejected",
+        )
+        .map_err(|error| mesh_transport_error(&error));
+    };
+    match crate::dm_order::forward(
+        request,
+        &context.state,
+        &context.store,
+        &context.discovery,
+        &context.router,
+    ) {
+        Ok(response) => ramflux_transport::write_mesh_json_response(stream, "200 OK", &response),
+        Err(error) => {
+            tracing::warn!(%error, "dm_order forward failed");
+            ramflux_transport::write_mesh_text_response(
+                stream,
+                "502 Bad Gateway",
+                "orderer unreachable",
+            )
+        }
+    }
+    .map_err(|error| mesh_transport_error(&error))
+}
+
+/// Pinned remote federation to this federation: a `dm_order` call for the local orderer.
+fn handle_dm_order_peer(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    auth: &AuthLevel,
+    body: &[u8],
+    context: &MeshServerContext,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let (AuthLevel::Peer(peer), Ok(request)) =
+        (auth, ramflux_protocol::parse_i_json::<ramflux_node_core::FederatedDmOrderRequest>(body))
+    else {
+        return ramflux_transport::write_mesh_text_response(
+            stream,
+            "403 Forbidden",
+            "federation request authentication failed",
+        )
+        .map_err(|error| mesh_transport_error(&error));
+    };
+    match crate::dm_order::inbound(
+        &request,
+        &peer.node_id,
+        &context.state,
+        &context.discovery,
+        &context.router,
+    ) {
+        Ok(response) => ramflux_transport::write_mesh_json_response(stream, "200 OK", &response),
+        Err(error) => {
+            tracing::debug!(%error, "dm_order peer call refused");
+            ramflux_transport::write_mesh_text_response(
+                stream,
+                "403 Forbidden",
+                "federation request authentication failed",
+            )
+        }
+    }
+    .map_err(|error| mesh_transport_error(&error))
 }
 
 struct MeshQuicRequestContext<'a> {

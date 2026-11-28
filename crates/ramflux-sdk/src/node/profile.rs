@@ -40,7 +40,7 @@ pub struct NodeProfile {
     pub ca_cert_pem: String,
     pub gateway: NodeGateway,
     pub relay: NodeRelay,
-    pub prekey_http_url: String,
+    pub key_package_http_url: String,
     #[serde(default)]
     pub signaling_turn_addr: String,
     #[serde(default)]
@@ -80,7 +80,7 @@ impl NodeProfile {
                 quic_addr: record.relay_quic_addr,
                 server_name: record.relay_server_name,
             },
-            prekey_http_url: record.prekey_http_url,
+            key_package_http_url: record.key_package_http_url,
             signaling_turn_addr: record.signaling_turn_addr,
             protocol_versions: record.protocol_versions,
             client_capabilities: record.client_capabilities,
@@ -125,7 +125,7 @@ impl NodeProfile {
         };
         endpoint.server_name.clone_from(&self.gateway.server_name);
         endpoint.ca_cert = self.write_ca(root)?;
-        endpoint.prekey_http_url = Some(self.prekey_http_url.clone());
+        endpoint.prekey_http_url = Some(self.key_package_http_url.clone());
         Ok(endpoint)
     }
 

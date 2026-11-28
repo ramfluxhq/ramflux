@@ -50,7 +50,7 @@ fn node_profile_with_ca(
             server_name: id.to_owned(),
         },
         relay: crate::NodeRelay { quic_addr: "127.0.0.1:1".to_owned(), server_name: id.to_owned() },
-        prekey_http_url: format!("https://{id}"),
+        key_package_http_url: format!("https://{id}"),
         signaling_turn_addr: String::new(),
         protocol_versions: Vec::new(),
         client_capabilities: Vec::new(),

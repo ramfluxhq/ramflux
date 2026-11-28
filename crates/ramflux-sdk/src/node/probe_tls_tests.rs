@@ -60,7 +60,7 @@ fn profile(ca_pem: &str, prekey_http_url: &str) -> NodeProfile {
             quic_addr: "127.0.0.1:1".to_owned(),
             server_name: "relay.example".to_owned(),
         },
-        prekey_http_url: prekey_http_url.to_owned(),
+        key_package_http_url: prekey_http_url.to_owned(),
         signaling_turn_addr: String::new(),
         protocol_versions: Vec::new(),
         client_capabilities: Vec::new(),

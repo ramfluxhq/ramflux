@@ -14,7 +14,7 @@ async fn native_ordinary_card_export_and_import_selector_keep_the_master_anchor(
     let profile: crate::NodeProfile = serde_json::from_value(json!({
         "discovery_url":"https://node.example", "node_id":"home", "node_public_key":ramflux_crypto::fixture_public_key_base64url(),
         "pin_source":"tofu", "ca_cert_pem":"", "gateway":{"quic_addr":"127.0.0.1:1","tcp_addr":"127.0.0.1:1","server_name":"localhost"},
-        "relay":{"quic_addr":"127.0.0.1:1","server_name":"localhost"}, "prekey_http_url":"https://node.example",
+        "relay":{"quic_addr":"127.0.0.1:1","server_name":"localhost"}, "key_package_http_url":"https://node.example",
         "discovered_at":now,"expires_at":now+3600,"enabled":true,"builtin":false
     }))?;
     let mut config = LocalBusConfig::new(root.join("bus.sock"), &root);

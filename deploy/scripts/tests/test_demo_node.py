@@ -1170,7 +1170,7 @@ class DemoNodeTests(unittest.TestCase):
             )
         # A valid signature over the wrong capabilities must not commit, and
         # recovery must judge the restored snapshot rather than this env file.
-        self.control.write_text(json.dumps({"public_client_capabilities": ["prekey"]}))
+        self.control.write_text(json.dumps({"public_client_capabilities": ["key_package"]}))
         failed = self.run_script("upgrade", success=False)
         self.assertIn(
             "discovery capabilities do not match the applied deployment",
@@ -1840,10 +1840,10 @@ class DemoNodeTests(unittest.TestCase):
             "gateway_server_name": "ramflux-gateway",
             "relay_quic_addr": "demo.example.org:59447",
             "relay_server_name": "ramflux-relay",
-            "prekey_http_url": "http://demo.example.org:59482",
+            "key_package_http_url": "http://demo.example.org:59482",
             "signaling_turn_addr": "demo.example.org:59478",
             "protocol_versions": ["v1"],
-            "client_capabilities": ["prekey"],
+            "client_capabilities": ["key_package"],
             "version": "0.2.0 (abcdef123456)",
             "updated_at": 1,
             "expires_at": 9999999999,
